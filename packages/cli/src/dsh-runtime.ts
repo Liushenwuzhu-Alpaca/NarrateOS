@@ -47,10 +47,26 @@ export interface DshRuntimeClientOptions {
     defaultModel?: string | undefined;
     /** 自定义 DeepSeek API Base URL（默认 https://api.deepseek.com） */
     baseUrl?: string | undefined;
+    /** 单次 HTTP 请求总超时毫秒数（默认读 NARRATEOS_REQUEST_TIMEOUT_MS 或 120000，0 表示禁用） */
+    requestTimeoutMs?: number | undefined;
+    /** 流式空闲看门狗毫秒数（默认读 NARRATEOS_STREAM_IDLE_TIMEOUT_MS 或 60000，0 表示禁用） */
+    streamIdleTimeoutMs?: number | undefined;
 }
 
 const DEFAULT_DSH_LLM_MODULE = '@deepseek-ai/dsh-llm';
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+interface DeepSeekUsageRaw {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_cache_hit_tokens?: number;
+    prompt_cache_miss_tokens?: number;
+    prompt_tokens_details?: {
+        cached_tokens?: number;
+    };
+}
 
 interface DeepSeekApiResponse {
     model?: string;
@@ -60,15 +76,19 @@ interface DeepSeekApiResponse {
         };
         finish_reason?: string | null;
     }>;
-    usage?: {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        prompt_cache_hit_tokens?: number;
-        prompt_cache_miss_tokens?: number;
-        prompt_tokens_details?: {
-            cached_tokens?: number;
+    usage?: DeepSeekUsageRaw;
+}
+
+interface DeepSeekStreamChunk {
+    model?: string;
+    choices?: Array<{
+        delta?: {
+            content?: string | null;
+            reasoning_content?: string | null;
         };
-    };
+        finish_reason?: string | null;
+    }>;
+    usage?: DeepSeekUsageRaw | null;
 }
 
 function resolveDefaultModelRouting(): Partial<Record<LlmPool, string>> {
@@ -104,6 +124,8 @@ export class DshRuntimeClient implements LlmPort {
     private readonly loader: (specifier: string) => Promise<DshLlmModuleLike>;
     private readonly modelRouting: Partial<Record<LlmPool, string>>;
     private readonly baseUrl: string;
+    private readonly requestTimeoutMs: number;
+    private readonly streamIdleTimeoutMs: number;
     private cachedModule: DshLlmModuleLike | null = null;
 
     constructor(options: DshRuntimeClientOptions = {}) {
@@ -132,6 +154,13 @@ export class DshRuntimeClient implements LlmPort {
             process.env['DEEPSEEK_BASE_URL'] ??
             DEFAULT_DEEPSEEK_BASE_URL
         ).replace(/\/+$/, '');
+        const rawTimeout = options.requestTimeoutMs ?? Number(process.env['NARRATEOS_REQUEST_TIMEOUT_MS']);
+        this.requestTimeoutMs =
+            Number.isFinite(rawTimeout) && rawTimeout >= 0 ? rawTimeout : DEFAULT_REQUEST_TIMEOUT_MS;
+        const rawIdle =
+            options.streamIdleTimeoutMs ?? Number(process.env['NARRATEOS_STREAM_IDLE_TIMEOUT_MS']);
+        this.streamIdleTimeoutMs =
+            Number.isFinite(rawIdle) && rawIdle >= 0 ? rawIdle : DEFAULT_STREAM_IDLE_TIMEOUT_MS;
     }
 
     private async resolveModule(): Promise<DshLlmModuleLike> {
@@ -167,7 +196,8 @@ export class DshRuntimeClient implements LlmPort {
         const body: Record<string, unknown> = {
             model,
             messages,
-            stream: false
+            stream: true,
+            stream_options: { include_usage: true }
         };
         if (!isReasoner && req.temperature !== undefined) {
             body['temperature'] = req.temperature;
@@ -179,6 +209,29 @@ export class DshRuntimeClient implements LlmPort {
         const backoffMs = [1000, 2000, 4000, 8000, 16000];
         let lastError: unknown;
         for (let attempt = 0; attempt <= backoffMs.length; attempt += 1) {
+            const idleController = new AbortController();
+            let idleTimer: ReturnType<typeof setTimeout> | undefined;
+            const resetIdleWatchdog = (): void => {
+                if (idleTimer !== undefined) {
+                    clearTimeout(idleTimer);
+                }
+                if (this.streamIdleTimeoutMs > 0) {
+                    idleTimer = setTimeout(() => {
+                        idleController.abort(
+                            new Error(`流式空闲超时 (${this.streamIdleTimeoutMs}ms 无响应)`)
+                        );
+                    }, this.streamIdleTimeoutMs);
+                }
+            };
+
+            const signals: AbortSignal[] = [idleController.signal];
+            if (signal) signals.push(signal);
+            if (this.requestTimeoutMs > 0) {
+                signals.push(AbortSignal.timeout(this.requestTimeoutMs));
+            }
+            const combinedSignal = AbortSignal.any(signals);
+            resetIdleWatchdog();
+
             try {
                 const resp = await fetch(`${this.baseUrl}/chat/completions`, {
                     method: 'POST',
@@ -187,7 +240,7 @@ export class DshRuntimeClient implements LlmPort {
                         Authorization: `Bearer ${apiKey}`
                     },
                     body: JSON.stringify(body),
-                    ...(signal ? { signal } : {})
+                    signal: combinedSignal
                 });
 
                 if (!resp.ok) {
@@ -202,30 +255,18 @@ export class DshRuntimeClient implements LlmPort {
                     throw err;
                 }
 
-                const json = (await resp.json()) as DeepSeekApiResponse;
-                const text = json.choices?.[0]?.message?.content ?? '';
-                const usageRaw = json.usage;
-                const cacheRead =
-                    usageRaw?.prompt_cache_hit_tokens ??
-                    usageRaw?.prompt_tokens_details?.cached_tokens ??
-                    0;
-                const inputUncached =
-                    usageRaw?.prompt_cache_miss_tokens ??
-                    Math.max(0, (usageRaw?.prompt_tokens ?? 0) - cacheRead);
+                const contentType = resp.headers.get('content-type') ?? '';
+                if (!contentType.includes('text/event-stream') || !resp.body) {
+                    const json = (await resp.json()) as DeepSeekApiResponse;
+                    return this.mapUsageResponse(
+                        json.choices?.[0]?.message?.content ?? '',
+                        json.usage,
+                        json.model ?? model,
+                        json.choices?.[0]?.finish_reason ?? undefined
+                    );
+                }
 
-                return {
-                    text,
-                    usage: {
-                        inputTokens: inputUncached,
-                        cacheReadTokens: cacheRead,
-                        cacheWriteTokens: 0,
-                        outputTokens: usageRaw?.completion_tokens ?? 0
-                    },
-                    modelId: json.model ?? model,
-                    ...(json.choices?.[0]?.finish_reason
-                        ? { finishReason: json.choices[0].finish_reason }
-                        : {})
-                };
+                return await this.consumeSseStream(resp.body, model, resetIdleWatchdog);
             } catch (err: unknown) {
                 if (signal?.aborted) {
                     throw err;
@@ -237,9 +278,103 @@ export class DshRuntimeClient implements LlmPort {
                     continue;
                 }
                 throw err;
+            } finally {
+                if (idleTimer !== undefined) {
+                    clearTimeout(idleTimer);
+                }
             }
         }
         throw lastError instanceof Error ? lastError : new Error('DeepSeek API 调用失败');
+    }
+
+    private mapUsageResponse(
+        text: string,
+        usageRaw: DeepSeekUsageRaw | null | undefined,
+        modelId: string,
+        finishReason?: string
+    ): CleanroomResponse {
+        const cacheRead =
+            usageRaw?.prompt_cache_hit_tokens ??
+            usageRaw?.prompt_tokens_details?.cached_tokens ??
+            0;
+        const inputUncached =
+            usageRaw?.prompt_cache_miss_tokens ??
+            Math.max(0, (usageRaw?.prompt_tokens ?? 0) - cacheRead);
+
+        return {
+            text,
+            usage: {
+                inputTokens: inputUncached,
+                cacheReadTokens: cacheRead,
+                cacheWriteTokens: 0,
+                outputTokens: usageRaw?.completion_tokens ?? 0
+            },
+            modelId,
+            ...(finishReason !== undefined ? { finishReason } : {})
+        };
+    }
+
+    private async consumeSseStream(
+        streamBody: ReadableStream<Uint8Array>,
+        fallbackModel: string,
+        onActivity: () => void
+    ): Promise<CleanroomResponse> {
+        const reader = streamBody.getReader();
+        const decoder = new TextDecoder('utf8');
+        let buffer = '';
+        let text = '';
+        let modelId = fallbackModel;
+        let finishReason: string | undefined;
+        let usageRaw: DeepSeekUsageRaw | null | undefined;
+
+        const processLine = (line: string): void => {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) {
+                return;
+            }
+            const dataStr = trimmed.slice(5).trim();
+            if (!dataStr || dataStr === '[DONE]') {
+                return;
+            }
+            const chunk = JSON.parse(dataStr) as DeepSeekStreamChunk;
+            if (chunk.model) {
+                modelId = chunk.model;
+            }
+            const choice = chunk.choices?.[0];
+            if (choice?.delta?.content) {
+                text += choice.delta.content;
+            }
+            if (choice?.finish_reason) {
+                finishReason = choice.finish_reason;
+            }
+            if (chunk.usage) {
+                usageRaw = chunk.usage;
+            }
+        };
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                onActivity();
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() ?? '';
+                for (const line of lines) {
+                    processLine(line);
+                }
+            }
+            buffer += decoder.decode();
+            if (buffer.trim().length > 0) {
+                processLine(buffer);
+            }
+        } finally {
+            reader.releaseLock();
+        }
+
+        return this.mapUsageResponse(text, usageRaw, modelId, finishReason);
     }
 
     async generate(req: CleanroomRequest, signal?: AbortSignal): Promise<CleanroomResponse> {

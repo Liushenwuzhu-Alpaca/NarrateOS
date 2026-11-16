@@ -190,6 +190,29 @@ export const DownstreamScanOutputSchema = z.object({
 export type DownstreamConflictItem = z.infer<typeof DownstreamConflictItemSchema>;
 export type DownstreamScanOutput = z.infer<typeof DownstreamScanOutputSchema>;
 
+/** 引擎单章运行阶段名 */
+export type EngineStageName =
+    | 'WAL_RECOVERY'
+    | 'LIBRARIAN'
+    | 'PLANNER'
+    | 'WRITER'
+    | 'PROSE_GATE'
+    | 'FACT_CHECKER'
+    | 'LOCAL_PATCH'
+    | 'REWRITE'
+    | 'REPLAN'
+    | 'EXTRACTOR'
+    | 'COMMITTED'
+    | 'SAFE_HALT';
+
+/** 引擎阶段进度事件 */
+export interface EngineProgressEvent {
+    stage: EngineStageName;
+    chapterNumber: number;
+    message: string;
+    timestamp: string;
+}
+
 /** stepChapter 调用参数 */
 export interface StepChapterOptions {
     chapterNumber?: number | undefined;
@@ -198,6 +221,7 @@ export interface StepChapterOptions {
     targetDay?: number | undefined;
     povCharIds?: string[] | undefined;
     signal?: AbortSignal | undefined;
+    onProgress?: ((event: EngineProgressEvent) => void) | undefined;
 }
 
 /** 单章执行结果 */

@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import {
     BookStore,
     bootBook,
     type BootMode,
     DreamingRunner,
     type LlmPort,
+    LoggingLlmAdapter,
     NarrativeEngine,
     NodeSystemAdapter,
     type SystemPort,
@@ -162,10 +163,32 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
     const stdout = deps.stdout ?? ((chunk: string) => process.stdout.write(chunk));
     const stderr = deps.stderr ?? ((chunk: string) => process.stderr.write(chunk));
     const system = deps.system ?? new NodeSystemAdapter();
-    const resolveLlm = (): LlmPort => deps.llm ?? new DshRuntimeClient();
 
     try {
         const parsed = parseCliArgs(argv, deps.cwd ?? process.cwd());
+        const resolveLlm = (): LlmPort => {
+            if (deps.llm) {
+                return deps.llm;
+            }
+            return new LoggingLlmAdapter(new DshRuntimeClient(), {
+                logPath: join(parsed.bookRoot, '.ops/llm_calls.jsonl'),
+                onCallFinish: (entry) => {
+                    const modelLabel = entry.modelId ?? entry.pool;
+                    if (entry.status === 'ok') {
+                        const inTok = entry.usage?.inputTokens ?? 0;
+                        const cacheTok = entry.usage?.cacheReadTokens ?? 0;
+                        const outTok = entry.usage?.outputTokens ?? 0;
+                        stderr(
+                            `[llm] ${entry.pool} (${modelLabel}) ok ${entry.durationMs}ms (in:${inTok} cache:${cacheTok} out:${outTok})\n`
+                        );
+                    } else {
+                        stderr(
+                            `[llm] ${entry.pool} (${modelLabel}) error ${entry.durationMs}ms: ${entry.error ?? 'unknown'}\n`
+                        );
+                    }
+                }
+            });
+        };
 
         if (parsed.help || parsed.command === 'help') {
             stdout(`${HELP_TEXT}\n`);
@@ -254,7 +277,10 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
                     ...(chapterNumber !== undefined ? { chapterNumber } : {}),
                     ...(timelineMode !== undefined ? { timelineMode } : {}),
                     ...(targetDay !== undefined ? { targetDay } : {}),
-                    ...(povCharIds !== undefined ? { povCharIds } : {})
+                    ...(povCharIds !== undefined ? { povCharIds } : {}),
+                    onProgress: (evt) => {
+                        stderr(`[stage] ch_${evt.chapterNumber} ${evt.stage}: ${evt.message}\n`);
+                    }
                 });
 
                 printOutput(

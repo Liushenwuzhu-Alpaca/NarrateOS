@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -6,6 +6,8 @@ import { z } from 'zod';
 import {
     DEFAULT_STRUCTURED_BACKOFF_MS,
     DEFAULT_STRUCTURED_MAX_RETRIES,
+    LoggingLlmAdapter,
+    type LlmCallLogEntry,
     NodeSystemAdapter,
     ScriptedLlmAdapter,
     StructuredOutputError,
@@ -95,6 +97,55 @@ describe('LlmPort & generateStructuredJson', () => {
 
         expect(adapter.history).toHaveLength(6);
         expect(sleepLog).toEqual([...DEFAULT_STRUCTURED_BACKOFF_MS]);
+    });
+
+    it('LoggingLlmAdapter 应记录成功与失败的每次模型调用到 JSONL 并触发回调', async () => {
+        const tempDir = await mkdtemp(join(tmpdir(), 'narrateos-llmlog-'));
+        tempDirs.push(tempDir);
+        const logPath = join(tempDir, '.ops/llm_calls.jsonl');
+        const events: LlmCallLogEntry[] = [];
+
+        const inner = new ScriptedLlmAdapter([
+            {
+                text: 'ok',
+                modelId: 'gemini-4-argon',
+                usage: { inputTokens: 120, cacheReadTokens: 60, cacheWriteTokens: 0, outputTokens: 30 }
+            },
+            new Error('simulated timeout')
+        ]);
+
+        const logged = new LoggingLlmAdapter(inner, {
+            logPath,
+            onCallFinish: (entry) => events.push(entry)
+        });
+
+        const res = await logged.generate({
+            pool: 'strong_creative',
+            staticPrefixBlocks: ['STATIC'],
+            dynamicTail: 'TAIL'
+        });
+        expect(res.text).toBe('ok');
+
+        await expect(
+            logged.generate({
+                pool: 'audit',
+                staticPrefixBlocks: ['STATIC'],
+                dynamicTail: 'TAIL'
+            })
+        ).rejects.toThrow('simulated timeout');
+
+        expect(events).toHaveLength(2);
+        expect(events[0]?.status).toBe('ok');
+        expect(events[0]?.modelId).toBe('gemini-4-argon');
+        expect(events[0]?.usage?.cacheReadTokens).toBe(60);
+        expect(events[1]?.status).toBe('error');
+        expect(events[1]?.error).toContain('simulated timeout');
+
+        const lines = (await readFile(logPath, 'utf8')).trim().split('\n');
+        expect(lines).toHaveLength(2);
+        const parsed0 = JSON.parse(lines[0]!) as LlmCallLogEntry;
+        expect(parsed0.pool).toBe('strong_creative');
+        expect(parsed0.durationMs).toBeGreaterThanOrEqual(0);
     });
 });
 

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { ZodType } from 'zod';
 
 /** 模型池路由分类 */
@@ -252,5 +254,89 @@ export class ScriptedLlmAdapter implements LlmPort {
             return await next(req, callIndex);
         }
         return next;
+    }
+}
+
+/** 单次模型调用审计日志条目 */
+export interface LlmCallLogEntry {
+    timestamp: string;
+    pool: LlmPool;
+    modelId?: string | undefined;
+    durationMs: number;
+    prefixHash: string;
+    dynamicTailChars: number;
+    status: 'ok' | 'error';
+    usage?: TokenUsage | undefined;
+    error?: string | undefined;
+}
+
+export interface LoggingLlmAdapterOptions {
+    /** 追加写入 JSONL 日志的文件路径（如 .ops/llm_calls.jsonl） */
+    logPath?: string | undefined;
+    /** 每次调用完成或失败时的实时回调 */
+    onCallFinish?: ((entry: LlmCallLogEntry) => void) | undefined;
+}
+
+/**
+ * 透明模型调用审计装饰器：
+ * 包装任意 LlmPort，在每次调用结束或失败后记录耗时、Token 命中与状态。
+ */
+export class LoggingLlmAdapter implements LlmPort {
+    private readonly inner: LlmPort;
+    private readonly logPath: string | undefined;
+    private readonly onCallFinish: ((entry: LlmCallLogEntry) => void) | undefined;
+
+    constructor(inner: LlmPort, options: LoggingLlmAdapterOptions = {}) {
+        this.inner = inner;
+        this.logPath = options.logPath;
+        this.onCallFinish = options.onCallFinish;
+    }
+
+    private async recordEntry(entry: LlmCallLogEntry): Promise<void> {
+        if (this.onCallFinish) {
+            try {
+                this.onCallFinish(entry);
+            } catch {
+                // 避免外部日志回调异常中断主流程
+            }
+        }
+        if (this.logPath) {
+            try {
+                await mkdir(dirname(this.logPath), { recursive: true });
+                await appendFile(this.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+            } catch {
+                // 审计日志写盘失败不阻断模型主调用
+            }
+        }
+    }
+
+    async generate(req: CleanroomRequest, signal?: AbortSignal): Promise<CleanroomResponse> {
+        const startedAt = Date.now();
+        const prefixHash = hashStaticPrefix(req.staticPrefixBlocks);
+        try {
+            const res = await this.inner.generate(req, signal);
+            await this.recordEntry({
+                timestamp: new Date().toISOString(),
+                pool: req.pool,
+                ...(res.modelId !== undefined ? { modelId: res.modelId } : {}),
+                durationMs: Date.now() - startedAt,
+                prefixHash,
+                dynamicTailChars: req.dynamicTail.length,
+                status: 'ok',
+                usage: res.usage
+            });
+            return res;
+        } catch (err: unknown) {
+            await this.recordEntry({
+                timestamp: new Date().toISOString(),
+                pool: req.pool,
+                durationMs: Date.now() - startedAt,
+                prefixHash,
+                dynamicTailChars: req.dynamicTail.length,
+                status: 'error',
+                error: err instanceof Error ? err.message : String(err)
+            });
+            throw err;
+        }
     }
 }

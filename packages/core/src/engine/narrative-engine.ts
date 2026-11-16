@@ -41,6 +41,8 @@ import {
     type DownstreamConflictReport,
     type DownstreamScanOutput,
     DownstreamScanOutputSchema,
+    type EngineProgressEvent,
+    type EngineStageName,
     type ExtractorOutput,
     ExtractorOutputSchema,
     type FactCheckIssue,
@@ -796,6 +798,21 @@ export class NarrativeEngine {
      * Librarian -> Planner -> Writer -> Static Prose Gate -> Fact Checker -> Extractor + 双粒度 WAL 提交
      */
     async stepChapter(options: StepChapterOptions): Promise<StepChapterResult> {
+        const emit = (stage: EngineStageName, chapterNum: number, message: string): void => {
+            if (!options.onProgress) return;
+            try {
+                const evt: EngineProgressEvent = {
+                    stage,
+                    chapterNumber: chapterNum,
+                    message,
+                    timestamp: new Date().toISOString()
+                };
+                options.onProgress(evt);
+            } catch {
+                // 避免进度回调异常影响主流程
+            }
+        };
+
         const totalUsage = createEmptyUsage();
         const recovery = await this.store.recoverWal();
         const snapshot = await this.store.loadSnapshot();
@@ -807,10 +824,12 @@ export class NarrativeEngine {
         // 分支 A：从 FEAT_COMMITTED 崩溃恢复，直接接续 Step 6 抽取与状态提交
         if (recovery.action === 'NEEDS_STATE_EXTRACTION' && recovery.activeChapter !== null) {
             const activeCh = recovery.activeChapter;
+            emit('WAL_RECOVERY', activeCh, `从 FEAT_COMMITTED 恢复第 ${activeCh} 章状态抽取`);
             const relPath = `manuscripts/${formatChapterKey(activeCh)}.md`;
             const prose = await readFile(join(this.store.bookRoot, relPath), 'utf8');
             const targetDay = options.targetDay ?? snapshot.worldState.frontmatter.story_day;
 
+            emit('EXTRACTOR', activeCh, '增量抽取实体状态与四联遥测');
             const stateRes = await this.runExtractorAndCommitState(
                 snapshot,
                 activeCh,
@@ -864,6 +883,7 @@ export class NarrativeEngine {
         const voicePool = await this.readVoicePool();
 
         // Step 1: Librarian
+        emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
         const { librarianOut, recallSlices } = await this.runLibrarian(
             snapshot,
             chapterNumber,
@@ -888,6 +908,7 @@ export class NarrativeEngine {
         // 外层：Planner -> Writer -> (Gate <-> FactChecker) 闭环
         outerLoop: while (true) {
             // Step 2: Planner
+            emit('PLANNER', chapterNumber, replanCount > 0 ? '改纲重排细纲 v2' : '生成章节细纲');
             const planned = await this.runPlanner(
                 snapshot,
                 chapterNumber,
@@ -910,6 +931,7 @@ export class NarrativeEngine {
             activeOutline = planned.outline;
 
             // Step 3: Writer
+            emit('WRITER', chapterNumber, '净室单轮执笔');
             const drafted = await this.runWriter(
                 snapshot,
                 chapterNumber,
@@ -934,6 +956,7 @@ export class NarrativeEngine {
             while (true) {
                 activeProse = stripBlockingTags(activeProse).cleanText.trim();
 
+                emit('PROSE_GATE', chapterNumber, '运行 0 Token 静态文风门禁');
                 const gateResult = this.gate.evaluate(activeProse, {
                     enableAntiCliche: snapshot.config.prose_gate.enable_anti_cliche,
                     enableCrossChapterSimile: snapshot.config.prose_gate.enable_cross_chapter_simile,
@@ -946,6 +969,7 @@ export class NarrativeEngine {
                 if (!gateResult.passed) {
                     if (gateResult.recommendedAction === 'PATCH' && patchRounds < 2) {
                         patchRounds += 1;
+                        emit('LOCAL_PATCH', chapterNumber, `Gate 触发第 ${patchRounds} 轮局部修补`);
                         const reason = gateResult.violations
                             .map((v) => `[${v.ruleId}] ${v.message}`)
                             .join('; ');
@@ -961,6 +985,7 @@ export class NarrativeEngine {
 
                     if (rewriteCount < 1) {
                         rewriteCount += 1;
+                        emit('REWRITE', chapterNumber, 'Gate 触发整章重写');
                         const rewritten = await this.runWriter(
                             snapshot,
                             chapterNumber,
@@ -997,6 +1022,7 @@ export class NarrativeEngine {
                 }
 
                 // Step 5: Fact Checker
+                emit('FACT_CHECKER', chapterNumber, '执行字面核查与双侧原句验真');
                 const verifiedIssues = await this.runFactChecker(
                     snapshot,
                     chapterNumber,
@@ -1110,6 +1136,7 @@ export class NarrativeEngine {
         await this.store.beginDraft(chapterNumber);
         const featRes = await this.store.commitDraft(chapterNumber, activeProse);
 
+        emit('EXTRACTOR', chapterNumber, '增量抽取实体状态与四联遥测');
         const stateRes = await this.runExtractorAndCommitState(
             snapshot,
             chapterNumber,
@@ -1126,6 +1153,7 @@ export class NarrativeEngine {
             options.signal
         );
 
+        emit('COMMITTED', chapterNumber, `第 ${chapterNumber} 章双粒度提交完成`);
         return {
             status: 'COMMITTED',
             chapterNumber,
