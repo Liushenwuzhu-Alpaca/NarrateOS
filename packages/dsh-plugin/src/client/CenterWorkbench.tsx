@@ -258,13 +258,91 @@ const PIPELINE_STAGES: readonly StageDefinition[] = [
 
 const STAGE_ORDER: readonly PipelineStageId[] = PIPELINE_STAGES.map((s) => s.id);
 
-const DIRECTOR_SIGNAL_OPTIONS: ReadonlyArray<{ value: DirectorSignalKind; label: string }> = [
-    { value: '下章剧情', label: '下章剧情' },
-    { value: 'FLASHBACK', label: 'FLASHBACK' },
-    { value: 'PARALLEL', label: 'PARALLEL' },
-    { value: 'Retcon', label: 'Retcon' },
-    { value: '文风修订', label: '文风修订' }
+/** 斜杠指令定义项 */
+interface SlashCommandItem {
+    command: string;
+    alias: string;
+    kind: DirectorSignalKind;
+    description: string;
+}
+
+/** 底部导演栏斜杠指令列表 */
+const SLASH_COMMANDS: ReadonlyArray<SlashCommandItem> = [
+    {
+        command: '/plot',
+        alias: '剧情',
+        kind: '导演指令',
+        description: '下章剧情 / 视角指示'
+    },
+    {
+        command: '/flashback',
+        alias: '插叙',
+        kind: 'FLASHBACK',
+        description: '强制插叙 · 屏蔽当前状态'
+    },
+    {
+        command: '/parallel',
+        alias: '支线',
+        kind: 'PARALLEL',
+        description: '开启并行多视角支线'
+    },
+    {
+        command: '/retcon',
+        alias: '圆谎',
+        kind: 'Retcon',
+        description: '投递短期 Retcon 圆谎纸条'
+    },
+    {
+        command: '/style',
+        alias: '文风',
+        kind: '文风修订',
+        description: '注入一次性文风修正补丁'
+    }
 ];
+
+/** 按序字符模糊匹配（支持 /fb 匹配 /flashback） */
+function isSubsequenceMatch(needle: string, haystack: string): boolean {
+    let i = 0;
+    for (let j = 0; j < haystack.length && i < needle.length; j++) {
+        if (haystack[j] === needle[i]) {
+            i++;
+        }
+    }
+    return i === needle.length;
+}
+
+/** 过滤并排序匹配的斜杠指令 */
+function filterSlashCommands(query: string): SlashCommandItem[] {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) {
+        return [...SLASH_COMMANDS];
+    }
+
+    const prefixMatches: SlashCommandItem[] = [];
+    const fuzzyMatches: SlashCommandItem[] = [];
+
+    for (const item of SLASH_COMMANDS) {
+        const cmdBody = item.command.slice(1).toLowerCase();
+        const alias = item.alias.toLowerCase();
+        const kind = item.kind.toLowerCase();
+        if (
+            cmdBody.startsWith(normalized) ||
+            alias.startsWith(normalized) ||
+            kind.startsWith(normalized)
+        ) {
+            prefixMatches.push(item);
+        } else if (
+            cmdBody.includes(normalized) ||
+            alias.includes(normalized) ||
+            kind.includes(normalized) ||
+            isSubsequenceMatch(normalized, cmdBody)
+        ) {
+            fuzzyMatches.push(item);
+        }
+    }
+
+    return [...prefixMatches, ...fuzzyMatches];
+}
 
 const YOLO_PRESETS: ReadonlyArray<{ targetChapters: number; label: string; desc: string }> = [
     { targetChapters: 3, label: '连跑 3 章', desc: '推进 3 章后在安全点停下' },
@@ -972,10 +1050,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [syncingFromDiff, setSyncingFromDiff] = useState(false);
 
     // 底部导演一次性干涉栏输入态
-    const [signalKind, setSignalKind] = useState<DirectorSignalKind>('下章剧情');
+    const [signalKind, setSignalKind] = useState<DirectorSignalKind>('导演指令');
     const [signalInput, setSignalInput] = useState('');
     const [submittingSignal, setSubmittingSignal] = useState(false);
     const [dismissedIndices, setDismissedIndices] = useState<number[]>([]);
+    const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
+    const [activeSlashIndex, setActiveSlashIndex] = useState(0);
     const signalInputRef = useRef<HTMLInputElement | null>(null);
 
     // 局部操作反馈提示
@@ -1193,6 +1273,28 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         } finally {
             setSubmittingSignal(false);
         }
+    };
+
+    /** 计算当前斜杠指令匹配结果 */
+    const slashQueryMatch = useMemo(() => /^\/(\S*)$/.exec(signalInput), [signalInput]);
+    const filteredSlashCommands = useMemo(
+        () => (slashQueryMatch ? filterSlashCommands(slashQueryMatch[1] ?? '') : []),
+        [slashQueryMatch]
+    );
+    const isSlashMenuOpen =
+        slashQueryMatch !== null && !slashMenuDismissed && filteredSlashCommands.length > 0;
+    const clampedSlashIndex =
+        filteredSlashCommands.length > 0
+            ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
+            : 0;
+
+    /** 选中斜杠指令：切换信号类型、剥离 /xxx 前缀并保持输入焦点 */
+    const applySlashCommand = (cmd: SlashCommandItem) => {
+        setSignalKind(cmd.kind);
+        setSignalInput((prev) => prev.replace(/^\/\S*\s*/, ''));
+        setSlashMenuDismissed(false);
+        setActiveSlashIndex(0);
+        signalInputRef.current?.focus();
     };
 
     /** 切换至历史章节 */
@@ -3049,13 +3151,91 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     ) : null}
 
                     <div className="ns-composer-box">
+                        {isSlashMenuOpen ? (
+                            <div
+                                className="ns-slash-menu"
+                                role="listbox"
+                                aria-label="导演信号斜杠指令菜单"
+                            >
+                                {filteredSlashCommands.map((cmd, idx) => {
+                                    const active = idx === clampedSlashIndex;
+                                    return (
+                                        <button
+                                            key={cmd.command}
+                                            type="button"
+                                            role="option"
+                                            aria-selected={active}
+                                            className={`ns-slash-item${active ? ' is-active' : ''}`}
+                                            onMouseEnter={() => setActiveSlashIndex(idx)}
+                                            onMouseDown={(e: React.MouseEvent<HTMLButtonElement>) => {
+                                                e.preventDefault();
+                                                applySlashCommand(cmd);
+                                            }}
+                                        >
+                                            <span className="ns-slash-cmd">{cmd.command}</span>
+                                            <span className="ns-slash-alias">{cmd.alias}</span>
+                                            <span className="ns-slash-desc">{cmd.description}</span>
+                                            <span className="ns-slash-kind">{cmd.kind}</span>
+                                        </button>
+                                    );
+                                })}
+                                <div className="ns-slash-foot">
+                                    ↑↓ 选择 · Enter / Tab 确认 · Esc 关闭
+                                </div>
+                            </div>
+                        ) : null}
+
                         <input
                             ref={signalInputRef}
                             type="text"
                             className="ns-composer-input"
                             value={signalInput}
-                            onChange={(e) => setSignalInput(e.target.value)}
+                            onChange={(e) => {
+                                setSignalInput(e.target.value);
+                                setSlashMenuDismissed(false);
+                                setActiveSlashIndex(0);
+                            }}
                             onKeyDown={(e) => {
+                                const nativeEvent = (
+                                    e as unknown as { nativeEvent?: { isComposing?: boolean } }
+                                ).nativeEvent;
+                                if (nativeEvent?.isComposing) {
+                                    return;
+                                }
+                                if (isSlashMenuOpen) {
+                                    if (e.key === 'ArrowDown') {
+                                        e.preventDefault();
+                                        setActiveSlashIndex(
+                                            (clampedSlashIndex + 1) % filteredSlashCommands.length
+                                        );
+                                        return;
+                                    }
+                                    if (e.key === 'ArrowUp') {
+                                        e.preventDefault();
+                                        setActiveSlashIndex(
+                                            (clampedSlashIndex - 1 + filteredSlashCommands.length) %
+                                                filteredSlashCommands.length
+                                        );
+                                        return;
+                                    }
+                                    if (
+                                        (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey) ||
+                                        e.key === 'Tab'
+                                    ) {
+                                        e.preventDefault();
+                                        const chosen = filteredSlashCommands[clampedSlashIndex];
+                                        if (chosen) {
+                                            applySlashCommand(chosen);
+                                        }
+                                        return;
+                                    }
+                                    if (e.key === 'Escape') {
+                                        e.preventDefault();
+                                        setSlashMenuDismissed(true);
+                                        return;
+                                    }
+                                }
+
                                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                                     e.preventDefault();
                                     void handleSignalAction(true);
@@ -3064,25 +3244,31 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     void handleSignalAction(false);
                                 }
                             }}
-                            placeholder="给下一章递一张纸条（写入 .ops/signals.jsonl，安全点消费即焚）"
+                            placeholder="给下一章递一张纸条（输入 / 选择指令，安全点消费即焚）"
                         />
 
                         <div className="ns-composer-bar">
-                            <span className="ns-pill-sel" title="纸条类型">
-                                <select
-                                    aria-label="导演信号类型"
-                                    value={signalKind}
-                                    onChange={(e) =>
-                                        setSignalKind(e.target.value as DirectorSignalKind)
-                                    }
-                                >
-                                    {DIRECTOR_SIGNAL_OPTIONS.map((opt) => (
-                                        <option key={opt.value} value={opt.value}>
-                                            {opt.label}
-                                        </option>
-                                    ))}
-                                </select>
-                            </span>
+                            {signalKind !== '导演指令' ? (
+                                <span className="ns-kind-pill" title="当前已选导演指令类型">
+                                    <span className="ns-kind-pill-label">{signalKind}</span>
+                                    <button
+                                        type="button"
+                                        className="ns-kind-pill-clear"
+                                        aria-label="清除指令类型并恢复默认"
+                                        title="恢复默认（导演指令）"
+                                        onClick={() => {
+                                            setSignalKind('导演指令');
+                                            signalInputRef.current?.focus();
+                                        }}
+                                    >
+                                        ×
+                                    </button>
+                                </span>
+                            ) : (
+                                <span className="ns-composer-hint">
+                                    输入 / 选择指令类型 · 安全点消费即焚
+                                </span>
+                            )}
 
                             <span className="ns-composer-sp" />
 

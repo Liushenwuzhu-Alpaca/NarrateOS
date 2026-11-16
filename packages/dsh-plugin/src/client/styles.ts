@@ -1736,6 +1736,7 @@ export const STUDIO_CSS = `
 }
 
 .ns-composer-box {
+    position: relative;
     border-radius: 16px;
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-2);
@@ -1772,32 +1773,136 @@ export const STUDIO_CSS = `
     flex: 1;
 }
 
-.ns-pill-sel {
-    position: relative;
+/* 左下角极简提示与已选指令胶囊 */
+.ns-composer-hint {
+    font-size: 11.5px;
+    color: var(--ns-text-4);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ns-kind-pill {
     display: inline-flex;
     align-items: center;
-    height: 28px;
-    padding: 0 10px;
+    gap: 5px;
+    height: 24px;
+    padding: 0 5px 0 10px;
     border-radius: 999px;
-    background: var(--ns-bg-hover);
-    font-size: 12px;
-    color: var(--ns-text-2);
+    background: var(--ns-brand-soft);
+    border: 1px solid var(--ns-brand-line);
+    color: var(--ns-brand-ink);
+    font-size: 11.5px;
+    font-weight: 600;
     white-space: nowrap;
 }
 
-.ns-pill-sel select {
-    border: 0;
-    outline: none;
-    background: transparent;
-    color: var(--ns-text-2);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
+.ns-kind-pill-label {
+    line-height: 1;
 }
 
-.ns-pill-sel select option {
-    background: var(--ns-bg-surface-2);
+.ns-kind-pill-clear {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 0;
+    background: transparent;
+    color: var(--ns-brand-ink);
+    display: grid;
+    place-items: center;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+}
+
+.ns-kind-pill-clear:hover {
+    background: var(--ns-bg-hover);
     color: var(--ns-text-1);
+}
+
+/* 斜杠 / 指令联想浮层菜单 */
+.ns-slash-menu {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 8px);
+    background: var(--ns-bg-surface-2);
+    border: 1px solid var(--ns-border-2);
+    border-radius: var(--ns-r-lg);
+    padding: 6px;
+    box-shadow: var(--ns-pop-shadow);
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ns-slash-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: var(--ns-r-sm);
+    background: transparent;
+    color: var(--ns-text-2);
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+}
+
+.ns-slash-item:hover,
+.ns-slash-item.is-active {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-1);
+}
+
+.ns-slash-item.is-active {
+    box-shadow: inset 2px 0 0 var(--ns-brand);
+}
+
+.ns-slash-cmd {
+    font: 600 12px var(--ns-font-mono);
+    color: var(--ns-brand-ink);
+    min-width: 88px;
+    white-space: nowrap;
+}
+
+.ns-slash-alias {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--ns-bg-card);
+    border: 1px solid var(--ns-border-1);
+    color: var(--ns-text-3);
+    white-space: nowrap;
+}
+
+.ns-slash-desc {
+    flex: 1;
+    min-width: 0;
+    color: var(--ns-text-2);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ns-slash-kind {
+    font-size: 11px;
+    color: var(--ns-text-4);
+    white-space: nowrap;
+}
+
+.ns-slash-foot {
+    margin-top: 2px;
+    padding: 4px 10px 2px;
+    border-top: 1px solid var(--ns-border-1);
+    font-size: 11px;
+    color: var(--ns-text-4);
 }
 
 .ns-send-circle {
