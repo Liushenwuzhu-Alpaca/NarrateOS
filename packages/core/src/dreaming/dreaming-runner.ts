@@ -17,6 +17,7 @@ import {
     type HealConflictItemResult,
     type HealConflictsOptions,
     type HealConflictsResult,
+    type HorizonEvalOutput,
     type OpsSignal,
     type QuarantineReport,
     type RunDreamingOptions,
@@ -29,6 +30,21 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_DREAM_WORD_THRESHOLD = 2000;
 const DEFAULT_DREAM_BUFFER_LIMIT = 4;
 const DEFAULT_WARPED_EXPIRE_DAYS = 3;
+const MAX_ACTIVE_OPEN_THREADS = 15;
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function matchesThreadId(line: string, threadId: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('- ')) {
+        return false;
+    }
+    const escaped = escapeRegExp(threadId);
+    const pattern = new RegExp(`(?:\\[|\\s|:)${escaped}(?:\\]|\\s|:|$)`);
+    return pattern.test(trimmed);
+}
 
 function emptyUsage(): TokenUsage {
     return {
@@ -139,6 +155,10 @@ export class DreamingRunner {
                 warpedNodesFlipped: 0,
                 archivedFiles: [],
                 spotlightTriggers: [],
+                resolvedThreads: [],
+                addedThreads: [],
+                rejectedThreadsCount: 0,
+                replenishedHorizonEventsCount: 0,
                 committedTxState: null,
                 usage
             };
@@ -212,19 +232,28 @@ export class DreamingRunner {
             vacuumedEntities.push(profile.metadata.entity_id);
         }
 
-        // 2. 核对 future_horizon.md 与离场角色前台镜头原则
+        // 2. 核对 future_horizon.md、open_threads.md 与离场角色前台镜头原则
         const horizonRelPath = 'world/future_horizon.md';
+        const openThreadsRelPath = 'world/open_threads.md';
         const horizonRaw = await readOptionalText(join(this.store.bookRoot, horizonRelPath));
+        const openThreadsRaw = await readOptionalText(join(this.store.bookRoot, openThreadsRelPath));
         let warpedNodesFlipped = 0;
         const archivedFiles: string[] = [];
         const spotlightTriggers: OpsSignal[] = [];
+        let resolvedThreads: string[] = [];
+        let addedThreads: string[] = [];
+        let rejectedThreadsCount = 0;
+        let replenishedHorizonEventsCount = 0;
 
-        if (horizonRaw !== null || (options.offscreenCharacters?.length ?? 0) > 0) {
+        if (horizonRaw !== null || openThreadsRaw !== null || (options.offscreenCharacters?.length ?? 0) > 0) {
             const horizonEvalPrompt = [
                 `当前章节: ch_${padChapter(options.currentChapter)} (story_day: ${currentStoryDay})`,
                 '',
                 '## world/future_horizon.md',
                 horizonRaw ?? '(无)',
+                '',
+                '## world/open_threads.md',
+                openThreadsRaw ?? '(无)',
                 '',
                 '## 离场重要角色待办与进度',
                 ...(options.offscreenCharacters?.map(
@@ -233,7 +262,10 @@ export class DreamingRunner {
                 '',
                 '请输出：',
                 '1. warped_markers: 已破灭需要翻转为 WARPED 的节点 id 或关键词列表；',
-                '2. spotlight_triggers: 蓄力抵达引爆重大冲突临界点的离场角色，严禁后台偷偷结算，必须抛出切镜信号。'
+                '2. spotlight_triggers: 蓄力抵达引爆重大冲突临界点的离场角色，严禁后台偷偷结算，必须抛出切镜信号；',
+                '3. resolved_thread_ids: 本周期已彻底兑现、可销账归档的伏笔 thread_id 列表；',
+                '4. new_threads: 本周期新埋设的跨章悬念（最多 2 条，含 thread_id / title / wakeup_condition）；',
+                '5. replenished_horizon_events: 根据离场角色待办目标滚动补货的未来惯性事件（含 event_id / description / premise 及可选 after_ch / story_day）。'
             ].join('\n');
 
             const evalRes = await generateStructuredJson(
@@ -241,7 +273,7 @@ export class DreamingRunner {
                 {
                     pool: 'audit',
                     staticPrefixBlocks: [
-                        '你是长篇小说远景推演与前台镜头裁判（On-Screen Principle）。重要冲突必须抛出 Spotlight Trigger 信号，仅输出合法 JSON。'
+                        '你是长篇小说远景推演、伏笔盘点与前台镜头裁判（On-Screen Principle）。重要冲突必须抛出 Spotlight Trigger 信号，仅输出合法 JSON。'
                     ],
                     dynamicTail: horizonEvalPrompt
                 },
@@ -251,6 +283,10 @@ export class DreamingRunner {
             );
             addUsage(usage, evalRes.totalUsage);
 
+            const replenishedEvents = evalRes.data.replenished_horizon_events ?? [];
+            let nextHorizonMarkdown = horizonRaw;
+            let horizonChanged = false;
+
             if (horizonRaw !== null) {
                 const horizonUpdate = this.applyHorizonWarpAndArchive(
                     horizonRaw,
@@ -259,10 +295,10 @@ export class DreamingRunner {
                     warpedExpireDays
                 );
                 warpedNodesFlipped = horizonUpdate.flippedCount;
+                nextHorizonMarkdown = horizonUpdate.updatedMarkdown;
 
                 if (horizonUpdate.flippedCount > 0 || horizonUpdate.expiredWarpedLines.length > 0) {
-                    await writeFile(join(this.store.bookRoot, horizonRelPath), horizonUpdate.updatedMarkdown, 'utf8');
-                    committedPaths.add(horizonRelPath);
+                    horizonChanged = true;
                 }
 
                 if (horizonUpdate.expiredWarpedLines.length > 0) {
@@ -275,6 +311,36 @@ export class DreamingRunner {
                     await writeFile(warpedArchiveAbs, mergedArchive, 'utf8');
                     committedPaths.add(warpedArchiveRel);
                     archivedFiles.push(warpedArchiveRel);
+                }
+            }
+
+            if (replenishedEvents.length > 0) {
+                const appended = this.appendReplenishedHorizonEvents(nextHorizonMarkdown, replenishedEvents);
+                if (appended.addedCount > 0) {
+                    nextHorizonMarkdown = appended.updatedMarkdown;
+                    replenishedHorizonEventsCount = appended.addedCount;
+                    horizonChanged = true;
+                }
+            }
+
+            if (horizonChanged && nextHorizonMarkdown !== null) {
+                await writeFile(join(this.store.bookRoot, horizonRelPath), nextHorizonMarkdown, 'utf8');
+                committedPaths.add(horizonRelPath);
+            }
+
+            // 周期盘点 world/open_threads.md（已兑现归档 + 新增硬锁 <= 15）
+            const resolvedIds = evalRes.data.resolved_thread_ids ?? [];
+            const newThreads = evalRes.data.new_threads ?? [];
+            if (resolvedIds.length > 0 || newThreads.length > 0) {
+                const threadUpdate = this.updateOpenThreadsMarkdown(openThreadsRaw, resolvedIds, newThreads);
+                resolvedThreads = threadUpdate.resolvedThreads;
+                addedThreads = threadUpdate.addedThreads;
+                rejectedThreadsCount = threadUpdate.rejectedThreadsCount;
+
+                if (threadUpdate.changed) {
+                    await mkdir(join(this.store.bookRoot, 'world'), { recursive: true });
+                    await writeFile(join(this.store.bookRoot, openThreadsRelPath), threadUpdate.updatedMarkdown, 'utf8');
+                    committedPaths.add(openThreadsRelPath);
                 }
             }
 
@@ -329,6 +395,10 @@ export class DreamingRunner {
             warpedNodesFlipped,
             archivedFiles,
             spotlightTriggers,
+            resolvedThreads,
+            addedThreads,
+            rejectedThreadsCount,
+            replenishedHorizonEventsCount,
             committedTxState,
             usage
         };
@@ -628,6 +698,166 @@ export class DreamingRunner {
             updatedMarkdown: keptLines.join('\n'),
             flippedCount,
             expiredWarpedLines
+        };
+    }
+
+    private appendReplenishedHorizonEvents(
+        horizonMarkdown: string | null,
+        events: HorizonEvalOutput['replenished_horizon_events']
+    ): {
+        updatedMarkdown: string;
+        addedCount: number;
+    } {
+        const base =
+            horizonMarkdown !== null && horizonMarkdown.trim().length > 0
+                ? horizonMarkdown.trimEnd()
+                : '# 世界默认惯性表 (Future Horizon)';
+        const newLines: string[] = [];
+        let addedCount = 0;
+
+        for (const evt of events) {
+            // 去重：若已存在同 event_id 则跳过
+            const escapedId = escapeRegExp(evt.event_id);
+            if (new RegExp(`(?:event:|id:\\s*)${escapedId}(?:\\s|\\]|$)`).test(base)) {
+                continue;
+            }
+            const metaParts = [`event:${evt.event_id}`];
+            if (evt.story_day !== undefined) {
+                metaParts.push(`day:${evt.story_day}`);
+            }
+            if (evt.after_ch !== undefined) {
+                metaParts.push(`after_ch:${evt.after_ch}`);
+            }
+            metaParts.push('status:ACTIVE');
+
+            newLines.push(`- [${metaParts.join(' | ')}] ${evt.description}`);
+            newLines.push(`  - Premise: ${evt.premise}`);
+            addedCount += 1;
+        }
+
+        if (addedCount === 0) {
+            return { updatedMarkdown: horizonMarkdown ?? `${base}\n`, addedCount: 0 };
+        }
+
+        return {
+            updatedMarkdown: `${base}\n${newLines.join('\n')}\n`,
+            addedCount
+        };
+    }
+
+    private updateOpenThreadsMarkdown(
+        openThreadsRaw: string | null,
+        resolvedThreadIds: string[],
+        newThreads: HorizonEvalOutput['new_threads']
+    ): {
+        updatedMarkdown: string;
+        resolvedThreads: string[];
+        addedThreads: string[];
+        rejectedThreadsCount: number;
+        changed: boolean;
+    } {
+        const sourceLines = (openThreadsRaw ?? '').split(/\r?\n/);
+        let docTitle = '# 跨卷伏笔台账 (Open Threads)';
+        const activeLines: string[] = [];
+        const archiveLines: string[] = [];
+        let currentSection: 'header' | 'active' | 'archive' = 'header';
+
+        for (const line of sourceLines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('# ') && currentSection === 'header') {
+                docTitle = trimmed;
+                continue;
+            }
+            if (/^##\s+.*(已回收伏笔归档|Resolved Archive)/i.test(trimmed)) {
+                currentSection = 'archive';
+                continue;
+            }
+            if (/^##\s+.*(活跃未解伏笔|Active Threads)/i.test(trimmed)) {
+                currentSection = 'active';
+                continue;
+            }
+            if (trimmed.startsWith('- ')) {
+                if (currentSection === 'archive') {
+                    archiveLines.push(trimmed);
+                } else {
+                    // 无显式二级标题的初始列表条目默认视为活跃伏笔
+                    activeLines.push(trimmed);
+                }
+            }
+        }
+
+        // 1. 将本周期已兑现伏笔从 Active 移入 Resolved Archive
+        const resolvedSet = new Set(resolvedThreadIds);
+        const remainingActive: string[] = [];
+        const resolvedThreads: string[] = [];
+        let changed = false;
+
+        for (const line of activeLines) {
+            const matchedId = Array.from(resolvedSet).find((id) => matchesThreadId(line, id));
+            if (matchedId !== undefined) {
+                const archivedLine = /status:\s*RESOLVED/i.test(line)
+                    ? line
+                    : `${line} [status: RESOLVED]`;
+                archiveLines.push(archivedLine);
+                if (!resolvedThreads.includes(matchedId)) {
+                    resolvedThreads.push(matchedId);
+                }
+                changed = true;
+            } else {
+                remainingActive.push(line);
+            }
+        }
+
+        // 2. 追加新立项伏笔，严格执行 ACTIVE <= 15 硬锁
+        const addedThreads: string[] = [];
+        let rejectedThreadsCount = 0;
+
+        for (const item of newThreads) {
+            const alreadyActive = remainingActive.some((line) => matchesThreadId(line, item.thread_id));
+            const alreadyArchived = archiveLines.some((line) => matchesThreadId(line, item.thread_id));
+            if (alreadyActive || alreadyArchived) {
+                continue;
+            }
+
+            if (remainingActive.length >= MAX_ACTIVE_OPEN_THREADS) {
+                rejectedThreadsCount += 1;
+                continue;
+            }
+
+            remainingActive.push(
+                `- [${item.thread_id}] ${item.title} | 唤醒条件: ${item.wakeup_condition}`
+            );
+            addedThreads.push(item.thread_id);
+            changed = true;
+        }
+
+        if (!changed) {
+            return {
+                updatedMarkdown: openThreadsRaw ?? `${docTitle}\n`,
+                resolvedThreads,
+                addedThreads,
+                rejectedThreadsCount,
+                changed: false
+            };
+        }
+
+        const outLines: string[] = [
+            docTitle,
+            '',
+            '## 活跃未解伏笔 (Active Threads)',
+            ...remainingActive,
+            '',
+            '## 已回收伏笔归档 (Resolved Archive)',
+            ...archiveLines,
+            ''
+        ];
+
+        return {
+            updatedMarkdown: outLines.join('\n'),
+            resolvedThreads,
+            addedThreads,
+            rejectedThreadsCount,
+            changed: true
         };
     }
 

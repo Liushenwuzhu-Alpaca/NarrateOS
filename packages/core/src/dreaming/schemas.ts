@@ -34,7 +34,7 @@ export const DreamVacuumOutputSchema = z.object({
 });
 export type DreamVacuumOutput = z.infer<typeof DreamVacuumOutputSchema>;
 
-/** 远景节点翻转与离场角色前台切镜评估输出 Schema */
+/** 远景节点翻转、伏笔盘点补货与离场角色前台切镜评估输出 Schema */
 export const HorizonEvalOutputSchema = z.object({
     warped_markers: z.array(z.string()).default([]),
     spotlight_triggers: z
@@ -43,6 +43,28 @@ export const HorizonEvalOutputSchema = z.object({
                 entity_id: z.string().min(1),
                 reason: z.string().min(1),
                 suggested_mode: z.enum(['MAINLINE', 'PARALLEL']).default('MAINLINE')
+            })
+        )
+        .default([]),
+    resolved_thread_ids: z.array(z.string()).default([]),
+    new_threads: z
+        .array(
+            z.object({
+                thread_id: z.string().min(1),
+                title: z.string().min(1),
+                wakeup_condition: z.string().min(1)
+            })
+        )
+        .max(2)
+        .default([]),
+    replenished_horizon_events: z
+        .array(
+            z.object({
+                event_id: z.string().min(1),
+                description: z.string().min(1),
+                premise: z.string().min(1),
+                after_ch: z.number().int().positive().optional(),
+                story_day: z.number().int().nonnegative().optional()
             })
         )
         .default([])
@@ -117,6 +139,10 @@ export interface RunDreamingResult {
     warpedNodesFlipped: number;
     archivedFiles: string[];
     spotlightTriggers: OpsSignal[];
+    resolvedThreads: string[];
+    addedThreads: string[];
+    rejectedThreadsCount: number;
+    replenishedHorizonEventsCount: number;
     committedTxState: TxState | null;
     usage: TokenUsage;
 }

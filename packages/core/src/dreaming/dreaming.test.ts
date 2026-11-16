@@ -603,4 +603,183 @@ describe('DreamingRunner', () => {
         const report = JSON.parse(await readFile(join(bookRoot, '.ops/quarantine_report.json'), 'utf8'));
         expect(report.conflict_id).toBe('c_deadlock');
     });
+
+    it('伏笔周期盘点与补货：将 resolved_thread_ids 归档至 Resolved Archive，追加 new_threads 并写入 replenished_horizon_events', async () => {
+        const { bookRoot, system, store } = await createDreamingTestRepo();
+
+        const openThreadsSeed = [
+            '# 跨卷伏笔台账 (Open Threads)',
+            '',
+            '## 活跃未解伏笔 (Active Threads)',
+            '- [th_001] 地下室铁门被替换的新锁芯 | 唤醒条件: 陆沉拿到旧校舍配电室备用钥匙',
+            '- [th_002] 十年前社团印章上的缺角 | 唤醒条件: 查阅十年前文化祭档案',
+            '- [th_003] 旧任部长的匿名留言条 | 唤醒条件: 对比学生会干事笔迹',
+            '',
+            '## 已回收伏笔归档 (Resolved Archive)',
+            '- [th_000] 废部预警单的签发人 | 唤醒条件: 核对学生会盖章记录 [status: RESOLVED]',
+            ''
+        ].join('\n');
+        await writeFile(join(bookRoot, 'world/open_threads.md'), openThreadsSeed, 'utf8');
+        await system.commitPaths(bookRoot, ['world/open_threads.md'], 'chore: seed open_threads');
+
+        const llm = new ScriptedLlmAdapter([
+            {
+                text: JSON.stringify({
+                    warped_markers: [],
+                    spotlight_triggers: [],
+                    resolved_thread_ids: ['th_001'],
+                    new_threads: [
+                        {
+                            thread_id: 'th_004',
+                            title: '配电室电表箱内的加密航海图残片',
+                            wakeup_condition: '破译残片背面的摩尔斯电码'
+                        }
+                    ],
+                    replenished_horizon_events: [
+                        {
+                            event_id: 'hz_004',
+                            description: '神代雪乃将带着学生会审计组突击查封旧校舍地下室',
+                            premise: '陆沉未能在听证会前销毁违规电表记录',
+                            after_ch: 12,
+                            story_day: 10
+                        }
+                    ]
+                }),
+                usage: { inputTokens: 120, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 80 }
+            }
+        ]);
+
+        const runner = new DreamingRunner(store, llm, system);
+        const result = await runner.runDreaming({
+            currentChapter: 6,
+            currentStoryDay: 6,
+            force: true,
+            offscreenCharacters: [
+                {
+                    entityId: 'char_002',
+                    pendingGoal: '申请查封旧校舍地下室',
+                    progressNote: '已起草审计通知书'
+                }
+            ],
+            retryOptions: { sleepFn: async () => {} }
+        });
+
+        expect(result.skipped).toBe(false);
+        expect(result.resolvedThreads).toEqual(['th_001']);
+        expect(result.addedThreads).toEqual(['th_004']);
+        expect(result.rejectedThreadsCount).toBe(0);
+        expect(result.committedTxState?.phase).toBe('DREAM_COMMITTED');
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+
+        const threadsAfter = await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8');
+        const [activeSection = '', archiveSection = ''] = threadsAfter.split('## 已回收伏笔归档 (Resolved Archive)');
+
+        expect(activeSection).not.toContain('th_001');
+        expect(activeSection).toContain('th_002');
+        expect(activeSection).toContain('th_003');
+        expect(activeSection).toContain('th_004');
+
+        expect(archiveSection).toContain('th_000');
+        expect(archiveSection).toContain('th_001');
+
+        const horizonAfter = await readFile(join(bookRoot, 'world/future_horizon.md'), 'utf8');
+        expect(horizonAfter).toContain('hz_004');
+        expect(horizonAfter).toContain('after_ch:12');
+        expect(horizonAfter).toContain('day:10');
+        expect(horizonAfter).toContain('Premise: 陆沉未能在听证会前销毁违规电表记录');
+    });
+
+    it('伏笔配额硬锁：ACTIVE 伏笔上限 15 条，超额 new_threads 被代码硬拦截并计入 rejectedThreadsCount', async () => {
+        const { bookRoot, system, store } = await createDreamingTestRepo();
+
+        const fourteenThreads = Array.from({ length: 14 }, (_, idx) => {
+            const num = String(idx + 1).padStart(3, '0');
+            return `- [th_${num}] 伏笔标题_${num} | 唤醒条件: 条件_${num}`;
+        });
+        const openThreadsSeed = [
+            '# 跨卷伏笔台账 (Open Threads)',
+            '',
+            '## 活跃未解伏笔 (Active Threads)',
+            ...fourteenThreads,
+            '',
+            '## 已回收伏笔归档 (Resolved Archive)',
+            ''
+        ].join('\n');
+        await writeFile(join(bookRoot, 'world/open_threads.md'), openThreadsSeed, 'utf8');
+        await system.commitPaths(bookRoot, ['world/open_threads.md'], 'chore: seed 14 active threads');
+
+        const llm = new ScriptedLlmAdapter([
+            {
+                text: JSON.stringify({
+                    warped_markers: [],
+                    spotlight_triggers: [],
+                    resolved_thread_ids: [],
+                    new_threads: [
+                        {
+                            thread_id: 'th_015',
+                            title: '第 15 条允许入库的伏笔',
+                            wakeup_condition: '条件_015'
+                        },
+                        {
+                            thread_id: 'th_016',
+                            title: '第 16 条超额应被硬拦截的伏笔',
+                            wakeup_condition: '条件_016'
+                        }
+                    ],
+                    replenished_horizon_events: []
+                }),
+                usage: { inputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 60 }
+            },
+            {
+                text: JSON.stringify({
+                    warped_markers: [],
+                    spotlight_triggers: [],
+                    resolved_thread_ids: [],
+                    new_threads: [
+                        {
+                            thread_id: 'th_017',
+                            title: '满额后新增应全数拦截的伏笔',
+                            wakeup_condition: '条件_017'
+                        }
+                    ],
+                    replenished_horizon_events: []
+                }),
+                usage: { inputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 50 }
+            }
+        ]);
+
+        const runner = new DreamingRunner(store, llm, system);
+        const firstRes = await runner.runDreaming({
+            currentChapter: 7,
+            currentStoryDay: 7,
+            force: true,
+            retryOptions: { sleepFn: async () => {} }
+        });
+
+        expect(firstRes.addedThreads).toEqual(['th_015']);
+        expect(firstRes.rejectedThreadsCount).toBe(1);
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+
+        const threadsAfterFirst = await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8');
+        const [activeAfterFirst = ''] = threadsAfterFirst.split('## 已回收伏笔归档 (Resolved Archive)');
+        const activeCountFirst = activeAfterFirst
+            .split(/\r?\n/)
+            .filter((line) => line.trim().startsWith('- ')).length;
+        expect(activeCountFirst).toBe(15);
+        expect(activeAfterFirst).toContain('th_015');
+        expect(activeAfterFirst).not.toContain('th_016');
+
+        // 达到 15 条上限后再次尝试新增，应全部拦截
+        const secondRes = await runner.runDreaming({
+            currentChapter: 8,
+            currentStoryDay: 8,
+            force: true,
+            retryOptions: { sleepFn: async () => {} }
+        });
+
+        expect(secondRes.addedThreads).toEqual([]);
+        expect(secondRes.rejectedThreadsCount).toBe(1);
+        const threadsAfterSecond = await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8');
+        expect(threadsAfterSecond).not.toContain('th_017');
+    });
 });
