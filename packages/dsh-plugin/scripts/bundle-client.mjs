@@ -65,7 +65,24 @@ function buildBundleSource(moduleEntries, entryId) {
  * NarrateOS DSH 客户端单文件 CJS bundle（由 scripts/bundle-client.mjs 自动生成）
  * 内部相对模块通过内存注册表解析，外部宿主依赖透传给 DSH require(id)。
  */
-(function (hostRequire, rootModule) {
+(function (runFactory) {
+    if (
+        typeof window !== 'undefined' &&
+        window.__ModuleLoader__ &&
+        typeof window.__ModuleLoader__.load === 'function'
+    ) {
+        window.__ModuleLoader__.load({
+            id: '@narrateos/dsh-plugin',
+            factory: function (hostRequire) {
+                var rootModule = { exports: {} };
+                runFactory(hostRequire, rootModule);
+                return rootModule.exports;
+            }
+        });
+    } else if (typeof module !== 'undefined' && typeof require === 'function') {
+        runFactory(require, module);
+    }
+})(function (hostRequire, rootModule) {
     var __modules = {
 ${moduleBlocks.join(',\n')}
     };
@@ -138,7 +155,7 @@ ${moduleBlocks.join(',\n')}
     } else {
         rootModule.exports = {};
     }
-})(require, module);
+});
 `;
 }
 

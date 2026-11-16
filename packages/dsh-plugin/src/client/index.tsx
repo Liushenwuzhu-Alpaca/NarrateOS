@@ -918,64 +918,90 @@ export function NarrateStudioRoot(): React.ReactElement {
     );
 }
 
+/** 侧栏导航图标组件 */
+function NarrateStudioSidebarIcon(): React.ReactElement {
+    return (
+        <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+        >
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            <path d="M8 7h8" />
+            <path d="M8 11h6" />
+        </svg>
+    );
+}
+
 /**
  * Cordis 客户端插件入口：向 @deepseek-ai/dsh@0.2.2-rc.1 双半侧槽位注册主舞台与侧栏导航
  */
 export function apply(ctx: Context): void {
     const slots = ctx.slots as
-        | { inject?: (slotName: string, entry: Record<string, unknown>) => unknown }
+        | {
+              inject?: (slotName: string, factory: unknown) => unknown;
+              register?: (meta: Record<string, unknown>, component: React.FC<Record<string, unknown>>) => unknown;
+          }
         | undefined;
     if (!slots || typeof slots.inject !== 'function') {
         return;
     }
 
     const injectSlot = slots.inject.bind(slots);
+    const registerSlot = typeof slots.register === 'function' ? slots.register.bind(slots) : null;
+
     const registerSlots = (): (() => void) => {
         const disposers: Array<() => void> = [];
 
-        const disposeMain = injectSlot('main', {
-            key: PANEL_ID,
-            title: 'NarrateOS 创作室',
-            render: () => <NarrateStudioRoot />
-        });
+        const disposeMain = injectSlot(
+            'main',
+            registerSlot
+                ? () =>
+                      registerSlot(
+                          {
+                              name: 'main',
+                              key: PANEL_ID,
+                              inject: () => ({ title: 'NarrateOS 创作室' })
+                          },
+                          NarrateStudioRoot as React.FC<Record<string, unknown>>
+                      )
+                : {
+                      key: PANEL_ID,
+                      title: 'NarrateOS 创作室',
+                      render: () => <NarrateStudioRoot />
+                  }
+        );
         if (typeof disposeMain === 'function') {
             disposers.push(disposeMain as () => void);
         }
 
-        const disposeSidebar = injectSlot('sidebar.panellist', {
-            id: PANEL_ID,
-            order: 15,
-            label: () => '创作室',
-            icon: () => (
-                <svg
-                    viewBox="0 0 24 24"
-                    width="18"
-                    height="18"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                >
-                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-                    <path d="M8 7h8" />
-                    <path d="M8 11h6" />
-                </svg>
-            ),
-            onClick: () => {
-                const layout = ctx.layout as Record<string, unknown> | undefined;
-                if (!layout) return;
-                if (typeof layout['openMain'] === 'function') {
-                    (layout['openMain'] as (id: string) => void)(PANEL_ID);
-                } else if (typeof layout['setActivePanel'] === 'function') {
-                    (layout['setActivePanel'] as (id: string) => void)(PANEL_ID);
-                } else if (typeof layout['activate'] === 'function') {
-                    (layout['activate'] as (id: string) => void)(PANEL_ID);
-                }
-            }
-        });
+        const disposeSidebar = injectSlot(
+            'sidebar.panellist',
+            registerSlot
+                ? () =>
+                      registerSlot(
+                          {
+                              name: 'sidebar.panellist',
+                              id: PANEL_ID,
+                              order: 15,
+                              label: () => '创作室'
+                          },
+                          NarrateStudioSidebarIcon as React.FC<Record<string, unknown>>
+                      )
+                : {
+                      id: PANEL_ID,
+                      order: 15,
+                      label: () => '创作室',
+                      icon: () => <NarrateStudioSidebarIcon />
+                  }
+        );
         if (typeof disposeSidebar === 'function') {
             disposers.push(disposeSidebar as () => void);
         }
