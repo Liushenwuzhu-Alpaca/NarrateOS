@@ -27,6 +27,7 @@ export interface SystemPort {
     readFileAtRef(bookRoot: string, ref: string, relativePath: string): Promise<string | null>;
     diffFile(bookRoot: string, refA: string, refB: string, relativePath: string): Promise<string>;
     resetHard(bookRoot: string, ref: string): Promise<void>;
+    cleanUntracked(bookRoot: string, excludePaths?: string[]): Promise<void>;
     isWorkingTreeClean(bookRoot: string): Promise<boolean>;
     ripgrepSearch(
         bookRoot: string,
@@ -92,6 +93,14 @@ export class NodeSystemAdapter implements SystemPort {
 
     async resetHard(bookRoot: string, ref: string): Promise<void> {
         await this.runGit(bookRoot, ['reset', '--hard', ref]);
+    }
+
+    async cleanUntracked(bookRoot: string, excludePaths: string[] = []): Promise<void> {
+        const args = ['clean', '-fd'];
+        for (const pattern of excludePaths) {
+            args.push('-e', pattern);
+        }
+        await this.runGit(bookRoot, args);
     }
 
     async isWorkingTreeClean(bookRoot: string): Promise<boolean> {

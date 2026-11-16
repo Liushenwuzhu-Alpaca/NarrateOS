@@ -1,0 +1,18 @@
+# NarrateOS Operator Studio 基础模式预设（遵循 @deepseek-ai/dsh@0.2.2-rc.1 Bundle Patch 规范）
+- insert:
+    - id: preset-narrate-studio
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: narrate-studio
+        name: NarrateOS 长篇创作室
+        description: 无会话 Operator Studio 长篇小说多智能体创作模式（后端控制面接入，前端 main 槽位待设计稿定稿后接入）
+        order: 100
+        plugins:
+          - id: narrate-studio-persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: 你是 NarrateOS 长篇创作室的 Operator Studio 调度中枢，负责协同多智能体执行单章规划、执笔、审校与状态提交。
+              complete: true
+              includeRuntimeContext: false
+          - id: narrate-studio-plugin
+            name: '@narrateos/dsh-plugin'

@@ -12,6 +12,7 @@ __pycache__/
 
 # Node / dsh local runtime artifacts
 node_modules/
+packages/*/dist/
 .dsh/sessions/
 .dsh/storages/
 

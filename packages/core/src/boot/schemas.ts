@@ -1,0 +1,157 @@
+import { z } from 'zod';
+import { EntryVisibilitySchema } from '../store/schemas.js';
+
+/** 开书编译模式：原创冷启动 / 同人设定包切分 */
+export type BootMode = 'original' | 'fanfic';
+
+/** 开书编译输入参数 */
+export interface BootBookInput {
+    bookRoot: string;
+    bookSlug: string;
+    title: string;
+    povCharacter: string;
+    mode: BootMode;
+    premiseOrSeed?: string | undefined;
+    sourceMaterial?: string | undefined;
+    t0Anchor?: string | undefined;
+    calibrationSampleText?: string | undefined;
+    writerTokenBudget?: number | null | undefined;
+    maxAutoRollbackChapters?: number | undefined;
+    craftPlugins?: string[] | undefined;
+    modelRouting?: Record<string, string> | undefined;
+    /** 同人盲审最低召回率，默认 0.98 */
+    minRecallRate?: number | undefined;
+    /** 盲审不达标时的补充重试次数，默认 1 */
+    maxAuditRetries?: number | undefined;
+}
+
+/** 模型输出的开书编译结构化 Schema */
+export const CompiledEntitySchema = z.object({
+    entityId: z.string().regex(/^(char|item)_[a-zA-Z0-9_]+$/),
+    canonicalName: z.string().min(1),
+    uniqueAliases: z.array(z.string()).default([]),
+    contextualTitles: z.array(z.string()).default([]),
+    innateLocks: z
+        .array(
+            z.object({
+                visibility: EntryVisibilitySchema.default('PUBLIC'),
+                text: z.string().min(1)
+            })
+        )
+        .default([]),
+    acquiredState: z
+        .array(
+            z.object({
+                storyDay: z.number().int().default(0),
+                visibility: EntryVisibilitySchema.default('PUBLIC'),
+                slotKey: z.string().optional(),
+                text: z.string().min(1)
+            })
+        )
+        .default([]),
+    irreversibleTrajectory: z
+        .array(
+            z.object({
+                storyDay: z.number().int().default(0),
+                text: z.string().min(1)
+            })
+        )
+        .default([]),
+    recentBuffer: z
+        .array(
+            z.object({
+                storyDay: z.number().int().optional(),
+                text: z.string().min(1)
+            })
+        )
+        .default([])
+});
+
+export type CompiledEntity = z.infer<typeof CompiledEntitySchema>;
+
+export const CompiledLoreEntrySchema = z.object({
+    id: z.string().regex(/^lore_[a-zA-Z0-9_]+$/),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    content: z.string().min(1)
+});
+
+export type CompiledLoreEntry = z.infer<typeof CompiledLoreEntrySchema>;
+
+export const BootCompilePayloadSchema = z.object({
+    worldSummary: z.string().min(1),
+    staticBaseAndVoice: z.string().min(1),
+    currentArcEnvelope: z.string().min(1),
+    voiceSamples: z
+        .array(
+            z.object({
+                tag: z.string().min(1),
+                sample: z.string().min(1)
+            })
+        )
+        .default([]),
+    openThreads: z
+        .array(
+            z.object({
+                threadId: z.string().min(1),
+                title: z.string().min(1),
+                wakeupCondition: z.string().min(1)
+            })
+        )
+        .default([]),
+    futureHorizonEvents: z
+        .array(
+            z.object({
+                eventId: z.string().min(1),
+                storyDay: z.number().int().positive(),
+                premise: z.string().min(1),
+                description: z.string().min(1)
+            })
+        )
+        .default([]),
+    loreEntries: z.array(CompiledLoreEntrySchema).default([]),
+    entities: z.array(CompiledEntitySchema).min(1)
+});
+
+export type BootCompilePayload = z.infer<typeof BootCompilePayloadSchema>;
+
+/** 异构盲审报告 Schema */
+export const T0LeakItemSchema = z.object({
+    entityId: z.string(),
+    field: z.string(),
+    excerpt: z.string(),
+    reason: z.string()
+});
+
+export type T0LeakItem = z.infer<typeof T0LeakItemSchema>;
+
+export const FanficAuditReportSchema = z.object({
+    recallRate: z.number().min(0).max(1),
+    missingFacts: z.array(z.string()).default([]),
+    t0Leaks: z.array(T0LeakItemSchema).default([]),
+    passed: z.boolean(),
+    notes: z.string().optional()
+});
+
+export type FanficAuditReport = z.infer<typeof FanficAuditReportSchema>;
+
+/** 开书编译结果 */
+export interface BootBookResult {
+    bookRoot: string;
+    commitSha: string;
+    tokensPerChar: number;
+    entityIds: string[];
+    loreIds: string[];
+    auditReport?: FanficAuditReport | undefined;
+}
+
+/** 同人 T0 切分异构盲审不达标或存在剧透泄露异常 */
+export class BootAuditError extends Error {
+    constructor(
+        public readonly report: FanficAuditReport,
+        message: string
+    ) {
+        super(message);
+        this.name = 'BootAuditError';
+    }
+}
