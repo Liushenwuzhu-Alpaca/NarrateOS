@@ -1,0 +1,345 @@
+/**
+ * NarrateOS 前端 Operator Studio 完整状态与 API 契约类型定义
+ */
+
+/** 后端运行态排他任务类型 */
+export type RuntimeTaskKind = 'IDLE' | 'STEPPING' | 'SYNCING' | 'DREAMING' | 'BOOTING';
+
+/** 章节时间线模式 */
+export type TimelineMode = 'MAINLINE' | 'PARALLEL' | 'FLASHBACK';
+
+/** 中央阅读区视图标签 */
+export type ActiveViewTab = 'prose' | 'plan' | 'diff';
+
+/** 作品列表单项摘要（对应 GET /api/narrate/books） */
+export interface BookSummary {
+    bookRoot: string;
+    slug: string;
+    title: string;
+    currentChapter: number;
+    storyDay: number;
+    walPhase: string;
+}
+
+/** 作品列表响应载荷 */
+export interface BooksListPayload {
+    currentBookRoot: string;
+    books: BookSummary[];
+}
+
+/** 世界状态 Frontmatter 摘要 */
+export interface WorldStateSummary {
+    story_day: number;
+    current_chapter: number;
+    timeline_mode?: TimelineMode | string | undefined;
+    [key: string]: unknown;
+}
+
+/** YOLO 连跑运行态摘要 */
+export interface YoloStatusSummary {
+    running: boolean;
+    completedChapters: number;
+    targetChapters: number;
+    currentStage: string | null;
+    stopRequested?: boolean | undefined;
+}
+
+/** 运行态任务与停机标志 */
+export interface RuntimeStatusSummary {
+    activeTask: RuntimeTaskKind;
+    haltRequested: boolean;
+}
+
+/** 作品全局状态载荷（对应 GET /api/narrate/status） */
+export interface NarrateStatusPayload {
+    bookRoot: string;
+    bookSlug: string;
+    title: string;
+    walPhase: string;
+    activeChapter: number | null;
+    lastCommittedChapter: number;
+    latestChapter: number;
+    chapterCount: number;
+    entityCount: number;
+    coldArchiveCount: number;
+    worldState: WorldStateSummary;
+    pendingSignalsCount: number;
+    yolo: YoloStatusSummary;
+    runtime: RuntimeStatusSummary;
+}
+
+/** 章节列表单项摘要（对应 GET /api/narrate/chapters） */
+export interface ChapterSummary {
+    chapterNumber: number;
+    fileName: string;
+    title: string;
+    charCount: number;
+    sha256: string;
+    dirty: boolean;
+    commitSha: string | null;
+}
+
+/** 章节列表响应载荷 */
+export interface ChaptersListPayload {
+    chapters: ChapterSummary[];
+}
+
+/** 单章详情与 Diff（对应 GET /api/narrate/chapter?ch=...） */
+export interface ChapterDetail {
+    chapterNumber: number;
+    content: string;
+    dirty: boolean;
+    sha256: string;
+    diffFromHead: string;
+}
+
+/** 6 节点运行阶段状态 */
+export type StageNodeStatus = 'pending' | 'active' | 'done' | 'patch' | 'halt' | 'dormant';
+
+/** 6 节点运行阶段图单个节点状态 */
+export interface StageNodeState {
+    id: string;
+    index: number;
+    name: string;
+    shortLabel: string;
+    status: StageNodeStatus;
+    detail: string;
+    durationLabel?: string | undefined;
+    updatedAt?: string | undefined;
+}
+
+/** 一次性导演信号条目（对应 .ops/signals.jsonl） */
+export interface OpsSignalItem {
+    id?: string | undefined;
+    type?: string | undefined;
+    content?: string | undefined;
+    instruction?: string | undefined;
+    target_chapter?: number | undefined;
+    created_at?: string | undefined;
+    raw?: string | undefined;
+    [key: string]: unknown;
+}
+
+/** 遥测指标条目（对应 .ops/telemetry.jsonl） */
+export interface TelemetryItem {
+    chapter?: number | undefined;
+    chapterNumber?: number | undefined;
+    stage?: string | undefined;
+    clicheDensityPer1k?: number | undefined;
+    mattr500?: number | undefined;
+    sentenceLengthCv?: number | undefined;
+    kontoyiannisHk?: number | undefined;
+    replanRate?: number | undefined;
+    cacheHitRate?: number | undefined;
+    inputTokens?: number | undefined;
+    cacheReadTokens?: number | undefined;
+    outputTokens?: number | undefined;
+    timestamp?: string | undefined;
+    raw?: string | undefined;
+    [key: string]: unknown;
+}
+
+/** 实体档案物化视图条目（对应 GET /api/narrate/views?kind=entities） */
+export interface EntityViewItem {
+    entityId: string;
+    canonicalName: string;
+    aliases: string[];
+    lastSeenChapter: number;
+    markdown: string;
+}
+
+/** 实体视图响应载荷 */
+export interface EntitiesViewPayload {
+    kind: 'entities';
+    entities: EntityViewItem[];
+    coldArchiveCount: number;
+    coldArchiveIds: string[];
+}
+
+/** Markdown 视图响应载荷（horizon / threads） */
+export interface MarkdownViewPayload {
+    kind: 'horizon' | 'threads';
+    content: string;
+}
+
+/** 遥测视图响应载荷 */
+export interface TelemetryViewPayload {
+    kind: 'telemetry';
+    entries: TelemetryItem[];
+}
+
+/** 信号视图响应载荷 */
+export interface SignalsViewPayload {
+    kind: 'signals';
+    signals: OpsSignalItem[];
+    pendingCount: number;
+}
+
+/** 挂起与隔离报告视图响应载荷 */
+export interface HaltViewPayload {
+    kind: 'halt';
+    safeHalt: Record<string, unknown> | null;
+    quarantineReport: Record<string, unknown> | null;
+}
+
+/** 切换作品请求 */
+export interface SelectBookRequest {
+    bookRoot?: string | undefined;
+    slug?: string | undefined;
+}
+
+/** 切换作品响应 */
+export interface SelectBookResponse {
+    status: 'SWITCHED';
+    bookRoot: string;
+}
+
+/** 开新书请求 */
+export interface BootBookRequest {
+    slug: string;
+    title: string;
+    povCharacter: string;
+    mode: 'original' | 'fanfic';
+    premiseOrSeed?: string | undefined;
+    sourceMaterial?: string | undefined;
+    t0Anchor?: string | undefined;
+}
+
+/** 开新书响应 */
+export interface BootBookResponse {
+    status: 'BOOTED';
+    bookRoot: string;
+    result: Record<string, unknown>;
+}
+
+/** 单章推进请求 */
+export interface StepChapterRequest {
+    chapterGoal: string;
+    chapterNumber?: number | undefined;
+    timelineMode?: TimelineMode | undefined;
+    targetDay?: number | undefined;
+    povCharIds?: string[] | undefined;
+}
+
+/** 单章推进响应 */
+export interface StepChapterResponse {
+    chapterNumber: number;
+    manuscriptPath: string;
+    featCommitSha?: string | undefined;
+    stateCommitSha?: string | undefined;
+    replanCount: number;
+    rewriteCount: number;
+    patchRounds: number;
+    telemetry: {
+        clicheDensityPer1k: number;
+        mattr500: number;
+        sentenceLengthCv: number;
+        [key: string]: unknown;
+    };
+    [key: string]: unknown;
+}
+
+/** 保存章节并触发同步请求 */
+export interface PutChapterRequest {
+    chapterNumber: number;
+    content: string;
+}
+
+/** 手改对账响应 */
+export interface SyncResponse {
+    status: string;
+    dirtyChapters: Array<{ chapterNumber: number; [key: string]: unknown }>;
+    downstreamConflicts: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+}
+
+/** 保存章节响应 */
+export interface PutChapterResponse {
+    chapterNumber: number;
+    sync: SyncResponse;
+}
+
+/** Dreaming 请求 */
+export interface DreamRequest {
+    currentChapter?: number | undefined;
+    force?: boolean | undefined;
+    recentWordDelta?: number | undefined;
+    activeEntityIds?: string[] | undefined;
+}
+
+/** Dreaming 响应 */
+export interface DreamResponse {
+    skipped: boolean;
+    vacuumedEntities?: number | undefined;
+    warpedNodesFlipped?: number | undefined;
+    archivedFiles?: number | undefined;
+    [key: string]: unknown;
+}
+
+/** 投递导演信号请求 */
+export interface PostSignalRequest {
+    type: string;
+    content: string;
+    target_chapter?: number | undefined;
+    created_at?: string | undefined;
+    [key: string]: unknown;
+}
+
+/** 投递导演信号响应 */
+export interface PostSignalResponse {
+    status: 'QUEUED';
+    signal: OpsSignalItem;
+}
+
+/** Safe-Point 停机响应 */
+export interface HaltResponse {
+    haltRequested: boolean;
+    activeTask: RuntimeTaskKind;
+}
+
+/** YOLO 启动请求 */
+export interface YoloStartRequest {
+    targetChapters?: number | undefined;
+    defaultGoal?: string | undefined;
+}
+
+/** YOLO 启动响应 */
+export interface YoloStartResponse {
+    status: 'STARTED';
+    targetChapters: number;
+    defaultGoal: string;
+}
+
+/** YOLO 停止响应 */
+export interface YoloStopResponse {
+    stopRequested: boolean;
+    running: boolean;
+    completedChapters: number;
+}
+
+/** 后端 SSE 推送的所有事件名称 */
+export type SseEventName =
+    | 'connected'
+    | 'book_switched'
+    | 'halt:requested'
+    | 'halt:completed'
+    | 'sync:started'
+    | 'sync:completed'
+    | 'chapter_synced'
+    | 'chapter:phase'
+    | 'stage'
+    | 'gate:result'
+    | 'checker:result'
+    | 'dream:started'
+    | 'dream:completed'
+    | 'signal:received'
+    | 'telemetry'
+    | 'yolo:stop_requested'
+    | 'yolo_halted'
+    | 'yolo_completed';
+
+/** 统一的 SSE 事件载荷封装 */
+export interface SseEventPayload {
+    event: SseEventName | string;
+    data: Record<string, unknown>;
+}
