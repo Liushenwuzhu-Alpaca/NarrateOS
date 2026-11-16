@@ -148,6 +148,34 @@ function parseJsonLines(raw: string | null): unknown[] {
     return results;
 }
 
+function resolveStatusModelRouting(configured?: Record<string, string>): Record<string, string> {
+    const routing: Record<string, string> = {};
+    if (configured) {
+        for (const [key, value] of Object.entries(configured)) {
+            const trimmed = value.trim();
+            if (trimmed.length > 0) {
+                routing[key] = trimmed;
+            }
+        }
+    }
+
+    const envFallbacks: Array<[string, string | undefined]> = [
+        ['strong_creative', process.env['NARRATEOS_MODEL_STRONG']],
+        ['fast_retrieval', process.env['NARRATEOS_MODEL_FAST']],
+        ['audit', process.env['NARRATEOS_MODEL_AUDIT']]
+    ];
+    for (const [pool, envValue] of envFallbacks) {
+        if (!routing[pool] && envValue) {
+            const trimmed = envValue.trim();
+            if (trimmed.length > 0) {
+                routing[pool] = trimmed;
+            }
+        }
+    }
+
+    return routing;
+}
+
 function computeSha256(text: string): string {
     return createHash('sha256').update(text, 'utf8').digest('hex');
 }
@@ -761,6 +789,7 @@ export class NarrateRuntimeController {
                 entityCount: Object.keys(snapshot.entities).length,
                 coldArchiveCount: snapshot.coldArchiveIds.length,
                 worldState: snapshot.worldState.frontmatter,
+                modelRouting: resolveStatusModelRouting(snapshot.config.model_routing),
                 pendingSignalsCount,
                 yolo: {
                     running: this.yoloState.running,

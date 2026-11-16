@@ -1526,4 +1526,96 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
 
         sseAbort.abort();
     });
+
+    it('GET /api/narrate/status 在未配置 model_routing 时从环境变量填充 modelRouting，且显式配置优先', async () => {
+        const prevStrong = process.env['NARRATEOS_MODEL_STRONG'];
+        const prevFast = process.env['NARRATEOS_MODEL_FAST'];
+        const prevAudit = process.env['NARRATEOS_MODEL_AUDIT'];
+        process.env['NARRATEOS_MODEL_STRONG'] = 'deepseek-reasoner';
+        process.env['NARRATEOS_MODEL_FAST'] = 'deepseek-chat';
+        process.env['NARRATEOS_MODEL_AUDIT'] = 'gpt-audit-env';
+
+        try {
+            const bookRoot = await setupTempBookRepo();
+            cleanups.push(async () => {
+                await rm(bookRoot, { recursive: true, force: true });
+            });
+            const store = new BookStore(bookRoot, new NodeSystemAdapter());
+            const webServer = new MockWebServer();
+            cleanups.push(() => webServer.close());
+            const mockLlm: DshLlmService = {
+                async *stream(): AsyncIterable<DshStreamChunk> {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            };
+            const ctx: DshCordisContext = {
+                llm: mockLlm,
+                webServer,
+                effect(factory) {
+                    const cleanup = factory();
+                    return () => {
+                        if (cleanup) void cleanup();
+                    };
+                }
+            };
+
+            apply(ctx, {
+                bookRoot,
+                poolRouting: DEFAULT_ROUTING,
+                store,
+                engine: { async stepChapter() {}, async syncManuscripts() {} } as never,
+                dreamingRunner: { async runDreaming() {} } as never
+            });
+
+            const baseUrl = await webServer.listen();
+            const envOnlyRes = await fetch(`${baseUrl}/api/narrate/status`);
+            expect(envOnlyRes.status).toBe(200);
+            const envOnlyJson = (await envOnlyRes.json()) as {
+                modelRouting: Record<string, string>;
+            };
+            expect(envOnlyJson.modelRouting).toEqual({
+                strong_creative: 'deepseek-reasoner',
+                fast_retrieval: 'deepseek-chat',
+                audit: 'gpt-audit-env'
+            });
+
+            // 显式配置部分 model_routing 时，显式项优先，其余池继续从环境变量回退
+            await writeFile(
+                join(bookRoot, 'world/book_config.yaml'),
+                [
+                    'book_slug: test-novel',
+                    'title: 测试小说',
+                    'tokens_per_char: 1.5',
+                    'writer_token_budget: 24000',
+                    'max_auto_rollback_chapters: 3',
+                    'model_routing:',
+                    '  strong_creative: custom-strong-model',
+                    '  custom_pool: custom-extra-model',
+                    ''
+                ].join('\n'),
+                'utf8'
+            );
+
+            const mixedRes = await fetch(`${baseUrl}/api/narrate/status`);
+            expect(mixedRes.status).toBe(200);
+            const mixedJson = (await mixedRes.json()) as {
+                modelRouting: Record<string, string>;
+            };
+            expect(mixedJson.modelRouting).toEqual({
+                strong_creative: 'custom-strong-model',
+                fast_retrieval: 'deepseek-chat',
+                audit: 'gpt-audit-env',
+                custom_pool: 'custom-extra-model'
+            });
+        } finally {
+            if (prevStrong === undefined) delete process.env['NARRATEOS_MODEL_STRONG'];
+            else process.env['NARRATEOS_MODEL_STRONG'] = prevStrong;
+            if (prevFast === undefined) delete process.env['NARRATEOS_MODEL_FAST'];
+            else process.env['NARRATEOS_MODEL_FAST'] = prevFast;
+            if (prevAudit === undefined) delete process.env['NARRATEOS_MODEL_AUDIT'];
+            else process.env['NARRATEOS_MODEL_AUDIT'] = prevAudit;
+        }
+    });
 });
