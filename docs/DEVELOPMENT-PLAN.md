@@ -25,7 +25,7 @@ narrateos/
 └── books/                   # [gitignored] 实际创作的独立作品 Git 仓库目录
 ```
 
-**依赖红线**：`packages/core` 仅允许依赖 Node 标准库及轻量数据校验/YAML 解析库（开始编码前向用户确认具体依赖清单），严禁导入任何 `@deepseek-ai/*` 或 UI 包；上游 `dsh` 版本迭代引发的接口适配 100% 封闭在 `packages/dsh-plugin` 内完成。
+**依赖红线**：`packages/core` 运行时仅允许依赖 `yaml`、`zod` 与 Node.js 标准库，严禁导入任何 `@deepseek-ai/*`、第三方 LLM SDK 或 UI 包；根开发依赖限定为 `typescript`、`vitest`、`@types/node`。上游 `dsh` 版本迭代引发的接口适配 100% 封闭在 `packages/dsh-plugin` 与 `packages/cli` 适配层内完成。
 
 ---
 
@@ -40,8 +40,8 @@ narrateos/
    - **输入不变量**：显式区分 `pool: 'strong_creative' | 'fast_retrieval' | 'audit'`，携带结构化分段 `{ staticPrefixBlocks: string[], dynamicTail: string }`（零工具声明、零历史会话数组）、采样/思考档位参数；输出标准化无交集 `TokenUsage`（`inputTokens`、`cacheReadTokens`、`cacheWriteTokens`、`outputTokens`）。
    - **Adapters**：
      - `ScriptedLlmAdapter`：按输入指纹返回预置响应或注入故障，支撑全套编排单测毫秒级离线运行；
-     - `DshLlmAdapter`：在 `packages/dsh-plugin` 内调用无 `sessionId` 的 `ctx.llm.stream()` 绕过宿主提示词与动态时钟（针对需要多级显式 `cache_control` 断点的后端，同步提供可注册至 `ctx.llm.registerAdapter()` 的轻量适配器）；
-     - `DirectHttpLlmAdapter`：在 `packages/cli` 内直连标准 HTTP 接口，支撑无宿主批处理与 `Plot-Haystack` 评测。
+     - `DshLlmAdapter`：在 `packages/dsh-plugin` 与 `packages/cli` 中复用 `@deepseek-ai/dsh-llm`（搭配 `dsh-llm-deepseek` / `dsh-llm-pi-ai` / `dsh-llm-retry`），通过无 `sessionId` 的流式调用绕过宿主对话上下文，不自研 HTTP/Retry 客户端。
+   - **结构化输出重试契约**：零 `tools` 净室请求统一要求 fenced JSON 输出并经 `zod` 校验；校验或解析失败时附带错误详情同轮自动修复重试，默认上限 **5 次**、指数退避 `1s -> 2s -> 4s -> 8s -> 16s`（支持配置覆盖，单测环境可设为 `0ms`）。
 2. **`SystemPort`（版本库与全文检索接缝）**：
    - **Interface**：封装针对单本 `bookRoot` 的原子 `git` 操作（`commitPaths`、`createTag`、`readFileAtRef`、`diffFile`、`resetHard`）与 `ripgrepSearch(patterns, chapterWhitelist, contextParagraphs)`。
    - **测试策略**：集成测试直接在 `/tmp` 创建真实临时 Git 子仓执行并自动清理，不编写脆弱的 Git 字符串 Mock。
@@ -59,20 +59,19 @@ narrateos/
 
 ---
 
-## 3. `@deepseek-ai/dsh` 插件集与模式预设集成方案
+## 3. `@deepseek-ai/dsh` 插件集与 Operator Studio 集成方案
 
-外层宿主适配完全基于 Cordis 插件声明与 `dsh-agent-presets` 组装，零侵入修改 `dsh` 官方源码：
+外层宿主适配完全基于 `@deepseek-ai/dsh@0.2.2-rc.1` 的 Cordis 插件声明、`dsh-client-ui-layout` 与 `ctx.webServer` 组装，零侵入修改 `dsh` 官方源码，且彻底放弃聊天框斜杠指令交互，采用 **Operator Studio（导演/运维控制台）** 范式：
 
-1. **Bundle 级冗余插件裁剪（`packages/dsh-plugin/cordis.patch.yml`）**：
-   - 按 `id` 显式将编码专用插件设为 `disabled: true`：`tool-subagent`、`tool-subagent-fork`、`tool-subagent-control`、`tool-ralph`、`tool-workflow`、`workflow-worker-thread`、`compaction-basic`、`tool-result-pruner`、`agent-instructions`、`plan-mode`。
-   - 挂载 `@narrateos/dsh-plugin` 宿主服务，注入 `llm`、`commands`、`tools`、`userQuestions` 与 `workspace`。
-2. **专属写作模式预设包（`presets/narrate-studio/`）**：
-   - `preset.yml`：注册显示名称「NarrateOS 长篇创作室」，支持在 `dsh web` 设置与新建会话时一键切换；
-   - `agent.cordis.yml`：挂载 `@deepseek-ai/dsh-persona`（设 `complete: true, includeRuntimeContext: false` 彻底屏蔽默认编码 Agent 身份与动态环境快照），仅暴露高层工单工具（`narrate_boot`、`narrate_step`、`narrate_sync`、`narrate_dream`、`narrate_status`）。
-3. **主会话防污染与优雅停机铁律**：
-   - 所有章节正文只在 `NarrativeEngine` 内部流转并直接落盘至 `books/<slug>/manuscripts/`；工具与 `/narrate` 斜杠命令仅向 `dsh` 主会话返回 `< 300` 字符的结构化回执（章号、字数、门禁结果、熵率指标、Git SHA）；
-   - 绑定工具执行的 `exec.signal` 与 Cordis Fiber 卸载钩子 `ctx.effect(() => () => engine.requestSafePointHalt())`，确保 5 秒停机窗口内完成 `.ops/tx_state.json` 安全落盘；
-   - 开书戏核三选一与超阈值（`> max_auto_rollback_chapters`）回滚确认直接桥接 `ctx.userQuestions.ask()` 弹窗；Web 右侧栏通过 `@deepseek-ai/dsh-client-ui-slots` 渲染章节进度、实体视图与健康度遥测卡片。
+1. **后端宿主胶水与 LLM 调度复用（`packages/dsh-plugin`）**：
+   - 注册 `DshLlmAdapter` 复用宿主 `ctx.llm.stream()`（及 `dsh-llm-retry` 限流重试）与本机模型/Key 配置；
+   - 绑定引擎生命周期与 Cordis Fiber 卸载钩子 `ctx.effect(() => () => engine.requestSafePointHalt())`，确保 5 秒停机窗口内完成 `.ops/tx_state.json` 与 `.ops/tx.lock` 安全落盘；
+   - 通过 `ctx.webServer` 注册 REST 控制接口与 SSE 状态流，将 `.ops/signals.jsonl` 运维事件、6 节点运行阶段、正文/细纲/Diff 与遥测数据推送给前端。
+2. **非会话 `'main'` 槽位前端（设计完成后接续施工）**：
+   - 通过 `@deepseek-ai/dsh-client-ui-layout` 注册独立 `'main'` keyed 槽位（`narrate-studio`），绕开 `conversation` 累进上下文会话循环；
+   - 复用 `dsh-client-ui-theme` CSS 变量，呈现 6 节点运行阶段图（含 `Dreaming`、隐藏 0-LLM 节点）、YOLO 连续运行控制、`正文 | 本章细纲 | 修改 Diff` 三视图、底部 `.ops/signals.jsonl` 运维输入/事件流及右侧 7 块可折叠运维检查器。
+3. **预设包（`presets/narrate-studio/`）**：
+   - `preset.yml` / `agent.cordis.yml`：注册「NarrateOS 长篇创作室」模式入口，按需禁用编码专用冗余内置插件（如 `tool-subagent`、`tool-ralph`、`compaction-basic` 等）。
 
 ---
 
@@ -96,7 +95,7 @@ narrateos/
     3. **门禁与遥测断言**：构造含 `<blocking>` 标签、S 姐七刀超标句与跨 5 章重复明喻的测试稿，`scanDraft()` 精确剥离标签并报出全部违规行号；捏造单字差异的伪原句被 `verifyDualQuotes()` 100% 拒止；`MATTR-500` 与 Kontoyiannis 熵率 $\hat{H}_K$ 在合成退化语料（重复文本 vs 自然样章）上呈现严格单调区分。
 
 ### Phase 3：双池前缀装配、单章自愈闭环与人工改稿同步 (`PrefixAssembler` + `stepChapter` + `syncManuscripts`)
-- **交付内容**：实现 `LlmPort`（含 `ScriptedLlmAdapter` 与 `DirectHttpLlmAdapter`）、`PrefixAssembler`（双池拼装、声纹标本 `LRU` 轮换、`writer_token_budget` 可配四级降级与无预算直通、`craft_plugins` 动态加载）、`NarrativeEngine.stepChapter()` 全链路审校自愈闭环、`NarrativeEngine.syncManuscripts()` 手改同步及 `@narrateos/cli` 基础命令。
+- **交付内容**：实现 `LlmPort`（含 `ScriptedLlmAdapter` 与结构化 JSON 校验/5 次指数退避修复重试）、`PrefixAssembler`（双池拼装、声纹标本 `LRU` 轮换、`writer_token_budget` 可配四级降级与无预算直通、`craft_plugins` 动态加载）、`NarrativeEngine.stepChapter()` 全链路审校自愈闭环、`NarrativeEngine.syncManuscripts()` 手改同步及 `@narrateos/cli` 基础命令。
 - **完工判据（Exit Criteria）**：
   - 基于 `ScriptedLlmAdapter` 跑通全部状态机分支单测（退出码 `0`）：
     1. **前缀零分叉断言**：同一卷内 `Planner` 与 `Prose Writer` 请求的静态前缀区字节序列 `SHA-256` 100% 相等；连续 3 章抽样 `voice_samples` 不发生相邻重复；设 `writer_token_budget = null` 时零裁剪直通，设紧预算时严格按四级顺序压入阈值内；
@@ -111,11 +110,12 @@ narrateos/
     2. `PARALLEL` 双线各写 2 章期间互不可见对方增量，汇合时成功合并非冲突状态，双线同时消耗同一 `item_001` 时被确定性拦截；
     3. `Dreaming` 执行期间未出场干净实体文件 `mtime` 保持不变；离场角色达临界点产出 `Spotlight Trigger` 信号而非后台直接结算；模拟单点跨章硬穿帮自动完成历史 `Patch + Sync` 零停机修复，模拟阈值内支线穿帮自动打备份 Tag 并 `git reset` 重跑，超阈值准确触发 `SAFE_HALT` 并输出精确章数与字数。
 
-### Phase 5：`@deepseek-ai/dsh` 插件包、写作模式预设与 Web 面板集成 (`packages/dsh-plugin` + `presets/`)
-- **交付内容**：实现 `DshLlmAdapter`（无 `sessionId` 净室流式调用与可选显式缓存断点适配器）、`cordis.patch.yml` 冗余插件裁剪、`presets/narrate-studio/` 模式配置、工单回执工具与斜杠命令、`ctx.userQuestions` 问卷桥接，以及基于 `@deepseek-ai/dsh-client-ui-slots` 的 Web 状态与遥测侧栏组件。
+### Phase 5：`@deepseek-ai/dsh` 插件包、后端控制流与 Operator Studio 集成 (`packages/dsh-plugin` + `presets/`)
+- **交付内容**：先交付后端部分——实现 `DshLlmAdapter`（复用 `@deepseek-ai/dsh-llm` 无 `sessionId` 流式调度与限流重试）、`ctx.webServer` REST + SSE 控制/遥测接口、`presets/narrate-studio/` 模式配置与优雅停机钩子；待前端设计稿定稿后接续交付 `'main'` keyed 槽位（`narrate-studio`）Operator Studio 面板。
 - **完工判据（Exit Criteria）**：
   - `packages/core` 对 `@deepseek-ai/*` 的依赖检查计数为 `0`；
-  - 启动真实 `dsh web` 加载 `narrate-studio` 预设端到端验证通过：① 冗余内置插件（`subagent`/`ralph`/`tool-result-pruner` 等）处于已禁用态；② 连续执行 3 章生成后，主对话历史仅含百字级工单回执（零章节正文滞留），`TokenUsage.cacheReadTokens > 0` 证实静态前缀缓存真实命中；③ Web 侧栏实时反映最新章节状态与遥测指标，中断信号在 5 秒内安全落盘 `.ops/tx_state.json`。
+  - 后端部分：`DshLlmAdapter` 实弹或集成夹具验证 `TokenUsage.cacheReadTokens > 0`，`ctx.webServer` REST/SSE 路由实时推送 `.ops/signals.jsonl` 与遥测指标，中断信号在 5 秒内安全落盘 `.ops/tx_state.json`；
+  - 前端部分（后续接续）：在真实 `dsh web` 的 `'main'` keyed 槽位中独立渲染，不污染 `conversation` 会话流。
 
 ### Phase 6：`Plot-Haystack` 40 章盲测基准验收
 - **交付内容**：构建自动化 40 章同源种子评测脚本与 10 探针核验套件（3 组得而复失极性反转、3 条无日常关联负向红线、2 处台词谎言分流、2 个跨 35 章伏笔回收）。

@@ -1,0 +1,13 @@
+book_slug: sample-book
+title: 放学后的因果律测试夹具
+tokens_per_char: 0.65
+writer_token_budget: null
+max_auto_rollback_chapters: 3
+structured_json_retry:
+    max_retries: 5
+    backoff_ms: [1000, 2000, 4000, 8000, 16000]
+craft_plugins: []
+prose_gate:
+    enable_anti_cliche: true
+    enable_cross_chapter_simile: true
+    cross_chapter_simile_window: 5
