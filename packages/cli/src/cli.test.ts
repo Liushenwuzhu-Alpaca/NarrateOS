@@ -51,13 +51,85 @@ function createLifecycleScriptedLlm(): ScriptedLlmAdapter {
             };
         }
 
-        // 2. bootBook: 开书编译器
+        // 2. bootBook: Phase 1A 开局定标与反俗套切口生成
+        if (req.pool === 'strong_creative' && tail.includes('Phase 1A')) {
+            return {
+                text: JSON.stringify({
+                    coordinates: {
+                        topology: 'CONTINUOUS_ESCALATION',
+                        tensionDrivers: ['EPISTEMIC_GAP', 'GOAL_FRICTION'],
+                        endgame: 'CONVERGENT_CLOSURE'
+                    },
+                    excludedCliches: [
+                        '主角开局获得无敌外挂碾压反派',
+                        '反派临死前长篇大论主动交代全部阴谋',
+                        '所有谜题仅靠天降神秘老人一句话点破'
+                    ],
+                    pitches: [
+                        {
+                            index: 0,
+                            title: '停摆钟楼与断齿铜钥',
+                            logline: '钟表匠沈砚在朔望大潮前追查停摆钟楼里的断齿钥匙之谜。',
+                            coreHook: '每停摆一小时，旧港地下排水闸便渗出一寸黑潮。',
+                            antiClicheNote: '沈砚必须靠修表手艺与物理试错逐层拆解机关。'
+                        },
+                        {
+                            index: 1,
+                            title: '雾港双面潮汐账',
+                            logline: '两本互相矛盾的潮汐账本同时出现在旧港当铺。',
+                            coreHook: '真账本记录的是活人而非货物的进出港时间。',
+                            antiClicheNote: '不依赖超自然预言，全靠时间线交叉比对破局。'
+                        }
+                    ]
+                }),
+                usage: makeUsage(600, 0, 260),
+                modelId: 'mock-strong'
+            };
+        }
+
+        // 3. bootBook: Phase 1B 自动择优拍板
+        if (req.pool === 'audit' && tail.includes('候选切口列表')) {
+            return {
+                text: JSON.stringify({
+                    selectedIndex: 0,
+                    rationale: '切口 0 兼具物理倒计时压迫感与强认知差悬念。'
+                }),
+                usage: makeUsage(400, 0, 80),
+                modelId: 'mock-audit'
+            };
+        }
+
+        // 4. bootBook: Phase 1C 纯文本《全书架构圣经》
+        if (req.pool === 'strong_creative' && tail.includes('请脱离 JSON 格式限制')) {
+            return {
+                text: [
+                    '# 全书架构圣经',
+                    '## 1. 里账本底层真相与代价定律',
+                    '旧港钟楼底层并非单纯计时机构，而是控制朔望夜防潮闸的机械锁；每次强行拨动主摆都会损耗不可再生的黄铜棘轮。',
+                    '## 2. 全书母题（L0）与多卷蓝图（L1）',
+                    '第一卷《雾港寻钥》聚焦钟表铺与旧港栈桥；第二卷《潮汐账本》深入地下档案室。',
+                    '## 3. 第一卷三幕拐点与开篇点火器',
+                    'Ch.01 雨夜接下缺口钥匙图纸，Stage Ceiling 限制主角不得提前越过主闸门。',
+                    '## 4. 核心角色与默认轨迹',
+                    '沈砚、林默、周管事、苏晴围绕断齿铜钥展开博弈。',
+                    '## 5. 首批跨卷伏笔与外部惯性事件',
+                    'thread_clock 停摆钟楼；storyDay 5 潮汐倒灌。'
+                ].join('\n\n'),
+                usage: makeUsage(750, 0, 320),
+                modelId: 'mock-strong'
+            };
+        }
+
+        // 5. bootBook: Phase 2 三把手术刀结构化编译
         if (req.pool === 'strong_creative' && tail.includes('编译模式:')) {
             return {
                 text: JSON.stringify({
                     worldSummary: '雾港钟楼与旧城区构成封闭孤岛，潮汐每夜倒灌。',
                     staticBaseAndVoice: '冷峻克制、感官锚定、短句推进。',
-                    currentArcEnvelope: '第一卷：雾港寻钥。',
+                    currentArcEnvelope: '第一卷：雾港寻钥。开篇雨夜接图纸，Stage Ceiling 禁入地下主闸。',
+                    l0SagasMarkdown: '# L0 纪元折叠总表\n\n- saga_01: 雾港钟楼与潮汐机械秘史',
+                    l1VolumesMarkdown:
+                        '# L1 活跃卷级总表\n\n- vol_01: 雾港寻钥 (story_day: 0..)\n- vol_02: 潮汐档案 (待开启)',
                     voiceSamples: [
                         { tag: 'calm_dialogue', sample: '“钥匙不在柜台里，”沈砚把铜牌推回桌面，“你再找找。”' }
                     ],
@@ -83,20 +155,77 @@ function createLifecycleScriptedLlm(): ScriptedLlmAdapter {
                             contextualTitles: ['旧钟表匠'],
                             innateLocks: [{ visibility: 'PUBLIC', text: '右腕戴旧铜表，对铁锈味极度敏感' }],
                             acquiredState: [
-                                { storyDay: 1, visibility: 'PUBLIC', slotKey: 'location', text: '身处雾港钟表铺' }
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '身处雾港钟表铺' }
                             ],
-                            irreversibleTrajectory: [{ storyDay: 1, text: '接手调查停摆钟楼委托' }],
+                            irreversibleTrajectory: [{ storyDay: 0, text: '接手调查停摆钟楼委托' }],
                             recentBuffer: [
-                                { storyDay: 1, text: '雨夜擦拭铜表表壳' },
-                                { storyDay: 1, text: '清点工作台上的黄铜齿轮' },
-                                { storyDay: 1, text: '听见港湾传来低沉汽笛' },
-                                { storyDay: 1, text: '记录客人留下的缺口钥匙图纸' }
+                                { storyDay: 0, text: '雨夜擦拭铜表表壳' },
+                                { storyDay: 0, text: '清点工作台上的黄铜齿轮' },
+                                { storyDay: 0, text: '听见港湾传来低沉汽笛' },
+                                { storyDay: 0, text: '记录客人留下的缺口钥匙图纸' }
                             ]
+                        },
+                        {
+                            entityId: 'char_linmo',
+                            canonicalName: '林默',
+                            uniqueAliases: ['阿默'],
+                            contextualTitles: ['学徒'],
+                            innateLocks: [{ visibility: 'PUBLIC', text: '随身携带防水油布与潮位尺' }],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '在钟表铺后堂整理工具' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'char_zhou',
+                            canonicalName: '周管事',
+                            uniqueAliases: ['老周'],
+                            contextualTitles: ['港务管事'],
+                            innateLocks: [
+                                {
+                                    visibility: 'OMNISCIENT_SECRET',
+                                    text: '私下扣留了真正能打开地下防潮闸的备用母钥'
+                                }
+                            ],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '驻守旧港码头值班室' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'item_broken_key',
+                            canonicalName: '断齿铜钥图纸',
+                            uniqueAliases: ['缺口图纸'],
+                            contextualTitles: ['委托物证'],
+                            innateLocks: [{ visibility: 'PUBLIC', text: '牛皮纸绘制，第三道轮槽处有明显断齿缺口' }],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'holder', text: '保存在沈砚工作台抽屉内' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
                         }
                     ]
                 }),
                 usage: makeUsage(900, 0, 420),
                 modelId: 'mock-strong'
+            };
+        }
+
+        // 6. bootBook: Phase 3c 异构剧透盲审
+        if (req.pool === 'audit' && tail.includes('异构剧透盲审')) {
+            return {
+                text: JSON.stringify({
+                    recallRate: 1,
+                    missingFacts: [],
+                    t0Leaks: [],
+                    publicSpoilerLeaks: [],
+                    passed: true,
+                    notes: 'PUBLIC 视图未泄露任何 OMNISCIENT_SECRET 与 T0 未来信息。'
+                }),
+                usage: makeUsage(450, 0, 90),
+                modelId: 'mock-audit'
             };
         }
 
@@ -187,6 +316,7 @@ function createLifecycleScriptedLlm(): ScriptedLlmAdapter {
                     focus_cast: ['char_shenyan'],
                     background_cast: [],
                     ending_beat: 'HOOK',
+                    chapter_turn: '沈砚从图纸缺口推算出旧钟楼水闸的真实齿距，决定冒雨动身。',
                     scene_plan: [
                         {
                             scene_index: 1,
