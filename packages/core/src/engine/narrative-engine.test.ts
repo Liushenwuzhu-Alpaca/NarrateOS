@@ -798,4 +798,87 @@ describe('NarrativeEngine', () => {
         // 验证 char_002 的档案也被自动挂载进了 Planner 视图
         expect(plannerCall?.request.dynamicTail).toContain('星野琉璃');
     });
+
+    it('stepChapter 应将 world/static_base_and_voice.md 与 world/current_arc_envelope.md 注入静态前缀并兼容 world/voice_samples.yaml 与 world/ops_style_amendments.md 回退', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+
+        // 模拟 bootBook 产物：写入 static_base_and_voice.md、current_arc_envelope.md、world/voice_samples.yaml（仅含 tag/sample）与 world/ops_style_amendments.md
+        await rm(join(bookRoot, '.ops/voice_samples.yaml'), { force: true });
+        await writeFile(
+            join(bookRoot, 'world/static_base_and_voice.md'),
+            '# 世界底层法则与抽象句法纪律\n\n冷峻白描第三人称限知视角，使用具象感官动词。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/current_arc_envelope.md'),
+            '# 当前卷纲要与阶段锁\n\n第一卷：旧校舍废部危机，围绕三张经费票据展开交锋。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/voice_samples.yaml'),
+            stringifyYaml({
+                samples: [
+                    {
+                        tag: '对峙',
+                        sample: '「废部通知书的纸质不错，拿来折纸飞机刚好。」'
+                    }
+                ]
+            }),
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/ops_style_amendments.md'),
+            '# 卷中风格修订 (Ops Style Amendments)\n\n- 对话控制在两行以内，优先写手部动作。\n',
+            'utf8'
+        );
+        await system.commitPaths(bookRoot, ['.'], 'chore: seed boot-style world files');
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK),
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            jsonResponse(EXTRACTOR_OK)
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.stepChapter({
+            chapterGoal: '验证静态前缀挂载与声纹池回退兼容'
+        });
+
+        expect(result.status).toBe('COMMITTED');
+
+        const plannerCall = llm.history[1];
+        const writerCall = llm.history[2];
+        expect(plannerCall).toBeDefined();
+        expect(writerCall).toBeDefined();
+
+        // Planner 与 Writer 静态前缀均包含 static_base_and_voice.md 与 current_arc_envelope.md 内容，且 prefixHash 100% 一致
+        const plannerStaticJoined = plannerCall?.request.staticPrefixBlocks.join('\n\n') ?? '';
+        const writerStaticJoined = writerCall?.request.staticPrefixBlocks.join('\n\n') ?? '';
+        expect(plannerStaticJoined).toContain('冷峻白描第三人称限知视角，使用具象感官动词。');
+        expect(plannerStaticJoined).toContain('第一卷：旧校舍废部危机，围绕三张经费票据展开交锋。');
+        expect(writerStaticJoined).toBe(plannerStaticJoined);
+        expect(plannerCall?.prefixHash).toBe(writerCall?.prefixHash);
+
+        // 验证 world/ops_style_amendments.md 回退生效，且声纹标本注入了 Writer 动态尾部
+        expect(plannerCall?.request.dynamicTail).toContain('对话控制在两行以内，优先写手部动作。');
+        expect(writerCall?.request.dynamicTail).toContain('对话控制在两行以内，优先写手部动作。');
+        expect(writerCall?.request.dynamicTail).toContain('废部通知书的纸质不错，拿来折纸飞机刚好。');
+
+        // 验证归一化后的声纹池已更新 LRU 并持久化至 .ops/voice_samples.yaml
+        const updatedVoiceRaw = await readFile(join(bookRoot, '.ops/voice_samples.yaml'), 'utf8');
+        const updatedVoice = parseYaml(updatedVoiceRaw) as {
+            samples: Array<{ id: string; tag: string; text: string; last_used_ch: number; use_count: number }>;
+        };
+        expect(updatedVoice.samples).toEqual([
+            {
+                id: 'voice_01',
+                tag: '对峙',
+                text: '「废部通知书的纸质不错，拿来折纸飞机刚好。」',
+                last_used_ch: 2,
+                use_count: 1
+            }
+        ]);
+    });
 });

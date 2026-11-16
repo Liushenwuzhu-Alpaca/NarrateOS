@@ -174,11 +174,31 @@ function splitParagraphs(text: string): string[] {
 }
 
 /** 构造同卷零字节变动的静态前缀输入 */
-function buildVolumeStaticPrefix(config: BookConfig, volumeNumber: number): StaticPrefixInput {
+function buildVolumeStaticPrefix(
+    config: BookConfig,
+    volumeNumber: number,
+    staticBaseAndVoice?: string | null,
+    currentArcEnvelope?: string | null
+): StaticPrefixInput {
+    const trimmedVoice = staticBaseAndVoice?.trim();
+    const trimmedArc = currentArcEnvelope?.trim();
     return {
         volumeNumber,
-        worldStaticBaseline: `书名：${config.title} (${config.book_slug})`
+        worldStaticBaseline: `书名：${config.title} (${config.book_slug})`,
+        ...(trimmedVoice ? { staticBaseAndVoice: trimmedVoice } : {}),
+        ...(trimmedArc ? { currentArcEnvelope: trimmedArc } : {})
     };
+}
+
+/** 过滤空内容或仅含 `# 卷中风格修订 (Ops Style Amendments)` 空标题的修订文本 */
+function normalizeOpsStyleAmendments(raw: string | null): string | undefined {
+    if (!raw) return undefined;
+    const body = raw
+        .replace(/^#\s*卷中风格修订\s*\(Ops Style Amendments\)\s*$/gm, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .trim();
+    if (!body) return undefined;
+    return raw.trim();
 }
 
 /** 将 SlicedView 中的实体与召回切片序列化为审校验真语料 */
@@ -270,15 +290,64 @@ export class NarrativeEngine {
         };
     }
 
-    /** 读取声纹标本池 (.ops/voice_samples.yaml) */
+    /** 读取声纹标本池（优先读取 .ops/voice_samples.yaml，若不存在则回退读取 world/voice_samples.yaml，并兼容归一化条目） */
     private async readVoicePool(): Promise<VoiceSamplePool | undefined> {
-        const raw = await readOptionalText(join(this.store.bookRoot, '.ops/voice_samples.yaml'));
+        const raw =
+            (await readOptionalText(join(this.store.bookRoot, '.ops/voice_samples.yaml'))) ??
+            (await readOptionalText(join(this.store.bookRoot, 'world/voice_samples.yaml')));
         if (!raw) return undefined;
-        const parsed = parseYaml(raw) as VoiceSamplePool | null;
+        const parsed = parseYaml(raw) as { samples?: unknown } | null;
         if (!parsed || !Array.isArray(parsed.samples)) {
             return undefined;
         }
-        return parsed;
+        const normalizedSamples = parsed.samples.flatMap((entry, idx) => {
+            if (!entry || typeof entry !== 'object') return [];
+            const record = entry as Record<string, unknown>;
+            const rawText =
+                typeof record.text === 'string' && record.text.trim().length > 0
+                    ? record.text
+                    : typeof record.sample === 'string' && record.sample.trim().length > 0
+                      ? record.sample
+                      : '';
+            if (!rawText) return [];
+            const id =
+                typeof record.id === 'string' && record.id.trim().length > 0
+                    ? record.id.trim()
+                    : `voice_${String(idx + 1).padStart(2, '0')}`;
+            const tag =
+                typeof record.tag === 'string' && record.tag.trim().length > 0
+                    ? record.tag.trim()
+                    : '默认';
+            const lastUsedCh =
+                typeof record.last_used_ch === 'number' && Number.isFinite(record.last_used_ch)
+                    ? record.last_used_ch
+                    : 0;
+            const useCount =
+                typeof record.use_count === 'number' && Number.isFinite(record.use_count)
+                    ? record.use_count
+                    : 0;
+            return [
+                {
+                    id,
+                    tag,
+                    text: rawText,
+                    last_used_ch: lastUsedCh,
+                    use_count: useCount
+                }
+            ];
+        });
+        return { samples: normalizedSamples };
+    }
+
+    /** 读取卷中风格修订（优先读取 .ops/style_amendments.md，若不存在或为空则回退读取 world/ops_style_amendments.md） */
+    private async readOpsStyleAmendments(): Promise<string | undefined> {
+        const primary = normalizeOpsStyleAmendments(
+            await readOptionalText(join(this.store.bookRoot, '.ops/style_amendments.md'))
+        );
+        if (primary) return primary;
+        return normalizeOpsStyleAmendments(
+            await readOptionalText(join(this.store.bookRoot, 'world/ops_style_amendments.md'))
+        );
     }
 
     /** 写回更新后的声纹标本池 */
@@ -930,15 +999,21 @@ export class NarrativeEngine {
             options.chapterNumber ??
             Math.max(snapshot.worldState.frontmatter.current_chapter, snapshot.txState.last_committed_ch) + 1;
         const targetDay = options.targetDay ?? snapshot.worldState.frontmatter.story_day;
+        const [staticBaseAndVoiceRaw, currentArcEnvelopeRaw] = await Promise.all([
+            readOptionalText(join(this.store.bookRoot, 'world/static_base_and_voice.md')),
+            readOptionalText(join(this.store.bookRoot, 'world/current_arc_envelope.md'))
+        ]);
         const staticPrefix = buildVolumeStaticPrefix(
             snapshot.config,
-            snapshot.worldState.frontmatter.current_volume
+            snapshot.worldState.frontmatter.current_volume,
+            staticBaseAndVoiceRaw,
+            currentArcEnvelopeRaw
         );
 
         const { gateRules, plannerInjection, writerInjection } = await this.loadActivePlugins(snapshot.config);
         const previousChapter = await this.loadPreviousChapter(chapterNumber);
         const futureHorizon = (await readOptionalText(join(this.store.bookRoot, 'world/future_horizon.md'))) ?? undefined;
-        const opsStyleAmendments = (await readOptionalText(join(this.store.bookRoot, '.ops/style_amendments.md'))) ?? undefined;
+        const opsStyleAmendments = await this.readOpsStyleAmendments();
         const historicalChapters = await this.loadHistoricalChapters(
             chapterNumber,
             snapshot.config.prose_gate.cross_chapter_simile_window

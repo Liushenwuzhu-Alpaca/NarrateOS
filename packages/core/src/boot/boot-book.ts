@@ -463,9 +463,23 @@ export async function bootBook(
         `# 当前卷纲要与阶段锁\n\n${payload.currentArcEnvelope.trim()}\n`,
         'utf8'
     );
+    const normalizedVoiceSamples = payload.voiceSamples.map((item, idx) => ({
+        id: `voice_${String(idx + 1).padStart(2, '0')}`,
+        tag: item.tag,
+        text: item.sample,
+        sample: item.sample,
+        last_used_ch: 0,
+        use_count: 0
+    }));
+    const voiceSamplesYaml = stringifyYaml({ samples: normalizedVoiceSamples }, { lineWidth: 0 });
     await writeFile(
         join(input.bookRoot, 'world/voice_samples.yaml'),
-        stringifyYaml({ samples: payload.voiceSamples }, { lineWidth: 0 }),
+        voiceSamplesYaml,
+        'utf8'
+    );
+    await writeFile(
+        join(input.bookRoot, '.ops/voice_samples.yaml'),
+        voiceSamplesYaml,
         'utf8'
     );
     await writeFile(

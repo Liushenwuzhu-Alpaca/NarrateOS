@@ -136,6 +136,7 @@ describe('bootBook 开书编译与导入接缝', () => {
             'world/static_base_and_voice.md',
             'world/current_arc_envelope.md',
             'world/voice_samples.yaml',
+            '.ops/voice_samples.yaml',
             'world/future_horizon.md',
             'world/open_threads.md',
             'entities/char_001.md',
@@ -144,6 +145,31 @@ describe('bootBook 开书编译与导入接缝', () => {
         for (const rel of expectedPaths) {
             expect(await exists(join(bookRoot, rel))).toBe(true);
         }
+
+        // 验证 world/voice_samples.yaml 与 .ops/voice_samples.yaml 同步写入且完成兼容字段归一化
+        const worldVoiceRaw = await readFile(join(bookRoot, 'world/voice_samples.yaml'), 'utf8');
+        const opsVoiceRaw = await readFile(join(bookRoot, '.ops/voice_samples.yaml'), 'utf8');
+        expect(opsVoiceRaw).toBe(worldVoiceRaw);
+        const parsedVoice = parseYaml(worldVoiceRaw) as {
+            samples: Array<{
+                id: string;
+                tag: string;
+                text: string;
+                sample: string;
+                last_used_ch: number;
+                use_count: number;
+            }>;
+        };
+        expect(parsedVoice.samples).toEqual([
+            {
+                id: 'voice_01',
+                tag: '悬疑白描',
+                text: '站牌上的墨迹在雨水里化开，像一只闭不上的眼。',
+                sample: '站牌上的墨迹在雨水里化开，像一只闭不上的眼。',
+                last_used_ch: 0,
+                use_count: 0
+            }
+        ]);
 
         // 验证 book_config.yaml 标定结果
         const rawConfig = await readFile(join(bookRoot, 'world/book_config.yaml'), 'utf8');
