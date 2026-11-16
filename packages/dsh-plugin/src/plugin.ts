@@ -40,9 +40,12 @@ export function apply(ctx: DshCordisContext, config: NarratePluginConfig): void 
 
     const controller = new NarrateRuntimeController({
         bookRoot: config.bookRoot,
+        ...(config.booksRoot !== undefined ? { booksRoot: config.booksRoot } : {}),
         store,
         engine,
         dreamingRunner,
+        llm,
+        system,
         ...(config.heartbeatIntervalMs !== undefined
             ? { heartbeatIntervalMs: config.heartbeatIntervalMs }
             : {}),

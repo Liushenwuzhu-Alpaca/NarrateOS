@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, appendFile, mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -34,6 +34,7 @@ const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
 const SLUG_RE = /^[a-zA-Z0-9_-]+$/;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
+const DEFAULT_LOCK_STALE_MS = 30_000;
 const DEFAULT_YOLO_GOAL = '按既定主线与人物弧光自然推进下一章';
 
 export interface NarrateControllerDeps {
@@ -441,12 +442,52 @@ export class NarrateRuntimeController {
         }
     }
 
+    private async assertNoActiveTxLock(message: string): Promise<void> {
+        const lockPath = join(this._bookRoot, '.ops/tx.lock');
+        const raw = await readOptionalText(lockPath);
+        if (raw === null) return;
+
+        let active = false;
+        try {
+            const parsed = TxLockPayloadSchema.safeParse(JSON.parse(raw));
+            if (parsed.success) {
+                const ageMs = Date.now() - Date.parse(parsed.data.acquiredAt);
+                let alive = false;
+                try {
+                    process.kill(parsed.data.pid, 0);
+                    alive = true;
+                } catch (err: unknown) {
+                    alive = (err as { code?: string }).code === 'EPERM';
+                }
+                active = alive && ageMs < DEFAULT_LOCK_STALE_MS;
+            } else {
+                const fileStat = await stat(lockPath);
+                active = Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;
+            }
+        } catch {
+            try {
+                const fileStat = await stat(lockPath);
+                active = Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;
+            } catch {
+                active = false;
+            }
+        }
+
+        if (active) {
+            throw new TxLockConflictError(message);
+        }
+    }
+
     private async runExclusiveTask<T>(
         kind: Exclude<RuntimeTaskKind, 'IDLE'>,
-        fn: (signal: AbortSignal) => Promise<T>
+        fn: (signal: AbortSignal) => Promise<T>,
+        options?: { allowDuringYolo?: boolean }
     ): Promise<T> {
         if (this.shuttingDown) {
             throw new Error('插件正在停机中，拒绝启动新任务');
+        }
+        if (this.yoloState.running && !options?.allowDuringYolo) {
+            throw new TaskConflictError('YOLO 连跑正在执行中，禁止并发执行其他任务');
         }
         if (this.activeTask !== 'IDLE') {
             throw new TaskConflictError(`当前正在执行任务: ${this.activeTask}`);
@@ -876,7 +917,13 @@ export class NarrateRuntimeController {
         }
 
         try {
+            if (this.yoloState.running) {
+                throw new TaskConflictError('YOLO 连跑正在执行中，禁止在线编辑章节');
+            }
+            await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止在线编辑章节');
+
             const syncRes = await this.runExclusiveTask('SYNCING', async (signal) => {
+                await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止写入章节');
                 await mkdir(join(this._bookRoot, 'manuscripts'), { recursive: true });
                 await writeFile(fullPath, content, 'utf8');
 
@@ -1023,6 +1070,9 @@ export class NarrateRuntimeController {
         }
 
         try {
+            if (this.yoloState.running) {
+                throw new TaskConflictError('YOLO 连跑正在执行中，禁止启动单步任务');
+            }
             const result = await this.executeSingleStep(stepOptions);
             sendJson(res, 200, result);
         } catch (err) {
@@ -1038,8 +1088,10 @@ export class NarrateRuntimeController {
         }
     }
 
-    private async executeSingleStep(stepOptions: StepChapterOptions) {
-        return await this.runExclusiveTask('STEPPING', async (signal) => {
+    private async executeSingleStep(stepOptions: StepChapterOptions, fromYolo = false) {
+        return await this.runExclusiveTask(
+            'STEPPING',
+            async (signal) => {
             this.emitEvent('chapter:phase', {
                 phase: 'STARTING',
                 chapterNumber: stepOptions.chapterNumber ?? null,
@@ -1088,7 +1140,9 @@ export class NarrateRuntimeController {
             });
             await this.flushTelemetryEvents();
             return resData;
-        });
+            },
+            { allowDuringYolo: fromYolo }
+        );
     }
 
     /** POST /api/narrate/yolo/start */
@@ -1117,6 +1171,17 @@ export class NarrateRuntimeController {
 
         if (this.yoloState.running || this.activeTask !== 'IDLE') {
             sendJson(res, 409, { error: '已有任务或 YOLO 连跑正在执行中' });
+            return;
+        }
+
+        try {
+            await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止启动 YOLO 连跑');
+        } catch (err) {
+            if (err instanceof TxLockConflictError) {
+                sendJson(res, 409, { error: err.message });
+                return;
+            }
+            sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
@@ -1152,7 +1217,7 @@ export class NarrateRuntimeController {
                     chapterGoal = `${defaultGoal}\n\n[待响应运维信号] ${summary}`;
                 }
 
-                const stepRes = await this.executeSingleStep({ chapterGoal });
+                const stepRes = await this.executeSingleStep({ chapterGoal }, true);
                 this.yoloState.completedChapters++;
 
                 if (this.yoloState.stopRequested || this.shuttingDown || this.haltRequested) {
@@ -1166,20 +1231,24 @@ export class NarrateRuntimeController {
 
                 // 每章结束后检查是否触发睡眠 VACUUM（runDreaming 内部自检水位，未达标会跳过）
                 this.yoloState.currentStage = 'DREAMING';
-                await this.runExclusiveTask('DREAMING', async (signal) => {
-                    const dreamRes = await this.dreamingRunner.runDreaming({
-                        currentChapter: stepRes.chapterNumber,
-                        signal
-                    });
-                    if (!dreamRes.skipped) {
-                        this.emitEvent('dream:completed', {
-                            skipped: dreamRes.skipped,
-                            vacuumedEntities: dreamRes.vacuumedEntities,
-                            warpedNodesFlipped: dreamRes.warpedNodesFlipped,
-                            archivedFiles: dreamRes.archivedFiles
+                await this.runExclusiveTask(
+                    'DREAMING',
+                    async (signal) => {
+                        const dreamRes = await this.dreamingRunner.runDreaming({
+                            currentChapter: stepRes.chapterNumber,
+                            signal
                         });
-                    }
-                });
+                        if (!dreamRes.skipped) {
+                            this.emitEvent('dream:completed', {
+                                skipped: dreamRes.skipped,
+                                vacuumedEntities: dreamRes.vacuumedEntities,
+                                warpedNodesFlipped: dreamRes.warpedNodesFlipped,
+                                archivedFiles: dreamRes.archivedFiles
+                            });
+                        }
+                    },
+                    { allowDuringYolo: true }
+                );
             }
 
             if (this.yoloState.stopRequested || this.haltRequested) {
@@ -1213,7 +1282,14 @@ export class NarrateRuntimeController {
     async handleYoloStop(req: IncomingMessage, res: ServerResponse): Promise<void> {
         if (!assertMethod(req, res, 'POST')) return;
         this.yoloState.stopRequested = true;
-        this.requestHalt();
+        this.emitEvent('yolo:stop_requested', {
+            stopRequested: true,
+            running: this.yoloState.running,
+            completedChapters: this.yoloState.completedChapters,
+            currentStage: this.yoloState.currentStage,
+            message: '将在当前章安全点完成后停止',
+            timestamp: new Date().toISOString()
+        });
         sendJson(res, 202, {
             stopRequested: true,
             running: this.yoloState.running,
@@ -1226,6 +1302,9 @@ export class NarrateRuntimeController {
         if (!assertMethod(req, res, 'POST')) return;
 
         try {
+            if (this.yoloState.running) {
+                throw new TaskConflictError('YOLO 连跑正在执行中，禁止手动同步稿件');
+            }
             const result = await this.runExclusiveTask('SYNCING', async (signal) => {
                 const opts: SyncManuscriptsOptions = { signal };
                 this.emitEvent('sync:started', { timestamp: new Date().toISOString() });
@@ -1260,6 +1339,9 @@ export class NarrateRuntimeController {
         }
 
         try {
+            if (this.yoloState.running) {
+                throw new TaskConflictError('YOLO 连跑正在执行中，禁止手动触发 Dreaming');
+            }
             const result = await this.runExclusiveTask('DREAMING', async (signal) => {
                 const txState = await this.store.readTxState();
                 const currentChapter =

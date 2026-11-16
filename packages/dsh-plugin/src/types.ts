@@ -125,6 +125,7 @@ export interface DshLlmAdapterOptions {
 /** 插件配置项 */
 export interface NarratePluginConfig {
     bookRoot: string;
+    booksRoot?: string;
     poolRouting: LlmPoolRouting;
     llmRetry?: {
         maxRetries?: number;

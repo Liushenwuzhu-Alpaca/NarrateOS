@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     BookStore,
+    DEFAULT_SECTION_HEADINGS,
     NodeSystemAdapter,
+    serializeEntityMarkdown,
     TxLockConflictError,
     type BookConfig,
     type WorldState
@@ -655,6 +657,873 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
 
         // 触发停机钩子应清理定时器并结束 SSE 流
         await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        sseAbort.abort();
+    });
+
+    it('应支持多作品目录扫描、安全切换与开新书 (boot)', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-books-root-'));
+        cleanups.push(async () => {
+            await rm(booksRoot, { recursive: true, force: true });
+        });
+
+        const system = new NodeSystemAdapter();
+        const bookAlpha = join(booksRoot, 'alpha-book');
+        await mkdir(bookAlpha, { recursive: true });
+        await system.initRepo(bookAlpha);
+        const storeAlpha = new BookStore(bookAlpha, system);
+        await storeAlpha.writeBookConfig({ ...createTestBookConfig(), book_slug: 'alpha-book', title: '阿尔法卷' });
+        await storeAlpha.writeWorldState(createTestWorldState());
+        await mkdir(join(bookAlpha, 'manuscripts'), { recursive: true });
+        await writeFile(join(bookAlpha, 'manuscripts', 'ch_0001.md'), '# 第一章\n\n阿尔法开篇。', 'utf8');
+        await storeAlpha.initializeWalFromDisk();
+        await system.commitPaths(
+            bookAlpha,
+            ['world/book_config.yaml', 'world/world_state.md', 'manuscripts/ch_0001.md', '.ops/tx_state.json'],
+            'chore: init alpha'
+        );
+
+        const bookBeta = join(booksRoot, 'beta-book');
+        await mkdir(bookBeta, { recursive: true });
+        await system.initRepo(bookBeta);
+        const storeBeta = new BookStore(bookBeta, system);
+        await storeBeta.writeBookConfig({ ...createTestBookConfig(), book_slug: 'beta-book', title: '贝塔卷' });
+        await storeBeta.writeWorldState({
+            frontmatter: {
+                story_day: 5,
+                current_volume: 1,
+                current_chapter: 2,
+                pov_character: 'char_lin',
+                timeline_mode: 'MAINLINE'
+            },
+            summaryMarkdown: '贝塔卷摘要。'
+        });
+        await storeBeta.initializeWalFromDisk();
+        await system.commitPaths(
+            bookBeta,
+            ['world/book_config.yaml', 'world/world_state.md', '.ops/tx_state.json'],
+            'chore: init beta'
+        );
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+
+        const mockLlm: DshLlmService = {
+            async *stream(options: DshGenerateOptions): AsyncIterable<DshStreamChunk> {
+                const prompt = options.messages[0]?.content[0]?.text ?? '';
+                if (prompt.includes('标定样本')) {
+                    yield { type: 'text-delta', index: 0, text: 'OK' };
+                    yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 2 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                    return;
+                }
+                const bootPayload = {
+                    worldSummary: '新开作品世界摘要',
+                    staticBaseAndVoice: '冷峻写实文风基线',
+                    currentArcEnvelope: '第一卷：雾港迷局',
+                    voiceSamples: [{ tag: 'narrator', sample: '雨落在码头铁皮棚顶上。' }],
+                    openThreads: [
+                        {
+                            threadId: 'thread_01',
+                            title: '失踪的怀表',
+                            wakeupCondition: '主角抵达旧船坞'
+                        }
+                    ],
+                    entities: [
+                        {
+                            entityId: 'char_lin',
+                            canonicalName: '林彻',
+                            uniqueAliases: ['林调查员'],
+                            contextualTitles: [],
+                            innateLocks: [{ visibility: 'PUBLIC', text: '左眉骨有旧疤' }],
+                            acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '身着深灰风衣' }],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ],
+                    loreEntries: []
+                };
+                yield { type: 'text-delta', index: 0, text: JSON.stringify(bootPayload) };
+                yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 200 } };
+                yield { type: 'finish', reason: { kind: 'stop' } };
+            }
+        };
+
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: mockLlm,
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot: bookAlpha,
+            booksRoot,
+            poolRouting: DEFAULT_ROUTING
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+
+        // 1. 扫描多作品列表
+        const booksRes = await fetch(`${baseUrl}/api/narrate/books`);
+        expect(booksRes.status).toBe(200);
+        const booksJson = (await booksRes.json()) as {
+            currentBookRoot: string;
+            books: Array<{ bookRoot: string; slug: string; title: string; storyDay: number }>;
+        };
+        expect(booksJson.currentBookRoot).toBe(bookAlpha);
+        expect(booksJson.books).toHaveLength(2);
+        expect(booksJson.books.map((b) => b.slug).sort()).toEqual(['alpha-book', 'beta-book']);
+
+        // 2. 防路径穿越校验
+        const traversalRes = await fetch(`${baseUrl}/api/narrate/book/select`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ bookRoot: '../outside-dir' })
+        });
+        expect(traversalRes.status).toBe(400);
+
+        // 3. 切换至 beta-book 并验证 SSE book_switched
+        const sseAbort = new AbortController();
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        async function readUntil(pred: (t: string) => boolean): Promise<string> {
+            const deadline = Date.now() + 3000;
+            while (!pred(sseBuf)) {
+                if (Date.now() > deadline) throw new Error(`SSE 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+            return sseBuf;
+        }
+        await readUntil((t) => t.includes('event: connected'));
+
+        const selectRes = await fetch(`${baseUrl}/api/narrate/book/select`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ slug: 'beta-book' })
+        });
+        expect(selectRes.status).toBe(200);
+        await readUntil((t) => t.includes('event: book_switched'));
+
+        const statusAfterSelect = await (await fetch(`${baseUrl}/api/narrate/status`)).json() as {
+            bookSlug: string;
+        };
+        expect(statusAfterSelect.bookSlug).toBe('beta-book');
+
+        // 4. 持有 tx.lock 时拒绝切换，返回 409 Conflict
+        await writeFile(
+            join(bookBeta, '.ops/tx.lock'),
+            JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }),
+            'utf8'
+        );
+        const conflictSelectRes = await fetch(`${baseUrl}/api/narrate/book/select`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ slug: 'alpha-book' })
+        });
+        expect(conflictSelectRes.status).toBe(409);
+        await rm(join(bookBeta, '.ops/tx.lock'), { force: true });
+
+        // 5. 调用 POST /api/narrate/boot 开新书并自动切换
+        const bootRes = await fetch(`${baseUrl}/api/narrate/boot`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                slug: 'gamma-book',
+                title: '伽马新篇',
+                povCharacter: 'char_lin',
+                mode: 'original',
+                premiseOrSeed: '雾港调查员在雨夜发现失踪怀表。'
+            })
+        });
+        expect(bootRes.status).toBe(201);
+        const statusAfterBoot = await (await fetch(`${baseUrl}/api/narrate/status`)).json() as {
+            bookSlug: string;
+            title: string;
+        };
+        expect(statusAfterBoot.bookSlug).toBe('gamma-book');
+        expect(statusAfterBoot.title).toBe('伽马新篇');
+
+        sseAbort.abort();
+    });
+
+    it('应支持章节列表、单章读取与 Diff、PUT 在线编辑触发 Sync 及物化视图 views 查询', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => {
+            await rm(bookRoot, { recursive: true, force: true });
+        });
+
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+        await mkdir(join(bookRoot, 'entities'), { recursive: true });
+        await writeFile(join(bookRoot, 'world/future_horizon.md'), '# 未来地平线\n\n第 3 章揭露旧船坞阴谋。', 'utf8');
+        await writeFile(join(bookRoot, 'world/open_threads.md'), '- [ ] thread_watch: 怀表去向', 'utf8');
+        await writeFile(
+            join(bookRoot, 'entities/char_lin.md'),
+            serializeEntityMarkdown({
+                metadata: {
+                    entity_id: 'char_lin',
+                    canonical_name: '林彻',
+                    unique_aliases: ['林调查员'],
+                    contextual_titles: [],
+                    historical_anchors: [],
+                    last_seen_ch: 1
+                },
+                sectionHeadings: DEFAULT_SECTION_HEADINGS,
+                innateLocks: [{ visibility: 'PUBLIC', text: '左眉骨有旧疤', continuationLines: [] }],
+                acquiredState: [{ storyDay: 1, chapter: 1, visibility: 'PUBLIC', text: '抵达雾港码头', continuationLines: [] }],
+                irreversibleTrajectory: [],
+                recentBuffer: [{ text: '正在追踪怀表线索', continuationLines: [] }]
+            }),
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, '.ops/telemetry.jsonl'),
+            `${JSON.stringify({ chapter: 1, proseGatePass: true, wordCount: 2200 })}\n`,
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, '.ops/signals.jsonl'),
+            `${JSON.stringify({
+                type: 'SPOTLIGHT_TRIGGER',
+                chapter: 1,
+                entity_id: 'char_lin',
+                suggested_mode: 'MAINLINE',
+                reason: '测试信号',
+                created_at: new Date().toISOString()
+            })}\n`,
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, '.ops/safe_halt.json'),
+            JSON.stringify({ status: 'SAFE_HALT', chapterNumber: 2, reason: '测试挂起' }),
+            'utf8'
+        );
+
+        let syncCalls = 0;
+        const fakeEngine = {
+            async stepChapter() {
+                throw new Error('not used');
+            },
+            async syncManuscripts() {
+                syncCalls++;
+                return {
+                    status: 'PROSE_POLISH_SYNCED' as const,
+                    dirtyChapters: [],
+                    updatedEntities: [],
+                    downstreamConflicts: [],
+                    totalUsage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+
+        // 1. 章节列表
+        const chaptersRes = await fetch(`${baseUrl}/api/narrate/chapters`);
+        expect(chaptersRes.status).toBe(200);
+        const chaptersJson = (await chaptersRes.json()) as {
+            chapters: Array<{ chapterNumber: number; fileName: string; title: string; dirty: boolean }>;
+        };
+        expect(chaptersJson.chapters).toHaveLength(1);
+        expect(chaptersJson.chapters[0]?.chapterNumber).toBe(1);
+        expect(chaptersJson.chapters[0]?.fileName).toBe('ch_0001.md');
+        expect(chaptersJson.chapters[0]?.title).toBe('第一章');
+        expect(chaptersJson.chapters[0]?.dirty).toBe(false);
+
+        // 2. 单章读取
+        const chRes = await fetch(`${baseUrl}/api/narrate/chapter?ch=1`);
+        expect(chRes.status).toBe(200);
+        const chJson = (await chRes.json()) as {
+            chapterNumber: number;
+            content: string;
+            dirty: boolean;
+            sha256: string;
+            diffFromHead: string;
+        };
+        expect(chJson.chapterNumber).toBe(1);
+        expect(chJson.content).toContain('雾港雨夜');
+        expect(chJson.dirty).toBe(false);
+        expect(chJson.sha256).toHaveLength(64);
+
+        // 3. PUT 在线编辑并触发 Sync + SSE chapter_synced
+        const sseAbort = new AbortController();
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        async function readUntil(pred: (t: string) => boolean): Promise<string> {
+            const deadline = Date.now() + 3000;
+            while (!pred(sseBuf)) {
+                if (Date.now() > deadline) throw new Error(`SSE 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+            return sseBuf;
+        }
+        await readUntil((t) => t.includes('event: connected'));
+
+        const putRes = await fetch(`${baseUrl}/api/narrate/chapter`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                chapterNumber: 1,
+                content: '# 第一章\n\n雾港雨夜，钟楼敲响十二下。'
+            })
+        });
+        expect(putRes.status).toBe(200);
+        expect(syncCalls).toBe(1);
+        const diskContent = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(diskContent).toContain('钟楼敲响十二下');
+        await readUntil((t) => t.includes('event: chapter_synced'));
+
+        // 读取修改后的 diffFromHead 应包含差异
+        const chAfterRes = await fetch(`${baseUrl}/api/narrate/chapter?ch=1`);
+        const chAfterJson = (await chAfterRes.json()) as { dirty: boolean; diffFromHead: string };
+        expect(chAfterJson.dirty).toBe(true);
+        expect(chAfterJson.diffFromHead).toContain('钟楼敲响十二下');
+
+        // 4. 物化视图 views 查询
+        const entitiesView = await (await fetch(`${baseUrl}/api/narrate/views?kind=entities`)).json() as {
+            entities: Array<{ entityId: string; canonicalName: string }>;
+            coldArchiveCount: number;
+        };
+        expect(entitiesView.entities.some((e) => e.entityId === 'char_lin')).toBe(true);
+        expect(entitiesView.coldArchiveCount).toBe(0);
+
+        const horizonView = await (await fetch(`${baseUrl}/api/narrate/views?kind=horizon`)).json() as {
+            content: string;
+        };
+        expect(horizonView.content).toContain('旧船坞阴谋');
+
+        const threadsView = await (await fetch(`${baseUrl}/api/narrate/views?kind=threads`)).json() as {
+            content: string;
+        };
+        expect(threadsView.content).toContain('thread_watch');
+
+        const telemetryView = await (await fetch(`${baseUrl}/api/narrate/views?kind=telemetry`)).json() as {
+            entries: Array<{ chapter: number }>;
+        };
+        expect(telemetryView.entries).toHaveLength(1);
+
+        const signalsView = await (await fetch(`${baseUrl}/api/narrate/views?kind=signals`)).json() as {
+            signals: Array<{ type: string }>;
+        };
+        expect(signalsView.signals).toHaveLength(1);
+
+        const haltView = await (await fetch(`${baseUrl}/api/narrate/views?kind=halt`)).json() as {
+            safeHalt: { status: string } | null;
+            quarantineReport: unknown;
+        };
+        expect(haltView.safeHalt?.status).toBe('SAFE_HALT');
+        expect(haltView.quarantineReport).toBeNull();
+
+        sseAbort.abort();
+    });
+
+    it('应支持 YOLO 连跑 2 章、推送 6 阶段 stage 事件并支持中途安全停止', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => {
+            await rm(bookRoot, { recursive: true, force: true });
+        });
+
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+
+        let completedStepCount = 0;
+        let dreamCount = 0;
+
+        const fakeEngine = {
+            async stepChapter(options: {
+                chapterGoal: string;
+                onProgress?: (evt: { stage: string; chapterNumber: number; message: string; timestamp: string }) => void;
+            }) {
+                const ch = 2 + completedStepCount;
+                for (const stage of ['LIBRARIAN', 'PLANNER', 'WRITER', 'PROSE_GATE', 'FACT_CHECKER', 'EXTRACTOR']) {
+                    options.onProgress?.({
+                        stage,
+                        chapterNumber: ch,
+                        message: `${stage} running`,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+                completedStepCount++;
+                return {
+                    status: 'COMMITTED' as const,
+                    chapterNumber: ch,
+                    manuscriptPath: `manuscripts/ch_000${ch}.md`,
+                    featCommitSha: 'sha1',
+                    stateCommitSha: 'sha2',
+                    outline: null,
+                    replanCount: 0,
+                    rewriteCount: 0,
+                    patchRounds: 0,
+                    telemetry: {
+                        charCount: 1000,
+                        wordCount: 500,
+                        sentenceCount: 20,
+                        mattr500: 0.7,
+                        kontoyiannisEntropy: 4.0,
+                        sentenceLengthCv: 0.4,
+                        clicheDensityPer1k: 0.2
+                    },
+                    totalUsage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 },
+                    updatedEntities: []
+                };
+            },
+            async syncManuscripts() {
+                return {
+                    status: 'CLEAN' as const,
+                    dirtyChapters: [],
+                    updatedEntities: [],
+                    downstreamConflicts: [],
+                    totalUsage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const fakeDreaming = {
+            async runDreaming() {
+                dreamCount++;
+                return {
+                    skipped: true,
+                    vacuumedEntities: [],
+                    warpedNodesFlipped: 0,
+                    archivedFiles: [],
+                    spotlightTriggers: [],
+                    committedTxState: null,
+                    usage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never,
+            dreamingRunner: fakeDreaming as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+
+        // 注入 1 条待消费信号，验证 status.pendingSignalsCount
+        const sigRes = await fetch(`${baseUrl}/api/narrate/signals`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                type: 'SPOTLIGHT_TRIGGER',
+                chapter: 1,
+                entity_id: 'char_lin',
+                suggested_mode: 'MAINLINE',
+                reason: '增加雨夜压迫感'
+            })
+        });
+        expect(sigRes.status).toBe(201);
+
+        const preStatus = await (await fetch(`${baseUrl}/api/narrate/status`)).json() as {
+            pendingSignalsCount: number;
+            yolo: { running: boolean; completedChapters: number; targetChapters: number };
+        };
+        expect(preStatus.pendingSignalsCount).toBe(1);
+        expect(preStatus.yolo.running).toBe(false);
+
+        const sseAbort = new AbortController();
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        async function readUntil(pred: (t: string) => boolean): Promise<string> {
+            const deadline = Date.now() + 4000;
+            while (!pred(sseBuf)) {
+                if (Date.now() > deadline) throw new Error(`SSE 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+            return sseBuf;
+        }
+        await readUntil((t) => t.includes('event: connected'));
+
+        // 启动 YOLO 连跑 2 章
+        const yoloStartRes = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 2, defaultGoal: '推进雾港连跑' })
+        });
+        expect(yoloStartRes.status).toBe(202);
+
+        await readUntil((t) => t.includes('event: stage') && t.includes('event: yolo_completed'));
+        expect(completedStepCount).toBe(2);
+        expect(dreamCount).toBe(2);
+
+        // 验证中途安全停止：启动持续连跑 (targetChapters: 0) 并在首章门闩处触发 yolo/stop
+        let holdSecondChapter: () => void = () => {};
+        let enteredSecondCall = false;
+        let resolveEnteredSecond: (() => void) | null = null;
+        const secondEntered = new Promise<void>((resolve) => {
+            resolveEnteredSecond = resolve;
+        });
+
+        const origStep = fakeEngine.stepChapter;
+        fakeEngine.stepChapter = async (opts) => {
+            if (completedStepCount >= 3 && !enteredSecondCall) {
+                enteredSecondCall = true;
+                resolveEnteredSecond?.();
+                await new Promise<void>((resolve) => {
+                    holdSecondChapter = resolve;
+                });
+            }
+            return await origStep(opts);
+        };
+
+        const continuousRes = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 0 })
+        });
+        expect(continuousRes.status).toBe(202);
+
+        await secondEntered;
+        const stopRes = await fetch(`${baseUrl}/api/narrate/yolo/stop`, { method: 'POST' });
+        expect(stopRes.status).toBe(202);
+        holdSecondChapter();
+
+        await readUntil((t) => t.includes('event: yolo_halted'));
+        sseAbort.abort();
+    });
+
+    it('PUT /api/narrate/chapter 在 .ops/tx.lock 被占用时返回 409 且不修改磁盘文件', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => {
+            await rm(bookRoot, { recursive: true, force: true });
+        });
+
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+        const originalContent = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+
+        let syncCalls = 0;
+        const fakeEngine = {
+            async stepChapter() {
+                throw new Error('not used');
+            },
+            async syncManuscripts() {
+                syncCalls++;
+                return {
+                    status: 'CLEAN' as const,
+                    dirtyChapters: [],
+                    updatedEntities: [],
+                    downstreamConflicts: [],
+                    totalUsage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+
+        // 模拟外部进程持有有效 .ops/tx.lock
+        await writeFile(
+            join(bookRoot, '.ops/tx.lock'),
+            JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }),
+            'utf8'
+        );
+
+        const putRes = await fetch(`${baseUrl}/api/narrate/chapter`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                chapterNumber: 1,
+                content: '# 第一章\n\n不应被写入的内容'
+            })
+        });
+        expect(putRes.status).toBe(409);
+        expect(syncCalls).toBe(0);
+
+        const diskContent = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(diskContent).toBe(originalContent);
+
+        // yolo/start 同样应被有效 .ops/tx.lock 前置拦截返回 409
+        const yoloStartRes = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 1 })
+        });
+        expect(yoloStartRes.status).toBe(409);
+    });
+
+    it('yolo/stop 不打断当前在途生成而在本章提交后平滑停止，且 YOLO 运行期间互斥外部任务', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => {
+            await rm(bookRoot, { recursive: true, force: true });
+        });
+
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+
+        let completedStepCount = 0;
+        let observedAbortedDuringStep = false;
+        let dreamCalls = 0;
+        let holdCurrentChapter: () => void = () => {};
+        let resolveEnteredFirst: (() => void) | null = null;
+        const firstEntered = new Promise<void>((resolve) => {
+            resolveEnteredFirst = resolve;
+        });
+
+        const fakeEngine = {
+            async stepChapter(options: { signal?: AbortSignal }) {
+                resolveEnteredFirst?.();
+                await new Promise<void>((resolve) => {
+                    holdCurrentChapter = resolve;
+                });
+                observedAbortedDuringStep = Boolean(options.signal?.aborted);
+                completedStepCount++;
+                return {
+                    status: 'COMMITTED' as const,
+                    chapterNumber: 1 + completedStepCount,
+                    manuscriptPath: `manuscripts/ch_000${1 + completedStepCount}.md`,
+                    featCommitSha: 'sha1',
+                    stateCommitSha: 'sha2',
+                    outline: null,
+                    replanCount: 0,
+                    rewriteCount: 0,
+                    patchRounds: 0,
+                    telemetry: {
+                        charCount: 1000,
+                        wordCount: 500,
+                        sentenceCount: 20,
+                        mattr500: 0.7,
+                        kontoyiannisEntropy: 4.0,
+                        sentenceLengthCv: 0.4,
+                        clicheDensityPer1k: 0.2
+                    },
+                    totalUsage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 },
+                    updatedEntities: []
+                };
+            },
+            async syncManuscripts() {
+                return {
+                    status: 'CLEAN' as const,
+                    dirtyChapters: [],
+                    updatedEntities: [],
+                    downstreamConflicts: [],
+                    totalUsage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const fakeDreaming = {
+            async runDreaming() {
+                dreamCalls++;
+                return {
+                    skipped: true,
+                    vacuumedEntities: [],
+                    warpedNodesFlipped: 0,
+                    archivedFiles: [],
+                    spotlightTriggers: [],
+                    committedTxState: null,
+                    usage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never,
+            dreamingRunner: fakeDreaming as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+        const sseAbort = new AbortController();
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        async function readUntil(pred: (t: string) => boolean): Promise<string> {
+            const deadline = Date.now() + 4000;
+            while (!pred(sseBuf)) {
+                if (Date.now() > deadline) throw new Error(`SSE 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+            return sseBuf;
+        }
+        await readUntil((t) => t.includes('event: connected'));
+
+        const yoloStartRes = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 3 })
+        });
+        expect(yoloStartRes.status).toBe(202);
+
+        await firstEntered;
+
+        // YOLO 运行期间，外部并发请求必须返回 409 Conflict
+        const [stepConflict, syncConflict, dreamConflict, putConflict] = await Promise.all([
+            fetch(`${baseUrl}/api/narrate/step`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ chapterGoal: '外部插队' })
+            }),
+            fetch(`${baseUrl}/api/narrate/sync`, { method: 'POST' }),
+            fetch(`${baseUrl}/api/narrate/dream`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({})
+            }),
+            fetch(`${baseUrl}/api/narrate/chapter`, {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ chapterNumber: 1, content: '# 冲突编辑' })
+            })
+        ]);
+        expect(stepConflict.status).toBe(409);
+        expect(syncConflict.status).toBe(409);
+        expect(dreamConflict.status).toBe(409);
+        expect(putConflict.status).toBe(409);
+
+        // 触发安全点停止：仅标记 stopRequested 并广播 SSE，不应 abort 在途生成
+        const stopRes = await fetch(`${baseUrl}/api/narrate/yolo/stop`, { method: 'POST' });
+        expect(stopRes.status).toBe(202);
+        await readUntil((t) => t.includes('event: yolo:stop_requested'));
+
+        // 放行当前在途章节，验证未被打断且本章提交后平滑停止（不再进入第 2 章与 dreaming）
+        holdCurrentChapter();
+        await readUntil((t) => t.includes('event: yolo_halted'));
+
+        expect(observedAbortedDuringStep).toBe(false);
+        expect(completedStepCount).toBe(1);
+        expect(dreamCalls).toBe(0);
+
+        const statusAfter = await (await fetch(`${baseUrl}/api/narrate/status`)).json() as {
+            yolo: { running: boolean; completedChapters: number };
+        };
+        expect(statusAfter.yolo.running).toBe(false);
+        expect(statusAfter.yolo.completedChapters).toBe(1);
+
         sseAbort.abort();
     });
 });
