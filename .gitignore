@@ -1,0 +1,24 @@
+# Secrets & Environment
+.env
+.env.*
+!.env.example
+
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node / dsh local runtime artifacts
+node_modules/
+.dsh/sessions/
+.dsh/storages/
+
+# OS & Editor temporary files
+.DS_Store
+*.swp
+*~
+/tmp/
+
+manuscript
