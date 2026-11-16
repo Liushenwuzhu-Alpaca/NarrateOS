@@ -674,4 +674,128 @@ describe('NarrativeEngine', () => {
         const ch2After = await readFile(ch2Path, 'utf8');
         expect(ch2After).toBe(ch2Original);
     });
+
+    it('Extractor 首次新建实体缺省 canonical_name 时应触发结构化重试，并落盘标准中文名', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK),
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            // 第一次 Extractor 尝试新建 item_002 但未填 canonical_name -> 触发 Zod superRefine 拦截重试
+            jsonResponse({
+                entity_patches: [
+                    {
+                        entity_id: 'item_002',
+                        last_seen_ch: 2,
+                        acquired_state_ops: [
+                            {
+                                op: 'append',
+                                entry: {
+                                    storyDay: 1,
+                                    chapter: 2,
+                                    visibility: 'PUBLIC',
+                                    text: '装有经费票据的塑料文件夹'
+                                }
+                            }
+                        ]
+                    }
+                ],
+                story_day_delta: 0,
+                chapter_summary: '星野琉璃递交塑料文件夹'
+            }),
+            // 第二次重试补齐 canonical_name（同时在已有实体 char_001 上附带冗余 canonical_name 验证自动剥离）
+            jsonResponse({
+                entity_patches: [
+                    {
+                        entity_id: 'char_001',
+                        canonical_name: '陆沉（冗余名字）',
+                        last_seen_ch: 2
+                    },
+                    {
+                        entity_id: 'item_002',
+                        canonical_name: '经费票据文件夹',
+                        last_seen_ch: 2,
+                        acquired_state_ops: [
+                            {
+                                op: 'append',
+                                entry: {
+                                    storyDay: 1,
+                                    chapter: 2,
+                                    visibility: 'PUBLIC',
+                                    text: '装有经费票据的塑料文件夹'
+                                }
+                            }
+                        ]
+                    }
+                ],
+                story_day_delta: 0,
+                chapter_summary: '星野琉璃递交经费票据文件夹'
+            })
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.stepChapter({
+            chapterGoal: '测试新建实体 canonical_name 强约束'
+        });
+
+        expect(result.status).toBe('COMMITTED');
+        expect(result.updatedEntities).toContain('item_002');
+        const newEntityMd = await readFile(join(bookRoot, 'entities/item_002.md'), 'utf8');
+        expect(newEntityMd).toContain('canonical_name: 经费票据文件夹');
+        expect(newEntityMd).not.toContain('canonical_name: item_002');
+    });
+
+    it('stepChapter 应自动读取 .ops/signals.jsonl 中的 SPOTLIGHT_TRIGGER 与 RETCON 并注入 Planner', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+
+        const signalsContent = [
+            JSON.stringify({
+                type: 'SPOTLIGHT_TRIGGER',
+                created_at: new Date().toISOString(),
+                chapter: 1,
+                entity_id: 'char_002',
+                suggested_mode: 'MAINLINE',
+                reason: '星野琉璃携带废部终审表抵达旧校舍三楼'
+            }),
+            JSON.stringify({
+                type: 'RETCON',
+                created_at: new Date().toISOString(),
+                chapter: 1,
+                conflict_id: 'conf_weather',
+                reason: '顺带说明走廊窗户刚被关上'
+            })
+        ].join('\n');
+        await writeFile(join(bookRoot, '.ops/signals.jsonl'), `${signalsContent}\n`, 'utf8');
+        await system.commitPaths(bookRoot, ['.ops/signals.jsonl'], 'chore: seed signals.jsonl');
+
+        // Librarian 故意不返回 char_002，验证 SPOTLIGHT_TRIGGER 会将 char_002 自动并入挂载列表
+        const librarianWithoutChar2 = {
+            selected_entity_ids: ['char_001'],
+            recall_queries: [],
+            selected_lore_files: []
+        };
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(librarianWithoutChar2),
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            jsonResponse(EXTRACTOR_OK)
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.stepChapter({
+            chapterGoal: '推进活动室门前交涉'
+        });
+
+        expect(result.status).toBe('COMMITTED');
+        const plannerCall = llm.history[1];
+        expect(plannerCall?.request.dynamicTail).toContain('SPOTLIGHT_TRIGGER');
+        expect(plannerCall?.request.dynamicTail).toContain('星野琉璃携带废部终审表抵达旧校舍三楼');
+        expect(plannerCall?.request.dynamicTail).toContain('RETCON 圆回指令');
+        // 验证 char_002 的档案也被自动挂载进了 Planner 视图
+        expect(plannerCall?.request.dynamicTail).toContain('星野琉璃');
+    });
 });

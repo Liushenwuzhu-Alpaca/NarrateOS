@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import type { z, ZodType, ZodTypeAny } from 'zod';
+import { z, type ZodType, type ZodTypeAny } from 'zod';
+import { OpsSignalSchema, type OpsSignal } from '../dreaming/schemas.js';
 import {
     computeTelemetry,
     StaticProseGate,
@@ -118,6 +119,39 @@ async function generateJson<S extends ZodTypeAny>(
         retryOptions,
         signal
     );
+}
+
+/** 构建带新建实体 canonical_name 强校验的 Extractor Schema */
+function buildExtractorSchema(snapshot: BookSnapshot) {
+    const knownEntityIds = new Set<string>([
+        ...Object.keys(snapshot.entities),
+        ...snapshot.coldArchiveIds
+    ]);
+    return ExtractorOutputSchema.superRefine((data, ctx) => {
+        data.entity_patches.forEach((patch, idx) => {
+            if (!knownEntityIds.has(patch.entity_id)) {
+                const name = patch.canonical_name?.trim();
+                if (!name || name === patch.entity_id) {
+                    ctx.addIssue({
+                        code: z.ZodIssueCode.custom,
+                        path: ['entity_patches', idx, 'canonical_name'],
+                        message: `首次新建实体 ${patch.entity_id} 时必须提供标准中文 canonical_name（禁止省略或直接填写英文 ID）`
+                    });
+                }
+            }
+        });
+    });
+}
+
+/** 清理已有实体补丁上冗余携带的 canonical_name，防止误触 InnateLockViolationError */
+function sanitizeExtractorPatches(snapshot: BookSnapshot, patches: EntityPatch[]): EntityPatch[] {
+    return patches.map((patch) => {
+        if (snapshot.entities[patch.entity_id] && patch.canonical_name !== undefined) {
+            const { canonical_name: _ignored, ...rest } = patch;
+            return rest;
+        }
+        return patch;
+    });
 }
 
 async function readOptionalText(filePath: string): Promise<string | null> {
@@ -286,6 +320,30 @@ export class NarrativeEngine {
             chapterNumber: prevCh,
             fullText: prevText
         };
+    }
+
+    /** 读取当前章节待响应的 .ops/signals.jsonl 信号（覆盖上一章收尾与本章投递的信号） */
+    private async loadActiveSignals(currentCh: number): Promise<OpsSignal[]> {
+        const raw = await readOptionalText(join(this.store.bookRoot, '.ops/signals.jsonl'));
+        if (!raw) return [];
+        const signals: OpsSignal[] = [];
+        for (const line of raw.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+                const parsed = OpsSignalSchema.safeParse(JSON.parse(trimmed));
+                if (
+                    parsed.success &&
+                    parsed.data.chapter >= Math.max(0, currentCh - 1) &&
+                    parsed.data.chapter <= currentCh
+                ) {
+                    signals.push(parsed.data);
+                }
+            } catch {
+                // 忽略损坏行
+            }
+        }
+        return signals;
     }
 
     /** 写入 SAFE_HALT 诊断快照并抛出 SafeHaltError */
@@ -704,7 +762,8 @@ export class NarrativeEngine {
                     '{',
                     '  "entity_patches": [',
                     '    {',
-                    '      "entity_id": "仅限已有实体ID或char_/item_前缀ID",',
+                    '      "entity_id": "已有实体ID，或新建char_/item_前缀ID",',
+                    '      "canonical_name": "首次新建实体时必填标准中文名称（已有实体勿填）",',
                     '      "last_seen_ch": 1,',
                     '      "acquired_state_ops": [',
                     '        { "op": "upsert_slot", "slot_key": "location", "entry": { "storyDay": 0, "visibility": "PUBLIC", "text": "状态描述" } }',
@@ -721,7 +780,7 @@ export class NarrativeEngine {
                     '  "chapter_summary": "一句话概括本章核心剧情进展"',
                     '}',
                     '```',
-                    '重要：勿修改先天红线(innate_locks_ops)，仅引用已存在实体 ID。'
+                    '重要：勿修改先天红线(innate_locks_ops)；引用已有实体时不填 canonical_name，若首次新建 char_/item_ 实体则必须填写标准中文 canonical_name。'
                 ].join('\n')
             ],
             dynamicTail: [
@@ -733,13 +792,17 @@ export class NarrativeEngine {
         const res = await generateJson(
             this.llm,
             req,
-            ExtractorOutputSchema,
+            buildExtractorSchema(snapshot),
             retryOptions,
             signal
         );
         addUsage(totalUsage, res.totalUsage);
 
         const extracted: ExtractorOutput = res.data;
+        const sanitizedPatches = sanitizeExtractorPatches(
+            snapshot,
+            extracted.entity_patches as EntityPatch[]
+        );
         const telemetry = computeTelemetry(prose);
 
         await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
@@ -779,7 +842,7 @@ export class NarrativeEngine {
 
         const patchRes = await this.store.applyStatePatch(
             chapterNumber,
-            extracted.entity_patches as EntityPatch[],
+            sanitizedPatches,
             {
                 worldStateUpdate,
                 extraCommitPaths
@@ -881,6 +944,7 @@ export class NarrativeEngine {
             snapshot.config.prose_gate.cross_chapter_simile_window
         );
         const voicePool = await this.readVoicePool();
+        const activeSignals = await this.loadActiveSignals(chapterNumber);
 
         // Step 1: Librarian
         emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
@@ -893,6 +957,29 @@ export class NarrativeEngine {
             totalUsage,
             options.signal
         );
+
+        // 将 SPOTLIGHT_TRIGGER 关联的已存在实体自动并入本章挂载集合
+        const spotlightEntityIds = activeSignals
+            .filter((s) => s.type === 'SPOTLIGHT_TRIGGER' && s.entity_id && snapshot.entities[s.entity_id])
+            .map((s) => s.entity_id!);
+        const mergedSelectedEntityIds = Array.from(
+            new Set([...librarianOut.selected_entity_ids, ...spotlightEntityIds])
+        );
+
+        const formattedSignalDirective =
+            activeSignals.length > 0 && !options.chapterGoal.includes('[待响应运维信号]')
+                ? [
+                      '## 待响应运维与切镜信号 (.ops/signals.jsonl)',
+                      ...activeSignals.map((s) =>
+                          s.type === 'SPOTLIGHT_TRIGGER'
+                              ? `- [SPOTLIGHT_TRIGGER] 实体 ${s.entity_id ?? '(未指定)'} (建议模式: ${s.suggested_mode ?? 'MAINLINE'}): ${s.reason}（请优先通过前台碰撞让该角色/势力实质介入当前现场，或在必要时切镜呈现，严禁幕后略过）`
+                              : `- [RETCON 圆回指令] (${s.conflict_id ?? '细节修正'}): ${s.reason}（请在本章顺带自然圆回该细节偏差）`
+                      )
+                  ].join('\n')
+                : '';
+        const effectivePlannerInjection = [plannerInjection, formattedSignalDirective]
+            .filter(Boolean)
+            .join('\n\n');
 
         let replanCount = 0;
         let rewriteCount = 0;
@@ -915,14 +1002,14 @@ export class NarrativeEngine {
                 targetDay,
                 timelineMode,
                 povCharIds,
-                librarianOut.selected_entity_ids,
+                mergedSelectedEntityIds,
                 recallSlices,
                 options.chapterGoal,
                 staticPrefix,
                 previousChapter,
                 futureHorizon,
                 opsStyleAmendments,
-                plannerInjection,
+                effectivePlannerInjection,
                 retryOptions,
                 totalUsage,
                 planConflictFeedback,
@@ -938,7 +1025,7 @@ export class NarrativeEngine {
                 targetDay,
                 timelineMode,
                 povCharIds,
-                librarianOut.selected_entity_ids,
+                mergedSelectedEntityIds,
                 recallSlices,
                 activeOutline,
                 staticPrefix,
@@ -992,7 +1079,7 @@ export class NarrativeEngine {
                             targetDay,
                             timelineMode,
                             povCharIds,
-                            librarianOut.selected_entity_ids,
+                            mergedSelectedEntityIds,
                             recallSlices,
                             activeOutline,
                             staticPrefix,
@@ -1029,7 +1116,7 @@ export class NarrativeEngine {
                     targetDay,
                     timelineMode,
                     povCharIds,
-                    librarianOut.selected_entity_ids,
+                    mergedSelectedEntityIds,
                     recallSlices,
                     activeOutline,
                     activeProse,
@@ -1102,7 +1189,7 @@ export class NarrativeEngine {
                         targetDay,
                         timelineMode,
                         povCharIds,
-                        librarianOut.selected_entity_ids,
+                        mergedSelectedEntityIds,
                         recallSlices,
                         activeOutline,
                         staticPrefix,
@@ -1338,7 +1425,7 @@ export class NarrativeEngine {
             const extracted = await generateJson(
                 this.llm,
                 extractReq,
-                ExtractorOutputSchema,
+                buildExtractorSchema(snapshot),
                 retryOptions,
                 options.signal
             );
@@ -1347,7 +1434,7 @@ export class NarrativeEngine {
             await this.store.commitDraft(dirty.chapterNumber, currentText);
             const patchRes = await this.store.applyStatePatch(
                 dirty.chapterNumber,
-                extracted.data.entity_patches as EntityPatch[]
+                sanitizeExtractorPatches(snapshot, extracted.data.entity_patches as EntityPatch[])
             );
 
             return {
