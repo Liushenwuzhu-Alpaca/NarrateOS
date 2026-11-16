@@ -1231,6 +1231,7 @@ export class NarrateRuntimeController {
     }
 
     private async runYoloLoop(targetChapters: number, defaultGoal: string): Promise<void> {
+        let lastNextChapterOptions: string[] = [];
         try {
             while (
                 !this.yoloState.stopRequested &&
@@ -1239,14 +1240,23 @@ export class NarrateRuntimeController {
             ) {
                 const pendingSignals = await this.consumePendingSignals();
                 let chapterGoal = defaultGoal;
+                if (defaultGoal === DEFAULT_YOLO_GOAL && lastNextChapterOptions.length > 0) {
+                    const optionsText = lastNextChapterOptions
+                        .map((opt, idx) => `${idx + 1}. ${opt}`)
+                        .join('\n');
+                    chapterGoal = `${defaultGoal}\n\n[上章延续候选方向（请择优展开其一）]\n${optionsText}`;
+                }
                 if (pendingSignals.length > 0) {
                     const summary = pendingSignals
                         .map((s) => JSON.stringify(s))
                         .join('; ');
-                    chapterGoal = `${defaultGoal}\n\n[待响应运维信号] ${summary}`;
+                    chapterGoal = `${chapterGoal}\n\n[待响应运维信号] ${summary}`;
                 }
 
                 const stepRes = await this.executeSingleStep({ chapterGoal }, true);
+                lastNextChapterOptions = Array.isArray(stepRes.nextChapterOptions)
+                    ? stepRes.nextChapterOptions
+                    : [];
                 this.yoloState.completedChapters++;
 
                 if (this.yoloState.stopRequested || this.shuttingDown || this.haltRequested) {

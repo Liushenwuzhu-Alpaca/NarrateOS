@@ -237,11 +237,12 @@ function upsertVolumeCardEntry(
     return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
 }
 
-/** 将 SlicedView 中的实体与召回切片序列化为审校验真语料 */
+/** 将 SlicedView 中的实体、召回切片与卷包络序列化为审校验真语料 */
 function buildVerificationCorpus(
     slicedView: SlicedView,
     recallSlices: RecallSlice[],
-    previousChapter?: PreviousChapterContext
+    previousChapter?: PreviousChapterContext,
+    currentArcEnvelope?: string | null
 ): string {
     const parts: string[] = [];
     for (const profile of Object.values(slicedView.entities)) {
@@ -252,6 +253,9 @@ function buildVerificationCorpus(
     }
     if (previousChapter?.fullText) {
         parts.push(previousChapter.fullText);
+    }
+    if (currentArcEnvelope && currentArcEnvelope.trim().length > 0) {
+        parts.push(`## 当前卷包络与阶段禁区 (current_arc_envelope.md)\n${currentArcEnvelope.trim()}`);
     }
     return parts.join('\n\n');
 }
@@ -433,17 +437,52 @@ export class NarrativeEngine {
         return result;
     }
 
-    /** 读取上一章上下文 */
-    private async loadPreviousChapter(currentCh: number): Promise<PreviousChapterContext | undefined> {
+    /** 从 L2 卷级章卡中提取指定章节的摘要 */
+    private async loadChapterSummaryFromCards(
+        chapterNumber: number,
+        currentVolume: number
+    ): Promise<string | undefined> {
+        const chKey = formatChapterKey(chapterNumber);
+        const sectionRe = new RegExp(
+            `^##\\s+${chKey}\\b[^\\n]*\\n([\\s\\S]*?)(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
+            'm'
+        );
+        const candidateVolumes = currentVolume > 1 ? [currentVolume, currentVolume - 1] : [currentVolume];
+        for (const vol of candidateVolumes) {
+            const cardPath = join(
+                this.store.bookRoot,
+                `index/L2_cards/vol_${String(vol).padStart(2, '0')}_cards.md`
+            );
+            const raw = await readOptionalText(cardPath);
+            if (!raw) continue;
+            const match = raw.match(sectionRe);
+            if (!match?.[1]) continue;
+            const blockBody = match[1].trim();
+            const mainPlotMatch = blockBody.match(/^-\s*主干剧情：\s*(.+)$/m);
+            const extracted = mainPlotMatch?.[1]?.trim() || blockBody;
+            if (extracted.length > 0) {
+                return extracted;
+            }
+        }
+        return undefined;
+    }
+
+    /** 读取上一章上下文（含 L2 章卡摘要） */
+    private async loadPreviousChapter(
+        currentCh: number,
+        currentVolume: number
+    ): Promise<PreviousChapterContext | undefined> {
         if (currentCh <= 1) return undefined;
         const prevCh = currentCh - 1;
         const prevText = await readOptionalText(
             join(this.store.bookRoot, 'manuscripts', `${formatChapterKey(prevCh)}.md`)
         );
         if (prevText === null) return undefined;
+        const summary = await this.loadChapterSummaryFromCards(prevCh, currentVolume);
         return {
             chapterNumber: prevCh,
-            fullText: prevText
+            fullText: prevText,
+            ...(summary ? { summary } : {})
         };
     }
 
@@ -488,6 +527,7 @@ export class NarrativeEngine {
         chapterNumber: number,
         targetDay: number,
         chapterGoal: string,
+        previousChapter: PreviousChapterContext | undefined,
         retryOptions: StructuredRetryOptions,
         totalUsage: TokenUsage,
         signal?: AbortSignal
@@ -511,6 +551,9 @@ export class NarrativeEngine {
             .join('\n');
 
         const worldSummary = snapshot.worldState.summaryMarkdown.trim();
+        const prevTailSlice = previousChapter?.fullText?.trim()
+            ? previousChapter.fullText.trim().slice(-600)
+            : '';
 
         const req: CleanroomRequest = {
             pool: 'fast_retrieval',
@@ -521,6 +564,9 @@ export class NarrativeEngine {
             dynamicTail: [
                 catalog.dynamicTail,
                 ...(worldSummary ? ['', '## 当前全局局势摘要 (world_state.md)', worldSummary] : []),
+                ...(prevTailSlice
+                    ? ['', '## 上一章末尾片段（防漏选刚登场的道具与词条）', prevTailSlice]
+                    : []),
                 '',
                 '## 可用实体档案列表',
                 entityList || '(暂无实体)',
@@ -587,6 +633,7 @@ export class NarrativeEngine {
         openThreads: string | undefined,
         opsStyleAmendments: string | undefined,
         plannerInjection: string,
+        voicePool: VoiceSamplePool | undefined,
         retryOptions: StructuredRetryOptions,
         totalUsage: TokenUsage,
         planConflictFeedback?: string,
@@ -602,12 +649,25 @@ export class NarrativeEngine {
             entityIds: selectedEntityIds.length > 0 ? selectedEntityIds : undefined
         });
 
+        const availableVoiceTags = voicePool
+            ? Array.from(new Set(voicePool.samples.map((s) => s.tag.trim()).filter((t) => t.length > 0)))
+            : [];
+
         const goalWithFeedback = [
             chapterGoal,
             openThreads ? `\n## 跨卷未解伏笔 (open_threads.md)\n${openThreads}` : '',
+            availableVoiceTags.length > 0
+                ? `\n## 可用声纹标签枚举 (preferred_voice_tag)\n请从以下标签中择一填入 preferred_voice_tag：${availableVoiceTags.join('、')}`
+                : '',
             planConflictFeedback ? `\n## 必须修正的物理/因果冲突 (v2 重规划)\n${planConflictFeedback}` : '',
             plannerInjection ? `\n## 激活文风插件指导\n${plannerInjection}` : '',
-            '\n请严格输出符合 PlannerOutlineSchema 的 JSON 细纲（含 chapter_title, target_word_count, focus_cast, background_cast, ending_beat, scene_plan, outline_text）。'
+            [
+                '\n## 细纲防泄底与波折规范',
+                '- director_rationale：结合 OMNISCIENT_SECRET 与 future_horizon 推演幕后因果与长期布局（该字段仅作导演内参，写手不可见）。',
+                '- chapter_turn：明确本章发生的实质预期偏差、代价或认知/关系偏移，拒绝零阻力顺水推舟。',
+                '- outline_text：仅写当前 POV 可见的表面动作与感官指令，未到揭秘章严禁在 outline_text 中写破底牌。',
+                '- 请严格输出符合 PlannerOutlineSchema 的 JSON 细纲（含 chapter_title, target_word_count, focus_cast, background_cast, ending_beat, director_rationale, chapter_turn, scene_plan, outline_text, preferred_voice_tag）。'
+            ].join('\n')
         ]
             .filter(Boolean)
             .join('\n');
@@ -669,10 +729,12 @@ export class NarrativeEngine {
             entityIds: selectedEntityIds.length > 0 ? selectedEntityIds : undefined
         });
 
+        // 物理丢弃 outline.director_rationale，严禁导演全知内参泄漏至写手信道
         const outlineText = [
             `标题：${outline.chapter_title}`,
             `目标字数：${outline.target_word_count}`,
             `收尾节拍：${outline.ending_beat}`,
+            `本章实质波折：${outline.chapter_turn}`,
             outline.outline_text,
             writerInjection ? `\n文风插件要求：\n${writerInjection}` : ''
         ]
@@ -774,6 +836,7 @@ export class NarrativeEngine {
         outline: PlannerOutline,
         prose: string,
         previousChapter: PreviousChapterContext | undefined,
+        currentArcEnvelope: string | undefined,
         retryOptions: StructuredRetryOptions,
         totalUsage: TokenUsage,
         signal?: AbortSignal
@@ -788,7 +851,12 @@ export class NarrativeEngine {
             entityIds: selectedEntityIds.length > 0 ? selectedEntityIds : undefined
         });
 
-        const corpusText = buildVerificationCorpus(auditView, recallSlices, previousChapter);
+        const corpusText = buildVerificationCorpus(
+            auditView,
+            recallSlices,
+            previousChapter,
+            currentArcEnvelope
+        );
         const numberedParagraphs = splitParagraphs(prose)
             .map((p, idx) => `[P${idx}] ${p}`)
             .join('\n\n');
@@ -797,7 +865,7 @@ export class NarrativeEngine {
             pool: 'audit',
             staticPrefixBlocks: [
                 [
-                    '你是冷酷字面核查员 (Fact Checker)。请核查正文是否违反物理红线、POV 视角越界或算术闭合，并严格按以下 JSON 格式输出（只输出 ```json ... ``` 代码块）：',
+                    '你是冷酷字面核查员 (Fact Checker)。请核查正文是否违反物理红线、POV 视角越界、算术闭合或提前揭穿 current_arc_envelope.md 中的阶段天花板禁区 (Stage Ceiling)，并严格按以下 JSON 格式输出（只输出 ```json ... ``` 代码块）：',
                     '```json',
                     '{',
                     '  "passed": true,',
@@ -812,6 +880,7 @@ export class NarrativeEngine {
                     '  ]',
                     '}',
                     '```',
+                    '若正文或细纲提前揭穿了 current_arc_envelope.md 中的 Stage Ceiling 禁区，必须直接输出 severity: "PLAN_CONFLICT"。',
                     '若核查通过无硬伤，直接输出 {"passed": true, "issues": []}。'
                 ].join('\n')
             ],
@@ -883,6 +952,7 @@ export class NarrativeEngine {
         stateCommitSha: string;
         updatedEntities: string[];
         telemetry: ReturnType<typeof computeTelemetry>;
+        nextChapterOptions: string[];
     }> {
         const extractorView = this.slicer.slice({
             snapshot,
@@ -901,7 +971,7 @@ export class NarrativeEngine {
             pool: 'fast_retrieval',
             staticPrefixBlocks: [
                 [
-                    '你是增量状态抽取器 (Extractor)。请根据定稿正文抽取实体补丁 (entity_patches)、故事天数推进量 (story_day_delta) 与章卡摘要 (chapter_summary)，严格按以下 JSON 格式输出（只输出 ```json ... ``` 代码块）：',
+                    '你是增量状态抽取器 (Extractor)。请根据定稿正文抽取实体补丁 (entity_patches)、故事天数推进量 (story_day_delta)、章卡摘要 (chapter_summary) 与下一章候选推进方向 (next_chapter_options)，严格按以下 JSON 格式输出（只输出 ```json ... ``` 代码块）：',
                     '```json',
                     '{',
                     '  "entity_patches": [',
@@ -922,10 +992,17 @@ export class NarrativeEngine {
                     '  ],',
                     '  "story_day_delta": 0,',
                     '  "chapter_summary": "一句话概括本章核心剧情进展",',
-                    '  "world_summary_markdown": "更新后的全局当前局势摘要（可选，当主线局势发生推进时填写）"',
+                    '  "world_summary_markdown": "更新后的全局当前局势摘要（可选，当主线局势发生推进时填写）",',
+                    '  "next_chapter_options": [',
+                    '    "结合本章结尾悬念与当前卷目标的下一章具象推进方向 1",',
+                    '    "结合本章结尾悬念与当前卷目标的下一章具象推进方向 2"',
+                    '  ]',
                     '}',
                     '```',
-                    '重要：勿修改先天红线(innate_locks_ops)；引用已有实体时不填 canonical_name，若首次新建 char_/item_ 实体则必须填写标准中文 canonical_name。'
+                    '重要规则：',
+                    '1. 勿修改先天红线(innate_locks_ops)；引用已有实体时不填 canonical_name，若首次新建 char_/item_ 实体则必须填写标准中文 canonical_name。',
+                    '2. 若本章已正式揭晓某条隐藏秘密，请通过 acquired_state_ops 的 upsert_slot 将对应槽位的 visibility 从 OMNISCIENT_SECRET 翻转为 PUBLIC 或 READER_KNOWN。',
+                    '3. 请结合本章结尾悬念与当前卷目标，输出 2~3 条具象的 next_chapter_options 候选推进方向。'
                 ].join('\n')
             ],
             dynamicTail: [
@@ -973,12 +1050,21 @@ export class NarrativeEngine {
             extraCommitPaths.push('.ops/voice_samples.yaml');
         }
 
+        const nextChapterOptions = extracted.next_chapter_options;
+        await writeFile(
+            join(this.store.bookRoot, '.ops/next_chapter_options.json'),
+            `${JSON.stringify(nextChapterOptions, null, 4)}\n`,
+            'utf8'
+        );
+        extraCommitPaths.push('.ops/next_chapter_options.json');
+
         // 将本章摘要写入或更新至对应卷的双轨章卡 (index/L2_cards/vol_XX_cards.md)
         const currentVolume = snapshot.worldState.frontmatter.current_volume;
-        const nextStoryDay =
-            timelineMode === 'FLASHBACK'
-                ? targetDay
-                : snapshot.worldState.frontmatter.story_day + extracted.story_day_delta;
+        const freezeMainlineStoryDay =
+            timelineMode === 'FLASHBACK' || timelineMode === 'PARALLEL';
+        const nextStoryDay = freezeMainlineStoryDay
+            ? targetDay
+            : snapshot.worldState.frontmatter.story_day + extracted.story_day_delta;
         const cardRelPath = `index/L2_cards/vol_${String(currentVolume).padStart(2, '0')}_cards.md`;
         const cardAbsPath = join(this.store.bookRoot, cardRelPath);
         await mkdir(join(this.store.bookRoot, 'index/L2_cards'), { recursive: true });
@@ -993,13 +1079,15 @@ export class NarrativeEngine {
         await writeFile(cardAbsPath, updatedCard, 'utf8');
         extraCommitPaths.push(cardRelPath);
 
-        // FLASHBACK 模式严禁推进 story_day 或覆写当前阶段游标
+        // FLASHBACK 模式严禁推进 story_day 或覆写当前阶段游标；PARALLEL 模式不累加主线 story_day
         const worldStateUpdate =
             timelineMode === 'FLASHBACK'
                 ? undefined
                 : {
                       current_chapter: Math.max(snapshot.worldState.frontmatter.current_chapter, chapterNumber),
-                      story_day: snapshot.worldState.frontmatter.story_day + extracted.story_day_delta,
+                      story_day: freezeMainlineStoryDay
+                          ? snapshot.worldState.frontmatter.story_day
+                          : snapshot.worldState.frontmatter.story_day + extracted.story_day_delta,
                       pov_character: povCharIds[0] ?? snapshot.worldState.frontmatter.pov_character,
                       timeline_mode: timelineMode,
                       summaryMarkdown: extracted.world_summary_markdown
@@ -1017,7 +1105,8 @@ export class NarrativeEngine {
         return {
             stateCommitSha: patchRes.sha,
             updatedEntities: patchRes.updatedEntities,
-            telemetry
+            telemetry,
+            nextChapterOptions
         };
     }
 
@@ -1087,7 +1176,8 @@ export class NarrativeEngine {
                 patchRounds: 0,
                 telemetry: stateRes.telemetry,
                 totalUsage,
-                updatedEntities: stateRes.updatedEntities
+                updatedEntities: stateRes.updatedEntities,
+                nextChapterOptions: stateRes.nextChapterOptions
             };
         }
 
@@ -1107,7 +1197,10 @@ export class NarrativeEngine {
         );
 
         const { gateRules, plannerInjection, writerInjection } = await this.loadActivePlugins(snapshot.config);
-        const previousChapter = await this.loadPreviousChapter(chapterNumber);
+        const previousChapter = await this.loadPreviousChapter(
+            chapterNumber,
+            snapshot.worldState.frontmatter.current_volume
+        );
         const futureHorizon = (await readOptionalText(join(this.store.bookRoot, 'world/future_horizon.md'))) ?? undefined;
         const openThreads = normalizeOpenThreads(
             await readOptionalText(join(this.store.bookRoot, 'world/open_threads.md'))
@@ -1127,6 +1220,7 @@ export class NarrativeEngine {
             chapterNumber,
             targetDay,
             options.chapterGoal,
+            previousChapter,
             retryOptions,
             totalUsage,
             options.signal
@@ -1187,6 +1281,7 @@ export class NarrativeEngine {
                 openThreads,
                 opsStyleAmendments,
                 effectivePlannerInjection,
+                voicePool,
                 retryOptions,
                 totalUsage,
                 planConflictFeedback,
@@ -1300,6 +1395,7 @@ export class NarrativeEngine {
                     activeOutline,
                     activeProse,
                     previousChapter,
+                    staticPrefix.currentArcEnvelope,
                     retryOptions,
                     totalUsage,
                     options.signal
@@ -1433,7 +1529,8 @@ export class NarrativeEngine {
             patchRounds,
             telemetry: stateRes.telemetry,
             totalUsage,
-            updatedEntities: stateRes.updatedEntities
+            updatedEntities: stateRes.updatedEntities,
+            nextChapterOptions: stateRes.nextChapterOptions
         };
     }
 

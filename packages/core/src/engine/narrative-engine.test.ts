@@ -200,6 +200,8 @@ const PLANNER_OK = {
     focus_cast: ['char_001', 'char_002'],
     background_cast: ['item_001'],
     ending_beat: 'HOOK',
+    director_rationale: '幕后内参：陆沉暗中藏着备用铁盒钥匙，但本章尚未到揭秘时机，表面仅让他用黄铜钥匙应付星野琉璃的查验。',
+    chapter_turn: '星野琉璃突然将票据核验期限提前至明晚放学前，迫使陆沉必须在二十四小时内筹齐三张缺失票据。',
     scene_plan: [
         {
             scene_index: 1,
@@ -230,7 +232,11 @@ const EXTRACTOR_OK = {
         }
     ],
     story_day_delta: 0,
-    chapter_summary: '星野琉璃通知陆沉在次日放学前补齐三张经费票据，陆沉持黄铜钥匙打开活动室门。'
+    chapter_summary: '星野琉璃通知陆沉在次日放学前补齐三张经费票据，陆沉持黄铜钥匙打开活动室门。',
+    next_chapter_options: [
+        '陆沉翻查社团旧账本追查缺失的三张票据去向',
+        '星野琉璃在学生会档案室发现旧校舍封存批文的异常签字'
+    ]
 };
 
 afterEach(async () => {
@@ -276,8 +282,14 @@ describe('NarrativeEngine', () => {
         expect(result.replanCount).toBe(0);
         expect(result.rewriteCount).toBe(0);
         expect(result.patchRounds).toBe(0);
+        expect(result.nextChapterOptions).toEqual(EXTRACTOR_OK.next_chapter_options);
 
-        // 验证 Writer 请求严格剥离了 char_002 的 SELF_ONLY、char_001 的 OMNISCIENT_SECRET 与 WARPED 词条
+        // 验证 Planner 请求注入了 voicePool 可用 tag 枚举
+        const plannerCall = llm.history[1];
+        expect(plannerCall?.request.dynamicTail).toContain('对峙');
+        expect(plannerCall?.request.dynamicTail).toContain('日常');
+
+        // 验证 Writer 请求严格剥离了 char_002 的 SELF_ONLY、char_001 的 OMNISCIENT_SECRET、WARPED 词条与 director_rationale
         const writerCall = llm.history[2];
         expect(writerCall).toBeDefined();
         expect(writerCall?.request.pool).toBe('strong_creative');
@@ -285,8 +297,15 @@ describe('NarrativeEngine', () => {
         expect(writerCall?.request.dynamicTail).not.toContain('秘密持有备用铁盒钥匙');
         expect(writerCall?.request.dynamicTail).not.toContain('WARPED');
         expect(writerCall?.request.dynamicTail).not.toContain('已遗失旧校舍钥匙的废止记忆');
+        expect(writerCall?.request.dynamicTail).not.toContain(PLANNER_OK.director_rationale);
+        expect(writerCall?.request.dynamicTail).toContain(PLANNER_OK.chapter_turn);
+        expect(writerCall?.request.dynamicTail).toContain(PLANNER_OK.outline_text);
         // Planner 与 Writer 静态前缀哈希必须一致
-        expect(llm.history[1]?.prefixHash).toBe(writerCall?.prefixHash);
+        expect(plannerCall?.prefixHash).toBe(writerCall?.prefixHash);
+
+        // 验证 .ops/next_chapter_options.json 已落盘
+        const savedOptionsRaw = await readFile(join(bookRoot, '.ops/next_chapter_options.json'), 'utf8');
+        expect(JSON.parse(savedOptionsRaw)).toEqual(EXTRACTOR_OK.next_chapter_options);
 
         // 验证 <blocking> 标签已被剥离，且正文已落盘
         const savedChapter = await readFile(join(bookRoot, 'manuscripts/ch_0002.md'), 'utf8');
@@ -940,5 +959,118 @@ describe('NarrativeEngine', () => {
         expect(l2CardRaw).toContain('## ch_0002 (day:1)');
         expect(l2CardRaw).toContain(`- 主干剧情：${EXTRACTOR_OK.chapter_summary}`);
         expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+    });
+
+    it('违反 current_arc_envelope.md Stage Ceiling 时应触发 PLAN_CONFLICT 重规划', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+
+        await writeFile(
+            join(bookRoot, 'world/current_arc_envelope.md'),
+            [
+                '# 第一卷包络 (Current Arc Envelope)',
+                '',
+                '## Stage Ceiling (本卷阶段天花板禁区)',
+                '- 本卷严禁提前揭穿「校长室地下室的旧钟楼密道」真相'
+            ].join('\n'),
+            'utf8'
+        );
+        await system.commitPaths(bookRoot, ['.'], 'chore: add Stage Ceiling in arc envelope');
+
+        const ceilingBreachOutline = {
+            ...PLANNER_OK,
+            outline_text: '陆沉在活动室直接推开墙柜，提前揭穿校长室地下室的旧钟楼密道真相。'
+        };
+        const ceilingBreachProse = [
+            '陆沉推开墙柜，当场指认了校长室地下室的旧钟楼密道。',
+            '星野琉璃沉默地看着他。'
+        ].join('\n\n');
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK),
+            jsonResponse(ceilingBreachOutline),
+            textResponse(ceilingBreachProse),
+            jsonResponse({
+                passed: false,
+                issues: [
+                    {
+                        severity: 'PLAN_CONFLICT',
+                        description: '正文与细纲提前揭穿了 Stage Ceiling 禁区：校长室地下室的旧钟楼密道',
+                        quote_draft: '陆沉推开墙柜，当场指认了校长室地下室的旧钟楼密道',
+                        quote_source: '本卷严禁提前揭穿「校长室地下室的旧钟楼密道」真相'
+                    }
+                ]
+            }),
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            jsonResponse(EXTRACTOR_OK)
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.stepChapter({
+            chapterGoal: '测试 Stage Ceiling 守卫触发 PLAN_CONFLICT'
+        });
+
+        expect(result.status).toBe('COMMITTED');
+        expect(result.replanCount).toBe(1);
+
+        const factCheckerCall = llm.history[3];
+        expect(factCheckerCall?.request.staticPrefixBlocks.join('\n')).toContain('Stage Ceiling');
+        expect(factCheckerCall?.request.dynamicTail).toContain('本卷严禁提前揭穿「校长室地下室的旧钟楼密道」真相');
+    });
+
+    it('PARALLEL 模式下主线 story_day 保持不变，且能从 L2 章卡提取前章摘要并向 Librarian 附入前章末尾 600 字', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+
+        // 预置 ch_0001 正文与 L2 章卡摘要，并调低 writer_token_budget 以触发前章摘要+尾窗渲染
+        const ch1Tail = '上一章末尾关键动作：星野琉璃把一枚刻着编号 07 的铜铃放在窗台。';
+        const ch1Prose = `${'雨滴敲打着旧校舍的玻璃窗。'.repeat(80)}\n\n${ch1Tail}`;
+        await mkdir(join(bookRoot, 'manuscripts'), { recursive: true });
+        await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), ch1Prose, 'utf8');
+        await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
+        await writeFile(
+            join(bookRoot, 'index/L2_cards/vol_01_cards.md'),
+            '# 第 1 卷双轨章卡\n\n## ch_0001 (day:1)\n- 主干剧情：星野琉璃留下编号 07 的铜铃并约定次日再会。\n',
+            'utf8'
+        );
+        const cfgRaw = await readFile(join(bookRoot, 'world/book_config.yaml'), 'utf8');
+        const cfgObj = parseYaml(cfgRaw) as Record<string, unknown>;
+        cfgObj['writer_token_budget'] = 1200;
+        await writeFile(join(bookRoot, 'world/book_config.yaml'), stringifyYaml(cfgObj), 'utf8');
+        await system.commitPaths(bookRoot, ['.'], 'chore: seed ch_0001 and vol_01_cards');
+
+        const beforeSnapshot = await store.loadSnapshot();
+        const beforeStoryDay = beforeSnapshot.worldState.frontmatter.story_day;
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK),
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            jsonResponse({
+                ...EXTRACTOR_OK,
+                story_day_delta: 3
+            })
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.stepChapter({
+            chapterGoal: '并行视角推进支线',
+            timelineMode: 'PARALLEL'
+        });
+
+        expect(result.status).toBe('COMMITTED');
+
+        // 1. PARALLEL 模式下主线 story_day 不累加
+        const afterSnapshot = await store.loadSnapshot();
+        expect(afterSnapshot.worldState.frontmatter.story_day).toBe(beforeStoryDay);
+
+        // 2. Librarian 收到上一章末尾 600 字切片
+        const librarianCall = llm.history[0];
+        expect(librarianCall?.request.dynamicTail).toContain(ch1Tail);
+
+        // 3. Writer 在预算触发窗口模式时收到从 L2 章卡提取的前章摘要
+        const writerCall = llm.history[2];
+        expect(writerCall?.request.dynamicTail).toContain('星野琉璃留下编号 07 的铜铃并约定次日再会。');
     });
 });

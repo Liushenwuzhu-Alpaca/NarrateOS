@@ -71,6 +71,8 @@ export const PlannerOutlineSchema = z.object({
     focus_cast: z.array(z.string()).min(1),
     background_cast: z.array(z.string()).default([]),
     ending_beat: z.enum(['HOOK', 'AFTERGLOW', 'CLOSURE']).default('HOOK'),
+    director_rationale: z.string().default(''),
+    chapter_turn: z.string().min(1),
     scene_plan: z.array(PlannerSceneSchema).min(1),
     outline_text: z.string().min(1),
     preferred_voice_tag: z.string().optional()
@@ -161,7 +163,8 @@ export const ExtractorOutputSchema = z.object({
     entity_patches: z.array(EntityPatchSchema).default([]),
     story_day_delta: z.number().int().min(0).default(0),
     chapter_summary: z.string().min(1),
-    world_summary_markdown: z.string().optional()
+    world_summary_markdown: z.string().optional(),
+    next_chapter_options: z.array(z.string().min(1)).default([])
 });
 
 export type ExtractorOutput = z.infer<typeof ExtractorOutputSchema>;
@@ -239,6 +242,7 @@ export interface StepChapterResult {
     telemetry: TelemetryMetrics;
     totalUsage: TokenUsage;
     updatedEntities: string[];
+    nextChapterOptions: string[];
 }
 
 /** syncManuscripts 调用参数 */

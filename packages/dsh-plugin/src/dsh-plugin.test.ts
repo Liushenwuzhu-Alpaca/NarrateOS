@@ -716,16 +716,118 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
                     yield { type: 'finish', reason: { kind: 'stop' } };
                     return;
                 }
+                if (prompt.includes('Phase 1A')) {
+                    const proposal = {
+                        coordinates: {
+                            topology: 'CONTINUOUS_ESCALATION',
+                            tensionDrivers: ['EPISTEMIC_GAP'],
+                            endgame: 'CONVERGENT_CLOSURE'
+                        },
+                        excludedCliches: ['失忆开局', '天降系统', '反派无脑送人头'],
+                        pitches: [
+                            {
+                                index: 0,
+                                title: '雾港钟表匠',
+                                logline: '调查员在雨夜码头捡到一只倒走怀表，发现失踪船员的线索被封存在表壳内。',
+                                coreHook: '每次拨动表冠，表盘都会映射出一段被掩盖的旧船坞记录。',
+                                antiClicheNote: '无超凡系统加持，全部依靠实证拼图推进。'
+                            },
+                            {
+                                index: 1,
+                                title: '潮汐账本',
+                                logline: '老旧船坞的潮汐时刻表与三年前沉船案的保险赔付单完全重合。',
+                                coreHook: '幕后经手人仍在港务局内部销毁物理证据。',
+                                antiClicheNote: '双线并进，反派同样在主动反侦察。'
+                            }
+                        ]
+                    };
+                    yield { type: 'text-delta', index: 0, text: JSON.stringify(proposal) };
+                    yield { type: 'usage', usage: { inputTokens: 50, outputTokens: 80 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                    return;
+                }
+                if (prompt.includes('候选切口列表')) {
+                    yield {
+                        type: 'text-delta',
+                        index: 0,
+                        text: JSON.stringify({
+                            selectedIndex: 0,
+                            rationale: '切口 0 兼具悬念张力与实证推理空间。'
+                        })
+                    };
+                    yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 20 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                    return;
+                }
+                if (prompt.includes('脱离 JSON 格式限制')) {
+                    const bible = [
+                        '# 全书架构圣经',
+                        '',
+                        '## 1. 里账本底层真相与代价定律',
+                        '倒走怀表实为走私船队加密计时器，周伯曾参与篡改航道信号。',
+                        '',
+                        '## 2. 全书母题与卷级蓝图',
+                        '- vol_01: 雾港迷局',
+                        '- vol_02: 深水回响',
+                        '',
+                        '## 3. 第 1 卷三幕拐点与阶段天花板',
+                        'Ch.01 雨夜码头拾获怀表，本卷天花板止于揭露旧船坞走私链。',
+                        '',
+                        '## 4. 核心角色',
+                        '林彻、苏岚、周伯、倒走怀表。',
+                        '',
+                        '## 5. 伏笔与外部惯性',
+                        '失踪怀表与港务局清点封条事件。'
+                    ].join('\n');
+                    yield { type: 'text-delta', index: 0, text: bible };
+                    yield { type: 'usage', usage: { inputTokens: 60, outputTokens: 120 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                    return;
+                }
+                if (prompt.includes('执行异构剧透盲审')) {
+                    yield {
+                        type: 'text-delta',
+                        index: 0,
+                        text: JSON.stringify({
+                            recallRate: 1,
+                            missingFacts: [],
+                            t0Leaks: [],
+                            publicSpoilerLeaks: [],
+                            passed: true
+                        })
+                    };
+                    yield { type: 'usage', usage: { inputTokens: 40, outputTokens: 20 } };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                    return;
+                }
                 const bootPayload = {
                     worldSummary: '新开作品世界摘要',
                     staticBaseAndVoice: '冷峻写实文风基线',
-                    currentArcEnvelope: '第一卷：雾港迷局',
+                    currentArcEnvelope: '第一卷：雾港迷局；Ch.01 雨夜码头拾获倒走怀表；Stage Ceiling 止于旧船坞走私链。',
+                    l0SagasMarkdown: '# L0 纪元折叠总表\n\n- saga_01: 雾港真相与代价',
+                    l1VolumesMarkdown: '# L1 活跃卷级总表\n\n- vol_01: 第一卷 雾港迷局 (story_day: 0..)\n- vol_02: 第二卷 深水回响 (待开启)',
                     voiceSamples: [{ tag: 'narrator', sample: '雨落在码头铁皮棚顶上。' }],
                     openThreads: [
                         {
                             threadId: 'thread_01',
                             title: '失踪的怀表',
                             wakeupCondition: '主角抵达旧船坞'
+                        }
+                    ],
+                    futureHorizonEvents: [
+                        {
+                            eventId: 'evt_01',
+                            storyDay: 3,
+                            premise: '旧船坞未提前封锁',
+                            description: '港务局例行清点仓库封条'
+                        }
+                    ],
+                    loreEntries: [
+                        {
+                            id: 'lore_01',
+                            title: '雾港潮汐钟',
+                            summary: '旧码头用于校准货轮进出港的机械钟表体系',
+                            content: '每逢大潮夜，雾港旧灯塔与码头钟楼会同步校准机械齿轮。'
                         }
                     ],
                     entities: [
@@ -735,12 +837,41 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
                             uniqueAliases: ['林调查员'],
                             contextualTitles: [],
                             innateLocks: [{ visibility: 'PUBLIC', text: '左眉骨有旧疤' }],
-                            acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '身着深灰风衣' }],
+                            acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', slotKey: 'attire', text: '身着深灰风衣' }],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'char_su',
+                            canonicalName: '苏岚',
+                            uniqueAliases: ['苏法医'],
+                            contextualTitles: [],
+                            innateLocks: [{ visibility: 'PUBLIC', text: '习惯用左手记录笔记' }],
+                            acquiredState: [{ storyDay: 0, visibility: 'SELF_ONLY', slotKey: 'agenda', text: '暗中核对沉船名单' }],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'char_zhou',
+                            canonicalName: '周伯',
+                            uniqueAliases: ['老周'],
+                            contextualTitles: ['守夜人'],
+                            innateLocks: [{ visibility: 'OMNISCIENT_SECRET', text: '三年前曾篡改沉船航道信号' }],
+                            acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '在旧船坞值班室守夜' }],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'item_watch',
+                            canonicalName: '倒走怀表',
+                            uniqueAliases: ['铜壳怀表'],
+                            contextualTitles: [],
+                            innateLocks: [{ visibility: 'PUBLIC', text: '表壳内侧刻有编号 07' }],
+                            acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', slotKey: 'owner', text: '暂由林彻保管' }],
                             irreversibleTrajectory: [],
                             recentBuffer: []
                         }
-                    ],
-                    loreEntries: []
+                    ]
                 };
                 yield { type: 'text-delta', index: 0, text: JSON.stringify(bootPayload) };
                 yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 200 } };
@@ -1111,7 +1242,8 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
                         clicheDensityPer1k: 0.2
                     },
                     totalUsage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 },
-                    updatedEntities: []
+                    updatedEntities: [],
+                    nextChapterOptions: []
                 };
             },
             async syncManuscripts() {
@@ -1394,7 +1526,8 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
                         clicheDensityPer1k: 0.2
                     },
                     totalUsage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 },
-                    updatedEntities: []
+                    updatedEntities: [],
+                    nextChapterOptions: []
                 };
             },
             async syncManuscripts() {
@@ -1617,5 +1750,137 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
             if (prevAudit === undefined) delete process.env['NARRATEOS_MODEL_AUDIT'];
             else process.env['NARRATEOS_MODEL_AUDIT'] = prevAudit;
         }
+    });
+
+    it('YOLO 默认目标连跑时应消费上一章产出的 nextChapterOptions 拼入下一章 chapterGoal', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => {
+            await rm(bookRoot, { recursive: true, force: true });
+        });
+
+        const store = new BookStore(bookRoot, new NodeSystemAdapter());
+        const receivedGoals: string[] = [];
+        let callIndex = 0;
+
+        const fakeEngine = {
+            async stepChapter(options: { chapterGoal: string }) {
+                receivedGoals.push(options.chapterGoal);
+                callIndex++;
+                const ch = 1 + callIndex;
+                return {
+                    status: 'COMMITTED' as const,
+                    chapterNumber: ch,
+                    manuscriptPath: `manuscripts/ch_000${ch}.md`,
+                    featCommitSha: 'sha1',
+                    stateCommitSha: 'sha2',
+                    outline: null,
+                    replanCount: 0,
+                    rewriteCount: 0,
+                    patchRounds: 0,
+                    telemetry: {
+                        charCount: 1000,
+                        wordCount: 500,
+                        sentenceCount: 20,
+                        mattr500: 0.7,
+                        kontoyiannisEntropy: 4.0,
+                        sentenceLengthCv: 0.4,
+                        clicheDensityPer1k: 0.2
+                    },
+                    totalUsage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 },
+                    updatedEntities: [],
+                    nextChapterOptions:
+                        callIndex === 1
+                            ? ['陆沉追查老钟表行里的残缺航海日志', '星野琉璃暗中核对沉船乘客名单']
+                            : []
+                };
+            },
+            async syncManuscripts() {
+                return {
+                    status: 'CLEAN' as const,
+                    dirtyChapters: [],
+                    updatedEntities: [],
+                    downstreamConflicts: [],
+                    totalUsage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const fakeDreaming = {
+            async runDreaming() {
+                return {
+                    skipped: true,
+                    vacuumedEntities: [],
+                    warpedNodesFlipped: 0,
+                    archivedFiles: [],
+                    spotlightTriggers: [],
+                    committedTxState: null,
+                    usage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never,
+            dreamingRunner: fakeDreaming as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+        const sseAbort = new AbortController();
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        async function readUntil(pred: (t: string) => boolean): Promise<string> {
+            const deadline = Date.now() + 4000;
+            while (!pred(sseBuf)) {
+                if (Date.now() > deadline) throw new Error(`SSE 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+            return sseBuf;
+        }
+        await readUntil((t) => t.includes('event: connected'));
+
+        const yoloStartRes = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 2 })
+        });
+        expect(yoloStartRes.status).toBe(202);
+        await readUntil((t) => t.includes('event: yolo_completed'));
+
+        expect(receivedGoals).toHaveLength(2);
+        expect(receivedGoals[0]).toBe('按既定主线与人物弧光自然推进下一章');
+        expect(receivedGoals[1]).toContain('陆沉追查老钟表行里的残缺航海日志');
+        expect(receivedGoals[1]).toContain('星野琉璃暗中核对沉船乘客名单');
+
+        sseAbort.abort();
     });
 });

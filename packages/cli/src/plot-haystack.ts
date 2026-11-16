@@ -563,13 +563,85 @@ export function createPlotHaystackScriptedLlm(targetChapters = 40): ScriptedLlmA
             };
         }
 
-        // 2. bootBook 编译世界与实体档案
+        // 2. bootBook: Phase 1A 开局定标与反俗套切口生成
+        if (req.pool === 'strong_creative' && tail.includes('Phase 1A')) {
+            return {
+                text: JSON.stringify({
+                    coordinates: {
+                        topology: 'CONTINUOUS_ESCALATION',
+                        tensionDrivers: ['EPISTEMIC_GAP', 'GOAL_FRICTION'],
+                        endgame: 'CONVERGENT_CLOSURE'
+                    },
+                    excludedCliches: [
+                        '主角凭空想起一切失落线索',
+                        '反派毫无理由地主动归还关键证物',
+                        '忽略角色物理旧伤与过敏禁忌'
+                    ],
+                    pitches: [
+                        {
+                            index: 0,
+                            title: '雾港长卷与03:17停摆大钟',
+                            logline: '钟表匠沈砚与学徒林默跨越四十章追踪失落账本与停摆大钟真相。',
+                            coreHook: '十组跨章物证与禁忌红线将在四十章内逐一闭合。',
+                            antiClicheNote: '严格维持物理红线、谎言信息差与得而复失极性反转。'
+                        },
+                        {
+                            index: 1,
+                            title: '旧港水闸孤城记',
+                            logline: '以旧港水闸为核心舞台展开潮汐密室调查。',
+                            coreHook: '水闸刻痕与怀表编号互为密码。',
+                            antiClicheNote: '拒绝工具人式全知视角。'
+                        }
+                    ]
+                }),
+                usage: { inputTokens: 620, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 240 },
+                modelId: 'haystack-mock'
+            };
+        }
+
+        // 3. bootBook: Phase 1B 自动择优拍板
+        if (req.pool === 'audit' && tail.includes('候选切口列表')) {
+            return {
+                text: JSON.stringify({
+                    selectedIndex: 0,
+                    rationale: '切口 0 最契合 40 章长卷盲测的伏笔回收结构。'
+                }),
+                usage: { inputTokens: 380, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 70 },
+                modelId: 'haystack-mock'
+            };
+        }
+
+        // 4. bootBook: Phase 1C 纯文本《全书架构圣经》
+        if (req.pool === 'strong_creative' && tail.includes('请脱离 JSON 格式限制')) {
+            return {
+                text: [
+                    '# 雾港长卷架构圣经',
+                    '## 1. 里账本底层真相与代价定律',
+                    '钟楼停摆时间 03:17 记录着当年大潮水闸锁死时刻，巡夜人与港务老吏各自隐瞒了部分账本真相。',
+                    '## 2. 全书母题（L0）与多卷蓝图（L1）',
+                    '第一卷聚焦线索埋设与中段失落；第二卷聚焦跨章兑现与真相合拢。',
+                    '## 3. 第一卷三幕拐点与开篇点火器',
+                    'Ch.01 沈砚取出银质怀表并绕开雪松熏料，Stage Ceiling 限制过早揭开 03:17 刻痕含义。',
+                    '## 4. 核心角色与默认轨迹',
+                    '沈砚、林默、巡夜人、港务老吏共同构成调查与阻滞网络。',
+                    '## 5. 首批跨卷伏笔与外部惯性事件',
+                    'thread_0317 停摆钟面；后续大潮周期推进调查节奏。'
+                ].join('\n\n'),
+                usage: { inputTokens: 780, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 310 },
+                modelId: 'haystack-mock'
+            };
+        }
+
+        // 5. bootBook: Phase 2 编译世界与实体档案
         if (req.pool === 'strong_creative' && tail.includes('编译模式:')) {
             return {
                 text: JSON.stringify({
                     worldSummary: '雾港钟楼与旧港码头构成潮汐孤城，钟表匠沈砚与学徒林默追查失落账本。',
                     staticBaseAndVoice: '冷峻写实，长短句交错，以器物与感官细节推进叙事。',
-                    currentArcEnvelope: '第一卷：雾港长卷（40 章盲测主线）。',
+                    currentArcEnvelope: '第一卷：雾港长卷（40 章盲测主线），Ch.01 由银质怀表与雪松禁忌点火。',
+                    l0SagasMarkdown: '# L0 纪元折叠总表\n\n- saga_01: 雾港钟楼与旧港水闸长卷',
+                    l1VolumesMarkdown:
+                        '# L1 活跃卷级总表\n\n- vol_01: 雾港长卷上篇 (story_day: 0..)\n- vol_02: 雾港长卷下篇 (待开启)',
                     voiceSamples: [
                         { tag: 'calm_dialogue', sample: '“钟摆不会自己停，”沈砚把铜尺放平，“总有人动过棘轮。”' }
                     ],
@@ -596,7 +668,7 @@ export function createPlotHaystackScriptedLlm(targetChapters = 40): ScriptedLlmA
                                 { visibility: 'PUBLIC', text: '左腕旧伤无法单手反拧重型生锈铁阀' }
                             ],
                             acquiredState: [
-                                { storyDay: 1, visibility: 'PUBLIC', slotKey: 'location', text: '身处旧钟表铺' }
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '身处旧钟表铺' }
                             ],
                             irreversibleTrajectory: [],
                             recentBuffer: []
@@ -608,7 +680,36 @@ export function createPlotHaystackScriptedLlm(targetChapters = 40): ScriptedLlmA
                             contextualTitles: ['学徒'],
                             innateLocks: [{ visibility: 'PUBLIC', text: '不识旧港渔家密符' }],
                             acquiredState: [
-                                { storyDay: 1, visibility: 'PUBLIC', slotKey: 'location', text: '跟随沈砚调查' }
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '跟随沈砚调查' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'char_nightwatch',
+                            canonicalName: '老巡夜人',
+                            uniqueAliases: ['巡夜人'],
+                            contextualTitles: ['巷口巡更'],
+                            innateLocks: [
+                                {
+                                    visibility: 'OMNISCIENT_SECRET',
+                                    text: '当年亲眼见过钟楼水闸在 03:17 锁死的真实记录簿'
+                                }
+                            ],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'location', text: '在旧港巷口巡逻' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        },
+                        {
+                            entityId: 'item_silver_watch',
+                            canonicalName: '银质怀表',
+                            uniqueAliases: ['刻号怀表'],
+                            contextualTitles: ['旧物证'],
+                            innateLocks: [{ visibility: 'PUBLIC', text: '表壳内侧刻有细小编号' }],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'holder', text: '收存于沈砚木匣最底层' }
                             ],
                             irreversibleTrajectory: [],
                             recentBuffer: []
@@ -616,6 +717,22 @@ export function createPlotHaystackScriptedLlm(targetChapters = 40): ScriptedLlmA
                     ]
                 }),
                 usage: { inputTokens: 960, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 480 },
+                modelId: 'haystack-mock'
+            };
+        }
+
+        // 6. bootBook: Phase 3c 异构剧透盲审
+        if (req.pool === 'audit' && tail.includes('异构剧透盲审')) {
+            return {
+                text: JSON.stringify({
+                    recallRate: 1,
+                    missingFacts: [],
+                    t0Leaks: [],
+                    publicSpoilerLeaks: [],
+                    passed: true,
+                    notes: 'PUBLIC 视图与 T0 边界均合规。'
+                }),
+                usage: { inputTokens: 420, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 80 },
                 modelId: 'haystack-mock'
             };
         }
@@ -658,6 +775,7 @@ export function createPlotHaystackScriptedLlm(targetChapters = 40): ScriptedLlmA
                     focus_cast: ['char_shenyan', 'char_linmo'],
                     background_cast: [],
                     ending_beat: 'HOOK',
+                    chapter_turn: `第 ${plannedChapter} 章通过现场物证核对缩小了潮汐账本与停摆钟楼的排查范围。`,
                     scene_plan: [
                         {
                             scene_index: 1,
