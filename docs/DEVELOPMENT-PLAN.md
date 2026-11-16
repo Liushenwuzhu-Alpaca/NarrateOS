@@ -53,9 +53,9 @@ narrateos/
 | **`1. BookStore`** | `loadSnapshot()` / `commitDraft(ch, text)` / `applyStatePatch(ch, patch)` / `recoverWal()` / `detectDirtyChapters()` | 解析 `book_config.yaml` 与四段式实体 Markdown；执行行级槽位增量合并（禁整文件覆写）；拦截固有属性篡改 Diff；执行 1ms 跨文件外键（`char_*`/`item_*`/`ch_*`/`cold_archive`）可达性校验；驱动 `.ops/tx_state.json` 双粒度提交恢复与 `SHA-256` 比对。 |
 | **`2. ViewSlicer`** | `sliceForPlanner(snap, req)` / `sliceForWriter(snap, plan)` | 执行 `MAINLINE / PARALLEL / FLASHBACK` 三态 `story_day` 偏序过滤（插叙保留 `Innate Locks`、屏蔽 `Acquired`）；对非 `pov_character` 物理剥离 `SELF_ONLY` 与 `OMNISCIENT_SECRET`；转化 `READER_KNOWN` 戏剧反讽块；对写手物理剥离 `WARPED` 废止条目（灰象双视图隔离）；计算 `>30` 章未出场感官唤醒提示。 |
 | **`3. IndexRecall`** | `buildLibrarianCatalog(snap)` / `executePairedRecall(snap, query)` | 按「已封旧卷静态区 + 当前活跃卷动态尾」组装 `<100K` 目录；展开实名、唯一别名与职务称谓（限定出场章白名单）执行 `rg -C 2`；硬编码注入时间差信封；强制校验伏笔回收与证物重现场景的「档案视图 + 原稿切片」成对挂载。 |
-| **`4. PrefixAssembler`** | `assembleStrongPrompt(ctx)` / `assembleFastPrompt(ctx)` | 保证 `Planner` 与 `Writer` 前段静态前缀字节 100% 一致；从 `voice_samples.yaml` 按自定义标签执行 `LRU` 防连挂抽样；按需拼入 `ops_style_amendments.md` 与 `craft_plugins`；当配置了 `writer_token_budget` 且超限时，按四级顺序自动压缩直至达标（未设预算或未超标则无损直通）。 |
+| **`4. PrefixAssembler`** | `assemblePlannerRequest(ctx)` / `assembleWriterRequest(ctx)` | 保证同卷内 `Planner` 与 `Writer` 前段静态前缀（含 `static_base_and_voice.md` 与 `current_arc_envelope.md`）字节 100% 一致；提取 `voice_samples.yaml` 可用标签枚举供 `Planner` 选择，并在匹配标签内按 `LRU` 轮换抽样；对 `Writer` 物理丢弃 `PlannerOutline.director_rationale` 防细纲信道泄底；当配置了 `writer_token_budget` 且超限时，按四级顺序自动压缩（第 1 级自动组合 `L2` 上章摘要与 600 字尾窗）。 |
 | **`5. ProseGateAndTelemetry`** | `scanDraft(draft, recentChs, rulesCfg)` / `verifyDualQuotes(claims, store)` / `collectTelemetry(ch, usage)` | 提取并剥离头部 `<blocking>` 标签；运行可独立开关的 `Static Prose Gate` 正则配额表与跨章具象喻体复读检测，输出精确违规行号与上下窗口；执行双侧原句去标点子串验真；零模型计算 `MATTR-500`、Kontoyiannis 熵率 $\hat{H}_K$ 与句段长变异系数 CV。 |
-| **`6. NarrativeEngine`** | `bootBook()` / `stepChapter()` / `syncManuscripts()` / `runDreaming()` | 串联开书原创/同人 `T0` 编译与分词率标定；驱动单章双关审校闭环（`<=2` 段局部 `Patch` -> 整章重写 -> `PlanConflictException` 改纲 -> `SAFE_HALT`）；处理 `PARALLEL` 分支暂存与 3-Way Merge；执行人工手改 `Sync` 增量提状态与历史旧章下游只读冲突扫描；运行按脏页增量 `VACUUM`、`Spotlight Trigger` 信号派发及跨章穿帮三级自动梯度自愈。 |
+| **`6. NarrativeEngine`** | `bootBook()` / `stepChapter()` / `syncManuscripts()` / `runDreaming()` / `advanceVolume()` | 串联四阶段开书（三维正交坐标纯文本深推演 -> 三把手术刀编译 -> 三重门禁 -> 落盘）；驱动单章 6 步闭环（挂载选中 `lore_library` 词条与 `open_threads.md`、消费 `.ops/signals.jsonl`、`Stage Ceiling` 违规抛 `PlanConflictError`、落盘 `L2` 章卡并产出 `next_chapter_options`）；处理 `PARALLEL` 分支主时钟锁定与 3-Way Merge；执行人工手改 `Sync`；运行 `Dreaming`（脏页清洗、`open_threads` 周期立项/销账、`future_horizon` 多轨补货、`Spotlight Trigger` 派发与跨章三级自动自愈）及五步原子换卷 `advanceVolume()`。 |
 
 ---
 
@@ -95,20 +95,20 @@ narrateos/
     3. **门禁与遥测断言**：构造含 `<blocking>` 标签、S 姐七刀超标句与跨 5 章重复明喻的测试稿，`scanDraft()` 精确剥离标签并报出全部违规行号；捏造单字差异的伪原句被 `verifyDualQuotes()` 100% 拒止；`MATTR-500` 与 Kontoyiannis 熵率 $\hat{H}_K$ 在合成退化语料（重复文本 vs 自然样章）上呈现严格单调区分。
 
 ### Phase 3：双池前缀装配、单章自愈闭环与人工改稿同步 (`PrefixAssembler` + `stepChapter` + `syncManuscripts`)
-- **交付内容**：实现 `LlmPort`（含 `ScriptedLlmAdapter` 与结构化 JSON 校验/5 次指数退避修复重试）、`PrefixAssembler`（双池拼装、声纹标本 `LRU` 轮换、`writer_token_budget` 可配四级降级与无预算直通、`craft_plugins` 动态加载）、`NarrativeEngine.stepChapter()` 全链路审校自愈闭环、`NarrativeEngine.syncManuscripts()` 手改同步及 `@narrateos/cli` 基础命令。
+- **交付内容**：实现 `LlmPort`（含 `ScriptedLlmAdapter`、`LoggingLlmAdapter` 与结构化 JSON 校验/5 次指数退避修复重试）、`PrefixAssembler`（双池拼装、声纹标本多标签 `LRU` 轮换、`director_rationale` 物理剥离、`writer_token_budget` 可配四级降级与无预算直通、`craft_plugins` 动态加载）、`NarrativeEngine.stepChapter()` 全链路审校自愈闭环（含 `.ops/signals.jsonl` 消费、`lore_library` 读盘挂载、`L2` 章卡更新、新建实体 `canonical_name` 强校验与 `next_chapter_options` 产出）、`NarrativeEngine.syncManuscripts()` 手改同步及 `@narrateos/cli` 基础命令。
 - **完工判据（Exit Criteria）**：
   - 基于 `ScriptedLlmAdapter` 跑通全部状态机分支单测（退出码 `0`）：
-    1. **前缀零分叉断言**：同一卷内 `Planner` 与 `Prose Writer` 请求的静态前缀区字节序列 `SHA-256` 100% 相等；连续 3 章抽样 `voice_samples` 不发生相邻重复；设 `writer_token_budget = null` 时零裁剪直通，设紧预算时严格按四级顺序压入阈值内；
-    2. **分级返工断言**：注入 `<=2` 段八股/小穿帮仅触发局部 `Patch`（不重跑整章），注入细纲级悖论触发 `PlanConflictException` 改纲 v2，连续失败准确落入 `SAFE_HALT`；
+    1. **前缀零分叉与防泄底断言**：同一卷内 `Planner` 与 `Prose Writer` 请求的静态前缀区（含 `static_base_and_voice.md` 与 `current_arc_envelope.md`）字节序列 `SHA-256` 100% 相等；`PlannerOutline.director_rationale` 在 `Writer` 请求中出现次数为 `0`；同场景标签连续抽样 `voice_samples` 按 `LRU` 轮换不发生相邻重复；设 `writer_token_budget = null` 时零裁剪直通，设紧预算时严格按四级顺序压入阈值内；
+    2. **分级返工与落盘断言**：注入 `<=2` 段八股/小穿帮仅触发局部 `Patch`（不重跑整章），注入细纲级悖论或违反 `Stage Ceiling` 触发 `PlanConflictError` 改纲 v2，连续失败准确落入 `SAFE_HALT`；新建实体缺省中文 `canonical_name` 时触发结构化重试；定稿后 `index/L2_cards/vol_XX_cards.md` 准确写入本章摘要；
     3. **手改 `Sync` 断言**：修改最新章纯修辞零模型调用更新 `sha256`；修改最新章钥匙归属自动增量刷新实体卡；修改旧章自动输出下游冲突章号与行号且下游 `manuscripts/` 文件字节零变动。
 
-### Phase 4：开书编译器、多时间线合并与周期睡眠自愈 (`bootBook` + `PARALLEL` + `runDreaming`)
-- **交付内容**：实现原创试播集冷启动与同人 `T0` 设定包切分编译（含异构盲审、召回率 `>=98%` 守恒校验与动态 `tokens_per_char` 标定）、`PARALLEL` 分叉快照与 3-Way Merge（唯一物双线冲突拦截）、按脏页增量 `Dreaming`、`Spotlight Trigger` 前台切镜信号派发、以及基于 `max_auto_rollback_chapters` 的跨章穿帮三级自动自愈。
+### Phase 4：四阶段开书编译器、多时间线合并、周期睡眠与换卷交接 (`bootBook` + `PARALLEL` + `runDreaming` + `advanceVolume`)
+- **交付内容**：实现四阶段 `bootBook`（分词率标定 -> 三维正交坐标纯文本深推演与 `interactive / auto_best` 拍板 -> 三把手术刀结构化编译 -> 确定性配额/`T0` 扫描、声纹 `Static Prose Gate` 过滤与异构剧透盲审）、`PARALLEL` 分叉快照与 3-Way Merge（主时钟冻结与唯一物双线冲突拦截）、按脏页增量 `Dreaming`（含 `open_threads.md` 周期立项/销账与 `ACTIVE <= 15` 配额硬锁、`future_horizon.md` 多轨补货、`Spotlight Trigger` 派发及跨章穿帮三级自动自愈）、以及五步原子换卷 `advanceVolume()`。
 - **完工判据（Exit Criteria）**：
   - 自动化集成测试全部通过（退出码 `0`）：
-    1. 同人设定包编译后，`T0` 后事件在初始 `entities/*.md` 中残留数为 `0`，专有名词守恒率 `>=98%`；
-    2. `PARALLEL` 双线各写 2 章期间互不可见对方增量，汇合时成功合并非冲突状态，双线同时消耗同一 `item_001` 时被确定性拦截；
-    3. `Dreaming` 执行期间未出场干净实体文件 `mtime` 保持不变；离场角色达临界点产出 `Spotlight Trigger` 信号而非后台直接结算；模拟单点跨章硬穿帮自动完成历史 `Patch + Sync` 零停机修复，模拟阈值内支线穿帮自动打备份 Tag 并 `git reset` 重跑，超阈值准确触发 `SAFE_HALT` 并输出精确章数与字数。
+    1. 开书编译后，`T0` 后事件在初始 `entities/*.md` 中残留数为 `0`；`L0_sagas.md`、`L1_volumes.md` 与含 `Stage Ceiling` 的 `current_arc_envelope.md` 非空落盘；声纹池含八股词的示范句被 `Static Prose Gate` 100% 剔除；同人设定包专有名词守恒率 `>=98%`；
+    2. `PARALLEL` 双线各写 2 章期间互不可见对方增量且主线 `story_day` 不重复累加，汇合时成功合并非冲突状态，双线同时消耗同一 `item_001` 时被确定性拦截；
+    3. `Dreaming` 执行期间未出场干净实体文件 `mtime` 保持不变；`open_threads.md` 超配额或已兑现条目准确归档；离场角色达临界点产出 `Spotlight Trigger` 信号并在下一章 `stepChapter` 被自动挂载消费；`advanceVolume()` 准确封存旧卷章卡、将非随行旧角色移入 `cold_archive/`、提炼压缩 `style_amendments.md` 并递增 `current_volume`。
 
 ### Phase 5：`@deepseek-ai/dsh` 插件包、后端控制流与 Operator Studio 集成 (`packages/dsh-plugin` + `presets/`)
 - **交付内容**：先交付后端部分——实现 `DshLlmAdapter`（复用 `@deepseek-ai/dsh-llm` 无 `sessionId` 流式调度与限流重试）、`ctx.webServer` REST + SSE 控制/遥测接口、`presets/narrate-studio/` 模式配置与优雅停机钩子；待前端设计稿定稿后接续交付 `'main'` keyed 槽位（`narrate-studio`）Operator Studio 面板。

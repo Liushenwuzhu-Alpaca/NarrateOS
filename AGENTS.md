@@ -5,7 +5,7 @@
 ## 上下文指针（按需读取）
 
 - **领域词表与裁决基线** -> [`ROADMAP.md`](ROADMAP.md)：核对核心领域术语定义，或区分内核固化常量与作品可配变量时读取。
-- **业务工作流与数据契约** -> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：理解或修改 `books/<slug>/` 纯文本数据库布局、开书引导、动静前缀与按需裁剪、四段式补集档案与 POV 剥离、单章审校、手改 `Sync`、三态时间线、睡眠 `VACUUM` 或跨章三级自动自愈规则时读取。
+- **业务工作流与数据契约** -> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：理解或修改 `books/<slug>/` 纯文本数据库布局、四阶段开书引导（三维正交坐标与三把手术刀编译）、动静前缀与里表双账本隔离、单章审校、手改 `Sync`、三态时间线、睡眠 `VACUUM`、换卷交接（`advanceVolume`）或跨章三级自动自愈规则时读取。
 - **微观文风与门禁词典** -> [`docs/WRITING-CRAFT.md`](docs/WRITING-CRAFT.md)：编写规划/执笔提示词、配置 `Static Prose Gate` 可开关规则表（含跨章喻体复读），或扩展 `craft_plugins` 外置文风插件时读取。
 - **程序架构与分步开发计划** -> [`docs/DEVELOPMENT-PLAN.md`](docs/DEVELOPMENT-PLAN.md)：编写引擎代码、设计 `packages/core` 深模块与 `LlmPort` 接缝、开发 `@deepseek-ai/dsh` 插件与 `agent-preset` 模式包，或核查各施工阶段完工判据时读取。
 - **外部实证与底座源码备忘** -> [`docs/RESEARCH.md`](docs/RESEARCH.md)：查阅长篇评测论文数据、跨厂商 API 缓存/`logprobs` 边界，或核对 `@deepseek-ai/dsh` 源码机制时读取。
