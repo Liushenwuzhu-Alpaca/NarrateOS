@@ -51,6 +51,42 @@ function createLifecycleScriptedLlm(): ScriptedLlmAdapter {
             };
         }
 
+        // 1.5 advanceVolume: 封存旧卷摘要
+        if (tail.includes('volume_summary') && tail.includes('story_day_span')) {
+            return {
+                text: JSON.stringify({
+                    volume_summary: '第一卷收束：沈砚取得断齿铜钥并锁定地下档案室入口。',
+                    story_day_span: 'day:1 - day:2'
+                }),
+                usage: makeUsage(300, 0, 80),
+                modelId: 'mock-fast'
+            };
+        }
+
+        // 1.6 advanceVolume: 合并风格修订
+        if (tail.includes('merged_markdown')) {
+            return {
+                text: JSON.stringify({
+                    merged_markdown: '# 世界底层法则与抽象句法纪律\n\n冷静克制白描。'
+                }),
+                usage: makeUsage(250, 0, 60),
+                modelId: 'mock-fast'
+            };
+        }
+
+        // 1.7 advanceVolume: 编译新卷包络与未来惯性
+        if (tail.includes('current_arc_envelope') && tail.includes('future_horizon')) {
+            return {
+                text: JSON.stringify({
+                    current_arc_envelope:
+                        '# 第 2 卷纲要与阶段锁\n\n## Stage Ceiling\n第二卷严禁提前揭穿地下闸门最终设计图。',
+                    future_horizon: '# 未来事件惯性表\n\n- [day:6 | status: PENDING] 旧港档案室例行巡查\n'
+                }),
+                usage: makeUsage(400, 0, 120),
+                modelId: 'mock-strong'
+            };
+        }
+
         // 2. bootBook: Phase 1A 开局定标与反俗套切口生成
         if (req.pool === 'strong_creative' && tail.includes('Phase 1A')) {
             return {
@@ -433,6 +469,20 @@ describe('@narrateos/cli', () => {
         expect(haystackParsed.command).toBe('plot-haystack');
         expect(haystackParsed.flags['chapters']).toBe('40');
         expect(haystackParsed.json).toBe(true);
+
+        const advanceParsed = parseCliArgs([
+            'advance-volume',
+            '--book',
+            '/tmp/demo-book',
+            '--companions',
+            'char_linmo,char_suqing',
+            '--complete',
+            '--json'
+        ]);
+        expect(advanceParsed.command).toBe('advance-volume');
+        expect(advanceParsed.flags['companions']).toBe('char_linmo,char_suqing');
+        expect(advanceParsed.flags['complete']).toBe(true);
+        expect(advanceParsed.json).toBe(true);
     });
 
     it('应该通过 DshRuntimeClient 动态加载 dsh-llm 调度器并在缺失时给出明确错误', async () => {
@@ -582,6 +632,24 @@ describe('@narrateos/cli', () => {
         const dreamJson = JSON.parse(dreamIo.out.join('')) as { skipped: boolean; vacuumedEntities: string[] };
         expect(dreamJson.skipped).toBe(false);
         expect(dreamJson.vacuumedEntities).toContain('char_shenyan');
+
+        // 6. advance-volume
+        const advanceIo = captureStreams();
+        const advanceCode = await runCli(
+            ['advance-volume', '--book', bookRoot, '--companions', 'char_linmo', '--json'],
+            { llm, stdout: advanceIo.stdout, stderr: advanceIo.stderr }
+        );
+        expect(advanceCode).toBe(0);
+        const advanceJson = JSON.parse(advanceIo.out.join('')) as {
+            sealedVolume: number;
+            nextVolume: number;
+            tagName: string;
+            completedBook: boolean;
+        };
+        expect(advanceJson.sealedVolume).toBe(1);
+        expect(advanceJson.nextVolume).toBe(2);
+        expect(advanceJson.tagName).toBe('arc-seal-vol-01');
+        expect(advanceJson.completedBook).toBe(false);
     }, 15_000);
 
     it('应该完整跑通 Plot-Haystack 40 章盲测并输出 10 枚探针核验与四联遥测报告', async () => {

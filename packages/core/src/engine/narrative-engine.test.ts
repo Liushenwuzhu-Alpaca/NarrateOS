@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
@@ -1072,5 +1074,205 @@ describe('NarrativeEngine', () => {
         // 3. Writer 在预算触发窗口模式时收到从 L2 章卡提取的前章摘要
         const writerCall = llm.history[2];
         expect(writerCall?.request.dynamicTail).toContain('星野琉璃留下编号 07 的铜铃并约定次日再会。');
+    });
+
+    it('advanceVolume 应执行五步原子换卷：打封存 tag、冷宫归档非随行角色、合并风格修订、编译新卷包络并递增卷号', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+        const execFileAsync = promisify(execFile);
+
+        // 准备第三名随行角色 char_003 与道具 item_001
+        const char003 = [
+            '---',
+            'entity_id: char_003',
+            'canonical_name: 顾南山',
+            'unique_aliases: []',
+            'contextual_titles: ["档案员"]',
+            'historical_anchors: []',
+            'last_seen_ch: 1',
+            '---',
+            '',
+            '## 1. Innate Locks (先天/底层永久红线 · since_day: -inf · 插叙永不屏蔽)',
+            '- [vis: PUBLIC] 随身携带黄铜袖珍放大镜',
+            '',
+            '## 2. Acquired State & Numeric Ledger (跨章后天状态与数值账本 · 行级补丁更新)',
+            '- [day:1 | ch:01 | vis: PUBLIC] 已与陆沉达成临时同行约定',
+            '',
+            '## 3. Irreversible Trajectory (不可逆极性变迁史 · 纪元内禁删)',
+            '- [day:1 | ch:01] 交出旧档案室铜钥',
+            '',
+            '## 4. Recent Sliding Buffer & Voice (近期跨章缓冲与专属声纹)',
+            '- [day:1 | ch:01] 站在钟楼门口等候出发',
+            ''
+        ].join('\n');
+        await writeFile(join(bookRoot, 'entities/char_003.md'), char003, 'utf8');
+
+        const item001 = [
+            '---',
+            'entity_id: item_001',
+            'canonical_name: 断齿铜钥',
+            'unique_aliases: []',
+            'contextual_titles: []',
+            'historical_anchors: []',
+            'last_seen_ch: 1',
+            '---',
+            '',
+            '## 1. Innate Locks (先天/底层永久红线 · since_day: -inf · 插叙永不屏蔽)',
+            '- [vis: PUBLIC] 齿距缺损半度的旧铜钥匙',
+            '',
+            '## 2. Acquired State & Numeric Ledger (跨章后天状态与数值账本 · 行级补丁更新)',
+            '- [day:1 | ch:01 | vis: PUBLIC] 由陆沉贴身保管',
+            ''
+        ].join('\n');
+        await writeFile(join(bookRoot, 'entities/item_001.md'), item001, 'utf8');
+
+        await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
+        await writeFile(join(bookRoot, 'index/L0_sagas.md'), '# L0 纪元折叠总表\n\n第一纪元：雾港钟楼谜案。\n', 'utf8');
+        await writeFile(join(bookRoot, 'index/L1_volumes.md'), '# L1 活跃卷级总表\n\n- vol_01: 旧校舍试炼\n- vol_02: 雾港地下档案室\n', 'utf8');
+        await writeFile(
+            join(bookRoot, 'index/L2_cards/vol_01_cards.md'),
+            '# 第 1 卷双轨章卡\n\n## ch_0001 (day:1)\n- 主干剧情：陆沉与顾南山取得断齿铜钥。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/static_base_and_voice.md'),
+            '# 世界底层法则与抽象句法纪律\n\n保持冷静克制的白描句法。',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/ops_style_amendments.md'),
+            '# 卷中风格修订 (Ops Style Amendments)\n\n- 对话尽量短促，少用冗余感叹词。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/open_threads.md'),
+            '# 跨卷伏笔账本\n\n## 活跃未解伏笔 (Active Threads)\n- [thread: t_001 | status: ACTIVE] 断齿铜钥背后的地下排水闸图纸\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/future_horizon.md'),
+            '# 未来事件惯性表\n\n- [day:5 | status: PENDING] 朔望大潮逼近旧港\n',
+            'utf8'
+        );
+        await system.commitPaths(bookRoot, ['.'], 'chore: seed volume 1 files before advanceVolume');
+
+        const longMergedVoice = `# 世界底层法则与抽象句法纪律\n\n${'保持冷静克制白描与短促对话。'.repeat(160)}`;
+        const llm = new ScriptedLlmAdapter([
+            // Step 1: 封存旧卷摘要
+            jsonResponse({
+                volume_summary: '第一卷收束：陆沉拿到断齿铜钥，与顾南山启程前往雾港地下档案室。',
+                story_day_span: 'day:1 - day:3'
+            }),
+            // Step 3: 合并风格修订（故意返回超长文本以验证 1500 字强截断）
+            jsonResponse({
+                merged_markdown: longMergedVoice
+            }),
+            // Step 4: 编译第 2 卷 current_arc_envelope & future_horizon
+            jsonResponse({
+                current_arc_envelope:
+                    '# 第 2 卷纲要与阶段锁\n\n## 本卷主线冲突\n雾港地下档案室的水闸真相争夺。\n\n## 跨图锚点\n从旧校舍转移至雾港码头地下区。\n\n## Stage Ceiling\n第二卷严禁提前揭晓总督府底层密约的真正签署人。',
+                future_horizon:
+                    '# 未来事件惯性表\n\n- [day:8 | status: PENDING] 档案室潮汐闸门每夜子时自动落锁\n'
+            })
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.advanceVolume({
+            companionEntityIds: ['char_003']
+        });
+
+        expect(result.sealedVolume).toBe(1);
+        expect(result.nextVolume).toBe(2);
+        expect(result.tagName).toBe('arc-seal-vol-01');
+        expect(result.completedBook).toBe(false);
+        expect(result.archivedEntities).toEqual(['char_002']);
+        expect(result.commitSha.length).toBeGreaterThan(6);
+
+        // 断言 Git tag 已创建
+        const { stdout: tagsOut } = await execFileAsync('git', ['-C', bookRoot, 'tag', '-l']);
+        expect(tagsOut.split(/\r?\n/)).toContain('arc-seal-vol-01');
+
+        // 断言非随行角色 char_002 移入 cold_archive，主角、随行与道具保留在 entities/
+        await expect(access(join(bookRoot, 'entities/cold_archive/char_002.md'))).resolves.toBeUndefined();
+        await expect(access(join(bookRoot, 'entities/char_002.md'))).rejects.toThrow();
+        await expect(access(join(bookRoot, 'entities/char_001.md'))).resolves.toBeUndefined();
+        await expect(access(join(bookRoot, 'entities/char_003.md'))).resolves.toBeUndefined();
+        await expect(access(join(bookRoot, 'entities/item_001.md'))).resolves.toBeUndefined();
+
+        // 断言新建 vol_02_cards.md
+        const vol02Cards = await readFile(join(bookRoot, 'index/L2_cards/vol_02_cards.md'), 'utf8');
+        expect(vol02Cards).toContain('第 2 卷');
+
+        // 断言 L1_volumes.md 收束摘要更新
+        const l1Text = await readFile(join(bookRoot, 'index/L1_volumes.md'), 'utf8');
+        expect(l1Text).toContain('day:1 - day:3');
+        expect(l1Text).toContain('第一卷收束：陆沉拿到断齿铜钥');
+
+        // 断言 static_base_and_voice.md 截断 <= 1500 字且修订表已清空
+        const voiceText = await readFile(join(bookRoot, 'world/static_base_and_voice.md'), 'utf8');
+        expect(voiceText.length).toBeLessThanOrEqual(1500);
+        const amendmentsText = await readFile(join(bookRoot, 'world/ops_style_amendments.md'), 'utf8');
+        expect(amendmentsText).not.toContain('对话尽量短促');
+
+        // 断言 current_arc_envelope.md 与 future_horizon.md 更新
+        const envelopeText = await readFile(join(bookRoot, 'world/current_arc_envelope.md'), 'utf8');
+        expect(envelopeText).toContain('雾港地下档案室的水闸真相争夺');
+        expect(envelopeText).toContain('Stage Ceiling');
+        const horizonText = await readFile(join(bookRoot, 'world/future_horizon.md'), 'utf8');
+        expect(horizonText).toContain('档案室潮汐闸门每夜子时自动落锁');
+
+        // 断言 world_state.md current_volume 推进为 2
+        const afterState = await store.readWorldState();
+        expect(afterState.frontmatter.current_volume).toBe(2);
+    });
+
+    it('advanceVolume({ completeBook: true }) 应将活跃伏笔标为 OPEN_ENDING 并打 novel-completed 标签', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+        const execFileAsync = promisify(execFile);
+
+        await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
+        await writeFile(join(bookRoot, 'index/L1_volumes.md'), '# L1 活跃卷级总表\n\n- vol_01: 终局卷\n', 'utf8');
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), '# 第 1 卷双轨章卡\n', 'utf8');
+        await writeFile(
+            join(bookRoot, 'world/open_threads.md'),
+            [
+                '# 跨卷伏笔账本',
+                '',
+                '## 活跃未解伏笔 (Active Threads)',
+                '- [thread: t_001 | status: ACTIVE] 钟楼暗格里的无名怀表',
+                '',
+                '## 已回收伏笔归档 (Resolved Archive)',
+                '- [thread: t_000 | status: RESOLVED] 旧校舍废部危机'
+            ].join('\n'),
+            'utf8'
+        );
+        await system.commitPaths(bookRoot, ['.'], 'chore: seed complete book fixture');
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse({
+                volume_summary: '全书终局收束：钟楼停摆后雾港恢复平静。',
+                story_day_span: 'day:1 - day:10'
+            })
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.advanceVolume({ completeBook: true });
+
+        expect(result.completedBook).toBe(true);
+        expect(result.tagName).toBe('arc-seal-vol-01');
+        expect(result.sealedVolume).toBe(1);
+        expect(result.nextVolume).toBe(1);
+
+        const { stdout: tagsOut } = await execFileAsync('git', ['-C', bookRoot, 'tag', '-l']);
+        const tags = tagsOut.split(/\r?\n/);
+        expect(tags).toContain('arc-seal-vol-01');
+        expect(tags).toContain('novel-completed');
+
+        const threadsText = await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8');
+        expect(threadsText).toContain('[thread: t_001 | status: OPEN_ENDING]');
+        expect(threadsText).toContain('[thread: t_000 | status: RESOLVED]');
+        await expect(access(join(bookRoot, 'index/L2_cards/vol_02_cards.md'))).rejects.toThrow();
+
+        const afterState = await store.readWorldState();
+        expect(afterState.frontmatter.current_volume).toBe(1);
     });
 });

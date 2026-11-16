@@ -1883,4 +1883,130 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
 
         sseAbort.abort();
     });
+
+    it('POST /api/narrate/volume/advance 应校验 tx.lock、调用 advanceVolume 并广播 volume:advanced SSE 事件', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(() => rm(bookRoot, { recursive: true, force: true }));
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+
+        const advanceCalls: Array<{ companionEntityIds?: string[]; completeBook?: boolean }> = [];
+        const fakeEngine = {
+            async stepChapter() {
+                throw new Error('not used');
+            },
+            async syncManuscripts() {
+                throw new Error('not used');
+            },
+            async advanceVolume(opts: { companionEntityIds?: string[]; completeBook?: boolean } = {}) {
+                advanceCalls.push(opts);
+                return {
+                    sealedVolume: 1,
+                    nextVolume: 2,
+                    tagName: 'arc-seal-vol-01',
+                    archivedEntities: ['char_002'],
+                    completedBook: Boolean(opts.completeBook),
+                    commitSha: 'deadbeef1234'
+                };
+            }
+        };
+
+        const fakeDreaming = {
+            async runDreaming() {
+                throw new Error('not used');
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never,
+            dreamingRunner: fakeDreaming as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+
+        const baseUrl = await webServer.listen();
+        expect(webServer.hasRoute('/api/narrate/volume/advance')).toBe(true);
+
+        const sseAbort = new AbortController();
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        async function readUntil(pred: (t: string) => boolean): Promise<string> {
+            const deadline = Date.now() + 4000;
+            while (!pred(sseBuf)) {
+                if (Date.now() > deadline) throw new Error(`SSE 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+            return sseBuf;
+        }
+        await readUntil((t) => t.includes('event: connected'));
+
+        // 1. 存在活跃 .ops/tx.lock 时应返回 409
+        await mkdir(join(bookRoot, '.ops'), { recursive: true });
+        const lockPath = join(bookRoot, '.ops/tx.lock');
+        await writeFile(
+            lockPath,
+            JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }),
+            'utf8'
+        );
+        const lockedRes = await fetch(`${baseUrl}/api/narrate/volume/advance`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ companionEntityIds: ['char_003'] })
+        });
+        expect(lockedRes.status).toBe(409);
+        await rm(lockPath, { force: true });
+
+        // 2. 正常调用返回 200 并广播 volume:advanced
+        const okRes = await fetch(`${baseUrl}/api/narrate/volume/advance`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ companionEntityIds: ['char_003'], completeBook: false })
+        });
+        expect(okRes.status).toBe(200);
+        const okJson = (await okRes.json()) as {
+            sealedVolume: number;
+            nextVolume: number;
+            tagName: string;
+            archivedEntities: string[];
+        };
+        expect(okJson.sealedVolume).toBe(1);
+        expect(okJson.nextVolume).toBe(2);
+        expect(okJson.tagName).toBe('arc-seal-vol-01');
+        expect(okJson.archivedEntities).toEqual(['char_002']);
+        expect(advanceCalls).toHaveLength(1);
+        expect(advanceCalls[0]).toMatchObject({ companionEntityIds: ['char_003'], completeBook: false });
+
+        const events = await readUntil((t) => t.includes('event: volume:advanced'));
+        expect(events).toContain('arc-seal-vol-01');
+
+        sseAbort.abort();
+    });
 });

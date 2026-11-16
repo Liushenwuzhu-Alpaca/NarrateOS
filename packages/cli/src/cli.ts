@@ -20,6 +20,7 @@ export type CliCommandName =
     | 'step'
     | 'sync'
     | 'dream'
+    | 'advance-volume'
     | 'status'
     | 'plot-haystack'
     | 'help';
@@ -46,6 +47,7 @@ const VALID_COMMANDS = new Set<string>([
     'step',
     'sync',
     'dream',
+    'advance-volume',
     'status',
     'plot-haystack',
     'help'
@@ -58,17 +60,18 @@ const HELP_TEXT = [
     '  narrateos <command> [options]',
     '',
     '子命令:',
-    '  boot           初始化并编译新书纯文本数据库与独立 Git 仓',
-    '  step           执行单章流水线 (Librarian -> Planner -> Writer -> Gate -> FactCheck -> Extractor)',
-    '  sync           同步手工修改的手稿章节并审计状态/下游冲突',
-    '  dream          执行周期睡眠整理 (脏页 VACUUM / WARPED 归档 / 前台切镜信号)',
-    '  status         查看当前作品世界状态、事务相位与实体统计',
-    '  plot-haystack  运行 40 章 Plot-Haystack 盲测基准并输出 10 枚探针核验报告',
+    '  boot            初始化并编译新书纯文本数据库与独立 Git 仓',
+    '  step            执行单章流水线 (Librarian -> Planner -> Writer -> Gate -> FactCheck -> Extractor)',
+    '  sync            同步手工修改的手稿章节并审计状态/下游冲突',
+    '  dream           执行周期睡眠整理 (脏页 VACUUM / WARPED 归档 / 前台切镜信号)',
+    '  advance-volume  执行五步原子换卷或全书完结封笔',
+    '  status          查看当前作品世界状态、事务相位与实体统计',
+    '  plot-haystack   运行 40 章 Plot-Haystack 盲测基准并输出 10 枚探针核验报告',
     '',
     '通用选项:',
-    '  --book <dir>   作品目录路径 (默认: 当前工作目录)',
-    '  --json         以 JSON 格式输出结构化结果',
-    '  -h, --help     显示帮助信息'
+    '  --book <dir>    作品目录路径 (默认: 当前工作目录)',
+    '  --json          以 JSON 格式输出结构化结果',
+    '  -h, --help      显示帮助信息'
 ].join('\n');
 
 /** 解析命令行参数 */
@@ -344,6 +347,39 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
                     result.skipped
                         ? '[dream] 未达到睡眠整理阈值，已跳过。'
                         : `[dream] 清洗实体 ${result.vacuumedEntities.length} 个，归档 ${result.archivedFiles.length} 份，切镜信号 ${result.spotlightTriggers.length} 条。`
+                );
+                return 0;
+            }
+
+            case 'advance-volume': {
+                const rawCompanions = getStringFlag(parsed.flags, 'companions');
+                const companionEntityIds = rawCompanions
+                    ? rawCompanions
+                          .split(',')
+                          .map((s) => s.trim())
+                          .filter((s) => s.length > 0)
+                    : undefined;
+                const completeBook = parsed.flags['complete'] === true;
+
+                const store = new BookStore(parsed.bookRoot, system);
+                const engine = new NarrativeEngine({
+                    store,
+                    llm: resolveLlm(),
+                    system
+                });
+
+                const result = await engine.advanceVolume({
+                    ...(companionEntityIds !== undefined ? { companionEntityIds } : {}),
+                    completeBook
+                });
+
+                printOutput(
+                    stdout,
+                    parsed.json,
+                    result,
+                    result.completedBook
+                        ? `[advance-volume] 全书完结封笔，封存第 ${result.sealedVolume} 卷 (${result.tagName})，归档 ${result.archivedEntities.length} 名角色。`
+                        : `[advance-volume] 已封存第 ${result.sealedVolume} 卷 (${result.tagName}) 并推进至第 ${result.nextVolume} 卷，归档 ${result.archivedEntities.length} 名角色。`
                 );
                 return 0;
             }

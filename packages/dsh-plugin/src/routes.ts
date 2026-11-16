@@ -15,6 +15,7 @@ import {
     serializeEntityMarkdown,
     TxLockConflictError,
     TxLockPayloadSchema,
+    type AdvanceVolumeOptions,
     type BootMode,
     type LlmPort,
     type OpsSignal,
@@ -27,7 +28,7 @@ import type { DshWebServerService } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
-export type RuntimeTaskKind = 'IDLE' | 'STEPPING' | 'SYNCING' | 'DREAMING' | 'BOOTING';
+export type RuntimeTaskKind = 'IDLE' | 'STEPPING' | 'SYNCING' | 'DREAMING' | 'BOOTING' | 'ADVANCING_VOLUME';
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
 const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
@@ -1424,6 +1425,48 @@ export class NarrateRuntimeController {
         }
     }
 
+    /** POST /api/narrate/volume/advance */
+    async handleAdvanceVolume(req: IncomingMessage, res: ServerResponse): Promise<void> {
+        if (!assertMethod(req, res, 'POST')) return;
+
+        let body: Record<string, unknown>;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        try {
+            if (this.yoloState.running) {
+                throw new TaskConflictError('YOLO 连跑正在执行中，禁止执行换卷操作');
+            }
+            const result = await this.runExclusiveTask('ADVANCING_VOLUME', async (signal) => {
+                await this.assertNoActiveTxLock('存在活跃事务锁，禁止并发执行换卷');
+                const advanceOptions: AdvanceVolumeOptions = { signal };
+                if (Array.isArray(body['companionEntityIds'])) {
+                    advanceOptions.companionEntityIds = body['companionEntityIds'].filter(
+                        (item): item is string => typeof item === 'string'
+                    );
+                }
+                if (typeof body['completeBook'] === 'boolean') {
+                    advanceOptions.completeBook = body['completeBook'];
+                }
+
+                const advanceRes = await this.engine.advanceVolume(advanceOptions);
+                this.emitEvent('volume:advanced', advanceRes);
+                return advanceRes;
+            });
+            sendJson(res, 200, result);
+        } catch (err) {
+            if (err instanceof TaskConflictError || err instanceof TxLockConflictError) {
+                sendJson(res, 409, { error: err.message });
+                return;
+            }
+            sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
     /** POST /api/narrate/signals */
     async handleSignals(req: IncomingMessage, res: ServerResponse): Promise<void> {
         if (!assertMethod(req, res, 'POST')) return;
@@ -1588,6 +1631,11 @@ export function registerNarrateRoutes(
             kind: 'exact',
             path: '/api/narrate/dream',
             handler: (req, res) => controller.handleDream(req, res)
+        }),
+        webServer.register({
+            kind: 'exact',
+            path: '/api/narrate/volume/advance',
+            handler: (req, res) => controller.handleAdvanceVolume(req, res)
         }),
         webServer.register({
             kind: 'exact',

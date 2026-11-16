@@ -267,3 +267,37 @@ export interface SyncManuscriptsResult {
     downstreamConflicts: DownstreamConflictReport[];
     totalUsage: TokenUsage;
 }
+
+/** advanceVolume 调用参数 */
+export interface AdvanceVolumeOptions {
+    companionEntityIds?: string[] | undefined;
+    completeBook?: boolean | undefined;
+    signal?: AbortSignal | undefined;
+}
+
+/** advanceVolume 执行结果 */
+export interface AdvanceVolumeResult {
+    sealedVolume: number;
+    nextVolume: number;
+    tagName: string;
+    archivedEntities: string[];
+    completedBook: boolean;
+    commitSha: string;
+}
+
+/** 换卷 Step 1: 旧卷封存摘要输出 Schema */
+export const VolumeSealOutputSchema = z.object({
+    volume_summary: z.string().min(1),
+    story_day_span: z.string().min(1)
+});
+
+/** 换卷 Step 3: 风格修订合并输出 Schema */
+export const StyleMergeOutputSchema = z.object({
+    merged_markdown: z.string().min(1)
+});
+
+/** 换卷 Step 4: 新卷包络与未来惯性输出 Schema */
+export const NextVolumeEnvelopeOutputSchema = z.object({
+    current_arc_envelope: z.string().min(1),
+    future_horizon: z.string().min(1)
+});
