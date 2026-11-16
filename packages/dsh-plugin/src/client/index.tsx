@@ -40,8 +40,11 @@ import {
     RightOpsInspector,
     type FactCheckerTelemetry,
     type HaltDiagnosticInfo,
+    type InspectorEntityItem,
+    type OpenThreadItem,
     type ProseGateViolationItem,
-    type StageArtifactTelemetry
+    type StageArtifactTelemetry,
+    type VolumeProgressSnapshot
 } from './RightOpsInspector';
 import { ensureStudioStyles } from './styles';
 import type {
@@ -96,6 +99,39 @@ function asNumber(value: unknown): number | undefined {
 
 function asString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** 兼容嵌套 token_usage 与扁平字段读取 Token 消耗 */
+function readTelemetryTokens(item: TelemetryItem | null | undefined): {
+    inputTokens: number;
+    cacheReadTokens: number;
+    outputTokens: number;
+} {
+    return {
+        inputTokens: item?.token_usage?.inputTokens ?? item?.inputTokens ?? 0,
+        cacheReadTokens: item?.token_usage?.cacheReadTokens ?? item?.cacheReadTokens ?? 0,
+        outputTokens: item?.token_usage?.outputTokens ?? item?.outputTokens ?? 0
+    };
+}
+
+/** 兼容嵌套 metrics 与扁平字段读取文风四联指标 */
+function readTelemetryMetrics(item: TelemetryItem | null | undefined): {
+    mattr500: number | null;
+    kontoyiannisEntropy: number | null;
+    sentenceLengthCv: number | null;
+    clicheDensityPer1k: number | null;
+} {
+    return {
+        mattr500: item?.metrics?.mattr500 ?? item?.mattr500 ?? null,
+        kontoyiannisEntropy:
+            item?.metrics?.kontoyiannisEntropy ??
+            item?.metrics?.kontoyiannisHk ??
+            item?.kontoyiannisEntropy ??
+            item?.kontoyiannisHk ??
+            null,
+        sentenceLengthCv: item?.metrics?.sentenceLengthCv ?? item?.sentenceLengthCv ?? null,
+        clicheDensityPer1k: item?.metrics?.clicheDensityPer1k ?? item?.clicheDensityPer1k ?? null
+    };
 }
 
 function mapSafeHaltInfo(raw: Record<string, unknown> | null | undefined): SafeHaltInfo | null {
@@ -679,6 +715,11 @@ export function NarrateStudioRoot(): React.ReactElement {
     const handleSelectChapter = useCallback(
         (chapterNumber: number) => {
             setSelectedChapter(chapterNumber);
+            viewCommandNonceRef.current += 1;
+            setExternalViewCommand({
+                viewTab: 'prose',
+                nonce: viewCommandNonceRef.current
+            });
             void loadChapterByNumber(chapterNumber);
         },
         [loadChapterByNumber]
@@ -794,17 +835,83 @@ export function NarrateStudioRoot(): React.ReactElement {
         let cacheReadTokens = 0;
         let outputTokens = 0;
         for (const item of entries) {
-            inputTokens += item.inputTokens ?? 0;
-            cacheReadTokens += item.cacheReadTokens ?? 0;
-            outputTokens += item.outputTokens ?? 0;
+            const tokens = readTelemetryTokens(item);
+            inputTokens += tokens.inputTokens;
+            cacheReadTokens += tokens.cacheReadTokens;
+            outputTokens += tokens.outputTokens;
         }
+        const latestTokens = readTelemetryTokens(latestTelemetryEntry);
+        const finalInputTokens = inputTokens || latestTokens.inputTokens;
+        const finalCacheReadTokens = cacheReadTokens || latestTokens.cacheReadTokens;
+        const finalOutputTokens = outputTokens || latestTokens.outputTokens;
         return {
-            inputTokens: inputTokens || (latestTelemetryEntry?.inputTokens ?? 0),
-            cacheReadTokens: cacheReadTokens || (latestTelemetryEntry?.cacheReadTokens ?? 0),
-            outputTokens: outputTokens || (latestTelemetryEntry?.outputTokens ?? 0),
-            cacheHitRate: latestTelemetryEntry?.cacheHitRate
+            inputTokens: finalInputTokens,
+            cacheReadTokens: finalCacheReadTokens,
+            outputTokens: finalOutputTokens,
+            cacheHitRate:
+                latestTelemetryEntry?.cacheHitRate ??
+                (finalInputTokens > 0 ? finalCacheReadTokens / finalInputTokens : undefined)
         };
     }, [latestTelemetryEntry, telemetryView]);
+
+    const latestMetrics = useMemo(
+        () => readTelemetryMetrics(latestTelemetryEntry),
+        [latestTelemetryEntry]
+    );
+
+    const inspectorEntities = useMemo<InspectorEntityItem[]>(() => {
+        if (!entitiesView?.entities) return [];
+        return entitiesView.entities.map((ent) => ({
+            id: ent.entityId,
+            name: ent.canonicalName,
+            ...(ent.aliases.length > 0 ? { role: ent.aliases.slice(0, 2).join(' / ') } : {}),
+            ...(ent.lastSeenChapter > 0 ? { lastChapter: ent.lastSeenChapter } : {}),
+            ...(ent.markdown ? { brief: ent.markdown.slice(0, 120) } : {})
+        }));
+    }, [entitiesView]);
+
+    const inspectorOpenThreads = useMemo<OpenThreadItem[]>(() => {
+        const md = threadsView?.content ?? '';
+        if (!md.trim()) return [];
+        const items: OpenThreadItem[] = [];
+        for (const rawLine of md.split('\n')) {
+            const line = rawLine.trim();
+            if (!line || line.startsWith('# ')) continue;
+            const bulletMatch = line.match(/^(?:[-*]|\d+\.)\s+(.+)$/);
+            const headingMatch = line.match(/^##+\s+(.+)$/);
+            const text = bulletMatch?.[1] ?? headingMatch?.[1];
+            if (!text) continue;
+            const chMatch = text.match(/(?:Ch\.?|第)\s*(\d+)\s*章?/i);
+            const chapter = chMatch?.[1] ? Number(chMatch[1]) : undefined;
+            items.push({
+                title: text.trim(),
+                ...(chapter !== undefined && Number.isFinite(chapter) ? { chapter } : {})
+            });
+        }
+        return items;
+    }, [threadsView]);
+
+    const inspectorVolumeProgress = useMemo<VolumeProgressSnapshot | null>(() => {
+        if (!status && !horizonView?.content) return null;
+        const statusExt = status as (NarrateStatusPayload & { volumeProgress?: VolumeProgressSnapshot }) | null;
+        const rawVol = statusExt?.volumeProgress;
+        const completedChapters =
+            rawVol?.completedChapters ??
+            status?.lastCommittedChapter ??
+            status?.worldState.current_chapter ??
+            0;
+        const horizonExcerpt = horizonView?.content?.trim()
+            ? horizonView.content.trim().slice(0, 240)
+            : null;
+        return {
+            ...(rawVol?.volumeLabel ? { volumeLabel: rawVol.volumeLabel } : {}),
+            ...(rawVol?.volumeTitle ? { volumeTitle: rawVol.volumeTitle } : {}),
+            completedChapters,
+            ...(rawVol?.totalChapters !== undefined ? { totalChapters: rawVol.totalChapters } : {}),
+            futureHorizon: rawVol?.futureHorizon ?? horizonExcerpt,
+            ...(rawVol?.milestoneLock !== undefined ? { milestoneLock: rawVol.milestoneLock } : {})
+        };
+    }, [status, horizonView]);
 
     const dirtyChaptersCount = useMemo(
         () => chapters.filter((item) => item.dirty).length,
@@ -899,7 +1006,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                     inputTokens: aggregateTokens.inputTokens,
                     cacheReadTokens: aggregateTokens.cacheReadTokens,
                     outputTokens: aggregateTokens.outputTokens,
-                    kontoyiannisHk: latestTelemetryEntry?.kontoyiannisHk
+                    kontoyiannisHk: latestMetrics.kontoyiannisEntropy ?? undefined
                 }}
                 rightOpen={rightOpen}
                 hasSafeHalt={Boolean(safeHaltInfo)}
@@ -1035,10 +1142,10 @@ export function NarrateStudioRoot(): React.ReactElement {
                             }}
                             stageArtifact={stageArtifact}
                             proseGate={{
-                                mattr500: latestTelemetryEntry?.mattr500 ?? null,
-                                kontoyiannisEntropy: latestTelemetryEntry?.kontoyiannisHk ?? null,
-                                sentenceLengthCv: latestTelemetryEntry?.sentenceLengthCv ?? null,
-                                clicheDensityPer1k: latestTelemetryEntry?.clicheDensityPer1k ?? null,
+                                mattr500: latestMetrics.mattr500,
+                                kontoyiannisEntropy: latestMetrics.kontoyiannisEntropy,
+                                sentenceLengthCv: latestMetrics.sentenceLengthCv,
+                                clicheDensityPer1k: latestMetrics.clicheDensityPer1k,
                                 recentViolations: gateViolations
                             }}
                             factChecker={factChecker}
@@ -1049,7 +1156,18 @@ export function NarrateStudioRoot(): React.ReactElement {
                                 spotlightQueue: []
                             }}
                             haltDiagnostic={haltDiagnostic}
+                            entities={inspectorEntities}
+                            openThreads={inspectorOpenThreads}
+                            volumeProgress={inspectorVolumeProgress}
                             busy={isBusy}
+                            onSelectEntity={() => {
+                                handleOpenView('entities');
+                                if (isNarrow) setRightOpen(false);
+                            }}
+                            onSelectChapter={(ch) => {
+                                handleSelectChapter(ch);
+                                if (isNarrow) setRightOpen(false);
+                            }}
                             onTriggerDreaming={() => {
                                 void handleDream().catch((err) => {
                                     showToast(err instanceof Error ? err.message : String(err), 'error');

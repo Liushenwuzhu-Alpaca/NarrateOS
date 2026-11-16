@@ -121,6 +121,25 @@ export interface OpsSignalItem {
     [key: string]: unknown;
 }
 
+/** 遥测指标嵌套明细 */
+export interface TelemetryMetrics {
+    mattr500?: number | null | undefined;
+    kontoyiannisEntropy?: number | null | undefined;
+    kontoyiannisHk?: number | null | undefined;
+    sentenceLengthCv?: number | null | undefined;
+    clicheDensityPer1k?: number | null | undefined;
+    [key: string]: unknown;
+}
+
+/** 遥测 Token 消耗嵌套明细 */
+export interface TelemetryTokenUsage {
+    inputTokens?: number | undefined;
+    cacheReadTokens?: number | undefined;
+    cacheWriteTokens?: number | undefined;
+    outputTokens?: number | undefined;
+    [key: string]: unknown;
+}
+
 /** 遥测指标条目（对应 .ops/telemetry.jsonl） */
 export interface TelemetryItem {
     chapter?: number | undefined;
@@ -130,11 +149,14 @@ export interface TelemetryItem {
     mattr500?: number | undefined;
     sentenceLengthCv?: number | undefined;
     kontoyiannisHk?: number | undefined;
+    kontoyiannisEntropy?: number | undefined;
     replanRate?: number | undefined;
     cacheHitRate?: number | undefined;
     inputTokens?: number | undefined;
     cacheReadTokens?: number | undefined;
     outputTokens?: number | undefined;
+    metrics?: TelemetryMetrics | undefined;
+    token_usage?: TelemetryTokenUsage | undefined;
     timestamp?: string | undefined;
     raw?: string | undefined;
     [key: string]: unknown;

@@ -398,7 +398,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
     };
 
     return (
-        <aside className="ns-right" aria-label="运维检查器">
+        <div className="ns-ops-inspector" aria-label="运维检查器">
             {/* 顶部 7 个横向紧凑胶囊子页签 */}
             <div
                 style={{
@@ -1337,6 +1337,6 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     </>
                 )}
             </div>
-        </aside>
+        </div>
     );
 }

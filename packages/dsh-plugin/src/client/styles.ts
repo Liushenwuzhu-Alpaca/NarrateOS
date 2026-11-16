@@ -1116,7 +1116,7 @@ export const STUDIO_CSS = `
     width: 100%;
     max-width: var(--ns-col);
     margin: 0 auto;
-    padding: 20px 0 48px;
+    padding: 20px 0 120px;
 }
 
 .ns-prose-col > * {
@@ -1975,7 +1975,12 @@ export const STUDIO_CSS = `
 .ns-right-closed .ns-right {
     opacity: 0;
     pointer-events: none;
+    visibility: hidden;
     border-left-color: transparent;
+}
+
+.ns-narrow.ns-right-closed .ns-right {
+    display: none;
 }
 
 .ns-narrow.ns-right-open .ns-right {
