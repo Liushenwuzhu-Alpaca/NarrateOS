@@ -1242,6 +1242,261 @@ export const STUDIO_CSS = `
     color: var(--ns-text-4);
 }
 
+/* SAFE_HALT / Sync 双栏对比裁决卡 */
+.ns-verdict {
+    position: relative;
+    margin-bottom: 36px;
+    padding: 24px 26px 22px;
+    border-radius: var(--ns-r-xl);
+    background: var(--ns-bg-card);
+    border: 1px solid var(--ns-border-1);
+    overflow: hidden;
+}
+
+.ns-verdict::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 20px;
+    bottom: 20px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--ns-v, var(--ns-red));
+}
+
+.ns-verdict-red {
+    --ns-v: var(--ns-red);
+    --ns-v-ink: var(--ns-red-ink);
+    --ns-v-soft: var(--ns-red-soft);
+    border-color: var(--ns-red-line);
+}
+
+.ns-verdict-amber {
+    --ns-v: var(--ns-amber);
+    --ns-v-ink: var(--ns-amber-ink);
+    --ns-v-soft: var(--ns-amber-soft);
+    border-color: var(--ns-amber-line);
+}
+
+.ns-v-eye {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ns-v-ink);
+}
+
+.ns-v-pd {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+    animation: ns-ping 1.4s infinite;
+}
+
+.ns-v-tag {
+    margin-left: auto;
+    font: 500 11px var(--ns-font-mono);
+    color: var(--ns-text-4);
+    padding: 2px 7px;
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-base);
+    border: 1px solid var(--ns-border-1);
+}
+
+.ns-verdict h2 {
+    font: 700 20px/1.5 var(--ns-font-serif);
+    color: var(--ns-text-1);
+    margin: 10px 0 8px;
+}
+
+.ns-v-sub {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ns-text-3);
+    line-height: 1.7;
+}
+
+.ns-v-sub b {
+    color: var(--ns-text-1);
+    font-family: var(--ns-font-mono);
+}
+
+.ns-v-ev {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 16px 0 18px;
+}
+
+.ns-v-ev figure {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: var(--ns-r-md);
+    background: var(--ns-bg-base);
+    border: 1px solid var(--ns-border-1);
+    min-width: 0;
+}
+
+.ns-v-ev figcaption {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font: 11px var(--ns-font-mono);
+    color: var(--ns-text-4);
+    margin-bottom: 6px;
+}
+
+.ns-v-ev figcaption b {
+    color: var(--ns-v-ink);
+}
+
+.ns-v-ev blockquote {
+    margin: 0;
+    font: 14px/1.85 var(--ns-font-serif);
+    color: var(--ns-prose);
+    word-break: break-word;
+}
+
+.ns-v-ev mark {
+    background: var(--ns-v-soft);
+    color: inherit;
+    box-shadow: 0 1.5px 0 var(--ns-v);
+    padding: 0 2px;
+    border-radius: 2px;
+}
+
+.ns-v-ev mark.ns-add {
+    background: var(--ns-green-soft);
+    box-shadow: 0 1.5px 0 var(--ns-green);
+}
+
+.ns-v-issue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ns-v-issue-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.ns-v-issue-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font: 11px var(--ns-font-mono);
+    color: var(--ns-text-4);
+}
+
+.ns-v-issue-meta b {
+    color: var(--ns-v-ink);
+}
+
+.ns-v-acts {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 10px;
+}
+
+.ns-v-opt {
+    display: flex;
+    gap: 11px;
+    align-items: flex-start;
+    text-align: left;
+    padding: 12px 14px;
+    border-radius: var(--ns-r-lg);
+    border: 1px solid var(--ns-border-2);
+    background: var(--ns-bg-base);
+    color: var(--ns-text-1);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+
+.ns-v-opt:hover:not(:disabled) {
+    border-color: var(--ns-border-3);
+    background: var(--ns-bg-surface-2);
+}
+
+.ns-v-opt:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.ns-v-opt-ico {
+    font-size: 14px;
+    line-height: 1.3;
+    flex-shrink: 0;
+    color: var(--ns-text-3);
+}
+
+.ns-v-opt b {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.ns-v-opt small {
+    display: block;
+    font-size: 11.5px;
+    color: var(--ns-text-4);
+    margin-top: 2px;
+    line-height: 1.45;
+}
+
+.ns-v-opt.ns-go {
+    background: var(--ns-brand);
+    border-color: var(--ns-brand);
+    color: #ffffff;
+}
+
+.ns-v-opt.ns-go:hover:not(:disabled) {
+    background: var(--ns-brand);
+    border-color: var(--ns-brand);
+    filter: brightness(1.06);
+}
+
+.ns-v-opt.ns-go .ns-v-opt-ico,
+.ns-v-opt.ns-go small {
+    color: rgba(255, 255, 255, 0.84);
+}
+
+.ns-v-more {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 11.5px;
+    color: var(--ns-text-4);
+}
+
+.ns-v-more button {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--ns-text-3);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+}
+
+.ns-v-more button:hover {
+    color: var(--ns-text-1);
+}
+
+@media (max-width: 720px) {
+    .ns-v-ev,
+    .ns-v-acts {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* 细纲节拍比例条 */
 .ns-beats {
     display: flex;

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 /** 6 阶段流水线节点 ID */
 export type PipelineStageId =
@@ -55,6 +55,26 @@ export interface ChapterDetailData {
     consumedSignal?: string | undefined;
 }
 
+/** SAFE_HALT 单条冲突/违规证据 */
+export interface SafeHaltIssueItem {
+    rule?: string | undefined;
+    line?: number | undefined;
+    quote?: string | undefined;
+    snippet?: string | undefined;
+    sourceRef?: string | undefined;
+    sourceQuote?: string | undefined;
+    detail?: string | undefined;
+}
+
+/** 门禁违规条目（用于裁决卡右栏高亮） */
+export interface VerdictGateViolationItem {
+    rule: string;
+    detail: string;
+    line?: number | undefined;
+    snippet?: string | undefined;
+    patched?: boolean | undefined;
+}
+
 /** SAFE_HALT 告警信息 (.ops/safe_halt.json) */
 export interface SafeHaltInfo {
     reason: string;
@@ -62,6 +82,12 @@ export interface SafeHaltInfo {
     chapter?: number | undefined;
     conflictId?: string | undefined;
     affectedChapters?: number | undefined;
+    rollbackThreshold?: number | undefined;
+    leftRef?: string | undefined;
+    rightRef?: string | undefined;
+    leftExcerpt?: string | undefined;
+    rightExcerpt?: string | undefined;
+    issues?: SafeHaltIssueItem[] | undefined;
     timestamp?: string | undefined;
     details?: string | undefined;
 }
@@ -149,6 +175,7 @@ export interface CenterWorkbenchProps {
     stages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
     latestSseStage?: string | null | undefined;
     safeHalt?: SafeHaltInfo | null | undefined;
+    gateViolations?: VerdictGateViolationItem[] | undefined;
     pendingSignals?: PendingSignalItem[] | undefined;
     pendingSignalsCount?: number | undefined;
     materializedViews?: MaterializedViewsData | undefined;
@@ -297,6 +324,457 @@ function splitProseParagraphs(
     }));
 }
 
+/** 细纲节拍比例条单段数据 */
+interface ParsedBeatSegment {
+    label: string;
+    summary: string;
+    percent: number;
+    isSpotlight: boolean;
+}
+
+/** 结构化细纲解析结果 */
+interface ParsedStructuredPlan {
+    chapterTitle: string;
+    timelineMode: string;
+    povCharacter: string;
+    targetWordCount: number | null;
+    endingBeat: string;
+    focusCast: string[];
+    backgroundCast: string[];
+    spotlight: string;
+    endingSummary: string;
+    outlineText: string;
+    beats: ParsedBeatSegment[];
+    consumedSignal?: string | undefined;
+}
+
+/** 从字符串或数组字段归一化角色列表 */
+function normalizeCastList(value: unknown): string[] {
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => String(item).trim())
+            .filter((item) => item.length > 0 && item !== '无' && item !== '本章无');
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed || trimmed === '无' || trimmed === '本章无' || trimmed === 'none') {
+            return [];
+        }
+        return trimmed
+            .split(/[,，、/|]+/)
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0 && item !== '无' && item !== '本章无');
+    }
+    return [];
+}
+
+/** 为角色名生成稳定色标 */
+function getAvatarColor(name: string): string {
+    const palette = ['#5686fe', '#e0664a', '#4ed17e', '#f7ad31', '#a78bfa', '#38bdf8'];
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+        hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+    }
+    return palette[hash % palette.length] ?? '#5686fe';
+}
+
+/** 根据 scene_plan 或默认 4 段比例计算总和为 100% 的节拍条 */
+function buildPlanBeats(
+    scenes: Array<{ location?: string; summary?: string; is_spotlight?: boolean }> | null,
+    spotlightFallback: string,
+    outlineFallback: string
+): ParsedBeatSegment[] {
+    if (scenes && scenes.length > 0) {
+        const weights = scenes.map((s) => (s.is_spotlight ? 3 : 1));
+        const totalWeight = weights.reduce((acc, w) => acc + w, 0) || scenes.length;
+        const percents = weights.map((w) => Math.max(8, Math.round((w / totalWeight) * 100)));
+        const diff = 100 - percents.reduce((acc, p) => acc + p, 0);
+        if (diff !== 0) {
+            const spotlightIdx = Math.max(
+                0,
+                scenes.findIndex((s) => s.is_spotlight)
+            );
+            percents[spotlightIdx] = Math.max(8, (percents[spotlightIdx] ?? 0) + diff);
+        }
+
+        const hasExplicitSpotlight = scenes.some((s) => Boolean(s.is_spotlight));
+        return scenes.map((scene, idx) => {
+            const isSpot = hasExplicitSpotlight ? Boolean(scene.is_spotlight) : idx === Math.floor(scenes.length / 2);
+            const loc = scene.location?.trim();
+            const label = isSpot ? '戏眼' : loc || `场次 ${idx + 1}`;
+            const summary = scene.summary?.trim() || loc || '推进本场戏剧冲突';
+            return {
+                label,
+                summary,
+                percent: percents[idx] ?? Math.floor(100 / scenes.length),
+                isSpotlight: isSpot
+            };
+        });
+    }
+
+    const firstSentence =
+        outlineFallback
+            .split(/[。\n]/)
+            .map((s) => s.trim())
+            .find((s) => s.length > 0) ?? '承接上章状态入场';
+    return [
+        {
+            label: '开场',
+            summary: firstSentence,
+            percent: 15,
+            isSpotlight: false
+        },
+        {
+            label: '戏眼',
+            summary: spotlightFallback || '核心冲突爆发与视角锚定',
+            percent: 55,
+            isSpotlight: true
+        },
+        {
+            label: '回收',
+            summary: '线索收束与关系余波',
+            percent: 20,
+            isSpotlight: false
+        },
+        {
+            label: '收尾',
+            summary: '末句定调与下章钩子',
+            percent: 10,
+            isSpotlight: false
+        }
+    ];
+}
+
+/** 尝试将章节 outlineText 解析为结构化细纲对象（支持 JSON 与 Markdown/键值回退） */
+function parseStructuredPlan(
+    rawText: string | undefined,
+    fallbackTitle: string,
+    fallbackTimelineMode: string,
+    consumedSignal?: string
+): ParsedStructuredPlan | null {
+    const trimmed = rawText?.trim() ?? '';
+    if (!trimmed) {
+        return null;
+    }
+
+    // 1. 尝试提取并解析 JSON（兼容 ```json 代码块）
+    let jsonCandidate = trimmed;
+    const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fencedMatch?.[1]) {
+        jsonCandidate = fencedMatch[1].trim();
+    }
+    if (jsonCandidate.startsWith('{') && jsonCandidate.endsWith('}')) {
+        try {
+            const parsed = JSON.parse(jsonCandidate) as Record<string, unknown>;
+            const focusCast = normalizeCastList(parsed['focus_cast'] ?? parsed['focusCast']);
+            const backgroundCast = normalizeCastList(
+                parsed['background_cast'] ?? parsed['backgroundCast']
+            );
+            const povCharacter =
+                typeof parsed['pov_character'] === 'string' && parsed['pov_character'].trim()
+                    ? parsed['pov_character'].trim()
+                    : typeof parsed['pov'] === 'string' && parsed['pov'].trim()
+                      ? parsed['pov'].trim()
+                      : focusCast[0] ?? '未指定';
+
+            const rawScenes = Array.isArray(parsed['scene_plan'])
+                ? (parsed['scene_plan'] as Array<{
+                      location?: string;
+                      summary?: string;
+                      is_spotlight?: boolean;
+                  }>)
+                : null;
+            const spotlightScene = rawScenes?.find((s) => s.is_spotlight);
+            const spotlight =
+                typeof parsed['spotlight'] === 'string' && parsed['spotlight'].trim()
+                    ? parsed['spotlight'].trim()
+                    : spotlightScene?.summary?.trim() ?? '';
+            const outlineBody =
+                typeof parsed['outline_text'] === 'string' && parsed['outline_text'].trim()
+                    ? parsed['outline_text'].trim()
+                    : trimmed;
+            const endingBeat =
+                typeof parsed['ending_beat'] === 'string' && parsed['ending_beat'].trim()
+                    ? parsed['ending_beat'].trim()
+                    : 'HOOK';
+            const targetWordCount =
+                typeof parsed['target_word_count'] === 'number' &&
+                Number.isFinite(parsed['target_word_count'])
+                    ? parsed['target_word_count']
+                    : null;
+            const chapterTitle =
+                typeof parsed['chapter_title'] === 'string' && parsed['chapter_title'].trim()
+                    ? parsed['chapter_title'].trim()
+                    : fallbackTitle;
+            const timelineModeVal =
+                typeof parsed['timeline_mode'] === 'string' && parsed['timeline_mode'].trim()
+                    ? parsed['timeline_mode'].trim()
+                    : fallbackTimelineMode;
+
+            return {
+                chapterTitle,
+                timelineMode: timelineModeVal,
+                povCharacter,
+                targetWordCount,
+                endingBeat,
+                focusCast: focusCast.length > 0 ? focusCast : povCharacter !== '未指定' ? [povCharacter] : [],
+                backgroundCast,
+                spotlight: spotlight || outlineBody.split(/[。\n]/)[0] || '待细化',
+                endingSummary:
+                    typeof parsed['ending_summary'] === 'string' && parsed['ending_summary'].trim()
+                        ? parsed['ending_summary'].trim()
+                        : `以 ${endingBeat} 节拍收束本章`,
+                outlineText: outlineBody,
+                beats: buildPlanBeats(rawScenes, spotlight, outlineBody),
+                consumedSignal
+            };
+        } catch {
+            // JSON 解析失败则回退到 Markdown / 键值文本解析
+        }
+    }
+
+    // 2. Markdown / 键值行文本解析回退
+    let chapterTitle = fallbackTitle;
+    let timelineModeVal = fallbackTimelineMode;
+    let povCharacter = '';
+    let targetWordCount: number | null = null;
+    let endingBeat = 'HOOK';
+    let focusCast: string[] = [];
+    let backgroundCast: string[] = [];
+    let spotlight = '';
+    let endingSummary = '';
+    const bodyLines: string[] = [];
+    const parsedScenes: Array<{ location?: string; summary?: string; is_spotlight?: boolean }> = [];
+
+    const lines = trimmed.split(/\r?\n/);
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+            bodyLines.push('');
+            continue;
+        }
+        const kvMatch = line.match(/^(?:[-*]\s*)?([A-Za-z0-9_\u4e00-\u9fa5]+)\s*[:：]\s*(.+)$/);
+        if (kvMatch) {
+            const key = (kvMatch[1] ?? '').toLowerCase();
+            const val = (kvMatch[2] ?? '').trim();
+            if (key === '标题' || key === 'chapter_title' || key === 'title') {
+                chapterTitle = val;
+                continue;
+            }
+            if (key === '目标字数' || key === 'target_word_count' || key === 'target') {
+                const num = Number.parseInt(val.replace(/[^\d]/g, ''), 10);
+                if (Number.isFinite(num) && num > 0) targetWordCount = num;
+                continue;
+            }
+            if (key === '收尾节拍' || key === 'ending_beat' || key === 'ending') {
+                endingBeat = val;
+                continue;
+            }
+            if (key === '收尾说明' || key === 'ending_summary') {
+                endingSummary = val;
+                continue;
+            }
+            if (key === '时间线' || key === '时间线模式' || key === 'timeline_mode') {
+                timelineModeVal = val;
+                continue;
+            }
+            if (key === '视角' || key === 'pov' || key === 'pov_character') {
+                povCharacter = val;
+                continue;
+            }
+            if (key === '焦点角色' || key === 'focus_cast') {
+                focusCast = normalizeCastList(val);
+                continue;
+            }
+            if (key === '背景角色' || key === 'background_cast') {
+                backgroundCast = normalizeCastList(val);
+                continue;
+            }
+            if (key === '戏眼' || key === 'spotlight') {
+                spotlight = val;
+                continue;
+            }
+        }
+        const sceneMatch = line.match(/^(?:[-*]|\d+[.)])\s*(?:\[(戏眼|spotlight)\]\s*)?(.+)$/i);
+        if (sceneMatch && line.length <= 120 && (line.includes('戏眼') || line.includes('场次') || line.includes('@'))) {
+            parsedScenes.push({
+                summary: sceneMatch[2]?.trim() ?? line,
+                is_spotlight: Boolean(sceneMatch[1]) || line.includes('戏眼')
+            });
+        }
+        bodyLines.push(rawLine);
+    }
+
+    const outlineBody = bodyLines.join('\n').trim() || trimmed;
+    const resolvedPov = povCharacter || focusCast[0] || '未指定';
+    const resolvedFocus =
+        focusCast.length > 0 ? focusCast : resolvedPov !== '未指定' ? [resolvedPov] : [];
+    const resolvedSpotlight =
+        spotlight ||
+        parsedScenes.find((s) => s.is_spotlight)?.summary ||
+        outlineBody
+            .split(/[。\n]/)
+            .map((s) => s.trim())
+            .find((s) => s.length > 0) ||
+        '见下方细纲正文';
+
+    return {
+        chapterTitle,
+        timelineMode: timelineModeVal,
+        povCharacter: resolvedPov,
+        targetWordCount,
+        endingBeat,
+        focusCast: resolvedFocus,
+        backgroundCast,
+        spotlight: resolvedSpotlight,
+        endingSummary: endingSummary || `以 ${endingBeat} 节拍收束本章`,
+        outlineText: outlineBody,
+        beats: buildPlanBeats(parsedScenes.length > 0 ? parsedScenes : null, resolvedSpotlight, outlineBody),
+        consumedSignal
+    };
+}
+
+/** Unified Diff 单行结构 */
+interface ParsedDiffRow {
+    kind: 'ctx' | 'add' | 'del';
+    lineNumber: number | null;
+    glyph: string;
+    text: string;
+}
+
+/** Unified Diff Hunk 块结构 */
+interface ParsedDiffHunk {
+    fileName: string;
+    header: string;
+    rows: ParsedDiffRow[];
+    addCount: number;
+    delCount: number;
+}
+
+/** 将标准 unified diff 解析为结构化 Hunk 块列表 */
+function parseUnifiedDiff(rawDiff: string, defaultFileName: string): ParsedDiffHunk[] {
+    const trimmed = rawDiff.trim();
+    if (!trimmed) {
+        return [];
+    }
+
+    const lines = rawDiff.split(/\r?\n/);
+    const hunks: ParsedDiffHunk[] = [];
+    let currentFile = defaultFileName;
+    let currentHunk: ParsedDiffHunk | null = null;
+    let oldLine = 1;
+    let newLine = 1;
+
+    for (const line of lines) {
+        if (line.startsWith('diff --git ')) {
+            const match = line.match(/b\/(.+)$/);
+            if (match?.[1]) {
+                currentFile = match[1].split('/').pop() ?? defaultFileName;
+            }
+            continue;
+        }
+        if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+            if (line.startsWith('+++ b/')) {
+                currentFile = line.slice(6).split('/').pop() ?? currentFile;
+            }
+            continue;
+        }
+        if (line.startsWith('index ') || line.startsWith('new file mode') || line.startsWith('deleted file mode')) {
+            continue;
+        }
+
+        const hunkHeaderMatch = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@(.*)$/);
+        if (hunkHeaderMatch) {
+            if (currentHunk) {
+                hunks.push(currentHunk);
+            }
+            oldLine = Number.parseInt(hunkHeaderMatch[1] ?? '1', 10);
+            newLine = Number.parseInt(hunkHeaderMatch[2] ?? '1', 10);
+            const suffix = (hunkHeaderMatch[3] ?? '').trim();
+            currentHunk = {
+                fileName: currentFile,
+                header: `@@ -${oldLine} +${newLine} @@${suffix ? ` ${suffix}` : ''}`,
+                rows: [],
+                addCount: 0,
+                delCount: 0
+            };
+            continue;
+        }
+
+        if (!currentHunk) {
+            // 若无标准 @@ 头但存在有效 diff 行，创建一个回退 hunk
+            if (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) {
+                currentHunk = {
+                    fileName: currentFile,
+                    header: '@@ L1 @@',
+                    rows: [],
+                    addCount: 0,
+                    delCount: 0
+                };
+            } else {
+                continue;
+            }
+        }
+
+        if (line.startsWith('\\ No newline')) {
+            continue;
+        }
+
+        if (line.startsWith('+')) {
+            currentHunk.rows.push({
+                kind: 'add',
+                lineNumber: newLine,
+                glyph: '+',
+                text: line.slice(1)
+            });
+            currentHunk.addCount += 1;
+            newLine += 1;
+        } else if (line.startsWith('-')) {
+            currentHunk.rows.push({
+                kind: 'del',
+                lineNumber: oldLine,
+                glyph: '-',
+                text: line.slice(1)
+            });
+            currentHunk.delCount += 1;
+            oldLine += 1;
+        } else {
+            currentHunk.rows.push({
+                kind: 'ctx',
+                lineNumber: newLine,
+                glyph: '',
+                text: line.startsWith(' ') ? line.slice(1) : line
+            });
+            oldLine += 1;
+            newLine += 1;
+        }
+    }
+
+    if (currentHunk) {
+        hunks.push(currentHunk);
+    }
+
+    // 如果输入非空但未匹配任何标准 diff 行，回退展示全文
+    if (hunks.length === 0) {
+        return [
+            {
+                fileName: defaultFileName,
+                header: '@@ L1 @@',
+                rows: lines.map((text, idx) => ({
+                    kind: 'ctx',
+                    lineNumber: idx + 1,
+                    glyph: '',
+                    text
+                })),
+                addCount: 0,
+                delCount: 0
+            }
+        ];
+    }
+
+    return hunks;
+}
+
 /**
  * 根据 SSE 推送的 EngineStageName 字符串推导 6 个节点的默认状态
  */
@@ -433,6 +911,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     stages,
     latestSseStage,
     safeHalt,
+    gateViolations = [],
     pendingSignals = [],
     pendingSignalsCount,
     materializedViews,
@@ -490,12 +969,14 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [isEditing, setIsEditing] = useState(false);
     const [draftContent, setDraftContent] = useState('');
     const [savingEdit, setSavingEdit] = useState(false);
+    const [syncingFromDiff, setSyncingFromDiff] = useState(false);
 
     // 底部导演一次性干涉栏输入态
     const [signalKind, setSignalKind] = useState<DirectorSignalKind>('下章剧情');
     const [signalInput, setSignalInput] = useState('');
     const [submittingSignal, setSubmittingSignal] = useState(false);
     const [dismissedIndices, setDismissedIndices] = useState<number[]>([]);
+    const signalInputRef = useRef<HTMLInputElement | null>(null);
 
     // 局部操作反馈提示
     const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -727,11 +1208,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             : `YOLO 持续连跑中 · 已完成 ${yolo.completedChapters} 章`
         : '';
 
-    const diffLines = useMemo(() => {
-        const raw = chapterDetail?.diffFromHead ?? '';
-        return raw ? raw.split(/\r?\n/) : [];
-    }, [chapterDetail?.diffFromHead]);
-
     const activeChapterIndex = useMemo(
         () => chapters.findIndex((ch) => ch.chapterNumber === activeChapterNumber),
         [chapters, activeChapterNumber]
@@ -749,6 +1225,13 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         chapterDetail?.title ??
         activeChapterSummary?.title ??
         `${formatChapterLabel(activeChapterNumber)} 正文`;
+    const chapterFileName =
+        activeChapterSummary?.fileName ??
+        `ch_${String(Math.max(0, activeChapterNumber)).padStart(4, '0')}.md`;
+    const diffHunks = useMemo(
+        () => parseUnifiedDiff(chapterDetail?.diffFromHead ?? '', chapterFileName),
+        [chapterDetail?.diffFromHead, chapterFileName]
+    );
     const isChapterDirty = Boolean(chapterDetail?.dirty ?? activeChapterSummary?.dirty);
     const proseContent = chapterDetail?.content ?? '';
     const proseCharCount = useMemo(
@@ -759,12 +1242,188 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         () => splitProseParagraphs(proseContent, activeChapterNumber, activeChapterTitle),
         [proseContent, activeChapterNumber, activeChapterTitle]
     );
+
+    // SAFE_HALT / Sync 双栏对比裁决卡数据
+    const verdictCardData = useMemo(() => {
+        const hasPendingSync = isChapterDirty && Boolean(chapterDetail?.diffFromHead?.trim());
+        if (!safeHalt && !hasPendingSync) {
+            return null;
+        }
+
+        const firstViolation = gateViolations[0];
+
+        if (safeHalt) {
+            const issues = safeHalt.issues ?? [];
+            const firstIssue = issues[0];
+            const targetChapterName =
+                safeHalt.chapter !== undefined
+                    ? `ch_${String(Math.max(0, safeHalt.chapter)).padStart(4, '0')}.md`
+                    : chapterFileName;
+            const targetLine = firstIssue?.line ?? firstViolation?.line;
+
+            const leftRef =
+                safeHalt.leftRef ??
+                firstIssue?.sourceRef ??
+                (safeHalt.conflictId ? `冲突源 · ${safeHalt.conflictId}` : '设定真源 / 上游锚点');
+            const leftExcerpt =
+                safeHalt.leftExcerpt ??
+                firstIssue?.sourceQuote ??
+                safeHalt.details ??
+                safeHalt.reason;
+
+            const rightRef =
+                safeHalt.rightRef ??
+                `${targetChapterName}${targetLine !== undefined ? ` · L${targetLine}` : ''}`;
+
+            const rightItems: Array<{
+                line?: number | undefined;
+                rule?: string | undefined;
+                text: string;
+            }> = [];
+
+            for (const issue of issues.slice(0, 3)) {
+                const quoteText = issue.quote ?? issue.snippet ?? issue.detail;
+                if (quoteText) {
+                    rightItems.push({
+                        line: issue.line,
+                        rule: issue.rule,
+                        text: quoteText
+                    });
+                }
+            }
+            for (const violation of gateViolations.slice(0, 3)) {
+                const quoteText = violation.snippet ?? violation.detail;
+                if (quoteText) {
+                    rightItems.push({
+                        line: violation.line,
+                        rule: violation.rule,
+                        text: quoteText
+                    });
+                }
+            }
+
+            if (rightItems.length === 0) {
+                const fallbackExcerpt =
+                    safeHalt.rightExcerpt ??
+                    proseParagraphs.find((p) => !p.isBreak)?.text ??
+                    '当前章节草稿已被安全门拦截，尚未提交入库。';
+                rightItems.push({
+                    line: targetLine,
+                    rule: safeHalt.stage,
+                    text: fallbackExcerpt
+                });
+            }
+
+            return {
+                mode: 'halt' as const,
+                eyeText: '需要你拍板 · YOLO 已在安全点挂起',
+                tagText: 'SAFE_HALT',
+                title: safeHalt.reason,
+                affectedChapters: safeHalt.affectedChapters,
+                rollbackThreshold: safeHalt.rollbackThreshold,
+                stage: safeHalt.stage,
+                leftRef,
+                leftLine: undefined as number | undefined,
+                leftRole: '冲突源 / 原设定引文',
+                leftText: leftExcerpt,
+                rightRef,
+                rightLine: targetLine,
+                rightRole:
+                    issues.length > 0 || gateViolations.length > 0
+                        ? '门禁违规行 / 本章草稿'
+                        : '本章草稿',
+                rightItems
+            };
+        }
+
+        // Sync 待对账裁决卡
+        let totalAdd = 0;
+        let totalDel = 0;
+        let firstAdd: ParsedDiffRow | undefined;
+        let firstDel: ParsedDiffRow | undefined;
+        let firstCtx: ParsedDiffRow | undefined;
+
+        for (const hunk of diffHunks) {
+            totalAdd += hunk.addCount;
+            totalDel += hunk.delCount;
+            for (const row of hunk.rows) {
+                if (row.kind === 'add' && !firstAdd) firstAdd = row;
+                if (row.kind === 'del' && !firstDel) firstDel = row;
+                if (row.kind === 'ctx' && !firstCtx) firstCtx = row;
+            }
+        }
+
+        const rightItems: Array<{
+            line?: number | undefined;
+            rule?: string | undefined;
+            text: string;
+        }> = [];
+        for (const violation of gateViolations.slice(0, 3)) {
+            const quoteText = violation.snippet ?? violation.detail;
+            if (quoteText) {
+                rightItems.push({
+                    line: violation.line,
+                    rule: violation.rule,
+                    text: quoteText
+                });
+            }
+        }
+        if (rightItems.length === 0) {
+            rightItems.push({
+                line: firstDel?.lineNumber ?? firstCtx?.lineNumber ?? undefined,
+                text:
+                    firstDel?.text ??
+                    firstCtx?.text ??
+                    '本次为纯新增手改，Git HEAD 中无对应旧行。'
+            });
+        }
+
+        return {
+            mode: 'sync' as const,
+            eyeText: '需要你拍板 · 手改待对账',
+            tagText: 'Sync',
+            title: '检测到手稿改动，待执行 Sync 对账与连续性扫描',
+            totalAdd,
+            totalDel,
+            leftRef: `${chapterFileName}${firstAdd?.lineNumber ? ` · L${firstAdd.lineNumber}` : ''}`,
+            leftLine: firstAdd?.lineNumber ?? undefined,
+            leftRole: '当前手改片段',
+            leftText:
+                firstAdd?.text ??
+                firstCtx?.text ??
+                '工作区正文存在未对账修改，待扫描实体与下游连续性。',
+            rightRef: firstViolation
+                ? `${chapterFileName}${firstViolation.line ? ` · L${firstViolation.line}` : ''}`
+                : `${chapterFileName}${firstDel?.lineNumber ? ` · L${firstDel.lineNumber}` : ''}`,
+            rightLine: firstViolation?.line ?? firstDel?.lineNumber ?? undefined,
+            rightRole: gateViolations.length > 0 ? '门禁违规行' : 'Git HEAD 原文',
+            rightItems
+        };
+    }, [
+        chapterDetail?.diffFromHead,
+        chapterFileName,
+        diffHunks,
+        gateViolations,
+        isChapterDirty,
+        proseParagraphs,
+        safeHalt
+    ]);
     const featHash =
         chapterDetail?.featCommitSha?.slice(0, 7) ??
         activeChapterSummary?.commitSha?.slice(0, 7) ??
         undefined;
     const stateHash = chapterDetail?.stateCommitSha?.slice(0, 7) ?? undefined;
     const consumedSignalText = chapterDetail?.consumedSignal ?? lastConsumedSignal;
+    const parsedPlan = useMemo(
+        () =>
+            parseStructuredPlan(
+                chapterDetail?.outlineText,
+                activeChapterTitle,
+                timelineMode,
+                consumedSignalText
+            ),
+        [chapterDetail?.outlineText, activeChapterTitle, timelineMode, consumedSignalText]
+    );
     const currentFontSize = PROSE_FONT_SIZES[fontStep] ?? 17;
 
     // 6 圆点连线进度胶囊当前阶段状态词
@@ -1002,8 +1661,8 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         onClick={() => setViewTab('diff')}
                     >
                         修改
-                        {diffLines.length > 0 ? (
-                            <span className="ns-tab-count">{diffLines.length}</span>
+                        {diffHunks.length > 0 ? (
+                            <span className="ns-tab-count">{diffHunks.length}</span>
                         ) : null}
                     </button>
                     <button
@@ -1085,8 +1744,8 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 </div>
             </div>
 
-            {/* SAFE_HALT 告警条 (.ops/safe_halt.json) */}
-            {safeHalt ? (
+            {/* SAFE_HALT 告警条 (.ops/safe_halt.json)：非正文阅读页时保留顶部提示 */}
+            {safeHalt && viewTab !== 'prose' ? (
                 <section className="ns-safe-halt-banner" role="alert">
                     <div className="ns-safe-halt-head">
                         <strong>SAFE_HALT · 运行已安全挂起</strong>
@@ -1200,6 +1859,208 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         className="ns-prose-col"
                         style={{ '--ns-fs': `${currentFontSize}px` } as React.CSSProperties}
                     >
+                        {/* SAFE_HALT / Sync 双栏对比裁决卡 */}
+                        {verdictCardData ? (
+                            <section
+                                className={`ns-verdict ${verdictCardData.mode === 'halt' ? 'ns-verdict-red' : 'ns-verdict-amber'}`}
+                                role="alert"
+                                aria-label={verdictCardData.tagText}
+                            >
+                                <div className="ns-v-eye">
+                                    <span className="ns-v-pd" aria-hidden="true" />
+                                    <span>{verdictCardData.eyeText}</span>
+                                    <span className="ns-v-tag">{verdictCardData.tagText}</span>
+                                </div>
+
+                                <h2>{verdictCardData.title}</h2>
+
+                                <p className="ns-v-sub">
+                                    {verdictCardData.mode === 'halt' ? (
+                                        <>
+                                            {verdictCardData.stage ? (
+                                                <>
+                                                    挂起阶段 <b>{verdictCardData.stage}</b>
+                                                    {' · '}
+                                                </>
+                                            ) : null}
+                                            {verdictCardData.affectedChapters !== undefined ? (
+                                                <>
+                                                    波及 <b>{verdictCardData.affectedChapters}</b> 章
+                                                    {verdictCardData.rollbackThreshold !== undefined ? (
+                                                        <>
+                                                            {' · 超过自动回滚上限 '}
+                                                            <b>{verdictCardData.rollbackThreshold}</b>
+                                                            {' 章'}
+                                                        </>
+                                                    ) : null}
+                                                </>
+                                            ) : (
+                                                '安全门已锁定自动写入，请投入纠偏信号或直接编辑本章修复。'
+                                            )}
+                                        </>
+                                    ) : (
+                                        <>
+                                            当前章节相对 Git HEAD 新增{' '}
+                                            <b>+{verdictCardData.totalAdd}</b> / 删除{' '}
+                                            <b>-{verdictCardData.totalDel}</b> 行，等待增量刷新视图与实体连续性扫描。
+                                        </>
+                                    )}
+                                </p>
+
+                                <div className="ns-v-ev">
+                                    <figure>
+                                        <figcaption>
+                                            <span>
+                                                {verdictCardData.leftRef}
+                                                {verdictCardData.leftLine !== undefined ? (
+                                                    <>
+                                                        {' · '}
+                                                        <b>L{verdictCardData.leftLine}</b>
+                                                    </>
+                                                ) : null}
+                                            </span>
+                                            <span>{verdictCardData.leftRole}</span>
+                                        </figcaption>
+                                        <blockquote>
+                                            <mark
+                                                className={
+                                                    verdictCardData.mode === 'sync' ? 'ns-add' : undefined
+                                                }
+                                            >
+                                                {verdictCardData.leftText}
+                                            </mark>
+                                        </blockquote>
+                                    </figure>
+
+                                    <figure>
+                                        <figcaption>
+                                            <span>
+                                                {verdictCardData.rightRef}
+                                                {verdictCardData.rightLine !== undefined ? (
+                                                    <>
+                                                        {' · '}
+                                                        <b>L{verdictCardData.rightLine}</b>
+                                                    </>
+                                                ) : null}
+                                            </span>
+                                            <span>{verdictCardData.rightRole}</span>
+                                        </figcaption>
+                                        {verdictCardData.rightItems.length > 1 ? (
+                                            <div className="ns-v-issue-list">
+                                                {verdictCardData.rightItems.map((item, idx) => (
+                                                    <div key={idx} className="ns-v-issue-item">
+                                                        {item.line !== undefined || item.rule ? (
+                                                            <div className="ns-v-issue-meta">
+                                                                {item.line !== undefined ? (
+                                                                    <b>L{item.line}</b>
+                                                                ) : null}
+                                                                {item.rule ? (
+                                                                    <span>{item.rule}</span>
+                                                                ) : null}
+                                                            </div>
+                                                        ) : null}
+                                                        <blockquote>
+                                                            <mark>{item.text}</mark>
+                                                        </blockquote>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <blockquote>
+                                                <mark>{verdictCardData.rightItems[0]?.text ?? ''}</mark>
+                                            </blockquote>
+                                        )}
+                                    </figure>
+                                </div>
+
+                                <div className="ns-v-acts">
+                                    {verdictCardData.mode === 'halt' ? (
+                                        <button
+                                            type="button"
+                                            className="ns-v-opt ns-go"
+                                            onClick={() => {
+                                                setIsEditing(false);
+                                                setSignalKind('Retcon');
+                                                if (!signalInput.trim() && safeHalt?.reason) {
+                                                    setSignalInput(`纠偏：${safeHalt.reason}`);
+                                                }
+                                                signalInputRef.current?.scrollIntoView({
+                                                    behavior: 'smooth',
+                                                    block: 'center'
+                                                });
+                                                signalInputRef.current?.focus();
+                                            }}
+                                        >
+                                            <span className="ns-v-opt-ico" aria-hidden="true">
+                                                ↻
+                                            </span>
+                                            <span>
+                                                <b>投入改写/纠偏信号</b>
+                                                <small>切至底部导演纸条栏写入 Retcon 约束并重新推进</small>
+                                            </span>
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            className="ns-v-opt ns-go"
+                                            disabled={isBusy || syncingFromDiff}
+                                            onClick={() => {
+                                                setSyncingFromDiff(true);
+                                                void Promise.resolve(handleSync()).finally(() => {
+                                                    setSyncingFromDiff(false);
+                                                });
+                                            }}
+                                        >
+                                            <span className="ns-v-opt-ico" aria-hidden="true">
+                                                ⇄
+                                            </span>
+                                            <span>
+                                                <b>
+                                                    {activeTask === 'SYNCING' || syncingFromDiff
+                                                        ? '正在执行 Sync 对账…'
+                                                        : '立即执行 Sync 对账'}
+                                                </b>
+                                                <small>增量更新实体/时间线视图并扫描下游连续性</small>
+                                            </span>
+                                        </button>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        className="ns-v-opt"
+                                        onClick={() => {
+                                            setDraftContent(chapterDetail?.content ?? '');
+                                            setIsEditing(true);
+                                        }}
+                                    >
+                                        <span className="ns-v-opt-ico" aria-hidden="true">
+                                            ✎
+                                        </span>
+                                        <span>
+                                            <b>直接编辑本章修复</b>
+                                            <small>打开内置编辑器修订原稿，保存后自动触发 Sync</small>
+                                        </span>
+                                    </button>
+                                </div>
+
+                                <div className="ns-v-more">
+                                    {verdictCardData.mode === 'sync' ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => setViewTab('diff')}
+                                        >
+                                            查看完整手改 Diff
+                                        </button>
+                                    ) : null}
+                                    {onOpenInspector ? (
+                                        <button type="button" onClick={onOpenInspector}>
+                                            打开右栏检查器（门禁 / Git WAL）
+                                        </button>
+                                    ) : null}
+                                </div>
+                            </section>
+                        ) : null}
+
                         {/* 精致章节头：大号半透明章号 + 卷/章 kicker + 标题 + 元信息 */}
                         <header className="ns-chap-header">
                             <div className="ns-chap-numeral">{activeChapterNumber}</div>
@@ -1365,51 +2226,714 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
                 {viewTab === 'plan' ? (
                     <section className="ns-paper">
-                        <div className="ns-paper-head">
-                            <strong>
-                                本章细纲 ({formatChapterLabel(activeChapterNumber)})
-                            </strong>
-                            <span className="ns-pill ns-pill-brand">{timelineMode}</span>
-                        </div>
-                        <pre className="ns-mono ns-pre-block">
-                            {chapterDetail?.outlineText ||
-                                '当前章节暂无已记录的结构化细纲摘要。'}
-                        </pre>
+                        {parsedPlan ? (
+                            <>
+                                {/* 原型同款头部：PLANNER · 结构化细纲 + 第 N 章 · 标题 + 4 枚胶囊 */}
+                                <header style={{ marginBottom: '22px' }}>
+                                    <div
+                                        style={{
+                                            fontSize: '11px',
+                                            fontWeight: 600,
+                                            letterSpacing: '0.08em',
+                                            textTransform: 'uppercase',
+                                            color: 'var(--ns-text-4)'
+                                        }}
+                                    >
+                                        PLANNER · 结构化细纲
+                                    </div>
+                                    <h2
+                                        style={{
+                                            margin: '6px 0 0',
+                                            font: '700 24px/1.35 var(--ns-font-serif)',
+                                            color: 'var(--ns-text-1)'
+                                        }}
+                                    >
+                                        第 {activeChapterNumber} 章 · {parsedPlan.chapterTitle}
+                                    </h2>
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            gap: '6px',
+                                            marginTop: '12px'
+                                        }}
+                                    >
+                                        <span
+                                            style={{
+                                                height: '24px',
+                                                padding: '0 10px',
+                                                borderRadius: '999px',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                font: '11px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-3)',
+                                                background: 'var(--ns-bg-hover)'
+                                            }}
+                                        >
+                                            timeline_mode{' '}
+                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
+                                                {parsedPlan.timelineMode}
+                                            </b>
+                                        </span>
+                                        <span
+                                            style={{
+                                                height: '24px',
+                                                padding: '0 10px',
+                                                borderRadius: '999px',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                font: '11px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-3)',
+                                                background: 'var(--ns-bg-hover)'
+                                            }}
+                                        >
+                                            pov{' '}
+                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
+                                                {parsedPlan.povCharacter}
+                                            </b>
+                                        </span>
+                                        <span
+                                            style={{
+                                                height: '24px',
+                                                padding: '0 10px',
+                                                borderRadius: '999px',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                font: '11px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-3)',
+                                                background: 'var(--ns-bg-hover)'
+                                            }}
+                                        >
+                                            target{' '}
+                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
+                                                {parsedPlan.targetWordCount
+                                                    ? `${parsedPlan.targetWordCount.toLocaleString('zh-CN')} 字`
+                                                    : '自适应'}
+                                            </b>
+                                        </span>
+                                        <span
+                                            style={{
+                                                height: '24px',
+                                                padding: '0 10px',
+                                                borderRadius: '999px',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                font: '11px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-3)',
+                                                background: 'var(--ns-bg-hover)'
+                                            }}
+                                        >
+                                            ending{' '}
+                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
+                                                {parsedPlan.endingBeat}
+                                            </b>
+                                        </span>
+                                    </div>
+                                </header>
+
+                                {/* 节拍比例条 (.ns-beats + .ns-beats-cap) */}
+                                <div>
+                                    <div className="ns-beats">
+                                        {parsedPlan.beats.map((beat, idx) => (
+                                            <div
+                                                key={`${beat.label}-${idx}`}
+                                                className={`ns-beat ${beat.isSpotlight ? 'eye' : ''}`}
+                                                style={{ flex: beat.percent }}
+                                                title={`${beat.label} (${beat.percent}%): ${beat.summary}`}
+                                            >
+                                                <b>
+                                                    {beat.label} {beat.percent}%
+                                                </b>
+                                                <span>{beat.summary}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="ns-beats-cap">
+                                        <span>0%</span>
+                                        {(() => {
+                                            let acc = 0;
+                                            return parsedPlan.beats.slice(0, -1).map((beat, idx) => {
+                                                acc += beat.percent;
+                                                return <span key={idx}>{acc}%</span>;
+                                            });
+                                        })()}
+                                        <span>100%</span>
+                                    </div>
+                                </div>
+
+                                {/* 结构化键值对表 */}
+                                <dl
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '132px minmax(0, 1fr)',
+                                        margin: 0
+                                    }}
+                                >
+                                    <dt
+                                        style={{
+                                            padding: '14px 12px 14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            fontSize: '12.5px',
+                                            color: 'var(--ns-text-3)'
+                                        }}
+                                    >
+                                        视角
+                                        <small
+                                            style={{
+                                                display: 'block',
+                                                marginTop: '2px',
+                                                font: '10.5px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-4)'
+                                            }}
+                                        >
+                                            pov_character
+                                        </small>
+                                    </dt>
+                                    <dd
+                                        style={{
+                                            margin: 0,
+                                            padding: '14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            gap: '6px',
+                                            alignItems: 'center'
+                                        }}
+                                    >
+                                        <span
+                                            style={{
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: '7px',
+                                                height: '28px',
+                                                padding: '0 11px 0 4px',
+                                                borderRadius: '999px',
+                                                background: 'var(--ns-bg-hover)',
+                                                font: '13px var(--ns-font-sans)',
+                                                color: 'var(--ns-text-1)'
+                                            }}
+                                        >
+                                            <i
+                                                style={{
+                                                    width: '20px',
+                                                    height: '20px',
+                                                    borderRadius: '50%',
+                                                    display: 'grid',
+                                                    placeItems: 'center',
+                                                    font: '700 10.5px var(--ns-font-serif)',
+                                                    fontStyle: 'normal',
+                                                    color: '#fff',
+                                                    background: getAvatarColor(parsedPlan.povCharacter)
+                                                }}
+                                            >
+                                                {parsedPlan.povCharacter.slice(0, 1)}
+                                            </i>
+                                            {parsedPlan.povCharacter}
+                                        </span>
+                                    </dd>
+
+                                    <dt
+                                        style={{
+                                            padding: '14px 12px 14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            fontSize: '12.5px',
+                                            color: 'var(--ns-text-3)'
+                                        }}
+                                    >
+                                        焦点角色
+                                        <small
+                                            style={{
+                                                display: 'block',
+                                                marginTop: '2px',
+                                                font: '10.5px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-4)'
+                                            }}
+                                        >
+                                            focus_cast
+                                        </small>
+                                    </dt>
+                                    <dd
+                                        style={{
+                                            margin: 0,
+                                            padding: '14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            gap: '6px',
+                                            alignItems: 'center'
+                                        }}
+                                    >
+                                        {parsedPlan.focusCast.length > 0 ? (
+                                            parsedPlan.focusCast.map((actor) => (
+                                                <span
+                                                    key={actor}
+                                                    style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '7px',
+                                                        height: '28px',
+                                                        padding: '0 11px 0 4px',
+                                                        borderRadius: '999px',
+                                                        background: 'var(--ns-bg-hover)',
+                                                        font: '13px var(--ns-font-sans)',
+                                                        color: 'var(--ns-text-1)'
+                                                    }}
+                                                >
+                                                    <i
+                                                        style={{
+                                                            width: '20px',
+                                                            height: '20px',
+                                                            borderRadius: '50%',
+                                                            display: 'grid',
+                                                            placeItems: 'center',
+                                                            font: '700 10.5px var(--ns-font-serif)',
+                                                            fontStyle: 'normal',
+                                                            color: '#fff',
+                                                            background: getAvatarColor(actor)
+                                                        }}
+                                                    >
+                                                        {actor.slice(0, 1)}
+                                                    </i>
+                                                    {actor}
+                                                </span>
+                                            ))
+                                        ) : (
+                                            <span className="ns-muted">本章无</span>
+                                        )}
+                                    </dd>
+
+                                    <dt
+                                        style={{
+                                            padding: '14px 12px 14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            fontSize: '12.5px',
+                                            color: 'var(--ns-text-3)'
+                                        }}
+                                    >
+                                        背景角色
+                                        <small
+                                            style={{
+                                                display: 'block',
+                                                marginTop: '2px',
+                                                font: '10.5px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-4)'
+                                            }}
+                                        >
+                                            background_cast
+                                        </small>
+                                    </dt>
+                                    <dd
+                                        style={{
+                                            margin: 0,
+                                            padding: '14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            gap: '6px',
+                                            alignItems: 'center'
+                                        }}
+                                    >
+                                        {parsedPlan.backgroundCast.length > 0 ? (
+                                            parsedPlan.backgroundCast.map((actor) => (
+                                                <span
+                                                    key={actor}
+                                                    style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '7px',
+                                                        height: '28px',
+                                                        padding: '0 11px 0 4px',
+                                                        borderRadius: '999px',
+                                                        background: 'var(--ns-bg-hover)',
+                                                        font: '13px var(--ns-font-sans)',
+                                                        color: 'var(--ns-text-1)'
+                                                    }}
+                                                >
+                                                    <i
+                                                        style={{
+                                                            width: '20px',
+                                                            height: '20px',
+                                                            borderRadius: '50%',
+                                                            display: 'grid',
+                                                            placeItems: 'center',
+                                                            font: '700 10.5px var(--ns-font-serif)',
+                                                            fontStyle: 'normal',
+                                                            color: '#fff',
+                                                            background: getAvatarColor(actor)
+                                                        }}
+                                                    >
+                                                        {actor.slice(0, 1)}
+                                                    </i>
+                                                    {actor}
+                                                </span>
+                                            ))
+                                        ) : (
+                                            <span className="ns-muted">本章无</span>
+                                        )}
+                                    </dd>
+
+                                    <dt
+                                        style={{
+                                            padding: '14px 12px 14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            fontSize: '12.5px',
+                                            color: 'var(--ns-text-3)'
+                                        }}
+                                    >
+                                        戏眼
+                                        <small
+                                            style={{
+                                                display: 'block',
+                                                marginTop: '2px',
+                                                font: '10.5px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-4)'
+                                            }}
+                                        >
+                                            spotlight
+                                        </small>
+                                    </dt>
+                                    <dd
+                                        style={{
+                                            margin: 0,
+                                            padding: '14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            font: '15px/1.8 var(--ns-font-serif)',
+                                            color: 'var(--ns-prose)'
+                                        }}
+                                    >
+                                        {parsedPlan.spotlight}
+                                    </dd>
+
+                                    <dt
+                                        style={{
+                                            padding: '14px 12px 14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            fontSize: '12.5px',
+                                            color: 'var(--ns-text-3)'
+                                        }}
+                                    >
+                                        收尾节拍
+                                        <small
+                                            style={{
+                                                display: 'block',
+                                                marginTop: '2px',
+                                                font: '10.5px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-4)'
+                                            }}
+                                        >
+                                            ending_beat
+                                        </small>
+                                    </dt>
+                                    <dd
+                                        style={{
+                                            margin: 0,
+                                            padding: '14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            display: 'flex',
+                                            flexWrap: 'wrap',
+                                            gap: '8px',
+                                            alignItems: 'center',
+                                            font: '15px/1.8 var(--ns-font-serif)',
+                                            color: 'var(--ns-prose)'
+                                        }}
+                                    >
+                                        <span className="ns-pill ns-pill-brand ns-mono">
+                                            {parsedPlan.endingBeat}
+                                        </span>
+                                        <span>{parsedPlan.endingSummary}</span>
+                                    </dd>
+
+                                    <dt
+                                        style={{
+                                            padding: '14px 12px 14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            fontSize: '12.5px',
+                                            color: 'var(--ns-text-3)'
+                                        }}
+                                    >
+                                        细纲正文
+                                        <small
+                                            style={{
+                                                display: 'block',
+                                                marginTop: '2px',
+                                                font: '10.5px var(--ns-font-mono)',
+                                                color: 'var(--ns-text-4)'
+                                            }}
+                                        >
+                                            outline_text
+                                        </small>
+                                    </dt>
+                                    <dd
+                                        style={{
+                                            margin: 0,
+                                            padding: '14px 0',
+                                            borderTop: '1px solid var(--ns-border-1)',
+                                            font: '15px/1.85 var(--ns-font-serif)',
+                                            color: 'var(--ns-prose)',
+                                            whiteSpace: 'pre-wrap',
+                                            wordBreak: 'break-word'
+                                        }}
+                                    >
+                                        {parsedPlan.outlineText}
+                                    </dd>
+                                </dl>
+                            </>
+                        ) : (
+                            <div
+                                style={{
+                                    borderRadius: 'var(--ns-r-lg)',
+                                    border: '1px solid var(--ns-border-1)',
+                                    background: 'var(--ns-bg-card)',
+                                    padding: '28px 24px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'flex-start',
+                                    gap: '12px'
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        fontSize: '11px',
+                                        fontWeight: 600,
+                                        letterSpacing: '0.08em',
+                                        textTransform: 'uppercase',
+                                        color: 'var(--ns-text-4)'
+                                    }}
+                                >
+                                    PLANNER · 结构化细纲
+                                </div>
+                                <h2
+                                    style={{
+                                        margin: 0,
+                                        font: '700 20px/1.35 var(--ns-font-serif)',
+                                        color: 'var(--ns-text-1)'
+                                    }}
+                                >
+                                    第 {activeChapterNumber} 章 · 尚未生成细纲
+                                </h2>
+                                <p style={{ margin: 0, fontSize: '13px', color: 'var(--ns-text-3)' }}>
+                                    当前章节暂无已落盘的 Planner 结构化细纲，可点击「推进 1 章」由 Planner 节点生成节拍与戏眼规划。
+                                </p>
+                                <button
+                                    type="button"
+                                    className="ns-btn ns-btn-primary ns-btn-sm"
+                                    disabled={isBusy}
+                                    onClick={() => void handleStepOne()}
+                                >
+                                    {activeTask === 'STEPPING' ? '正在推进…' : '推进 1 章'}
+                                </button>
+                            </div>
+                        )}
                     </section>
                 ) : null}
 
                 {viewTab === 'diff' ? (
                     <section className="ns-paper">
-                        <div className="ns-paper-head">
-                            <strong>
-                                手改 Diff ({formatChapterLabel(activeChapterNumber)} vs HEAD)
-                            </strong>
-                            <span
-                                className={`ns-pill ${diffLines.length > 0 ? 'ns-pill-amber' : 'ns-pill-muted'}`}
+                        <header style={{ marginBottom: '22px' }}>
+                            <div
+                                style={{
+                                    fontSize: '11px',
+                                    fontWeight: 600,
+                                    letterSpacing: '0.08em',
+                                    textTransform: 'uppercase',
+                                    color: 'var(--ns-text-4)'
+                                }}
                             >
-                                {diffLines.length > 0 ? '存在未提交变更' : '无工作区差异'}
-                            </span>
-                        </div>
-                        {diffLines.length > 0 ? (
-                            <div className="ns-diff-block ns-mono">
-                                {diffLines.map((line, index) => {
-                                    let cls = 'ns-diff-ctx';
-                                    if (line.startsWith('+') && !line.startsWith('+++')) {
-                                        cls = 'ns-diff-add';
-                                    } else if (line.startsWith('-') && !line.startsWith('---')) {
-                                        cls = 'ns-diff-del';
-                                    } else if (line.startsWith('@@')) {
-                                        cls = 'ns-diff-hunk';
-                                    }
-                                    return (
-                                        <div key={index} className={cls}>
-                                            {line || ' '}
-                                        </div>
-                                    );
-                                })}
+                                修改 DIFF
                             </div>
+                            <h2
+                                style={{
+                                    margin: '6px 0 0',
+                                    font: '700 24px/1.35 var(--ns-font-serif)',
+                                    color: 'var(--ns-text-1)'
+                                }}
+                            >
+                                门禁 Patch 与人工手改
+                            </h2>
+                        </header>
+
+                        {diffHunks.length > 0 ? (
+                            diffHunks.map((hunk, hunkIdx) => (
+                                <div
+                                    key={`${hunk.fileName}-${hunk.header}-${hunkIdx}`}
+                                    className="ns-hunk"
+                                    style={{
+                                        marginBottom: '20px',
+                                        borderRadius: 'var(--ns-r-lg)',
+                                        border: '1px solid var(--ns-border-1)',
+                                        overflow: 'hidden',
+                                        background: 'var(--ns-bg-base)'
+                                    }}
+                                >
+                                    {/* Hunk 顶部信息栏 */}
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '10px',
+                                            padding: '9px 14px',
+                                            fontSize: '12px',
+                                            background: 'var(--ns-bg-hover)',
+                                            borderBottom: '1px solid var(--ns-border-1)'
+                                        }}
+                                    >
+                                        <span className="ns-mono" style={{ color: 'var(--ns-text-1)' }}>
+                                            {hunk.fileName}
+                                        </span>
+                                        <span className="ns-mono" style={{ color: 'var(--ns-text-4)' }}>
+                                            {hunk.header}
+                                        </span>
+                                        <span style={{ flex: 1 }} />
+                                        <span
+                                            className={`ns-pill ${isChapterDirty ? 'ns-pill-amber' : 'ns-pill-green'}`}
+                                        >
+                                            {isChapterDirty ? '人工手改 · 待 Sync' : 'WAL 已对齐'}
+                                        </span>
+                                    </div>
+
+                                    {/* 带行号与红绿高亮的 Diff 行 */}
+                                    <div>
+                                        {hunk.rows.map((row, rowIdx) => {
+                                            const isDel = row.kind === 'del';
+                                            const isAdd = row.kind === 'add';
+                                            return (
+                                                <div
+                                                    key={rowIdx}
+                                                    style={{
+                                                        display: 'grid',
+                                                        gridTemplateColumns: '48px 22px minmax(0, 1fr)',
+                                                        font: '14px/1.9 var(--ns-font-serif)',
+                                                        background: isDel
+                                                            ? 'var(--ns-red-soft)'
+                                                            : isAdd
+                                                              ? 'var(--ns-green-soft)'
+                                                              : 'transparent'
+                                                    }}
+                                                >
+                                                    <span
+                                                        style={{
+                                                            font: '11px/2.45 var(--ns-font-mono)',
+                                                            color: 'var(--ns-text-4)',
+                                                            textAlign: 'left',
+                                                            paddingLeft: '14px',
+                                                            userSelect: 'none'
+                                                        }}
+                                                    >
+                                                        {row.lineNumber ?? ''}
+                                                    </span>
+                                                    <span
+                                                        style={{
+                                                            font: '12px/2.25 var(--ns-font-mono)',
+                                                            textAlign: 'center',
+                                                            color: isDel
+                                                                ? 'var(--ns-red-ink)'
+                                                                : isAdd
+                                                                  ? 'var(--ns-green-ink)'
+                                                                  : 'var(--ns-text-4)',
+                                                            userSelect: 'none'
+                                                        }}
+                                                    >
+                                                        {row.glyph}
+                                                    </span>
+                                                    <span
+                                                        style={{
+                                                            padding: '3px 14px 3px 2px',
+                                                            color: isDel
+                                                                ? 'var(--ns-red-ink)'
+                                                                : isAdd
+                                                                  ? 'var(--ns-green-ink)'
+                                                                  : 'var(--ns-text-3)',
+                                                            textDecoration: isDel ? 'line-through' : 'none',
+                                                            whiteSpace: 'pre-wrap',
+                                                            wordBreak: 'break-word'
+                                                        }}
+                                                    >
+                                                        {row.text || ' '}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Hunk 底部提示与快捷 Sync 对账按钮 */}
+                                    <div
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '12px',
+                                            padding: '9px 14px',
+                                            fontSize: '11.5px',
+                                            color: 'var(--ns-text-4)',
+                                            borderTop: '1px solid var(--ns-border-1)'
+                                        }}
+                                    >
+                                        <span>
+                                            SHA-256 指纹变化 · 新增 +{hunk.addCount} / 删除 -{hunk.delCount} 行 · Sync 后自动对齐 WAL 状态
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className="ns-btn ns-btn-ghost ns-btn-sm"
+                                            disabled={isBusy || syncingFromDiff}
+                                            onClick={() => {
+                                                setSyncingFromDiff(true);
+                                                void Promise.resolve(handleSync()).finally(() => {
+                                                    setSyncingFromDiff(false);
+                                                });
+                                            }}
+                                        >
+                                            {activeTask === 'SYNCING' || syncingFromDiff
+                                                ? '正在对账…'
+                                                : '立即触发 Sync 对账'}
+                                        </button>
+                                    </div>
+                                </div>
+                            ))
                         ) : (
-                            <div className="ns-muted">当前章节正文与 Git HEAD 一致，无手改差异。</div>
+                            <div
+                                style={{
+                                    borderRadius: 'var(--ns-r-lg)',
+                                    border: '1px solid var(--ns-border-1)',
+                                    background: 'var(--ns-bg-card)',
+                                    padding: '24px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '12px'
+                                }}
+                            >
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <span className="ns-pill ns-pill-green">WAL 已对齐 · 无未同步差异</span>
+                                    <span className="ns-mono" style={{ fontSize: '12px', color: 'var(--ns-text-4)' }}>
+                                        {chapterFileName}
+                                    </span>
+                                </div>
+                                <div style={{ fontSize: '13px', color: 'var(--ns-text-2)' }}>
+                                    当前章节正文与 Git HEAD 一致，无待对账的人工手改或门禁 Patch 残留。
+                                </div>
+                                <div
+                                    className="ns-mono"
+                                    style={{
+                                        display: 'flex',
+                                        flexWrap: 'wrap',
+                                        gap: '10px',
+                                        fontSize: '11.5px',
+                                        color: 'var(--ns-text-4)',
+                                        paddingTop: '10px',
+                                        borderTop: '1px solid var(--ns-border-1)'
+                                    }}
+                                >
+                                    <span>WAL: {walPhase}</span>
+                                    {featHash ? <span>· feat {featHash}</span> : null}
+                                    {stateHash ? <span>· state {stateHash}</span> : null}
+                                    {chapterDetail?.sha256 ? (
+                                        <span>· sha256 {chapterDetail.sha256.slice(0, 12)}</span>
+                                    ) : null}
+                                </div>
+                            </div>
                         )}
                     </section>
                 ) : null}
@@ -1526,6 +3050,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
                     <div className="ns-composer-box">
                         <input
+                            ref={signalInputRef}
                             type="text"
                             className="ns-composer-input"
                             value={signalInput}
