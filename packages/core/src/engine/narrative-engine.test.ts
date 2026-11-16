@@ -881,4 +881,64 @@ describe('NarrativeEngine', () => {
             }
         ]);
     });
+
+    it('stepChapter 应挂载 selected_lore_files 至 Planner/Writer、注入 open_threads.md 与实体别名，并将 chapter_summary 写入 L2 卷级章卡', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+
+        await mkdir(join(bookRoot, 'lore_library'), { recursive: true });
+        await writeFile(
+            join(bookRoot, 'lore_library/lore_001.md'),
+            '# 旧校舍管理规约\n\n> 摘要: 社团经费与门禁制度\n\n旧校舍三楼社团每学期须提交三张正规经费票据，逾期由学生会收回黄铜钥匙。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/open_threads.md'),
+            '# 跨卷伏笔台账 (Open Threads)\n\n- [thread_001] 铁盒备用钥匙的真正来源 | 唤醒条件: 学生会终审前揭晓\n',
+            'utf8'
+        );
+        await system.commitPaths(bookRoot, ['.'], 'chore: seed lore_001 and open_threads');
+
+        const librarianWithLore = {
+            ...LIBRARIAN_OK,
+            selected_lore_files: ['lore_001', 'lore_001.md', '../world/book_config.yaml']
+        };
+
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(librarianWithLore),
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            jsonResponse(EXTRACTOR_OK)
+        ]);
+
+        const engine = makeEngine(store, llm, system);
+        const result = await engine.stepChapter({
+            chapterGoal: '核查外围设定挂载、未解伏笔注入与 L2 章卡落盘'
+        });
+
+        expect(result.status).toBe('COMMITTED');
+
+        // 1. 验证 Librarian 请求包含实体唯一别名与职务称谓以及全局局势摘要
+        const librarianCall = llm.history[0];
+        expect(librarianCall?.request.dynamicTail).toContain('- char_001: 陆沉 (别名: 小沉 | 称谓: 社长)');
+        expect(librarianCall?.request.dynamicTail).toContain('- char_002: 星野琉璃 (别名: 琉璃 | 称谓: 学生会书记)');
+
+        // 2. 验证 Planner 与 Writer 的 dynamicTail 均包含 lore_001.md 内容（且去重、拦截非法路径），Planner 包含 open_threads.md
+        const plannerCall = llm.history[1];
+        const writerCall = llm.history[2];
+        expect(plannerCall?.request.dynamicTail).toContain('旧校舍三楼社团每学期须提交三张正规经费票据');
+        expect(writerCall?.request.dynamicTail).toContain('旧校舍三楼社团每学期须提交三张正规经费票据');
+        expect(plannerCall?.request.dynamicTail).not.toContain('tokens_per_char');
+        expect(plannerCall?.request.dynamicTail).toContain('铁盒备用钥匙的真正来源');
+
+        // 3. 验证 Extractor 提示词模板包含 world_summary_markdown 字段说明
+        const extractorCall = llm.history[4];
+        expect(extractorCall?.request.staticPrefixBlocks.join('\n')).toContain('world_summary_markdown');
+
+        // 4. 验证 index/L2_cards/vol_01_cards.md 已写入 ## ch_0002 与 chapter_summary，且工作区保持 clean
+        const l2CardRaw = await readFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), 'utf8');
+        expect(l2CardRaw).toContain('## ch_0002 (day:1)');
+        expect(l2CardRaw).toContain(`- 主干剧情：${EXTRACTOR_OK.chapter_summary}`);
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+    });
 });

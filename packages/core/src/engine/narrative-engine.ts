@@ -201,6 +201,42 @@ function normalizeOpsStyleAmendments(raw: string | null): string | undefined {
     return raw.trim();
 }
 
+/** 过滤空内容或仅含标题与注释的跨卷伏笔台账模板 */
+function normalizeOpenThreads(raw: string | null): string | undefined {
+    if (!raw) return undefined;
+    const body = raw
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/^#+\s*.*$/gm, '')
+        .trim();
+    if (!body) return undefined;
+    return raw.trim();
+}
+
+/** 追加或替换 L2 卷级章卡中的单章摘要块 */
+function upsertVolumeCardEntry(
+    rawCardContent: string | null,
+    currentVolume: number,
+    chapterNumber: number,
+    storyDay: number,
+    chapterSummary: string
+): string {
+    const baseContent =
+        rawCardContent && rawCardContent.trim().length > 0
+            ? rawCardContent.replace(/\r\n/g, '\n')
+            : `# 第 ${currentVolume} 卷双轨章卡\n\n`;
+    const chKey = formatChapterKey(chapterNumber);
+    const entryBlock = `## ${chKey} (day:${storyDay})\n- 主干剧情：${chapterSummary.trim()}`;
+    const sectionRe = new RegExp(
+        `^##\\s+${chKey}\\b[^\\n]*\\n[\\s\\S]*?(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
+        'm'
+    );
+    if (sectionRe.test(baseContent)) {
+        const replaced = baseContent.replace(sectionRe, `${entryBlock}\n\n`);
+        return `${replaced.trimEnd()}\n`;
+    }
+    return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
+}
+
 /** 将 SlicedView 中的实体与召回切片序列化为审校验真语料 */
 function buildVerificationCorpus(
     slicedView: SlicedView,
@@ -350,6 +386,26 @@ export class NarrativeEngine {
         );
     }
 
+    /** 读取 Librarian 选中的外围设定词条 (lore_library/lore_*.md) */
+    private async loadSelectedLoreEntries(selectedFiles: string[]): Promise<string[]> {
+        const entries: string[] = [];
+        const seen = new Set<string>();
+        for (const rawName of selectedFiles) {
+            const trimmed = rawName.trim();
+            if (!trimmed) continue;
+            const fileName = trimmed.endsWith('.md') ? trimmed : `${trimmed}.md`;
+            if (!/^lore_[a-zA-Z0-9_-]+\.md$/.test(fileName) || seen.has(fileName)) {
+                continue;
+            }
+            seen.add(fileName);
+            const content = await readOptionalText(join(this.store.bookRoot, 'lore_library', fileName));
+            if (content && content.trim().length > 0) {
+                entries.push(content.trim());
+            }
+        }
+        return entries;
+    }
+
     /** 写回更新后的声纹标本池 */
     private async writeVoicePool(pool: VoiceSamplePool): Promise<void> {
         await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
@@ -441,8 +497,20 @@ export class NarrativeEngine {
         });
 
         const entityList = Object.values(snapshot.entities)
-            .map((e) => `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}`)
+            .map((e) => {
+                const extraParts: string[] = [];
+                if (e.metadata.unique_aliases.length > 0) {
+                    extraParts.push(`别名: ${e.metadata.unique_aliases.join('、')}`);
+                }
+                if (e.metadata.contextual_titles.length > 0) {
+                    extraParts.push(`称谓: ${e.metadata.contextual_titles.join('、')}`);
+                }
+                const suffix = extraParts.length > 0 ? ` (${extraParts.join(' | ')})` : '';
+                return `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}${suffix}`;
+            })
             .join('\n');
+
+        const worldSummary = snapshot.worldState.summaryMarkdown.trim();
 
         const req: CleanroomRequest = {
             pool: 'fast_retrieval',
@@ -452,6 +520,7 @@ export class NarrativeEngine {
             ],
             dynamicTail: [
                 catalog.dynamicTail,
+                ...(worldSummary ? ['', '## 当前全局局势摘要 (world_state.md)', worldSummary] : []),
                 '',
                 '## 可用实体档案列表',
                 entityList || '(暂无实体)',
@@ -510,10 +579,12 @@ export class NarrativeEngine {
         povCharIds: string[],
         selectedEntityIds: string[],
         recallSlices: RecallSlice[],
+        selectedLoreEntries: string[],
         chapterGoal: string,
         staticPrefix: StaticPrefixInput,
         previousChapter: PreviousChapterContext | undefined,
         futureHorizon: string | undefined,
+        openThreads: string | undefined,
         opsStyleAmendments: string | undefined,
         plannerInjection: string,
         retryOptions: StructuredRetryOptions,
@@ -533,6 +604,7 @@ export class NarrativeEngine {
 
         const goalWithFeedback = [
             chapterGoal,
+            openThreads ? `\n## 跨卷未解伏笔 (open_threads.md)\n${openThreads}` : '',
             planConflictFeedback ? `\n## 必须修正的物理/因果冲突 (v2 重规划)\n${planConflictFeedback}` : '',
             plannerInjection ? `\n## 激活文风插件指导\n${plannerInjection}` : '',
             '\n请严格输出符合 PlannerOutlineSchema 的 JSON 细纲（含 chapter_title, target_word_count, focus_cast, background_cast, ending_beat, scene_plan, outline_text）。'
@@ -546,6 +618,7 @@ export class NarrativeEngine {
             slicedView: plannerView,
             chapterGoal: goalWithFeedback,
             recallSlices,
+            loreEntries: selectedLoreEntries,
             previousChapter,
             futureHorizon,
             opsStyleAmendments,
@@ -576,6 +649,7 @@ export class NarrativeEngine {
         povCharIds: string[],
         selectedEntityIds: string[],
         recallSlices: RecallSlice[],
+        selectedLoreEntries: string[],
         outline: PlannerOutline,
         staticPrefix: StaticPrefixInput,
         previousChapter: PreviousChapterContext | undefined,
@@ -613,6 +687,7 @@ export class NarrativeEngine {
             focusCastIds: outline.focus_cast,
             backgroundCastIds: outline.background_cast,
             recallSlices,
+            loreEntries: selectedLoreEntries,
             previousChapter,
             opsStyleAmendments,
             voicePool,
@@ -846,7 +921,8 @@ export class NarrativeEngine {
                     '    }',
                     '  ],',
                     '  "story_day_delta": 0,',
-                    '  "chapter_summary": "一句话概括本章核心剧情进展"',
+                    '  "chapter_summary": "一句话概括本章核心剧情进展",',
+                    '  "world_summary_markdown": "更新后的全局当前局势摘要（可选，当主线局势发生推进时填写）"',
                     '}',
                     '```',
                     '重要：勿修改先天红线(innate_locks_ops)；引用已有实体时不填 canonical_name，若首次新建 char_/item_ 实体则必须填写标准中文 canonical_name。'
@@ -896,6 +972,26 @@ export class NarrativeEngine {
             await this.writeVoicePool(updatedVoicePool);
             extraCommitPaths.push('.ops/voice_samples.yaml');
         }
+
+        // 将本章摘要写入或更新至对应卷的双轨章卡 (index/L2_cards/vol_XX_cards.md)
+        const currentVolume = snapshot.worldState.frontmatter.current_volume;
+        const nextStoryDay =
+            timelineMode === 'FLASHBACK'
+                ? targetDay
+                : snapshot.worldState.frontmatter.story_day + extracted.story_day_delta;
+        const cardRelPath = `index/L2_cards/vol_${String(currentVolume).padStart(2, '0')}_cards.md`;
+        const cardAbsPath = join(this.store.bookRoot, cardRelPath);
+        await mkdir(join(this.store.bookRoot, 'index/L2_cards'), { recursive: true });
+        const existingCard = await readOptionalText(cardAbsPath);
+        const updatedCard = upsertVolumeCardEntry(
+            existingCard,
+            currentVolume,
+            chapterNumber,
+            nextStoryDay,
+            extracted.chapter_summary
+        );
+        await writeFile(cardAbsPath, updatedCard, 'utf8');
+        extraCommitPaths.push(cardRelPath);
 
         // FLASHBACK 模式严禁推进 story_day 或覆写当前阶段游标
         const worldStateUpdate =
@@ -1013,6 +1109,9 @@ export class NarrativeEngine {
         const { gateRules, plannerInjection, writerInjection } = await this.loadActivePlugins(snapshot.config);
         const previousChapter = await this.loadPreviousChapter(chapterNumber);
         const futureHorizon = (await readOptionalText(join(this.store.bookRoot, 'world/future_horizon.md'))) ?? undefined;
+        const openThreads = normalizeOpenThreads(
+            await readOptionalText(join(this.store.bookRoot, 'world/open_threads.md'))
+        );
         const opsStyleAmendments = await this.readOpsStyleAmendments();
         const historicalChapters = await this.loadHistoricalChapters(
             chapterNumber,
@@ -1032,6 +1131,7 @@ export class NarrativeEngine {
             totalUsage,
             options.signal
         );
+        const selectedLoreEntries = await this.loadSelectedLoreEntries(librarianOut.selected_lore_files);
 
         // 将 SPOTLIGHT_TRIGGER 关联的已存在实体自动并入本章挂载集合
         const spotlightEntityIds = activeSignals
@@ -1079,10 +1179,12 @@ export class NarrativeEngine {
                 povCharIds,
                 mergedSelectedEntityIds,
                 recallSlices,
+                selectedLoreEntries,
                 options.chapterGoal,
                 staticPrefix,
                 previousChapter,
                 futureHorizon,
+                openThreads,
                 opsStyleAmendments,
                 effectivePlannerInjection,
                 retryOptions,
@@ -1102,6 +1204,7 @@ export class NarrativeEngine {
                 povCharIds,
                 mergedSelectedEntityIds,
                 recallSlices,
+                selectedLoreEntries,
                 activeOutline,
                 staticPrefix,
                 previousChapter,
@@ -1156,6 +1259,7 @@ export class NarrativeEngine {
                             povCharIds,
                             mergedSelectedEntityIds,
                             recallSlices,
+                            selectedLoreEntries,
                             activeOutline,
                             staticPrefix,
                             previousChapter,
@@ -1266,6 +1370,7 @@ export class NarrativeEngine {
                         povCharIds,
                         mergedSelectedEntityIds,
                         recallSlices,
+                        selectedLoreEntries,
                         activeOutline,
                         staticPrefix,
                         previousChapter,
