@@ -28,7 +28,7 @@ export type CenterViewTab = 'prose' | 'plan' | 'diff' | 'views';
 export type MaterializedViewKind = 'entities' | 'horizon' | 'threads';
 
 /** 导演一次性信号下拉类型 */
-export type DirectorSignalKind = '导演指令' | 'FLASHBACK' | 'PARALLEL' | 'Retcon' | '文风修订';
+export type DirectorSignalKind = '下章剧情' | '导演指令' | 'FLASHBACK' | 'PARALLEL' | 'Retcon' | '文风修订';
 
 /** 章节列表摘要项 */
 export interface ChapterSummaryItem {
@@ -115,10 +115,29 @@ export interface ExternalViewCommand {
     nonce: number;
 }
 
+/** 作品切换下拉摘要项 */
+export interface CenterBookSummary {
+    bookRoot: string;
+    slug: string;
+    title: string;
+    currentChapter: number;
+}
+
+/** 底部遥测尾注摘要 */
+export interface CenterTelemetrySummary {
+    cacheHitRate?: number | undefined;
+    inputTokens?: number | undefined;
+    cacheReadTokens?: number | undefined;
+    outputTokens?: number | undefined;
+    kontoyiannisHk?: number | undefined;
+}
+
 /** CenterWorkbench 组件 Props */
 export interface CenterWorkbenchProps {
     bookTitle?: string | undefined;
     bookSlug?: string | undefined;
+    currentBookRoot?: string | undefined;
+    books?: CenterBookSummary[] | undefined;
     currentChapter: number;
     selectedChapter?: number | undefined;
     timelineMode?: string | undefined;
@@ -136,6 +155,16 @@ export interface CenterWorkbenchProps {
     dirtyChaptersCount?: number | undefined;
     lastConsumedSignal?: string | undefined;
     externalViewCommand?: ExternalViewCommand | undefined;
+    telemetrySummary?: CenterTelemetrySummary | undefined;
+    leftCollapsed?: boolean | undefined;
+    rightOpen?: boolean | undefined;
+    hasSafeHalt?: boolean | undefined;
+    onSelectBook?: ((bookRoot: string) => void) | undefined;
+    onNewBook?: (() => void) | undefined;
+    onToggleLeft?: (() => void) | undefined;
+    onToggleRight?: (() => void) | undefined;
+    onOpenInspector?: (() => void) | undefined;
+    onDismissSignal?: ((index: number) => void) | undefined;
     onSelectChapter?: ((chapterNumber: number) => void) | undefined;
     onStepOne?: (() => Promise<void> | void) | undefined;
     onStartYolo?: ((targetChapters: number) => Promise<void> | void) | undefined;
@@ -203,11 +232,11 @@ const PIPELINE_STAGES: readonly StageDefinition[] = [
 const STAGE_ORDER: readonly PipelineStageId[] = PIPELINE_STAGES.map((s) => s.id);
 
 const DIRECTOR_SIGNAL_OPTIONS: ReadonlyArray<{ value: DirectorSignalKind; label: string }> = [
-    { value: '导演指令', label: '导演指令（下章剧情 / 视角）' },
-    { value: 'FLASHBACK', label: 'FLASHBACK（插叙回溯）' },
-    { value: 'PARALLEL', label: 'PARALLEL（并行支线）' },
-    { value: 'Retcon', label: 'Retcon（圆谎纸条）' },
-    { value: '文风修订', label: '文风修订（局部风格微调）' }
+    { value: '下章剧情', label: '下章剧情' },
+    { value: 'FLASHBACK', label: 'FLASHBACK' },
+    { value: 'PARALLEL', label: 'PARALLEL' },
+    { value: 'Retcon', label: 'Retcon' },
+    { value: '文风修订', label: '文风修订' }
 ];
 
 const YOLO_PRESETS: ReadonlyArray<{ targetChapters: number; label: string; desc: string }> = [
@@ -218,17 +247,54 @@ const YOLO_PRESETS: ReadonlyArray<{ targetChapters: number; label: string; desc:
 
 const PROSE_FONT_SIZES: readonly number[] = [15, 17, 19];
 
-/** 将章节正文拆分为阅读段落（识别场景分隔符） */
-function splitProseParagraphs(content: string): Array<{ text: string; isBreak: boolean }> {
+/** 归一化章节标题用于首行去重比对 */
+function normalizeHeadingText(text: string): string {
+    return text
+        .replace(/^#{1,3}\s+/, '')
+        .replace(/^第\s*0*\d+\s*章\s*[:：·\-]?\s*/u, '')
+        .replace(/^(?:Ch\.?|Chapter)\s*0*\d+\s*[:：·\-]?\s*/i, '')
+        .replace(/\s+/g, '')
+        .trim();
+}
+
+/** 判断正文首行是否为与章节头重复的 Markdown 标题行 */
+function isDuplicateChapterHeading(
+    firstLine: string,
+    chapterNumber: number,
+    chapterTitle?: string
+): boolean {
+    if (!/^#{1,2}\s+/.test(firstLine)) return false;
+    const rawHeading = firstLine.replace(/^#{1,2}\s+/, '').trim();
+    if (!rawHeading) return false;
+    const normalizedHeading = normalizeHeadingText(rawHeading);
+    const normalizedTitle = chapterTitle ? normalizeHeadingText(chapterTitle) : '';
+    if (normalizedTitle && normalizedHeading === normalizedTitle) {
+        return true;
+    }
+    return (
+        rawHeading === `第${chapterNumber}章` ||
+        rawHeading === formatChapterLabel(chapterNumber)
+    );
+}
+
+/** 将章节正文拆分为阅读段落（识别场景分隔符，并自动略去重复的 Markdown 章节标题行） */
+function splitProseParagraphs(
+    content: string,
+    chapterNumber: number,
+    chapterTitle?: string
+): Array<{ text: string; isBreak: boolean }> {
     if (!content.trim()) return [];
-    return content
+    const lines = content
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .map((line) => ({
-            text: line,
-            isBreak: /^([-*_·]\s*){3,}$/.test(line)
-        }));
+        .filter((line) => line.length > 0);
+    if (lines.length > 0 && isDuplicateChapterHeading(lines[0] ?? '', chapterNumber, chapterTitle)) {
+        lines.shift();
+    }
+    return lines.map((line) => ({
+        text: line,
+        isBreak: /^([-*_·]\s*){3,}$/.test(line)
+    }));
 }
 
 /**
@@ -305,9 +371,9 @@ function getStageStatusMeta(status: StageNodeStatus): { text: string; badgeClass
         case 'done':
             return { text: '通过', badgeClass: 'ns-badge-green' };
         case 'healing':
-            return { text: '告警自愈', badgeClass: 'ns-badge-amber' };
+            return { text: '告警', badgeClass: 'ns-badge-amber' };
         case 'halt':
-            return { text: '停机', badgeClass: 'ns-badge-red' };
+            return { text: '告警', badgeClass: 'ns-badge-red' };
         case 'idle':
         default:
             return { text: '待命', badgeClass: 'ns-badge-muted' };
@@ -336,7 +402,7 @@ function buildOpsSignalPayload(
 
     if (kind === 'PARALLEL') {
         base['suggested_mode'] = 'PARALLEL';
-    } else if (kind === '导演指令') {
+    } else if (kind === '下章剧情' || kind === '导演指令') {
         base['suggested_mode'] = 'MAINLINE';
     }
 
@@ -354,6 +420,8 @@ function buildOpsSignalPayload(
 export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     bookTitle,
     bookSlug,
+    currentBookRoot,
+    books = [],
     currentChapter,
     selectedChapter,
     timelineMode = 'MAINLINE',
@@ -371,6 +439,14 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     dirtyChaptersCount = 0,
     lastConsumedSignal,
     externalViewCommand,
+    telemetrySummary,
+    rightOpen = true,
+    hasSafeHalt = false,
+    onSelectBook,
+    onNewBook,
+    onToggleRight,
+    onOpenInspector,
+    onDismissSignal,
     onSelectChapter,
     onStepOne,
     onStartYolo,
@@ -388,8 +464,11 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     // 顶部 YOLO 拆分下拉菜单开关
     const [yoloMenuOpen, setYoloMenuOpen] = useState(false);
 
-    // 6 阶段流水线选中的检查节点（null 表示折叠检查条）
-    const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId | null>('WRITER');
+    // 6 阶段流水线详情检查条开关（默认收起，点击 6 圆点进度胶囊才展开）
+    const [stageDrawerOpen, setStageDrawerOpen] = useState(false);
+
+    // 6 阶段流水线选中的检查节点
+    const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId>('LIBRARIAN');
 
     // 主视图页签 & 只读物化视图子页签
     const [viewTab, setViewTab] = useState<CenterViewTab>('prose');
@@ -413,9 +492,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [savingEdit, setSavingEdit] = useState(false);
 
     // 底部导演一次性干涉栏输入态
-    const [signalKind, setSignalKind] = useState<DirectorSignalKind>('导演指令');
+    const [signalKind, setSignalKind] = useState<DirectorSignalKind>('下章剧情');
     const [signalInput, setSignalInput] = useState('');
     const [submittingSignal, setSubmittingSignal] = useState(false);
+    const [dismissedIndices, setDismissedIndices] = useState<number[]>([]);
 
     // 局部操作反馈提示
     const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -665,6 +745,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             ? (chapters[activeChapterIndex + 1] ?? null)
             : null;
 
+    const activeChapterTitle =
+        chapterDetail?.title ??
+        activeChapterSummary?.title ??
+        `${formatChapterLabel(activeChapterNumber)} 正文`;
     const isChapterDirty = Boolean(chapterDetail?.dirty ?? activeChapterSummary?.dirty);
     const proseContent = chapterDetail?.content ?? '';
     const proseCharCount = useMemo(
@@ -672,8 +756,8 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         [proseContent]
     );
     const proseParagraphs = useMemo(
-        () => splitProseParagraphs(proseContent),
-        [proseContent]
+        () => splitProseParagraphs(proseContent, activeChapterNumber, activeChapterTitle),
+        [proseContent, activeChapterNumber, activeChapterTitle]
     );
     const featHash =
         chapterDetail?.featCommitSha?.slice(0, 7) ??
@@ -683,24 +767,135 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const consumedSignalText = chapterDetail?.consumedSignal ?? lastConsumedSignal;
     const currentFontSize = PROSE_FONT_SIZES[fontStep] ?? 17;
 
+    // 6 圆点连线进度胶囊当前阶段状态词
+    const stageStatusLabel = useMemo(() => {
+        if (safeHalt) return 'SAFE_HALT 拦截';
+        const activeStage = PIPELINE_STAGES.find((s) => stageMap[s.id].status === 'active');
+        if (activeStage) {
+            return `${activeStage.label.replace(/^\d+\.\s*/, '')} ${activeStage.shortDesc}`;
+        }
+        const healingStage = PIPELINE_STAGES.find((s) => stageMap[s.id].status === 'healing');
+        if (healingStage) {
+            return `${healingStage.label.replace(/^\d+\.\s*/, '')} 自愈中`;
+        }
+        if (latestSseStage === 'COMMITTED') return '本轮已提交';
+        return '链路就绪';
+    }, [latestSseStage, safeHalt, stageMap]);
+
+    // 可见待消费纸条列表
+    const visibleSignals = useMemo(
+        () =>
+            pendingSignals
+                .map((sig, idx) => ({ sig, idx }))
+                .filter(({ idx }) => !dismissedIndices.includes(idx)),
+        [dismissedIndices, pendingSignals]
+    );
+
+    // 底部遥测尾注格式化
+    const telemetryCacheRate =
+        telemetrySummary?.cacheHitRate !== undefined && Number.isFinite(telemetrySummary.cacheHitRate)
+            ? `${(telemetrySummary.cacheHitRate * 100).toFixed(1)}%`
+            : '--';
+    const telemetryTotalTokens =
+        (telemetrySummary?.inputTokens ?? 0) +
+        (telemetrySummary?.cacheReadTokens ?? 0) +
+        (telemetrySummary?.outputTokens ?? 0);
+    const telemetryTokensLabel =
+        telemetryTotalTokens >= 1_000_000
+            ? `${(telemetryTotalTokens / 1_000_000).toFixed(2)}M tokens`
+            : telemetryTotalTokens >= 1_000
+                ? `${(telemetryTotalTokens / 1_000).toFixed(1)}k tokens`
+                : telemetryTotalTokens > 0
+                    ? `${telemetryTotalTokens} tokens`
+                    : '0 tokens';
+    const telemetryHkLabel =
+        telemetrySummary?.kontoyiannisHk !== undefined && Number.isFinite(telemetrySummary.kontoyiannisHk)
+            ? telemetrySummary.kontoyiannisHk.toFixed(2)
+            : '--';
+
     return (
         <main className="ns-center-workbench">
-            {/* 顶部控制条 */}
+            {/* 顶栏第一行：作品切换下拉 + • narrate-studio + 开新书 | 刷新 / 推进 1 章 / YOLO / 右栏开关 */}
             <header className="ns-topbar">
                 <div className="ns-top-left">
-                    <strong className="ns-chapter-badge">
-                        {formatChapterLabel(activeChapterNumber)}
-                    </strong>
-                    {bookTitle ? <span className="ns-book-name">{bookTitle}</span> : null}
-                    {bookSlug ? <span className="ns-mono ns-muted">({bookSlug})</span> : null}
-                    <span className="ns-pill ns-pill-brand">{timelineMode}</span>
-                    <span className="ns-pill ns-pill-muted ns-mono">{walPhase}</span>
+                    {books.length > 0 && onSelectBook ? (
+                        <select
+                            className="ns-top-book-select"
+                            aria-label="切换作品"
+                            value={currentBookRoot ?? ''}
+                            disabled={isBusy}
+                            onChange={(e) => {
+                                if (e.target.value && e.target.value !== currentBookRoot) {
+                                    onSelectBook(e.target.value);
+                                }
+                            }}
+                        >
+                            {books.map((book) => (
+                                <option key={book.bookRoot} value={book.bookRoot}>
+                                    {book.title || book.slug}
+                                </option>
+                            ))}
+                        </select>
+                    ) : (
+                        <span className="ns-book-name" title={bookTitle || bookSlug || 'NarrateOS'}>
+                            {bookTitle || bookSlug || '未命名作品'}
+                        </span>
+                    )}
+
+                    <button
+                        type="button"
+                        className="ns-mode-pill"
+                        onClick={onOpenInspector}
+                        title="查看引擎运行时检查器"
+                    >
+                        <span className="ns-seal-dot" aria-hidden="true" />
+                        <span>narrate-studio</span>
+                    </button>
+
+                    {onNewBook ? (
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-ghost ns-btn-sm"
+                            disabled={isBusy}
+                            onClick={onNewBook}
+                        >
+                            + 开新书
+                        </button>
+                    ) : null}
+
                     {activeTask !== 'IDLE' ? (
                         <span className="ns-pill ns-pill-amber">{activeTask}</span>
                     ) : null}
                 </div>
 
-                <div className="ns-top-center">
+                <div className="ns-top-right">
+                    <button
+                        type="button"
+                        className={`ns-icon-btn ${dirtyChaptersCount > 0 ? 'ns-btn-dirty' : ''}`}
+                        disabled={isBusy}
+                        onClick={() => {
+                            if (dirtyChaptersCount > 0) {
+                                void handleSync();
+                            } else if (onRefreshViews) {
+                                void onRefreshViews();
+                            }
+                        }}
+                        title={
+                            dirtyChaptersCount > 0
+                                ? `检测到 ${dirtyChaptersCount} 章手改，点击立即 Sync`
+                                : '刷新工作区视图'
+                        }
+                        aria-label="刷新或同步"
+                    >
+                        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7" />
+                            <path d="M13.5 2.5v2.8h-2.8" />
+                        </svg>
+                        {dirtyChaptersCount > 0 ? (
+                            <span className="ns-badge-dot">{dirtyChaptersCount}</span>
+                        ) : null}
+                    </button>
+
                     {isYoloRunning ? (
                         <div className="ns-yolo-running-bar">
                             <span className="ns-pill ns-pill-brand ns-pulse">
@@ -709,7 +904,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             </span>
                             <button
                                 type="button"
-                                className="ns-btn ns-btn-stop"
+                                className="ns-btn ns-btn-stop ns-btn-sm"
                                 onClick={handleStopYolo}
                             >
                                 安全点停止
@@ -720,20 +915,20 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             <div className="ns-split-btn">
                                 <button
                                     type="button"
-                                    className="ns-btn ns-btn-primary"
+                                    className="ns-btn ns-btn-primary ns-btn-sm"
                                     disabled={isBusy}
                                     onClick={handleStepOne}
                                 >
-                                    单步推进 1 章
+                                    ▶ 推进 1 章
                                 </button>
                                 <button
                                     type="button"
-                                    className="ns-btn ns-btn-yolo"
+                                    className="ns-btn ns-btn-yolo ns-btn-sm"
                                     disabled={isBusy}
                                     aria-expanded={yoloMenuOpen}
                                     onClick={() => setYoloMenuOpen((prev) => !prev)}
                                 >
-                                    YOLO 连跑 ▾
+                                    YOLO ▾
                                 </button>
                             </div>
 
@@ -759,27 +954,136 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             ) : null}
                         </div>
                     )}
-                </div>
 
-                <div className="ns-top-right">
-                    <button
-                        type="button"
-                        className={`ns-btn ns-btn-ghost ${dirtyChaptersCount > 0 ? 'ns-btn-dirty' : ''}`}
-                        disabled={isBusy}
-                        onClick={handleSync}
-                    >
-                        手动 Sync{dirtyChaptersCount > 0 ? ` (${dirtyChaptersCount})` : ''}
-                    </button>
-                    <button
-                        type="button"
-                        className="ns-btn ns-btn-ghost"
-                        disabled={isBusy}
-                        onClick={handleDream}
-                    >
-                        手动 Dreaming
-                    </button>
+                    {onToggleRight ? (
+                        <button
+                            type="button"
+                            className={`ns-icon-btn ${rightOpen ? 'ns-btn-active' : ''} ${hasSafeHalt ? 'ns-btn-halt-alert' : ''}`}
+                            onClick={onToggleRight}
+                            title={rightOpen ? '收起右侧辅助栏' : '展开右侧辅助栏'}
+                            aria-label={rightOpen ? '收起右侧辅助栏' : '展开右侧辅助栏'}
+                        >
+                            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+                                <path d="M10.5 2.5v11" />
+                            </svg>
+                            {hasSafeHalt ? <span className="ns-badge-dot ns-badge-red">!</span> : null}
+                        </button>
+                    ) : null}
                 </div>
             </header>
+
+            {/* 顶栏第二行：蓝底线页签（正文 | 细纲 | 修改 | 视图） + 6 圆点连线进度胶囊 + Aa + ✎ 编辑 */}
+            <div className="ns-top-2">
+                <div className="ns-dsh-tabs" role="tablist">
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={viewTab === 'prose'}
+                        className={`ns-dsh-tab ${viewTab === 'prose' ? 'on' : ''}`}
+                        onClick={() => setViewTab('prose')}
+                    >
+                        正文
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={viewTab === 'plan'}
+                        className={`ns-dsh-tab ${viewTab === 'plan' ? 'on' : ''}`}
+                        onClick={() => setViewTab('plan')}
+                    >
+                        细纲
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={viewTab === 'diff'}
+                        className={`ns-dsh-tab ${viewTab === 'diff' ? 'on' : ''}`}
+                        onClick={() => setViewTab('diff')}
+                    >
+                        修改
+                        {diffLines.length > 0 ? (
+                            <span className="ns-tab-count">{diffLines.length}</span>
+                        ) : null}
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected={viewTab === 'views'}
+                        className={`ns-dsh-tab ${viewTab === 'views' ? 'on' : ''}`}
+                        onClick={() => {
+                            setViewTab('views');
+                            if (onRefreshViews) {
+                                void onRefreshViews();
+                            }
+                        }}
+                    >
+                        视图
+                    </button>
+                </div>
+
+                <span className="ns-top2-spacer" />
+
+                <div className="ns-top2-right">
+                    <button
+                        type="button"
+                        className={`ns-thread-btn ${stageDrawerOpen ? 'open' : ''}`}
+                        aria-expanded={stageDrawerOpen}
+                        onClick={() => setStageDrawerOpen((prev) => !prev)}
+                        title="点击展开/收起 6 阶段流水线详情检查条"
+                    >
+                        <span className="ns-dots" aria-hidden="true">
+                            {PIPELINE_STAGES.map((stage, idx) => {
+                                const nodeState = stageMap[stage.id];
+                                const nextState =
+                                    idx < PIPELINE_STAGES.length - 1
+                                        ? stageMap[PIPELINE_STAGES[idx + 1]!.id]
+                                        : null;
+                                const lineLit =
+                                    nextState &&
+                                    (nextState.status === 'done' ||
+                                        nextState.status === 'active' ||
+                                        nextState.status === 'healing' ||
+                                        nextState.status === 'halt');
+                                return (
+                                    <React.Fragment key={stage.id}>
+                                        <i className={`ns-dt ${nodeState.status}`} />
+                                        {idx < PIPELINE_STAGES.length - 1 ? (
+                                            <b className={`ns-ln ${lineLit ? 'on' : ''}`} />
+                                        ) : null}
+                                    </React.Fragment>
+                                );
+                            })}
+                        </span>
+                        <span className="ns-thread-label">{stageStatusLabel}</span>
+                    </button>
+
+                    {viewTab === 'prose' ? (
+                        <>
+                            <button
+                                type="button"
+                                className="ns-icon-btn ns-aa-btn"
+                                title={`切换阅读字号 (${currentFontSize}px)`}
+                                onClick={() =>
+                                    setFontStep((prev) => (prev + 1) % PROSE_FONT_SIZES.length)
+                                }
+                            >
+                                Aa
+                            </button>
+                            <button
+                                type="button"
+                                className={`ns-btn ns-btn-ghost ns-btn-sm ${isEditing ? 'ns-btn-active' : ''}`}
+                                onClick={() => {
+                                    setIsEditing((prev) => !prev);
+                                    setDraftContent(chapterDetail?.content ?? '');
+                                }}
+                            >
+                                {isEditing ? '取消' : '✎ 编辑'}
+                            </button>
+                        </>
+                    ) : null}
+                </div>
+            </div>
 
             {/* SAFE_HALT 告警条 (.ops/safe_halt.json) */}
             {safeHalt ? (
@@ -804,179 +1108,73 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 </section>
             ) : null}
 
-            {/* 6 阶段流水线图 */}
-            <section className="ns-stage-strip">
-                <div className="ns-stage-head">
-                    <span>
-                        <strong>6 阶段流水线</strong>（点击任意节点查看输入/输出概要）
-                    </span>
-                    <span className="ns-mono ns-muted">
-                        SSE: {latestSseStage ?? 'IDLE'}
-                    </span>
-                </div>
-
-                <div className="ns-pipeline-graph">
-                    {PIPELINE_STAGES.map((stage, idx) => {
-                        const nodeState = stageMap[stage.id];
-                        const statusMeta = getStageStatusMeta(nodeState.status);
-                        const isSelected = inspectedStageId === stage.id;
-                        return (
-                            <React.Fragment key={stage.id}>
-                                <button
-                                    type="button"
-                                    className={`ns-stage-node ns-stage-${nodeState.status} ${isSelected ? 'ns-selected' : ''}`}
-                                    onClick={() =>
-                                        setInspectedStageId((prev) =>
-                                            prev === stage.id ? null : stage.id
-                                        )
-                                    }
-                                >
-                                    <div className="ns-stage-title">
-                                        <span>{stage.label}</span>
-                                        <span className={`ns-badge ${statusMeta.badgeClass}`}>
-                                            {nodeState.status === 'active' ? (
-                                                <span className="ns-pulse-dot" />
-                                            ) : null}
+            {/* 6 阶段详情检查条（点击 6 圆点进度胶囊才展开） */}
+            {stageDrawerOpen ? (
+                <section className="ns-stage-strip" aria-label="6 阶段流水线详情">
+                    <div className="ns-pipeline-graph">
+                        {PIPELINE_STAGES.map((stage, idx) => {
+                            const nodeState = stageMap[stage.id];
+                            const statusMeta = getStageStatusMeta(nodeState.status);
+                            const isSelected = inspectedStageId === stage.id;
+                            return (
+                                <React.Fragment key={stage.id}>
+                                    <button
+                                        type="button"
+                                        className={`ns-stage-node ns-stage-${nodeState.status} ${isSelected ? 'ns-selected' : ''}`}
+                                        title={`${stage.label} · ${stage.shortDesc}`}
+                                        onClick={() => setInspectedStageId(stage.id)}
+                                    >
+                                        <span className={`ns-stage-dot ns-dot-${nodeState.status}`} />
+                                        <span className="ns-stage-label">{stage.label}</span>
+                                        <span className={`ns-stage-status ${statusMeta.badgeClass}`}>
                                             {statusMeta.text}
                                         </span>
-                                    </div>
-                                    <div className="ns-stage-sub ns-mono">
-                                        {stage.shortDesc}
-                                        {nodeState.summary ? ` · ${nodeState.summary}` : ''}
-                                    </div>
-                                </button>
-                                {idx < PIPELINE_STAGES.length - 1 ? (
-                                    <span className="ns-stage-arrow" aria-hidden="true">
-                                        -&gt;
-                                    </span>
-                                ) : null}
-                            </React.Fragment>
-                        );
-                    })}
-                </div>
+                                    </button>
+                                    {idx < PIPELINE_STAGES.length - 1 ? (
+                                        <span className="ns-stage-arrow" aria-hidden="true">
+                                            ›
+                                        </span>
+                                    ) : null}
+                                </React.Fragment>
+                            );
+                        })}
+                    </div>
 
-                {/* 可折叠节点输入/输出检查条 */}
-                {inspectedStageDef ? (
-                    <div className="ns-stage-inspector">
-                        <div className="ns-inspector-main">
-                            <div className="ns-inspector-title">
-                                <strong>
-                                    {inspectedStageDef.label} ({inspectedStageDef.shortDesc})
-                                </strong>
-                                <button
-                                    type="button"
-                                    className="ns-btn ns-btn-ghost ns-btn-xs"
-                                    onClick={() => setInspectedStageId(null)}
-                                >
-                                    收起
-                                </button>
-                            </div>
-                            <div className="ns-inspector-io">
-                                <span>
-                                    <strong>输入概要：</strong>
-                                    {stageMap[inspectedStageDef.id].inputSummary ??
-                                        inspectedStageDef.defaultInput}
-                                </span>
-                                <span>
-                                    <strong>输出概要：</strong>
-                                    {stageMap[inspectedStageDef.id].outputSummary ??
-                                        inspectedStageDef.defaultOutput}
-                                </span>
+                    {inspectedStageDef ? (
+                        <div className="ns-stage-inspector">
+                            <div className="ns-inspector-main">
+                                <div className="ns-inspector-title">
+                                    <strong>
+                                        {inspectedStageDef.label} ({inspectedStageDef.shortDesc})
+                                    </strong>
+                                    <span className="ns-mono ns-muted">
+                                        SSE: {latestSseStage ?? 'IDLE'}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        className="ns-btn ns-btn-ghost ns-btn-xs"
+                                        onClick={() => setStageDrawerOpen(false)}
+                                    >
+                                        收起
+                                    </button>
+                                </div>
+                                <div className="ns-inspector-io">
+                                    <span>
+                                        <strong>输入概要：</strong>
+                                        {stageMap[inspectedStageDef.id].inputSummary ??
+                                            inspectedStageDef.defaultInput}
+                                    </span>
+                                    <span>
+                                        <strong>输出概要：</strong>
+                                        {stageMap[inspectedStageDef.id].outputSummary ??
+                                            inspectedStageDef.defaultOutput}
+                                    </span>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                ) : null}
-            </section>
-
-            {/* 主内容视图切换栏 */}
-            <div className="ns-view-bar">
-                <div className="ns-view-tabs" role="tablist">
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={viewTab === 'prose'}
-                        className={`ns-vtab ${viewTab === 'prose' ? 'ns-active' : ''}`}
-                        onClick={() => setViewTab('prose')}
-                    >
-                        正文阅读
-                    </button>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={viewTab === 'plan'}
-                        className={`ns-vtab ${viewTab === 'plan' ? 'ns-active' : ''}`}
-                        onClick={() => setViewTab('plan')}
-                    >
-                        本章细纲
-                    </button>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={viewTab === 'diff'}
-                        className={`ns-vtab ${viewTab === 'diff' ? 'ns-active' : ''}`}
-                        onClick={() => setViewTab('diff')}
-                    >
-                        手改 Diff
-                    </button>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={viewTab === 'views'}
-                        className={`ns-vtab ${viewTab === 'views' ? 'ns-active' : ''}`}
-                        onClick={() => {
-                            setViewTab('views');
-                            if (onRefreshViews) {
-                                void onRefreshViews();
-                            }
-                        }}
-                    >
-                        物化视图（只读）
-                    </button>
-                </div>
-
-                <div className="ns-view-actions">
-                    {chapters.length > 0 ? (
-                        <select
-                            className="ns-select ns-chapter-select"
-                            aria-label="切换历史章节"
-                            value={activeChapterNumber}
-                            onChange={(e) => handleChapterChange(Number(e.target.value))}
-                        >
-                            {chapters.map((ch) => (
-                                <option key={ch.chapterNumber} value={ch.chapterNumber}>
-                                    {formatChapterLabel(ch.chapterNumber)} · {ch.title}
-                                    {ch.dirty ? ' [有手改]' : ''}
-                                </option>
-                            ))}
-                        </select>
                     ) : null}
-
-                    {viewTab === 'prose' ? (
-                        <>
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-ghost"
-                                title={`切换阅读字号 (${currentFontSize}px)`}
-                                onClick={() =>
-                                    setFontStep((prev) => (prev + 1) % PROSE_FONT_SIZES.length)
-                                }
-                            >
-                                Aa
-                            </button>
-                            <button
-                                type="button"
-                                className={`ns-btn ns-btn-ghost ${isEditing ? 'ns-btn-active' : ''}`}
-                                onClick={() => {
-                                    setIsEditing((prev) => !prev);
-                                    setDraftContent(chapterDetail?.content ?? '');
-                                }}
-                            >
-                                {isEditing ? '取消编辑' : '✎ 直接编辑本章'}
-                            </button>
-                        </>
-                    ) : null}
-                </div>
-            </div>
+                </section>
+            ) : null}
 
             {/* 操作反馈条 */}
             {actionMessage || actionError ? (
@@ -1015,11 +1213,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     {formatChapterLabel(activeChapterNumber)}
                                     {timelineMode ? ` · ${timelineMode}` : ''}
                                 </div>
-                                <h1>
-                                    {chapterDetail?.title ??
-                                        activeChapterSummary?.title ??
-                                        `${formatChapterLabel(activeChapterNumber)} 正文`}
-                                </h1>
+                                <h1>{activeChapterTitle}</h1>
                                 <div className="ns-chap-meta">
                                     <span
                                         className={`ns-pill ${isChapterDirty ? 'ns-pill-amber' : 'ns-pill-green'}`}
@@ -1299,69 +1493,114 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 ) : null}
             </div>
 
-            {/* 底部导演一次性干涉栏 */}
-            <footer className="ns-signal-dock">
-                <div className="ns-dock-head">
-                    <span>
-                        <strong>导演一次性干涉栏</strong>（写入{' '}
-                        <span className="ns-mono">.ops/signals.jsonl</span> · 安全点消费即焚 ·{' '}
-                        <strong>零累进上下文</strong>）
-                    </span>
-                    <span className="ns-mono">待消费：{effectiveSignalsCount} 条</span>
-                </div>
+            {/* 底部悬浮圆角导演信号栏 */}
+            <footer className="ns-composer-dock">
+                <div className="ns-composer-wrap">
+                    {visibleSignals.length > 0 ? (
+                        <div className="ns-queue" aria-label="待消费导演纸条队列">
+                            {visibleSignals.map(({ sig, idx }) => (
+                                <span key={idx} className="ns-qslip">
+                                    <span className="ns-qslip-ty">{sig.type ?? 'SIGNAL'}</span>
+                                    <span className="ns-qslip-tx">
+                                        {sig.reason ?? sig.raw ?? '待消费信号'}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        className="ns-qslip-del"
+                                        title="从队列视图移除"
+                                        aria-label="移除纸条"
+                                        onClick={() => {
+                                            if (onDismissSignal) {
+                                                onDismissSignal(idx);
+                                            } else {
+                                                setDismissedIndices((prev) => [...prev, idx]);
+                                            }
+                                        }}
+                                    >
+                                        ×
+                                    </button>
+                                </span>
+                            ))}
+                        </div>
+                    ) : null}
 
-                {pendingSignals.length > 0 ? (
-                    <div className="ns-sig-list">
-                        {pendingSignals.map((sig, idx) => (
-                            <span key={idx} className="ns-sig-chip">
-                                [{sig.type ?? 'SIGNAL'}] {sig.reason ?? sig.raw ?? '待消费信号'}
+                    <div className="ns-composer-box">
+                        <input
+                            type="text"
+                            className="ns-composer-input"
+                            value={signalInput}
+                            onChange={(e) => setSignalInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                                    e.preventDefault();
+                                    void handleSignalAction(true);
+                                } else if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    void handleSignalAction(false);
+                                }
+                            }}
+                            placeholder="给下一章递一张纸条（写入 .ops/signals.jsonl，安全点消费即焚）"
+                        />
+
+                        <div className="ns-composer-bar">
+                            <span className="ns-pill-sel" title="纸条类型">
+                                <select
+                                    aria-label="导演信号类型"
+                                    value={signalKind}
+                                    onChange={(e) =>
+                                        setSignalKind(e.target.value as DirectorSignalKind)
+                                    }
+                                >
+                                    {DIRECTOR_SIGNAL_OPTIONS.map((opt) => (
+                                        <option key={opt.value} value={opt.value}>
+                                            {opt.label}
+                                        </option>
+                                    ))}
+                                </select>
                             </span>
-                        ))}
-                    </div>
-                ) : null}
 
-                <div className="ns-dock-row">
-                    <select
-                        className="ns-dock-select"
-                        aria-label="导演信号类型"
-                        value={signalKind}
-                        onChange={(e) => setSignalKind(e.target.value as DirectorSignalKind)}
-                    >
-                        {DIRECTOR_SIGNAL_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                            </option>
-                        ))}
-                    </select>
-                    <input
-                        type="text"
-                        className="ns-dock-input"
-                        value={signalInput}
-                        onChange={(e) => setSignalInput(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                                e.preventDefault();
-                                void handleSignalAction(false);
-                            }
-                        }}
-                        placeholder="输入一次性导演指令、插叙/并行支线或 Retcon 圆谎纸条…"
-                    />
-                    <button
-                        type="button"
-                        className="ns-btn ns-btn-ghost"
-                        disabled={submittingSignal || !signalInput.trim()}
-                        onClick={() => handleSignalAction(false)}
-                    >
-                        投入队列
-                    </button>
-                    <button
-                        type="button"
-                        className="ns-btn ns-btn-primary"
-                        disabled={submittingSignal || isBusy}
-                        onClick={() => handleSignalAction(true)}
-                    >
-                        入队并推进
-                    </button>
+                            <span className="ns-composer-sp" />
+
+                            <button
+                                type="button"
+                                className="ns-btn ns-btn-ghost ns-btn-sm"
+                                disabled={submittingSignal || !signalInput.trim()}
+                                onClick={() => handleSignalAction(false)}
+                                title="仅写入队列 (Enter)"
+                            >
+                                投入队列
+                            </button>
+
+                            <button
+                                type="button"
+                                className="ns-send-circle"
+                                disabled={submittingSignal || isBusy}
+                                onClick={() => handleSignalAction(true)}
+                                title="入队并推进 1 章 (Ctrl + Enter)"
+                                aria-label="入队并推进"
+                            >
+                                ↑
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="ns-composer-telemetry">
+                        <button type="button" onClick={onOpenInspector}>
+                            WAL {walPhase}
+                        </button>
+                        <span className="ns-tel-sep">·</span>
+                        <button type="button" onClick={onOpenInspector}>
+                            缓存命中 {telemetryCacheRate}
+                        </button>
+                        <span className="ns-tel-sep">·</span>
+                        <button type="button" onClick={onOpenInspector}>
+                            {telemetryTokensLabel}
+                        </button>
+                        <span className="ns-tel-sep">·</span>
+                        <button type="button" onClick={onOpenInspector}>
+                            H_K {telemetryHkLabel}
+                        </button>
+                    </div>
                 </div>
             </footer>
         </main>

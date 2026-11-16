@@ -69,6 +69,8 @@ export interface LeftBookNavProps {
     onNewBook: () => void;
     /** 点击章节回调 */
     onSelectChapter: (chapterNumber: number) => void;
+    /** 是否以嵌入式无头模式渲染（用于右栏「目录」Tab） */
+    embedded?: boolean;
     /** 点击只读物化视图入口回调 */
     onOpenView: (kind: MaterializedViewKind) => void;
 }
@@ -140,6 +142,7 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
         openThreadsCount,
         activeViewKind = null,
         loading = false,
+        embedded = false,
         onSelectBook,
         onNewBook,
         onSelectChapter,
@@ -163,6 +166,91 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
     const displayTitle = currentTitle || currentSlug || '未命名作品';
     const displaySlugPath = currentSlug ? `books/${currentSlug}` : 'books/unknown';
     const displayChapterCount = chapterCount > 0 ? chapterCount : chapters.length;
+
+    const chapterListSection = (
+        <section className="ns-nav-group" aria-label="章节 WAL 状态列表">
+            <div className="ns-group-title">
+                <span>章节目录 ({sortedChapters.length})</span>
+                <button
+                    type="button"
+                    className="ns-link-btn ns-mono"
+                    onClick={() => setSortDesc((prev) => !prev)}
+                    title="切换章节排序方向"
+                >
+                    {sortDesc ? 'WAL 倒序' : 'WAL 正序'}
+                </button>
+            </div>
+
+            {sortedChapters.length === 0 ? (
+                <div className="ns-empty-hint">暂无已落盘章节，请先开书或推进第 1 章。</div>
+            ) : (
+                <div className="ns-ch-list">
+                    {sortedChapters.map((chapter) => {
+                        const isSelected = selectedChapter === chapter.chapterNumber;
+                        const badge = resolveChapterStatus(chapter);
+                        return (
+                            <button
+                                key={chapter.fileName}
+                                type="button"
+                                className={`ns-ch-btn${isSelected ? ' ns-active' : ''}`}
+                                onClick={() => onSelectChapter(chapter.chapterNumber)}
+                                title={`${chapter.fileName} (${chapter.charCount} 字)`}
+                            >
+                                <span className="ns-ch-label">
+                                    <span className="ns-mono ns-ch-code">
+                                        {formatChapterCode(chapter.chapterNumber)}
+                                    </span>
+                                    <span className="ns-ch-title"> - {chapter.title}</span>
+                                </span>
+                                <span className={badge.pillClass} data-wal-status={badge.status}>
+                                    {badge.label}
+                                </span>
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+        </section>
+    );
+
+    if (embedded) {
+        return (
+            <div className="ns-toc-embedded" aria-label="章节目录与物化视图">
+                {chapterListSection}
+
+                {/* 底部 3 枚状态小方块：活跃实体 / WARPED / 未收伏笔 */}
+                <div className="ns-views-row" aria-label="物化视图快捷方块">
+                    <button
+                        type="button"
+                        className={`ns-vtile${activeViewKind === 'entities' ? ' ns-active' : ''}`}
+                        onClick={() => onOpenView('entities')}
+                        title={`查看活跃实体（冷档 ${coldArchiveCount}）`}
+                    >
+                        <b>{entityCount}</b>
+                        <span>活跃实体</span>
+                    </button>
+                    <button
+                        type="button"
+                        className={`ns-vtile ns-vtile-warped${activeViewKind === 'horizon' ? ' ns-active' : ''}`}
+                        onClick={() => onOpenView('horizon')}
+                        title="查看 future_horizon 中的 WARPED 条目"
+                    >
+                        <b>{typeof warpedHorizonCount === 'number' ? warpedHorizonCount : 0}</b>
+                        <span>WARPED</span>
+                    </button>
+                    <button
+                        type="button"
+                        className={`ns-vtile${activeViewKind === 'threads' ? ' ns-active' : ''}`}
+                        onClick={() => onOpenView('threads')}
+                        title="查看 open_threads 未收伏笔"
+                    >
+                        <b>{typeof openThreadsCount === 'number' ? openThreadsCount : 0}</b>
+                        <span>未收伏笔</span>
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <aside className="ns-book-nav" aria-label="作品与章节真源目录">

@@ -13,6 +13,7 @@ import {
     fetchViewTelemetry,
     fetchViewThreads,
     postSignal,
+    requestHalt,
     runDreaming,
     saveChapter,
     selectBook,
@@ -184,7 +185,7 @@ function buildSignalPayload(kind: DirectorSignalKind, content: string, chapter: 
     };
     if (kind === 'PARALLEL') {
         payload.suggested_mode = 'PARALLEL';
-    } else if (kind === '导演指令') {
+    } else if (kind === '下章剧情' || kind === '导演指令') {
         payload.suggested_mode = 'MAINLINE';
     }
     return payload;
@@ -266,6 +267,17 @@ export function NarrateStudioRoot(): React.ReactElement {
     const [externalViewCommand, setExternalViewCommand] = useState<ExternalViewCommand | undefined>(undefined);
     const [toast, setToast] = useState<ToastState | null>(null);
 
+    const [containerWidth, setContainerWidth] = useState<number>(() =>
+        typeof window !== 'undefined' ? window.innerWidth : 1280
+    );
+    const [rightOpen, setRightOpen] = useState<boolean>(() =>
+        typeof window !== 'undefined' ? window.innerWidth >= 1060 : true
+    );
+    const [rightTab, setRightTab] = useState<'toc' | 'insp' | 'tools'>('toc');
+    const [dismissedSignalIndices, setDismissedSignalIndices] = useState<number[]>([]);
+
+    const shellRef = useRef<HTMLDivElement | null>(null);
+    const prevWidthRef = useRef<number>(containerWidth);
     const viewCommandNonceRef = useRef<number>(0);
     const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const selectedChapterRef = useRef<number | null>(null);
@@ -289,6 +301,37 @@ export function NarrateStudioRoot(): React.ReactElement {
                 clearTimeout(toastTimerRef.current);
             }
         };
+    }, []);
+
+    useEffect(() => {
+        const el = shellRef.current;
+        if (!el || typeof window === 'undefined') return;
+
+        const updateWidth = (width: number) => {
+            if (width <= 0) return;
+            setContainerWidth(width);
+            if (prevWidthRef.current >= 1060 && width < 1060) {
+                setRightOpen(false);
+            }
+            prevWidthRef.current = width;
+        };
+
+        updateWidth(el.clientWidth || window.innerWidth);
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const observer = new ResizeObserver((entries) => {
+                const entry = entries[0];
+                if (entry) {
+                    updateWidth(entry.contentRect.width);
+                }
+            });
+            observer.observe(el);
+            return () => observer.disconnect();
+        }
+
+        const onResize = () => updateWidth(el.clientWidth || window.innerWidth);
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
     }, []);
 
     const loadViews = useCallback(async () => {
@@ -693,6 +736,17 @@ export function NarrateStudioRoot(): React.ReactElement {
         await Promise.all([fetchStatus().then(setStatus), loadViews()]);
     }, [loadViews]);
 
+    const handleRequestHalt = useCallback(async () => {
+        try {
+            await requestHalt();
+            showToast('已发送安全停机请求，将在安全检查点挂起');
+            const nextStatus = await fetchStatus();
+            setStatus(nextStatus);
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : String(err), 'error');
+        }
+    }, [showToast]);
+
     const handleSaveChapter = useCallback(
         async (chapterNumber: number, content: string) => {
             await saveChapter({ chapterNumber, content });
@@ -710,6 +764,7 @@ export function NarrateStudioRoot(): React.ReactElement {
             const currentCh = status?.worldState.current_chapter ?? status?.latestChapter ?? 0;
             const req = buildSignalPayload(payload.kind, payload.content, currentCh);
             await postSignal(req);
+            setDismissedSignalIndices([]);
             await Promise.all([
                 fetchViewSignals().then(setSignalsView),
                 fetchStatus().then(setStatus)
@@ -758,8 +813,32 @@ export function NarrateStudioRoot(): React.ReactElement {
 
     const safeHaltInfo = useMemo(() => mapSafeHaltInfo(haltView?.safeHalt), [haltView]);
     const haltDiagnostic = useMemo(() => mapHaltDiagnostic(haltView), [haltView]);
-    const pendingSignals = useMemo(() => mapPendingSignals(signalsView), [signalsView]);
+    const pendingSignals = useMemo(
+        () => mapPendingSignals(signalsView).filter((_, idx) => !dismissedSignalIndices.includes(idx)),
+        [dismissedSignalIndices, signalsView]
+    );
     const stageArtifact = useMemo(() => deriveStageArtifact(latestSseStage), [latestSseStage]);
+
+    const warpedHorizonCount = useMemo(() => {
+        const md = horizonView?.content ?? '';
+        const matches = md.match(/WARPED/gi);
+        return matches ? matches.length : 0;
+    }, [horizonView]);
+
+    const openThreadsCount = useMemo(() => {
+        const md = threadsView?.content ?? '';
+        const matches = md.match(/^[-*]\s+|^\d+\.\s+|^##\s+/gm);
+        return matches ? matches.length : 0;
+    }, [threadsView]);
+
+    const modelPools = useMemo(() => {
+        const routing = status?.modelRouting ?? {};
+        return {
+            strongModel: routing['strong_creative'] ?? routing['strong'] ?? 'strong',
+            fastModel: routing['fast_retrieval'] ?? routing['fast'] ?? 'fast',
+            auditModel: routing['audit'] ?? 'audit'
+        };
+    }, [status?.modelRouting]);
 
     const activeTask = status?.runtime.activeTask ?? 'IDLE';
     const isBusy = activeTask !== 'IDLE' || Boolean(status?.yolo.running);
@@ -777,33 +856,22 @@ export function NarrateStudioRoot(): React.ReactElement {
         };
     }, [chapterDetail, chapters]);
 
-    return (
-        <div className="ns-studio-shell">
-            <LeftBookNav
-                currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot}
-                currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
-                currentSlug={status?.bookSlug ?? activeBookSummary?.slug ?? ''}
-                chapterCount={status?.chapterCount ?? chapters.length}
-                storyDay={status?.worldState.story_day ?? 0}
-                walPhase={status?.walPhase ?? 'IDLE'}
-                books={booksState.books}
-                chapters={chapters}
-                selectedChapter={selectedChapter}
-                entityCount={entitiesView?.entities.length ?? status?.entityCount ?? 0}
-                coldArchiveCount={entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0}
-                activeViewKind={activeViewKind}
-                loading={loading}
-                onSelectBook={(root) => {
-                    void handleSelectBook(root);
-                }}
-                onNewBook={() => setBootModalOpen(true)}
-                onSelectChapter={handleSelectChapter}
-                onOpenView={handleOpenView}
-            />
+    const isNarrow = containerWidth < 1060;
+    const shellStyle = {
+        '--ns-right-w': rightOpen && !isNarrow ? '332px' : '0px'
+    } as React.CSSProperties;
 
+    return (
+        <div
+            ref={shellRef}
+            className={`ns-studio-shell ${rightOpen ? 'ns-right-open' : 'ns-right-closed'} ${isNarrow ? 'ns-narrow' : ''}`}
+            style={shellStyle}
+        >
             <CenterWorkbench
-                bookTitle={status?.title}
-                bookSlug={status?.bookSlug}
+                bookTitle={status?.title ?? activeBookSummary?.title}
+                bookSlug={status?.bookSlug ?? activeBookSummary?.slug}
+                currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot}
+                books={booksState.books}
                 currentChapter={status?.worldState.current_chapter ?? status?.latestChapter ?? 0}
                 selectedChapter={selectedChapter ?? undefined}
                 timelineMode={String(status?.worldState.timeline_mode ?? 'MAINLINE')}
@@ -816,7 +884,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                 latestSseStage={latestSseStage}
                 safeHalt={safeHaltInfo}
                 pendingSignals={pendingSignals}
-                pendingSignalsCount={signalsView?.pendingCount ?? status?.pendingSignalsCount ?? 0}
+                pendingSignalsCount={pendingSignals.length}
                 materializedViews={{
                     entities: entitiesView?.entities,
                     coldArchiveCount: entitiesView?.coldArchiveCount,
@@ -826,6 +894,27 @@ export function NarrateStudioRoot(): React.ReactElement {
                 dirtyChaptersCount={dirtyChaptersCount}
                 lastConsumedSignal={lastConsumedSignal}
                 externalViewCommand={externalViewCommand}
+                telemetrySummary={{
+                    cacheHitRate: aggregateTokens.cacheHitRate,
+                    inputTokens: aggregateTokens.inputTokens,
+                    cacheReadTokens: aggregateTokens.cacheReadTokens,
+                    outputTokens: aggregateTokens.outputTokens,
+                    kontoyiannisHk: latestTelemetryEntry?.kontoyiannisHk
+                }}
+                rightOpen={rightOpen}
+                hasSafeHalt={Boolean(safeHaltInfo)}
+                onSelectBook={(root) => {
+                    void handleSelectBook(root);
+                }}
+                onNewBook={() => setBootModalOpen(true)}
+                onToggleRight={() => setRightOpen((prev) => !prev)}
+                onOpenInspector={() => {
+                    setRightOpen(true);
+                    setRightTab('insp');
+                }}
+                onDismissSignal={(idx) => {
+                    setDismissedSignalIndices((prev) => [...prev, idx]);
+                }}
                 onSelectChapter={handleSelectChapter}
                 onStepOne={handleStepOne}
                 onStartYolo={handleStartYolo}
@@ -837,58 +926,232 @@ export function NarrateStudioRoot(): React.ReactElement {
                 onRefreshViews={loadViews}
             />
 
-            <RightOpsInspector
-                walLock={{
-                    walPhase: status?.walPhase ?? 'IDLE',
-                    timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
-                    txLockStatus: activeTask !== 'IDLE' ? 'locked' : 'free',
-                    txLockHolder: activeTask !== 'IDLE' ? activeTask : null,
-                    lastCommittedChapter: status?.lastCommittedChapter ?? 0,
-                    activeChapter: status?.activeChapter ?? null
-                }}
-                modelPool={{
-                    fastModel: 'fast',
-                    strongModel: 'strong',
-                    auditModel: 'audit',
-                    inputTokens: aggregateTokens.inputTokens,
-                    cacheReadTokens: aggregateTokens.cacheReadTokens,
-                    outputTokens: aggregateTokens.outputTokens,
-                    ...(aggregateTokens.cacheHitRate !== undefined
-                        ? { cacheHitRate: aggregateTokens.cacheHitRate }
-                        : {})
-                }}
-                stageArtifact={stageArtifact}
-                proseGate={{
-                    mattr500: latestTelemetryEntry?.mattr500 ?? null,
-                    kontoyiannisEntropy: latestTelemetryEntry?.kontoyiannisHk ?? null,
-                    sentenceLengthCv: latestTelemetryEntry?.sentenceLengthCv ?? null,
-                    clicheDensityPer1k: latestTelemetryEntry?.clicheDensityPer1k ?? null,
-                    recentViolations: gateViolations
-                }}
-                factChecker={factChecker}
-                dreaming={{
-                    dirtyEntityCount: 0,
-                    dirtyThreshold: 5,
-                    coldArchiveCount: entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
-                    spotlightQueue: []
-                }}
-                haltDiagnostic={haltDiagnostic}
-                busy={isBusy}
-                onTriggerDreaming={() => {
-                    void handleDream().catch((err) => {
-                        showToast(err instanceof Error ? err.message : String(err), 'error');
-                    });
-                }}
-                onInspectHalt={() => {
-                    void fetchViewHalt().then((nextHalt) => {
-                        setHaltView(nextHalt);
-                        const diag = mapHaltDiagnostic(nextHalt);
-                        if (diag) {
-                            showToast(`${diag.kind}: ${diag.reason}`, 'error');
-                        }
-                    });
-                }}
-            />
+            {isNarrow && rightOpen ? (
+                <div
+                    className="ns-drawer-backdrop"
+                    aria-hidden="true"
+                    onClick={() => setRightOpen(false)}
+                />
+            ) : null}
+
+            {/* 右侧三页签辅助栏：目录 | 检查器 | 工具 */}
+            <aside className="ns-right" aria-label="右侧辅助栏">
+                <div className="ns-r-head">
+                    <div className="ns-r-tabs" role="tablist">
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={rightTab === 'toc'}
+                            className={`ns-r-tab ${rightTab === 'toc' ? 'on' : ''}`}
+                            onClick={() => setRightTab('toc')}
+                        >
+                            目录
+                        </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={rightTab === 'insp'}
+                            className={`ns-r-tab ${rightTab === 'insp' ? 'on' : ''}`}
+                            onClick={() => setRightTab('insp')}
+                        >
+                            检查器
+                            {safeHaltInfo ? <span className="ns-r-dot" aria-hidden="true" /> : null}
+                        </button>
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={rightTab === 'tools'}
+                            className={`ns-r-tab ${rightTab === 'tools' ? 'on' : ''}`}
+                            onClick={() => setRightTab('tools')}
+                        >
+                            工具
+                        </button>
+                    </div>
+                    <button
+                        type="button"
+                        className="ns-icon-btn"
+                        onClick={() => setRightOpen(false)}
+                        title="收起右侧辅助栏"
+                        aria-label="收起右侧辅助栏"
+                    >
+                        ×
+                    </button>
+                </div>
+
+                <div className="ns-r-body">
+                    {rightTab === 'toc' ? (
+                        <LeftBookNav
+                            embedded
+                            currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot}
+                            currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
+                            currentSlug={status?.bookSlug ?? activeBookSummary?.slug ?? ''}
+                            chapterCount={status?.chapterCount ?? chapters.length}
+                            storyDay={status?.worldState.story_day ?? 0}
+                            walPhase={status?.walPhase ?? 'IDLE'}
+                            books={booksState.books}
+                            chapters={chapters}
+                            selectedChapter={selectedChapter}
+                            entityCount={entitiesView?.entities.length ?? status?.entityCount ?? 0}
+                            coldArchiveCount={entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0}
+                            warpedHorizonCount={warpedHorizonCount}
+                            openThreadsCount={openThreadsCount}
+                            activeViewKind={activeViewKind}
+                            loading={loading}
+                            onSelectBook={(root) => {
+                                void handleSelectBook(root);
+                            }}
+                            onNewBook={() => setBootModalOpen(true)}
+                            onSelectChapter={(ch) => {
+                                handleSelectChapter(ch);
+                                if (isNarrow) setRightOpen(false);
+                            }}
+                            onOpenView={(kind) => {
+                                handleOpenView(kind);
+                                if (isNarrow) setRightOpen(false);
+                            }}
+                        />
+                    ) : null}
+
+                    {rightTab === 'insp' ? (
+                        <RightOpsInspector
+                            walLock={{
+                                walPhase: status?.walPhase ?? 'IDLE',
+                                timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
+                                txLockStatus: activeTask !== 'IDLE' ? 'locked' : 'free',
+                                txLockHolder: activeTask !== 'IDLE' ? activeTask : null,
+                                lastCommittedChapter: status?.lastCommittedChapter ?? 0,
+                                activeChapter: status?.activeChapter ?? null
+                            }}
+                            modelPool={{
+                                fastModel: modelPools.fastModel,
+                                strongModel: modelPools.strongModel,
+                                auditModel: modelPools.auditModel,
+                                inputTokens: aggregateTokens.inputTokens,
+                                cacheReadTokens: aggregateTokens.cacheReadTokens,
+                                outputTokens: aggregateTokens.outputTokens,
+                                ...(aggregateTokens.cacheHitRate !== undefined
+                                    ? { cacheHitRate: aggregateTokens.cacheHitRate }
+                                    : {})
+                            }}
+                            stageArtifact={stageArtifact}
+                            proseGate={{
+                                mattr500: latestTelemetryEntry?.mattr500 ?? null,
+                                kontoyiannisEntropy: latestTelemetryEntry?.kontoyiannisHk ?? null,
+                                sentenceLengthCv: latestTelemetryEntry?.sentenceLengthCv ?? null,
+                                clicheDensityPer1k: latestTelemetryEntry?.clicheDensityPer1k ?? null,
+                                recentViolations: gateViolations
+                            }}
+                            factChecker={factChecker}
+                            dreaming={{
+                                dirtyEntityCount: 0,
+                                dirtyThreshold: 5,
+                                coldArchiveCount: entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
+                                spotlightQueue: []
+                            }}
+                            haltDiagnostic={haltDiagnostic}
+                            busy={isBusy}
+                            onTriggerDreaming={() => {
+                                void handleDream().catch((err) => {
+                                    showToast(err instanceof Error ? err.message : String(err), 'error');
+                                });
+                            }}
+                            onInspectHalt={() => {
+                                void fetchViewHalt().then((nextHalt) => {
+                                    setHaltView(nextHalt);
+                                    const diag = mapHaltDiagnostic(nextHalt);
+                                    if (diag) {
+                                        showToast(`${diag.kind}: ${diag.reason}`, 'error');
+                                    }
+                                });
+                            }}
+                        />
+                    ) : null}
+
+                    {rightTab === 'tools' ? (
+                        <div className="ns-tool-cards" aria-label="运维工具与模型池">
+                            <button
+                                type="button"
+                                className="ns-tool-card"
+                                disabled={isBusy}
+                                onClick={() => {
+                                    void handleSync()
+                                        .then(() => showToast('已完成手改差异扫描与状态 Sync'))
+                                        .catch((err) =>
+                                            showToast(err instanceof Error ? err.message : String(err), 'error')
+                                        );
+                                }}
+                            >
+                                <span className="ns-tool-icon" aria-hidden="true">↻</span>
+                                <span>
+                                    <b>
+                                        手动 Sync
+                                        {dirtyChaptersCount > 0 ? ` (${dirtyChaptersCount} 处待同步)` : ''}
+                                    </b>
+                                    <small>扫描 SHA-256 与 Git Diff，增量刷新物化视图</small>
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                className="ns-tool-card"
+                                disabled={isBusy}
+                                onClick={() => {
+                                    void handleDream()
+                                        .then(() => showToast('已完成睡眠 VACUUM 与连续性整理'))
+                                        .catch((err) =>
+                                            showToast(err instanceof Error ? err.message : String(err), 'error')
+                                        );
+                                }}
+                            >
+                                <span className="ns-tool-icon" aria-hidden="true">☾</span>
+                                <span>
+                                    <b>手动 Dreaming</b>
+                                    <small>触发离线 VACUUM 与跨章自愈整理</small>
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                className="ns-tool-card ns-tool-card-danger"
+                                onClick={() => {
+                                    void handleRequestHalt();
+                                }}
+                            >
+                                <span className="ns-tool-icon" aria-hidden="true">■</span>
+                                <span>
+                                    <b>安全停机 (Safe-Point Halt)</b>
+                                    <small>请求在当前原子事务检查点安全挂起</small>
+                                </span>
+                            </button>
+
+                            <section className="ns-pool-card" aria-label="当前三池模型路由">
+                                <div className="ns-pool-card-title">当前三池模型路由</div>
+                                <div className="ns-pool-item">
+                                    <div>
+                                        <b>强创作池</b>
+                                        <small>Planner · Writer</small>
+                                    </div>
+                                    <span className="ns-mono">{modelPools.strongModel}</span>
+                                </div>
+                                <div className="ns-pool-item">
+                                    <div>
+                                        <b>检索快池</b>
+                                        <small>Librarian · Extractor</small>
+                                    </div>
+                                    <span className="ns-mono">{modelPools.fastModel}</span>
+                                </div>
+                                <div className="ns-pool-item">
+                                    <div>
+                                        <b>异构核查池</b>
+                                        <small>Fact Checker</small>
+                                    </div>
+                                    <span className="ns-mono">{modelPools.auditModel}</span>
+                                </div>
+                            </section>
+                        </div>
+                    ) : null}
+                </div>
+            </aside>
 
             <BootBookModal
                 open={bootModalOpen}

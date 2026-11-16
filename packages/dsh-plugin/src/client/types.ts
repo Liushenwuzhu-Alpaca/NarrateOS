@@ -66,6 +66,7 @@ export interface NarrateStatusPayload {
     pendingSignalsCount: number;
     yolo: YoloStatusSummary;
     runtime: RuntimeStatusSummary;
+    modelRouting?: Record<string, string> | undefined;
 }
 
 /** 章节列表单项摘要（对应 GET /api/narrate/chapters） */
