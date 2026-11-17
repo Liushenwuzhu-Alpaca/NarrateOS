@@ -109,6 +109,7 @@ narrateos/
 
 ### Phase 4：四阶段开书编译器、多时间线合并、周期睡眠与换卷交接 (`bootBook` + `PARALLEL` + `runDreaming` + `advanceVolume`)
 - **交付内容**：实现四阶段 `bootBook`（分词率标定 -> 三维正交坐标纯文本深推演与 `interactive / auto_best` 拍板 -> 三把手术刀结构化编译 -> 确定性配额/`T0` 扫描、声纹 `Static Prose Gate` 过滤与异构剧透盲审）、`PARALLEL` 分叉快照与 3-Way Merge（主时钟冻结与唯一物双线冲突拦截）、按脏页增量 `Dreaming`（含 `open_threads.md` 周期立项/销账与 `ACTIVE <= 15` 配额硬锁、`future_horizon.md` 多轨补货、`Spotlight Trigger` 派发及跨章穿帮三级自动自愈）、以及五步原子换卷 `advanceVolume()`。
+- 开书只接受空目录，在调用模型前排他创建 `.boot-incomplete`；失败保留标记与已写资产，后续开书拒绝复用该目录，成功提交前移除标记。重复开书不是作品重建入口。
 - **完工判据（Exit Criteria）**：
   - 自动化集成测试全部通过（退出码 `0`）：
     1. 开书编译后，`T0` 后事件在初始 `entities/*.md` 中残留数为 `0`；`L0_sagas.md`、`L1_volumes.md` 与含 `Stage Ceiling` 的 `current_arc_envelope.md` 非空落盘；声纹池含八股词的示范句被 `Static Prose Gate` 100% 剔除；同人设定包专有名词守恒率 `>=98%`；

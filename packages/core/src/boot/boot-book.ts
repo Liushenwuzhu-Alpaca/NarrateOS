@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 import { StaticProseGate } from '../gate/static-prose-gate.js';
@@ -765,6 +765,20 @@ export async function bootBook(
     input: BootBookInput,
     deps: BootBookDependencies
 ): Promise<BootBookResult> {
+    await mkdir(input.bookRoot, { recursive: true });
+    if ((await readdir(input.bookRoot)).length > 0) {
+        throw new Error('开书目标目录必须为空，不能覆盖已有作品或未完成的初始化');
+    }
+    const initializationPath = join(input.bookRoot, '.boot-incomplete');
+    const initialization = await open(initializationPath, 'wx');
+    try {
+        await initialization.writeFile(JSON.stringify({ pid: process.pid, bookSlug: input.bookSlug }), 'utf8');
+    } finally {
+        await initialization.close();
+    }
+    if ((await readdir(input.bookRoot)).some((name) => name !== '.boot-incomplete')) {
+        throw new Error('开书目标目录在初始化期间发生变化，已停止写入');
+    }
     const tokensPerChar = await calibrateTokensPerChar(
         deps.llm,
         input.calibrationSampleText,
@@ -935,6 +949,7 @@ export async function bootBook(
     await store.initializeWalFromDisk();
 
     await deps.system.initRepo(input.bookRoot);
+    await rm(initializationPath);
     const { sha } = await deps.system.commitPaths(
         input.bookRoot,
         ['.'],

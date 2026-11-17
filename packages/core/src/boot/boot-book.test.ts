@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -40,6 +40,23 @@ afterEach(async () => {
 });
 
 describe('bootBook 开书编译与导入接缝', () => {
+    it('已有资产和失败初始化目录在调用模型前被拒绝', async () => {
+        const bookRoot = await createTempBookRoot();
+        const asset = join(bookRoot, 'notes.md');
+        await writeFile(asset, '保留原作品笔记', 'utf8');
+        const llm = new ScriptedLlmAdapter([]);
+        const input = { bookRoot, bookSlug: 'existing', title: '已有作品', povCharacter: 'char_001', mode: 'original' as const, premiseOrSeed: '新种子' };
+        const deps = { llm, system: new NodeSystemAdapter() };
+        await expect(bootBook(input, deps)).rejects.toThrow('目标目录必须为空');
+        expect(await readFile(asset, 'utf8')).toBe('保留原作品笔记');
+        expect(llm.history).toEqual([]);
+        await rm(asset);
+        await expect(bootBook(input, deps)).rejects.toThrow('队列已耗尽');
+        expect(await exists(join(bookRoot, '.boot-incomplete'))).toBe(true);
+        await expect(bootBook(input, deps)).rejects.toThrow('目标目录必须为空');
+        expect(llm.history).toHaveLength(1);
+    });
+
     it('原创冷启动应创建完整目录树、标定 tokens_per_char 并完成初始 Git 提交', async () => {
         const bookRoot = await createTempBookRoot();
         const system = new NodeSystemAdapter();
