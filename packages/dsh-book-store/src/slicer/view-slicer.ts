@@ -218,6 +218,11 @@ function shouldStripWarped(forRole: SlicerRole): boolean {
     return forRole === 'writer' || forRole === 'extractor';
 }
 
+/** 判定单条实体记录是否被标记为 WARPED 废止（兼容标签状态与文本内联标记） */
+function isWarpedEntry(entry: EntityEntry): boolean {
+    return entry.status === 'WARPED' || /\bWARPED\b/.test(entry.text);
+}
+
 /**
  * 确定性上下文裁剪器（ViewSlicer）
  * - 零 LLM、零网络、纯内存不可变计算
@@ -359,7 +364,7 @@ export class ViewSlicer {
 
             const filtered: EntityEntry[] = [];
             for (const entry of profile[section]) {
-                if (ctx.stripWarped && entry.status === 'WARPED') {
+                if (ctx.stripWarped && isWarpedEntry(entry)) {
                     continue;
                 }
 
@@ -460,7 +465,7 @@ export class ViewSlicer {
     ): ParallelBroadcastItem[] {
         const result: ParallelBroadcastItem[] = [];
         for (const entry of entries) {
-            if (stripWarped && entry.status === 'WARPED') {
+            if (stripWarped && isWarpedEntry(entry)) {
                 continue;
             }
             if (entry.storyDay !== undefined && entry.storyDay > targetDay) {

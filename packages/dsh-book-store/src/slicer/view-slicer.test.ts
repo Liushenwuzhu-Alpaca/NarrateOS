@@ -608,4 +608,61 @@ describe('sliceWorldDocuments', () => {
         expect(checkerDocs.arcDirectorPlan).toContain('Stage Ceiling');
         expect(checkerDocs.authorCharter).toContain('走私账本');
     });
+
+    it('条目正文内联包含 WARPED（即使未标注 status: WARPED）时对 writer 与 extractor 物理剥离，planner 保留', () => {
+        const snapshot = createTestSnapshot();
+        const hero = snapshot.entities['char_001'];
+        if (hero) {
+            hero.acquiredState.push({
+                storyDay: 11,
+                chapter: 40,
+                visibility: 'PUBLIC',
+                text: '[WARPED] 旧设定的仓库伏击点已作废',
+                continuationLines: []
+            });
+        }
+
+        const slicer = new ViewSlicer();
+        const writerView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'PARALLEL',
+            povCharId: 'char_001',
+            parallelBroadcastEntries: [
+                {
+                    storyDay: 12,
+                    visibility: 'PUBLIC',
+                    text: '广播：[WARPED] 港口停电事件已撤回',
+                    continuationLines: []
+                },
+                {
+                    storyDay: 12,
+                    visibility: 'PUBLIC',
+                    text: '广播：三号码头货轮按时靠岸',
+                    continuationLines: []
+                }
+            ]
+        });
+        expect(writerView.entities['char_001']?.acquiredState.some((e) => /\bWARPED\b/.test(e.text))).toBe(false);
+        expect(writerView.parallelBroadcast).toHaveLength(1);
+        expect(writerView.parallelBroadcast[0]?.text).toContain('货轮按时靠岸');
+
+        const extractorView = slicer.slice({
+            snapshot,
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001',
+            forRole: 'extractor'
+        });
+        expect(extractorView.entities['char_001']?.acquiredState.some((e) => /\bWARPED\b/.test(e.text))).toBe(false);
+
+        const plannerView = slicer.sliceForPlanner(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        expect(plannerView.entities['char_001']?.acquiredState.some((e) => /\bWARPED\b/.test(e.text))).toBe(true);
+    });
 });

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NodeSystemAdapter } from '../ports/index.js';
 import {
+    BookConfigSchema,
     BookStore,
     ForeignKeyError,
     InnateLockViolationError,
@@ -936,5 +937,39 @@ describe('BookStore', () => {
         await expect(store.assertDreamingPhaseSafe()).resolves.toMatchObject({ phase: 'STATE_COMMITTED' });
         await store.markDreamCommitted(2);
         await expect(store.assertDreamingPhaseSafe()).resolves.toMatchObject({ phase: 'DREAM_COMMITTED' });
+    });
+
+    it('BookConfigSchema 与 readBookConfig 允许 max_auto_rollback_chapters 为 0（关闭自动回滚），拒绝负数', async () => {
+        const { bookRoot, store } = await createTempBookRepo();
+
+        const validZero = BookConfigSchema.parse({
+            book_slug: 'zero-rollback',
+            title: '零回滚测试',
+            tokens_per_char: 0.6,
+            max_auto_rollback_chapters: 0
+        });
+        expect(validZero.max_auto_rollback_chapters).toBe(0);
+        expect(() =>
+            BookConfigSchema.parse({
+                book_slug: 'neg-rollback',
+                title: '负回滚测试',
+                tokens_per_char: 0.6,
+                max_auto_rollback_chapters: -1
+            })
+        ).toThrow();
+
+        await writeFile(
+            join(bookRoot, 'world/book_config.yaml'),
+            [
+                'book_slug: zero-rollback',
+                'title: 零回滚测试',
+                'tokens_per_char: 0.6',
+                'max_auto_rollback_chapters: 0',
+                ''
+            ].join('\n'),
+            'utf8'
+        );
+        const loaded = await store.readBookConfig();
+        expect(loaded.max_auto_rollback_chapters).toBe(0);
     });
 });

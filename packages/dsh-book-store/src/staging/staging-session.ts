@@ -6,7 +6,48 @@ interface StagingSessionState {
     overlay: Map<string, string>;
 }
 
-/** 校验并归一化暂存区相对路径，禁止路径穿越、.git、.ops/tx.lock 及（写操作时）manuscripts/ */
+/** 引擎内部元数据与事务路径：严禁暂存区读/写/编辑 */
+const BLOCKED_OPS_PATHS = [
+    '.ops/runs.jsonl',
+    '.ops/tx.lock',
+    '.ops/tx_state.json',
+    '.ops/pending_writes.json',
+    '.ops/recovery',
+    '.ops/traces',
+    '.ops/parallel_deltas',
+    '.ops/dream_watermark.json',
+    '.ops/safe_halt.json'
+] as const;
+
+/** 只读遥测路径：允许读取供诊断，严禁通过暂存区写入/编辑 */
+const READONLY_OPS_PATHS = ['.ops/telemetry.jsonl'] as const;
+
+function matchesPathOrSubpath(normalizedPath: string, prefix: string): boolean {
+    return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
+}
+
+function assertAllowedRelativePath(normalized: string, rawRelPath: string, forWrite: boolean): void {
+    if (matchesPathOrSubpath(normalized, '.git')) {
+        throw new Error(`禁止访问 .git 目录: ${rawRelPath}`);
+    }
+    for (const blocked of BLOCKED_OPS_PATHS) {
+        if (matchesPathOrSubpath(normalized, blocked)) {
+            throw new Error(`禁止通过暂存区访问引擎内部路径 (${blocked}): ${rawRelPath}`);
+        }
+    }
+    if (forWrite) {
+        for (const readonlyPath of READONLY_OPS_PATHS) {
+            if (matchesPathOrSubpath(normalized, readonlyPath)) {
+                throw new Error(`禁止通过暂存区修改只读遥测路径 (${readonlyPath}): ${rawRelPath}`);
+            }
+        }
+        if (matchesPathOrSubpath(normalized, 'manuscripts')) {
+            throw new Error(`禁止通过暂存区修改正稿目录 manuscripts/: ${rawRelPath}`);
+        }
+    }
+}
+
+/** 校验并归一化暂存区相对路径，禁止路径穿越、.git、引擎内部 .ops/ 路径及（写操作时）manuscripts/ 与只读遥测 */
 function normalizeAndValidateRelPath(
     bookRoot: string,
     relPath: string,
@@ -38,15 +79,7 @@ function normalizeAndValidateRelPath(
         throw new Error(`路径越界: ${relPath}`);
     }
 
-    if (normalized === '.git' || normalized.startsWith('.git/')) {
-        throw new Error(`禁止访问 .git 目录: ${relPath}`);
-    }
-    if (normalized === '.ops/tx.lock') {
-        throw new Error(`禁止通过暂存区读写事务锁: ${relPath}`);
-    }
-    if (forWrite && (normalized === 'manuscripts' || normalized.startsWith('manuscripts/'))) {
-        throw new Error(`禁止通过暂存区修改正稿目录 manuscripts/: ${relPath}`);
-    }
+    assertAllowedRelativePath(normalized, relPath, forWrite);
 
     const absPath = resolve(bookRoot, normalized);
     const relFromRoot = relative(bookRoot, absPath);
@@ -90,7 +123,7 @@ export class StagingSessionManager {
 
     /**
      * 读取作品内文件（优先命中本 runId 暂存覆盖层，否则回落磁盘只读）
-     * 严禁跨越 bookRoot 或访问 .git/、.ops/tx.lock。
+     * 严禁跨越 bookRoot 或访问 .git/ 与引擎内部 .ops/ 元数据路径。
      */
     async read(runId: string, relPath: string): Promise<string> {
         const session = this.requireSession(runId);
@@ -106,9 +139,10 @@ export class StagingSessionManager {
             realpath(absPath)
         ]);
         const realRel = relative(realRoot, realTarget);
-        if (realRel.startsWith('..') || isAbsolute(realRel)) {
+        if (realRel === '' || realRel.startsWith('..') || isAbsolute(realRel)) {
             throw new Error(`符号链接路径越界 bookRoot: ${relPath}`);
         }
+        assertAllowedRelativePath(posix.normalize(realRel.replace(/\\/g, '/')), relPath, false);
 
         return await readFile(realTarget, 'utf8');
     }
