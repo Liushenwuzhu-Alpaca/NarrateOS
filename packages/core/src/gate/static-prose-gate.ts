@@ -100,7 +100,10 @@ export class StaticProseGate {
                     : lineMetas;
 
             const hits: GateViolation[] = [];
-            for (const lineMeta of targetLines) {
+            const scanLines = ruleId === 'tag_residue'
+                ? [{ lineNumber: 1, text, paragraphIndex: 0 }]
+                : targetLines;
+            for (const lineMeta of scanLines) {
                 for (const pattern of patterns) {
                     const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
                     const regex = new RegExp(pattern.source, flags);
@@ -110,13 +113,17 @@ export class StaticProseGate {
                             regex.lastIndex += 1;
                             continue;
                         }
+                        const prefix = ruleId === 'tag_residue' ? text.slice(0, match.index) : '';
+                        const actualLine = ruleId === 'tag_residue'
+                            ? lineMetas[prefix.split('\n').length - 1] ?? lineMeta
+                            : lineMeta;
                         hits.push({
                             ruleId,
-                            line: lineMeta.lineNumber,
-                            column: match.index + 1,
-                            paragraphIndex: lineMeta.paragraphIndex,
+                            line: actualLine.lineNumber,
+                            column: ruleId === 'tag_residue' ? match.index - prefix.lastIndexOf('\n') : match.index + 1,
+                            paragraphIndex: actualLine.paragraphIndex,
                             matchedText: match[0],
-                            lineText: lineMeta.text,
+                            lineText: actualLine.text,
                             message: `触发规则 ${ruleId}: "${match[0]}"`
                         });
                     }

@@ -45,6 +45,15 @@ describe('stripBlockingTags', () => {
 });
 
 describe('StaticProseGate', () => {
+    it('跨行 HTML 注释按全文检出并保留准确起始行列', () => {
+        const gate = new StaticProseGate();
+        const result = gate.evaluate('雨落在窗沿。\n\n<!--\n内部工程说明\n-->\n\n门开了。', { enableAntiCliche: false });
+        expect(result.passed).toBe(false);
+        expect(result.violations).toEqual(expect.arrayContaining([
+            expect.objectContaining({ ruleId: 'tag_residue', line: 3, column: 1, matchedText: '<!--\n内部工程说明\n-->' })
+        ]));
+    });
+
     it('能够检出八股配额超限、微距人体套话、否定对比句与末段说教并给出精确行号', () => {
         const draft = [
             '他站在窗前，指节泛白。',
