@@ -16,3 +16,16 @@
               includeRuntimeContext: false
           - id: narrate-studio-plugin
             name: '@narrateos/dsh-plugin'
+            config:
+              bookRoot: ./books/default
+              booksRoot: ./books
+              poolRouting:
+                strong_creative:
+                  provider: deepseek-official
+                  model: deepseek-v4
+                fast_retrieval:
+                  provider: deepseek-official
+                  model: deepseek-v4-flash
+                audit:
+                  provider: deepseek-official
+                  model: deepseek-v4

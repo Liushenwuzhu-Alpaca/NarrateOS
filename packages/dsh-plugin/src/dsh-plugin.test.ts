@@ -313,6 +313,21 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         }
     });
 
+    it('配置缺失时在注册路由前给出明确错误', () => {
+        const webServer = new MockWebServer();
+        const ctx: DshCordisContext = {
+            llm: { async *stream() { throw new Error('不应调用模型'); } },
+            webServer,
+            effect() { throw new Error('不应注册生命周期'); }
+        };
+        expect(() => apply(ctx)).toThrow('bookRoot');
+        expect(() => apply(ctx, {
+            bookRoot: '/tmp/narrateos-unused',
+            poolRouting: { ...DEFAULT_ROUTING, audit: { provider: '', model: '' } }
+        })).toThrow('poolRouting.audit');
+        expect(webServer.hasRoute('/api/narrate/status')).toBe(false);
+    });
+
     it('应导出正确的插件元信息并在 REST 控制面、SSE 与停机 Safe-Point 正常联动', async () => {
         expect(name).toBe('narrateos-dsh-plugin');
         expect(inject).toEqual(['llm', 'webServer']);

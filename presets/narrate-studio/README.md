@@ -9,6 +9,13 @@ NarrateOS 基础模式预设包，遵循 `@deepseek-ai/dsh@0.2.2-rc.1` Bundle Pa
   - `@deepseek-ai/dsh-persona`（`complete: true`、`includeRuntimeContext: false`）：遮蔽宿主默认对话人设与可选运行时上下文，避免编码向运行时快照注入写作链路。
   - `@narrateos/dsh-plugin`：挂载 NarrateOS 后端 `DshLlmAdapter`、`ctx.webServer` REST/SSE 控制与遥测路由及优雅停机钩子。
 
+## 后端配置
+
+预设显式传入 `bookRoot: ./books/default`、`booksRoot: ./books` 和三个模型池路由，相对路径以宿主工作目录为准。初始目录尚无作品时，可在控制面选择已有作品或开书。
+
+默认路由使用宿主注册的 `deepseek-official` provider，创作与审计使用 `deepseek-v4`，检索使用 `deepseek-v4-flash`。部署时将 `cordis.patch.yml` 中的 provider/model 改为宿主实际可用的标识；认证信息只由宿主配置提供，预设不保存密钥。插件在注册路由前检查作品路径和三池配置，缺项会给出明确配置错误。
+
+
 ## 前端 `'main'` 槽位状态说明
 
 - 本预设当前仅覆盖**无会话 Operator Studio 后端接入声明**。
