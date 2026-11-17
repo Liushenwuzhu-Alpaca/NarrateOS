@@ -10,6 +10,7 @@ export interface StripBlockingResult {
 export type GateRuleId =
     | 'tag_residue'
     | 'negation_contrast'
+    | 'subjective_judgment'
     | 'micro_anatomy'
     | 'skeletal_quota'
     | 'filler_trace'
@@ -40,6 +41,8 @@ export interface HistoricalChapterInput {
 
 /** StaticProseGate 评估选项 */
 export interface ProseGateOptions {
+    /** 叙述人称与主观度基线（subjective_first 自动豁免视角主观评判与先否决对比规则） */
+    narrationSubjectivity?: 'objective_third' | 'subjective_first' | undefined;
     /** 是否启用反八股规则总开关（与 BookConfig.prose_gate.enable_anti_cliche 对齐） */
     enableAntiCliche?: boolean | undefined;
     /** 是否启用跨章明喻复读检测（与 BookConfig.prose_gate.enable_cross_chapter_simile 对齐） */

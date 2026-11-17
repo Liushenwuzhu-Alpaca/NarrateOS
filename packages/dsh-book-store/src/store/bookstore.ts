@@ -1,10 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import { SystemPort } from '../ports/system.js';
+import type { VoiceSamplePool } from '../prefix/types.js';
+import { loadVoiceSamples, saveVoiceSamples } from '../prefix/voice-sampler.js';
 import {
     DEFAULT_SECTION_HEADINGS,
     inferSlotKey,
@@ -18,6 +20,8 @@ import {
     BookSnapshot,
     ChapterOutlineSnapshot,
     DirtyChapter,
+    DreamWatermark,
+    DreamWatermarkSchema,
     EntityEntry,
     EntityEntryInput,
     EntityMetadataSchema,
@@ -26,6 +30,8 @@ import {
     ForeignKeyError,
     InnateLockViolationError,
     PlannerOutlineSchema,
+    RunRecord,
+    RunRecordSchema,
     TxLockConflictError,
     TxLockPayloadSchema,
     TxState,
@@ -287,6 +293,154 @@ export class BookStore {
         const body = state.summaryMarkdown.trimEnd();
         const content = body.length > 0 ? `---\n${yamlBlock}\n---\n\n${body}\n` : `---\n${yamlBlock}\n---\n`;
         await writeFile(this.worldStatePath, content, 'utf8');
+    }
+
+    private async readOptionalRelativeText(relPath: string): Promise<string | null> {
+        try {
+            return await readFile(join(this.bookRoot, relPath), 'utf8');
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code === 'ENOENT') {
+                return null;
+            }
+            throw err;
+        }
+    }
+
+    private async writeRelativeText(relPath: string, content: string): Promise<void> {
+        const fullPath = join(this.bookRoot, relPath);
+        await mkdir(dirname(fullPath), { recursive: true });
+        await writeFile(fullPath, content, 'utf8');
+    }
+
+    /** 读取《作者契约》world/author_charter.md */
+    async readAuthorCharter(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/author_charter.md');
+    }
+
+    /** 写入《作者契约》world/author_charter.md */
+    async writeAuthorCharter(content: string): Promise<void> {
+        await this.writeRelativeText('world/author_charter.md', content);
+    }
+
+    /** 读取《导演禁区计划》world/arc_director_plan.md */
+    async readArcDirectorPlan(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/arc_director_plan.md');
+    }
+
+    /** 写入《导演禁区计划》world/arc_director_plan.md */
+    async writeArcDirectorPlan(content: string): Promise<void> {
+        await this.writeRelativeText('world/arc_director_plan.md', content);
+    }
+
+    /** 读取《写手正向卷纲》world/current_arc_envelope.md */
+    async readCurrentArcEnvelope(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/current_arc_envelope.md');
+    }
+
+    /** 写入《写手正向卷纲》world/current_arc_envelope.md */
+    async writeCurrentArcEnvelope(content: string): Promise<void> {
+        await this.writeRelativeText('world/current_arc_envelope.md', content);
+    }
+
+    /** 读取《写手静态基线》world/static_base_and_voice.md */
+    async readStaticBaseAndVoice(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/static_base_and_voice.md');
+    }
+
+    /** 写入《写手静态基线》world/static_base_and_voice.md */
+    async writeStaticBaseAndVoice(content: string): Promise<void> {
+        await this.writeRelativeText('world/static_base_and_voice.md', content);
+    }
+
+    /** 读取《动态风格补丁》world/ops_style_amendments.md */
+    async readOpsStyleAmendments(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/ops_style_amendments.md');
+    }
+
+    /** 写入《动态风格补丁》world/ops_style_amendments.md */
+    async writeOpsStyleAmendments(content: string): Promise<void> {
+        await this.writeRelativeText('world/ops_style_amendments.md', content);
+    }
+
+    /** 读取《世界默认惯性表》world/future_horizon.md */
+    async readFutureHorizon(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/future_horizon.md');
+    }
+
+    /** 写入《世界默认惯性表》world/future_horizon.md */
+    async writeFutureHorizon(content: string): Promise<void> {
+        await this.writeRelativeText('world/future_horizon.md', content);
+    }
+
+    /** 读取《跨卷必收伏笔台账》world/open_threads.md */
+    async readOpenThreads(): Promise<string | null> {
+        return await this.readOptionalRelativeText('world/open_threads.md');
+    }
+
+    /** 写入《跨卷必收伏笔台账》world/open_threads.md */
+    async writeOpenThreads(content: string): Promise<void> {
+        await this.writeRelativeText('world/open_threads.md', content);
+    }
+
+    /** 读取动态声纹标本池 .ops/voice_samples.yaml（不存在时返回空池） */
+    async readVoiceSamples(): Promise<VoiceSamplePool> {
+        return await loadVoiceSamples(join(this.opsDir, 'voice_samples.yaml'));
+    }
+
+    /** 校验并写入动态声纹标本池 .ops/voice_samples.yaml */
+    async writeVoiceSamples(pool: VoiceSamplePool): Promise<void> {
+        await saveVoiceSamples(join(this.opsDir, 'voice_samples.yaml'), pool);
+    }
+
+    /** 读取周期 Dreaming 水位 .ops/dream_watermark.json（不存在时返回 null） */
+    async readDreamWatermark(): Promise<DreamWatermark | null> {
+        const raw = await this.readOptionalRelativeText('.ops/dream_watermark.json');
+        if (raw === null) {
+            return null;
+        }
+        return DreamWatermarkSchema.parse(JSON.parse(raw));
+    }
+
+    /** 校验并写入周期 Dreaming 水位 .ops/dream_watermark.json */
+    async writeDreamWatermark(watermark: DreamWatermark): Promise<void> {
+        const validated = DreamWatermarkSchema.parse(watermark);
+        await mkdir(this.opsDir, { recursive: true });
+        await writeFile(
+            join(this.opsDir, 'dream_watermark.json'),
+            `${JSON.stringify(validated, null, 4)}\n`,
+            'utf8'
+        );
+    }
+
+    /** 追加写入单条工种/整理会话索引记录至 .ops/runs.jsonl */
+    async appendRunRecord(record: RunRecord): Promise<RunRecord> {
+        const validated = RunRecordSchema.parse(record);
+        await mkdir(this.opsDir, { recursive: true });
+        await appendFile(join(this.opsDir, 'runs.jsonl'), `${JSON.stringify(validated)}\n`, 'utf8');
+        return validated;
+    }
+
+    /** 读取并按条件过滤 .ops/runs.jsonl 会话索引记录 */
+    async listRunRecords(filter?: {
+        chapter?: number | undefined;
+        runId?: string | undefined;
+        role?: string | undefined;
+    }): Promise<RunRecord[]> {
+        const raw = await this.readOptionalRelativeText('.ops/runs.jsonl');
+        if (raw === null) {
+            return [];
+        }
+        const records: RunRecord[] = [];
+        for (const line of raw.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (trimmed.length === 0) continue;
+            const parsed = RunRecordSchema.parse(JSON.parse(trimmed));
+            if (filter?.chapter !== undefined && parsed.chapter !== filter.chapter) continue;
+            if (filter?.runId !== undefined && parsed.runId !== filter.runId) continue;
+            if (filter?.role !== undefined && parsed.role !== filter.role) continue;
+            records.push(parsed);
+        }
+        return records;
     }
 
     /** 读取 .ops/tx_state.json，不存在时返回默认 IDLE 状态 */
@@ -635,13 +789,19 @@ export class BookStore {
         });
     }
 
+    /** 校验当前 WAL 相位是否允许启动 Dreaming（拒绝未完成的 DRAFTING 与 FEAT_COMMITTED 相位） */
+    async assertDreamingPhaseSafe(): Promise<TxState> {
+        const current = await this.readTxState();
+        if (!BEGIN_DRAFT_ALLOWED_PHASES.has(current.phase)) {
+            throw new Error(`非法 WAL 状态迁移: 无法从 ${current.phase} 执行 Dreaming`);
+        }
+        return current;
+    }
+
     /** 标记睡眠整理提交 (DREAM_COMMITTED) */
     async markDreamCommitted(chapterNumber: number, extraPaths: string[] = []): Promise<TxState> {
         return await this.runWithTxLock(async () => {
-            const current = await this.readTxState();
-            if (!BEGIN_DRAFT_ALLOWED_PHASES.has(current.phase)) {
-                throw new Error(`非法 WAL 状态迁移: 无法从 ${current.phase} 执行 Dreaming`);
-            }
+            const current = await this.assertDreamingPhaseSafe();
             await this.recordPendingWrites(extraPaths);
             const next: TxState = {
                 ...current,

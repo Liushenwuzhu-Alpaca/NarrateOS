@@ -29,11 +29,16 @@ export interface ChapterOutlineSnapshot {
     status: 'available' | 'missing' | 'error';
 }
 
+/** 叙述人称与主观度基线 */
+export const NarrationSubjectivitySchema = z.enum(['objective_third', 'subjective_first']);
+export type NarrationSubjectivity = z.infer<typeof NarrationSubjectivitySchema>;
+
 /** 作品可配变量 Schema (world/book_config.yaml) */
 export const BookConfigSchema = z.object({
     book_slug: z.string().min(1),
     title: z.string().min(1),
     tokens_per_char: z.number().positive(),
+    narration_subjectivity: NarrationSubjectivitySchema.default('objective_third'),
     trace_level: z.enum(['full', 'metadata', 'off']).optional(),
     writer_token_budget: z.number().int().positive().nullable().optional().default(null),
     max_auto_rollback_chapters: z.number().int().positive().default(3),
@@ -63,6 +68,28 @@ export const BookConfigSchema = z.object({
 });
 
 export type BookConfig = z.infer<typeof BookConfigSchema>;
+
+/** 工种与 Dreaming 运行会话索引记录 (.ops/runs.jsonl) */
+export const RunRecordSchema = z.object({
+    runId: z.string().min(1),
+    chapter: z.number().int().nonnegative(),
+    stage: z.string().min(1),
+    role: z.string().min(1),
+    sessionId: z.string().min(1),
+    status: z.string().min(1),
+    startedAt: z.string().min(1),
+    finishedAt: z.string().min(1).optional(),
+    error: z.string().optional()
+});
+export type RunRecord = z.infer<typeof RunRecordSchema>;
+
+/** 周期 Dreaming 水位记录 (.ops/dream_watermark.json) */
+export const DreamWatermarkSchema = z.object({
+    last_dream_ch: z.number().int().nonnegative(),
+    accumulated_words_since_dream: z.number().int().nonnegative(),
+    updated_at: z.string().min(1)
+});
+export type DreamWatermark = z.infer<typeof DreamWatermarkSchema>;
 
 /** 三态时间线模式 */
 export const TimelineModeSchema = z.enum(['MAINLINE', 'PARALLEL', 'FLASHBACK']);
@@ -260,5 +287,15 @@ export class ForeignKeyError extends Error {
     ) {
         super(`外键可达性校验失败 (${sourceEntityId}): 引用了不存在的对象 [${missingKeys.join(', ')}]`);
         this.name = 'ForeignKeyError';
+    }
+}
+
+/** 切书冲突异常（存在在途运行任务或仓库事务锁未排空） */
+export class BookSwitchConflictError extends Error {
+    public readonly statusCode = 409 as const;
+
+    constructor(message = '存在在途运行任务或事务锁占用，拒绝切换作品') {
+        super(message);
+        this.name = 'BookSwitchConflictError';
     }
 }

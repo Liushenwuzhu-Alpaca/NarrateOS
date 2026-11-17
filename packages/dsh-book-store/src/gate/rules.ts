@@ -41,6 +41,16 @@ export const DEFAULT_GATE_RULES: Record<GateRuleId, Required<Pick<GateRuleConfig
         patterns: [/(不是|并非|不像)[^。！？\n]{1,18}(而是|却是|更像)/g],
         description: '限制先否决对比句式'
     },
+    subjective_judgment: {
+        enabled: true,
+        maxCount: 0,
+        scaleByLength: false,
+        referenceChars: 3000,
+        patterns: [
+            /(?:带着(?:几分|一丝|一抹|某种)?(?:笑意|审视|嘲弄|怜悯|轻蔑|深意)|(?:气氛|空气)顿时(?:缓和|凝固|紧张|沉重)下来|(?:天真|残忍|可笑|荒唐)得近乎[\u4e00-\u9fa5]{2,4}|(?:似乎|仿佛|大概)是?(?:想|意识|察觉)到什么|在我看来|老实说|说白了|简直就像|简直是)/g
+        ],
+        description: '客观镜头模式下抑制叙述者主观评判与抽象情绪定性'
+    },
     micro_anatomy: {
         enabled: true,
         maxCount: 0,

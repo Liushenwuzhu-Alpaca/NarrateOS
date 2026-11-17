@@ -313,3 +313,94 @@ describe('零依赖语言退化遥测', () => {
         expect(telemetryDegraded.clicheDensityPer1k).toBeGreaterThan(20);
     });
 });
+
+describe('StaticProseGate 跨行注释定位与第一人称豁免', () => {
+    it('跨行 <!-- ... --> 注释无论是否紧接空白行，均映射非负 paragraphIndex 与精确 1-based 行列并触发 PATCH/REWRITE', () => {
+        const gate = new StaticProseGate();
+
+        const afterBlank = [
+            '码头起雾了。',
+            '',
+            '  <!--',
+            '内部草稿注释',
+            '-->',
+            '',
+            '他提着灯往前走。'
+        ].join('\n');
+        const res1 = gate.evaluate(afterBlank, { enableAntiCliche: false });
+        expect(res1.passed).toBe(false);
+        expect(res1.recommendedAction).toBe('PATCH');
+        expect(res1.violatedParagraphIndices).toEqual([1]);
+        expect(res1.violations[0]).toMatchObject({
+            ruleId: 'tag_residue',
+            line: 3,
+            column: 3,
+            paragraphIndex: 1
+        });
+
+        // 即使自定义 tag_residue 正则以换行空白行起始，也必须回落至最近非空段落（非负索引）
+        const resCustom = gate.evaluate('码头起雾了。\n\n<!--\n注释\n-->\n\n灯灭了。', {
+            enableAntiCliche: false,
+            rules: {
+                tag_residue: {
+                    enabled: true,
+                    maxCount: 0,
+                    patterns: [/\n<!--[\s\S]*?-->/g]
+                }
+            }
+        });
+        expect(resCustom.passed).toBe(false);
+        expect(resCustom.violations[0]?.line).toBe(2);
+        expect(resCustom.violations[0]?.column).toBe(1);
+        expect(resCustom.violations[0]?.paragraphIndex).toBeGreaterThanOrEqual(0);
+        expect(resCustom.violatedParagraphCount).toBe(1);
+        expect(resCustom.recommendedAction).toBe('PATCH');
+    });
+
+    it('objective_third 拦截主观评判与先否决对比，subjective_first 自动豁免并保留硬底线规则', () => {
+        const gate = new StaticProseGate();
+        const firstPersonProse = [
+            '在我看来，这桩买卖从头到尾都透着一股寒酸气。',
+            '这不是胆怯，而是权衡利弊后的退让；这不是客套，而是彼此留一线。',
+            '老实说，屋里的气氛顿时缓和下来。'
+        ].join('\n');
+
+        const thirdRes = gate.evaluate(firstPersonProse, {
+            narrationSubjectivity: 'objective_third'
+        });
+        expect(thirdRes.passed).toBe(false);
+        expect(thirdRes.exceededRules).toContain('subjective_judgment');
+        expect(thirdRes.exceededRules).toContain('negation_contrast');
+
+        const firstRes = gate.evaluate(firstPersonProse, {
+            narrationSubjectivity: 'subjective_first'
+        });
+        expect(firstRes.passed).toBe(true);
+        expect(firstRes.ruleCounts.subjective_judgment).toBe(0);
+        expect(firstRes.ruleCounts.negation_contrast).toBe(0);
+
+        // 显式在 options.rules 覆盖时仍生效
+        const overriddenFirstRes = gate.evaluate(firstPersonProse, {
+            narrationSubjectivity: 'subjective_first',
+            rules: {
+                negation_contrast: { enabled: true, maxCount: 0 }
+            }
+        });
+        expect(overriddenFirstRes.passed).toBe(false);
+        expect(overriddenFirstRes.exceededRules).toContain('negation_contrast');
+
+        // subjective_first 依然严查 tag_residue、micro_anatomy、ending_moralizing 与陈腐比喻
+        const dirtyFirstPerson = [
+            '<!--内部注释-->',
+            '我盯着他的喉结上下滚动，心里像被按下了暂停键，他就像精密运转的机器。',
+            '那一刻，我终于明白命运的齿轮开始转动。'
+        ].join('\n');
+        const dirtyRes = gate.evaluate(dirtyFirstPerson, {
+            narrationSubjectivity: 'subjective_first'
+        });
+        expect(dirtyRes.passed).toBe(false);
+        expect(dirtyRes.exceededRules).toEqual(
+            expect.arrayContaining(['tag_residue', 'micro_anatomy', 'filler_cliche', 'ending_moralizing'])
+        );
+    });
+});

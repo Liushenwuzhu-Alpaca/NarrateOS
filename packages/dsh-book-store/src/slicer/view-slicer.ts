@@ -50,6 +50,27 @@ export type ParallelBroadcastItem = EntityEntry & {
     readonly: true;
 };
 
+/** 世界文档集合输入（用于按角色物理裁剪契约、禁区与导演文档） */
+export interface WorldDocumentsInput {
+    authorCharter?: string | null | undefined;
+    arcDirectorPlan?: string | null | undefined;
+    currentArcEnvelope?: string | null | undefined;
+    staticBaseAndVoice?: string | null | undefined;
+    opsStyleAmendments?: string | null | undefined;
+    futureHorizon?: string | null | undefined;
+}
+
+/** 按角色物理裁剪后的世界文档视图 */
+export interface SlicedWorldDocuments {
+    forRole: SlicerRole;
+    authorCharter: string | null;
+    arcDirectorPlan: string | null;
+    currentArcEnvelope: string | null;
+    staticBaseAndVoice: string | null;
+    opsStyleAmendments: string | null;
+    futureHorizon: string | null;
+}
+
 /** ViewSlicer 裁剪输出视图 */
 export interface SlicedView {
     forRole: SlicerRole;
@@ -66,6 +87,88 @@ export interface SlicedView {
 type SectionKey = 'innateLocks' | 'acquiredState' | 'irreversibleTrajectory' | 'recentBuffer';
 
 const DEFAULT_WAKEUP_GAP_THRESHOLD = 30;
+const WRITER_RESTRICTED_DIRECTIVE_RE = /\bWARPED\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+)$/;
+
+/** 剥离写手不可见的 WARPED / Stage Ceiling 导演禁区章节与条目 */
+function stripWriterRestrictedDirectives(raw: string | null | undefined): string | null {
+    if (raw === null || raw === undefined) {
+        return null;
+    }
+
+    const lines = raw.split(/\r?\n/);
+    const kept: string[] = [];
+    let skipSectionLevel: number | null = null;
+    let skipIndentedContinuations = false;
+
+    for (const line of lines) {
+        const headingMatch = MARKDOWN_HEADING_RE.exec(line.trim());
+        if (headingMatch?.[1] && headingMatch[2]) {
+            const level = headingMatch[1].length;
+            const headingTitle = headingMatch[2];
+            if (skipSectionLevel !== null && level <= skipSectionLevel) {
+                skipSectionLevel = null;
+            }
+            if (skipSectionLevel === null && WRITER_RESTRICTED_DIRECTIVE_RE.test(headingTitle)) {
+                skipSectionLevel = level;
+                skipIndentedContinuations = false;
+                continue;
+            }
+        }
+
+        if (skipSectionLevel !== null) {
+            continue;
+        }
+
+        if (skipIndentedContinuations) {
+            if (/^\s{2,}\S/.test(line)) {
+                continue;
+            }
+            skipIndentedContinuations = false;
+        }
+
+        if (WRITER_RESTRICTED_DIRECTIVE_RE.test(line)) {
+            skipIndentedContinuations = true;
+            continue;
+        }
+
+        kept.push(line);
+    }
+
+    return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * 按受众角色物理裁剪世界级设定与导演文档：
+ * - 对 'writer' 物理剥离 authorCharter、arcDirectorPlan、futureHorizon，并清除剩余正向文档中的 WARPED / Stage Ceiling 导演指令；
+ * - 对 'planner'、'fact_checker'、'extractor' 保留传入文档视图以便统筹、审校与抽取。
+ */
+export function sliceWorldDocuments(
+    forRole: SlicerRole,
+    docs: WorldDocumentsInput
+): SlicedWorldDocuments {
+    if (forRole === 'writer') {
+        return {
+            forRole,
+            authorCharter: null,
+            arcDirectorPlan: null,
+            currentArcEnvelope: stripWriterRestrictedDirectives(docs.currentArcEnvelope),
+            staticBaseAndVoice: stripWriterRestrictedDirectives(docs.staticBaseAndVoice),
+            opsStyleAmendments: stripWriterRestrictedDirectives(docs.opsStyleAmendments),
+            futureHorizon: null
+        };
+    }
+
+    return {
+        forRole,
+        authorCharter: docs.authorCharter ?? null,
+        arcDirectorPlan: docs.arcDirectorPlan ?? null,
+        currentArcEnvelope: docs.currentArcEnvelope ?? null,
+        staticBaseAndVoice: docs.staticBaseAndVoice ?? null,
+        opsStyleAmendments: docs.opsStyleAmendments ?? null,
+        futureHorizon: docs.futureHorizon ?? null
+    };
+}
 
 /** 深拷贝单条实体记录，避免污染原始快照 */
 function cloneEntry(entry: EntityEntry): EntityEntry {
@@ -217,6 +320,11 @@ export class ViewSlicer {
             snapshot,
             forRole: 'writer'
         });
+    }
+
+    /** 按受众角色物理裁剪世界文档 */
+    sliceWorldDocuments(forRole: SlicerRole, docs: WorldDocumentsInput): SlicedWorldDocuments {
+        return sliceWorldDocuments(forRole, docs);
     }
 
     /** 裁剪单个四段式实体档案 */

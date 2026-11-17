@@ -817,4 +817,124 @@ describe('BookStore', () => {
         expect(kept.status).toBe('available');
         expect(JSON.parse(kept.outlineText!).chapter_title).toBe('第二章 门锁与票据');
     });
+
+    it('narration_subjectivity 默认 objective_third 并支持 subjective_first 校验', async () => {
+        const { store } = await createTempBookRepo();
+        const defaultConfig = await store.readBookConfig();
+        expect(defaultConfig.narration_subjectivity).toBe('objective_third');
+
+        await store.writeBookConfig({
+            ...defaultConfig,
+            narration_subjectivity: 'subjective_first'
+        });
+        const updated = await store.readBookConfig();
+        expect(updated.narration_subjectivity).toBe('subjective_first');
+    });
+
+    it('支持 world 文档、voice_samples、dream_watermark 与 .ops/runs.jsonl 读写及过滤', async () => {
+        const { store } = await createTempBookRepo();
+
+        await store.writeAuthorCharter('# 作者契约\n底牌：码头账本被掉包。');
+        await store.writeArcDirectorPlan('# 导演禁区\nStage Ceiling: 第三章前不得揭底。');
+        await store.writeCurrentArcEnvelope('# 正向卷纲\n港口风波初起。');
+        await store.writeStaticBaseAndVoice('# 静态基线\n短句写实。');
+        await store.writeOpsStyleAmendments('# 风格补丁\n多写潮湿质感。');
+        await store.writeFutureHorizon('- [day:5] 巡检船靠港。');
+        await store.writeOpenThreads('- [OPEN] 铜钥匙归属');
+
+        expect(await store.readAuthorCharter()).toContain('码头账本被掉包');
+        expect(await store.readArcDirectorPlan()).toContain('Stage Ceiling');
+        expect(await store.readCurrentArcEnvelope()).toContain('港口风波初起');
+        expect(await store.readStaticBaseAndVoice()).toContain('短句写实');
+        expect(await store.readOpsStyleAmendments()).toContain('多写潮湿质感');
+        expect(await store.readFutureHorizon()).toContain('巡检船靠港');
+        expect(await store.readOpenThreads()).toContain('铜钥匙归属');
+
+        await store.writeVoiceSamples({
+            samples: [
+                {
+                    id: 'vs-1',
+                    tag: '对话冷讽',
+                    text: '「账本湿了可以晒，手脚不干净晒不干。」',
+                    last_used_ch: 1,
+                    use_count: 1
+                }
+            ]
+        });
+        const voicePool = await store.readVoiceSamples();
+        expect(voicePool.samples).toHaveLength(1);
+        expect(voicePool.samples[0]?.id).toBe('vs-1');
+
+        expect(await store.readDreamWatermark()).toBeNull();
+        await store.writeDreamWatermark({
+            last_dream_ch: 5,
+            accumulated_words_since_dream: 3200,
+            updated_at: '2026-11-17T00:00:00.000Z'
+        });
+        const watermark = await store.readDreamWatermark();
+        expect(watermark).toEqual({
+            last_dream_ch: 5,
+            accumulated_words_since_dream: 3200,
+            updated_at: '2026-11-17T00:00:00.000Z'
+        });
+
+        expect(await store.listRunRecords()).toEqual([]);
+        await store.appendRunRecord({
+            runId: 'run-01',
+            chapter: 2,
+            stage: 'planner',
+            role: 'planner',
+            sessionId: 'sess-p2',
+            status: 'completed',
+            startedAt: '2026-11-17T00:00:00.000Z',
+            finishedAt: '2026-11-17T00:00:10.000Z'
+        });
+        await store.appendRunRecord({
+            runId: 'run-02',
+            chapter: 2,
+            stage: 'fact_checker',
+            role: 'fact_checker',
+            sessionId: 'sess-fc2',
+            status: 'failed',
+            startedAt: '2026-11-17T00:00:11.000Z',
+            error: 'POV 越界'
+        });
+        await store.appendRunRecord({
+            runId: 'run-03',
+            chapter: 3,
+            stage: 'planner',
+            role: 'planner',
+            sessionId: 'sess-p3',
+            status: 'completed',
+            startedAt: '2026-11-17T00:01:00.000Z'
+        });
+
+        expect(await store.listRunRecords()).toHaveLength(3);
+        expect(await store.listRunRecords({ chapter: 2 })).toHaveLength(2);
+        expect(await store.listRunRecords({ role: 'planner' })).toHaveLength(2);
+        const byRun = await store.listRunRecords({ runId: 'run-02' });
+        expect(byRun).toHaveLength(1);
+        expect(byRun[0]?.error).toBe('POV 越界');
+    });
+
+    it('assertDreamingPhaseSafe 拒绝 DRAFTING 与 FEAT_COMMITTED 相位，放行 IDLE 与 STATE_COMMITTED', async () => {
+        const { store } = await createTempBookRepo();
+
+        // IDLE 允许启动 Dreaming
+        await expect(store.assertDreamingPhaseSafe()).resolves.toMatchObject({ phase: 'IDLE' });
+
+        // DRAFTING 拒绝
+        await store.beginDraft(2);
+        await expect(store.assertDreamingPhaseSafe()).rejects.toThrow('DRAFTING');
+
+        // FEAT_COMMITTED 拒绝
+        await store.commitDraft(2, '第2章正文');
+        await expect(store.assertDreamingPhaseSafe()).rejects.toThrow('FEAT_COMMITTED');
+
+        // STATE_COMMITTED 放行，DREAM_COMMITTED 放行
+        await store.applyStatePatch(2, []);
+        await expect(store.assertDreamingPhaseSafe()).resolves.toMatchObject({ phase: 'STATE_COMMITTED' });
+        await store.markDreamCommitted(2);
+        await expect(store.assertDreamingPhaseSafe()).resolves.toMatchObject({ phase: 'DREAM_COMMITTED' });
+    });
 });
