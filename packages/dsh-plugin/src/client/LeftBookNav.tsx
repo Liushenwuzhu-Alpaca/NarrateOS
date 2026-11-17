@@ -325,7 +325,17 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
                         </button>
                     </div>
 
-                    {sortedChapters.length === 0 ? (
+                    {loading && sortedChapters.length === 0 ? (
+                        <div className="ns-ch-list" aria-label="章节目录加载中" role="status">
+                            {Array.from({ length: 6 }, (_, idx) => (
+                                <div key={idx} className="ns-skel-row">
+                                    <span className="ns-skel ns-skel-code" />
+                                    <span className="ns-skel ns-skel-title" />
+                                    <span className="ns-skel ns-skel-pill" />
+                                </div>
+                            ))}
+                        </div>
+                    ) : sortedChapters.length === 0 ? (
                         <div className="ns-empty-hint">暂无已落盘章节，请先开书或推进第 1 章。</div>
                     ) : (
                         <div className="ns-ch-list">

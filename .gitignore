@@ -25,3 +25,5 @@ packages/*/dist/
 books/
 
 manuscript
+.agents/
+skills-lock.json

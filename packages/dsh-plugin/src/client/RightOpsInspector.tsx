@@ -135,7 +135,7 @@ export interface VolumeProgressSnapshot {
     milestoneLock?: string | null;
 }
 
-/** 右栏 7 子页签运维检查器 Props */
+/** 右栏 7 组运维检查器 Props */
 export interface RightOpsInspectorProps {
     walLock: WalLockTelemetry;
     modelPool: ModelPoolTelemetry;
@@ -164,12 +164,8 @@ export interface RightOpsInspectorProps {
     onSelectChapter?: (chapter: number) => void;
 }
 
+/** 检查器手风琴分组键（沿用旧子页签键位，便于与数据口径对齐） */
 type InspectorSubtabKey = 'tel' | 'ctx' | 'ent' | 'arc' | 'git' | 'vol' | 'gate';
-
-interface SubtabDef {
-    key: InspectorSubtabKey;
-    label: string;
-}
 
 interface CoreGateRuleDef {
     id: string;
@@ -177,15 +173,37 @@ interface CoreGateRuleDef {
     threshold: string;
 }
 
-const SUBTABS: SubtabDef[] = [
-    { key: 'tel', label: '遥测' },
-    { key: 'ctx', label: '装配' },
-    { key: 'ent', label: '实体' },
-    { key: 'arc', label: '伏笔' },
-    { key: 'git', label: '提交' },
-    { key: 'vol', label: '卷纲' },
-    { key: 'gate', label: '门禁' }
-];
+/** 默认展开状态：遥测、装配常驻展开，其余折叠 */
+const INITIAL_EXPANDED_GROUPS: Record<InspectorSubtabKey, boolean> = {
+    tel: true,
+    ctx: true,
+    ent: false,
+    arc: false,
+    git: false,
+    vol: false,
+    gate: false
+};
+
+/** 全部展开 / 全部收起时使用的整组状态 */
+const ALL_EXPANDED_GROUPS: Record<InspectorSubtabKey, boolean> = {
+    tel: true,
+    ctx: true,
+    ent: true,
+    arc: true,
+    git: true,
+    vol: true,
+    gate: true
+};
+
+const ALL_COLLAPSED_GROUPS: Record<InspectorSubtabKey, boolean> = {
+    tel: false,
+    ctx: false,
+    ent: false,
+    arc: false,
+    git: false,
+    vol: false,
+    gate: false
+};
 
 const CORE_GATE_RULES: CoreGateRuleDef[] = [
     { id: 'tag_residue', label: '工程标签残留', threshold: '0' },
@@ -250,32 +268,10 @@ function resolveWalPhaseStepStatus(
 }
 
 /**
- * 共享样式片段：完全使用 styles.ts 的 CSS 变量，确保暗/亮主题自动适配
- */
-const cardStyle: React.CSSProperties = {
-    padding: '12px',
-    borderRadius: 'var(--ns-r-lg)',
-    background: 'var(--ns-bg-card)',
-    border: '1px solid var(--ns-border-1)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px'
-};
-
-const subSectionTitleStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    fontSize: '11px',
-    fontWeight: 600,
-    color: 'var(--ns-text-3)',
-    letterSpacing: '0.02em'
-};
-
-/**
- * 右栏 7 子页签运维检查器：
- * - 顶部渲染 7 个横向紧凑胶囊子页签：遥测 | 装配 | 实体 | 伏笔 | 提交 | 卷纲 | 门禁
- * - 存在门禁告警或 HALT 异常时在对应子页签显示提示圆点
+ * 右栏运维检查器：7 组可同时展开的手风琴卡片
+ * - 顶部工具行提供「全部展开 / 全部收起」
+ * - 组头常驻摘要徽标；HALT 与门禁告警以圆点提示
+ * - 所有静态样式走 inspector-styles.ts 的 ns-i-* 类，主题由 CSS 变量自动适配
  */
 export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactElement {
     const {
@@ -297,15 +293,12 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         onSelectChapter
     } = props;
 
-    const [activeSubtab, setActiveSubtab] = useState<InspectorSubtabKey>('tel');
+    const [expandedGroups, setExpandedGroups] =
+        useState<Record<InspectorSubtabKey, boolean>>(INITIAL_EXPANDED_GROUPS);
     const [expandedEntityId, setExpandedEntityId] = useState<string | null>(null);
 
     const cacheHitPct = computeCacheHitRatePct(modelPool);
     const hasHalt = haltDiagnostic !== null;
-    const isWalHalted =
-        hasHalt ||
-        walLock.walPhase.toUpperCase() === 'SAFE_HALT' ||
-        walLock.walPhase.toUpperCase() === 'QUARANTINED';
     const hasGateAlert =
         proseGate.recentViolations.length > 0 || (factChecker.blockedCount ?? 0) > 0;
 
@@ -358,6 +351,8 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         return [];
     }, [openThreads]);
 
+    const triggeredSpotlightCount = dreaming.spotlightQueue.filter((item) => item.triggered).length;
+
     const dirtyRatioPct =
         dreaming.dirtyThreshold > 0
             ? Math.min(100, Math.round((dreaming.dirtyEntityCount / dreaming.dirtyThreshold) * 100))
@@ -367,15 +362,13 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
     const dynamicTokens = stageArtifact.dynamicTailTokens ?? 0;
     const totalUsedTokens = staticTokens + dynamicTokens;
     const budgetLimit = stageArtifact.budgetLimitTokens ?? 0;
-    const staticPct =
-        budgetLimit > 0 ? Math.min(100, (staticTokens / budgetLimit) * 100) : 0;
+    const staticPct = budgetLimit > 0 ? Math.min(100, (staticTokens / budgetLimit) * 100) : 0;
     const dynamicPct =
         budgetLimit > 0 ? Math.min(100 - staticPct, (dynamicTokens / budgetLimit) * 100) : 0;
     const degradationLevel = stageArtifact.degradationLevel ?? 0;
 
     // 卷纲进度计算
-    const completedCh =
-        volumeProgress?.completedChapters ?? walLock.lastCommittedChapter;
+    const completedCh = volumeProgress?.completedChapters ?? walLock.lastCommittedChapter;
     const totalVolCh =
         volumeProgress?.totalChapters && volumeProgress.totalChapters > 0
             ? volumeProgress.totalChapters
@@ -383,7 +376,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
     const volumePct =
         totalVolCh > 0 ? Math.min(100, Math.round((completedCh / totalVolCh) * 100)) : 0;
 
-    // Token 占比条 (遥测子页签)
+    // Token 占比条 (遥测分组)
     const uncachedInputTokens = Math.max(0, modelPool.inputTokens - modelPool.cacheReadTokens);
     const outputTokens = modelPool.outputTokens ?? 0;
     const barTotalTokens = Math.max(
@@ -391,106 +384,112 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         uncachedInputTokens + modelPool.cacheReadTokens + outputTokens
     );
 
-    const renderSubtabDot = (key: InspectorSubtabKey): boolean => {
-        if (key === 'gate') return hasGateAlert;
-        if (key === 'git') return isWalHalted;
-        return false;
+    const toggleGroup = (key: InspectorSubtabKey): void => {
+        setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+    };
+
+    const expandAllGroups = (): void => {
+        setExpandedGroups(ALL_EXPANDED_GROUPS);
+    };
+
+    const collapseAllGroups = (): void => {
+        setExpandedGroups(ALL_COLLAPSED_GROUPS);
+    };
+
+    // 统一渲染手风琴分组：组头常驻摘要与告警圆点，body 通过 hidden 折叠
+    const renderGroup = (
+        key: InspectorSubtabKey,
+        title: string,
+        summary: React.ReactNode,
+        body: React.ReactNode
+    ): React.ReactElement => {
+        const isOpen = expandedGroups[key];
+        return (
+            <section className="ns-i-acc">
+                <button
+                    type="button"
+                    className="ns-i-acc-head"
+                    aria-expanded={isOpen}
+                    aria-controls={`ns-i-body-${key}`}
+                    onClick={() => toggleGroup(key)}
+                >
+                    <span className="ns-i-acc-title">{title}</span>
+                    {summary}
+                    {key === 'git' && hasHalt && (
+                        <span
+                            className="ns-i-dot ns-i-dot-red"
+                            role="img"
+                            aria-label="存在 SAFE_HALT 告警"
+                        />
+                    )}
+                    {key === 'gate' && hasGateAlert && (
+                        <span
+                            className="ns-i-dot ns-i-dot-amber"
+                            role="img"
+                            aria-label="存在门禁告警"
+                        />
+                    )}
+                    <span className="ns-i-chevron" aria-hidden="true">
+                        ›
+                    </span>
+                </button>
+                <div className="ns-i-acc-body" id={`ns-i-body-${key}`} hidden={!isOpen}>
+                    {body}
+                </div>
+            </section>
+        );
     };
 
     return (
         <div className="ns-ops-inspector" aria-label="运维检查器">
-            {/* 顶部 7 个横向紧凑胶囊子页签 */}
-            <div
-                style={{
-                    padding: '10px 12px',
-                    borderBottom: '1px solid var(--ns-border-1)',
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '4px',
-                    flexShrink: 0
-                }}
-                role="tablist"
-                aria-label="检查器子页签"
-            >
-                {SUBTABS.map((tab) => {
-                    const isActive = activeSubtab === tab.key;
-                    const showDot = renderSubtabDot(tab.key);
-                    return (
-                        <button
-                            key={tab.key}
-                            type="button"
-                            role="tab"
-                            aria-selected={isActive}
-                            onClick={() => setActiveSubtab(tab.key)}
-                            style={{
-                                height: '26px',
-                                padding: '0 9px',
-                                borderRadius: '999px',
-                                border: isActive
-                                    ? '1px solid var(--ns-brand-line)'
-                                    : '1px solid transparent',
-                                background: isActive ? 'var(--ns-brand-soft)' : 'var(--ns-bg-hover)',
-                                color: isActive ? 'var(--ns-brand-ink)' : 'var(--ns-text-3)',
-                                fontSize: '11.5px',
-                                fontWeight: isActive ? 600 : 500,
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                cursor: 'pointer',
-                                transition: 'all 0.15s ease'
-                            }}
-                        >
-                            <span>{tab.label}</span>
-                            {showDot && (
-                                <span
-                                    aria-label="存在告警"
-                                    style={{
-                                        width: '6px',
-                                        height: '6px',
-                                        borderRadius: '50%',
-                                        background:
-                                            tab.key === 'git' && isWalHalted
-                                                ? 'var(--ns-red)'
-                                                : 'var(--ns-amber)'
-                                    }}
-                                />
-                            )}
-                        </button>
-                    );
-                })}
+            {/* 顶部工具行：标题与批量展开/收起 */}
+            <div className="ns-i-toolbar">
+                <span className="ns-i-toolbar-title">运维检查器</span>
+                <div className="ns-i-toolbar-actions">
+                    <button
+                        type="button"
+                        className="ns-btn ns-btn-ghost ns-btn-xs"
+                        aria-label="展开全部检查器分组"
+                        onClick={expandAllGroups}
+                    >
+                        全部展开
+                    </button>
+                    <button
+                        type="button"
+                        className="ns-btn ns-btn-ghost ns-btn-xs"
+                        aria-label="收起全部检查器分组"
+                        onClick={collapseAllGroups}
+                    >
+                        全部收起
+                    </button>
+                </div>
             </div>
 
-            {/* 子页签内容区 */}
-            <div className="ns-right-scroll">
-                {/* 1. 遥测 */}
-                {activeSubtab === 'tel' && (
+            {/* 7 组手风琴卡片 */}
+            <div className="ns-i-list">
+                {/* 1. 遥测与健康度 */}
+                {renderGroup(
+                    'tel',
+                    '遥测与健康度',
+                    <span className="ns-i-sum ns-i-sum-quiet">
+                        缓存 {cacheHitPct.toFixed(1)}%
+                    </span>,
                     <>
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>静态前缀缓存命中</span>
-                                <span className="ns-mono" style={{ color: 'var(--ns-green-ink)' }}>
+                                <span className="ns-mono ns-i-green-ink">
                                     {cacheHitPct.toFixed(1)}%
                                 </span>
                             </div>
-                            <div
-                                style={{
-                                    fontSize: '28px',
-                                    fontWeight: 300,
-                                    lineHeight: 1.1,
-                                    fontFamily: 'var(--ns-font-display)',
-                                    color: 'var(--ns-text-1)'
-                                }}
-                            >
+                            <div className="ns-i-big">
                                 {cacheHitPct.toFixed(1)}
-                                <small style={{ fontSize: '14px', color: 'var(--ns-text-4)' }}>%</small>
+                                <small className="ns-i-big-unit">%</small>
                             </div>
-                            <div className="ns-prog-bar" style={{ marginTop: '2px' }}>
+                            <div className="ns-prog-bar ns-i-prog-top">
                                 <div
-                                    className="ns-prog-fill"
-                                    style={{
-                                        width: `${cacheHitPct}%`,
-                                        background: 'var(--ns-green)'
-                                    }}
+                                    className="ns-prog-fill ns-i-fill-green"
+                                    style={{ width: `${cacheHitPct}%` }}
                                 />
                             </div>
                         </div>
@@ -498,142 +497,109 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         {/* 四联指标卡片 */}
                         <div className="ns-kv-grid">
                             <div className="ns-metric">
-                                <div className="ns-metric-k" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <div className="ns-metric-k ns-i-metric-k-row">
                                     <span>MATTR-500</span>
                                     <span
-                                        style={{
-                                            width: '6px',
-                                            height: '6px',
-                                            borderRadius: '50%',
-                                            alignSelf: 'center',
-                                            background:
-                                                proseGate.mattr500 !== null
-                                                    ? 'var(--ns-green)'
-                                                    : 'var(--ns-text-4)'
-                                        }}
+                                        className={`ns-i-dot ${
+                                            proseGate.mattr500 !== null
+                                                ? 'ns-i-dot-green'
+                                                : 'ns-i-dot-idle'
+                                        }`}
+                                        aria-hidden="true"
                                     />
                                 </div>
                                 <div className="ns-metric-v ns-mono">
                                     {formatMetricNumber(proseGate.mattr500)}
                                 </div>
-                                <div style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>词汇多样性</div>
+                                <div className="ns-i-metric-note">词汇多样性</div>
                             </div>
                             <div className="ns-metric">
-                                <div className="ns-metric-k" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <div className="ns-metric-k ns-i-metric-k-row">
                                     <span>Kontoyiannis H_K</span>
                                     <span
-                                        style={{
-                                            width: '6px',
-                                            height: '6px',
-                                            borderRadius: '50%',
-                                            alignSelf: 'center',
-                                            background:
-                                                proseGate.kontoyiannisEntropy !== null
-                                                    ? 'var(--ns-green)'
-                                                    : 'var(--ns-text-4)'
-                                        }}
+                                        className={`ns-i-dot ${
+                                            proseGate.kontoyiannisEntropy !== null
+                                                ? 'ns-i-dot-green'
+                                                : 'ns-i-dot-idle'
+                                        }`}
+                                        aria-hidden="true"
                                     />
                                 </div>
                                 <div className="ns-metric-v ns-mono">
                                     {formatMetricNumber(proseGate.kontoyiannisEntropy)}
                                 </div>
-                                <div style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>信息熵率</div>
+                                <div className="ns-i-metric-note">信息熵率</div>
                             </div>
                             <div className="ns-metric">
-                                <div className="ns-metric-k" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <div className="ns-metric-k ns-i-metric-k-row">
                                     <span>句段长 CV</span>
                                     <span
-                                        style={{
-                                            width: '6px',
-                                            height: '6px',
-                                            borderRadius: '50%',
-                                            alignSelf: 'center',
-                                            background:
-                                                proseGate.sentenceLengthCv !== null
-                                                    ? 'var(--ns-green)'
-                                                    : 'var(--ns-text-4)'
-                                        }}
+                                        className={`ns-i-dot ${
+                                            proseGate.sentenceLengthCv !== null
+                                                ? 'ns-i-dot-green'
+                                                : 'ns-i-dot-idle'
+                                        }`}
+                                        aria-hidden="true"
                                     />
                                 </div>
                                 <div className="ns-metric-v ns-mono">
                                     {formatMetricNumber(proseGate.sentenceLengthCv)}
                                 </div>
-                                <div style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>节奏变化</div>
+                                <div className="ns-i-metric-note">节奏变化</div>
                             </div>
                             <div className="ns-metric">
-                                <div className="ns-metric-k" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <div className="ns-metric-k ns-i-metric-k-row">
                                     <span>AI 八股千字密度</span>
                                     <span
-                                        style={{
-                                            width: '6px',
-                                            height: '6px',
-                                            borderRadius: '50%',
-                                            alignSelf: 'center',
-                                            background:
-                                                proseGate.clicheDensityPer1k !== null
-                                                    ? proseGate.clicheDensityPer1k > 1.5
-                                                        ? 'var(--ns-amber)'
-                                                        : 'var(--ns-green)'
-                                                    : 'var(--ns-text-4)'
-                                        }}
+                                        className={`ns-i-dot ${
+                                            proseGate.clicheDensityPer1k !== null
+                                                ? proseGate.clicheDensityPer1k > 1.5
+                                                    ? 'ns-i-dot-amber'
+                                                    : 'ns-i-dot-green'
+                                                : 'ns-i-dot-idle'
+                                        }`}
+                                        aria-hidden="true"
                                     />
                                 </div>
                                 <div className="ns-metric-v ns-mono">
                                     {formatMetricNumber(proseGate.clicheDensityPer1k)}
                                 </div>
-                                <div style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>/千字</div>
+                                <div className="ns-i-metric-note">/千字</div>
                             </div>
                         </div>
 
                         {/* 本章实耗与 Token 分布进度条 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>本章实耗 Token 分布</span>
-                                <span className="ns-mono" style={{ color: 'var(--ns-text-2)' }}>
+                                <span className="ns-mono ns-i-head-value">
                                     {formatTokenCount(modelPool.inputTokens + outputTokens)}
                                 </span>
                             </div>
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    gap: '2px',
-                                    height: '8px',
-                                    borderRadius: '4px',
-                                    overflow: 'hidden',
-                                    background: 'var(--ns-bg-surface-2)'
-                                }}
-                            >
+                            <div className="ns-i-bar">
                                 <div
+                                    className="ns-i-bar-seg ns-i-seg-in"
                                     title={`未命中输入 ${formatTokenCount(uncachedInputTokens)}`}
                                     style={{
-                                        width: `${(uncachedInputTokens / barTotalTokens) * 100}%`,
-                                        background: 'var(--ns-text-3)'
+                                        width: `${(uncachedInputTokens / barTotalTokens) * 100}%`
                                     }}
                                 />
                                 <div
+                                    className="ns-i-bar-seg ns-i-seg-green"
                                     title={`缓存读取 ${formatTokenCount(modelPool.cacheReadTokens)}`}
                                     style={{
-                                        width: `${(modelPool.cacheReadTokens / barTotalTokens) * 100}%`,
-                                        background: 'var(--ns-green)'
+                                        width: `${(modelPool.cacheReadTokens / barTotalTokens) * 100}%`
                                     }}
                                 />
                                 <div
+                                    className="ns-i-bar-seg ns-i-seg-brand"
                                     title={`输出 ${formatTokenCount(outputTokens)}`}
                                     style={{
-                                        width: `${(outputTokens / barTotalTokens) * 100}%`,
-                                        background: 'var(--ns-brand)'
+                                        width: `${(outputTokens / barTotalTokens) * 100}%`
                                     }}
                                 />
                             </div>
-                            <div
-                                className="ns-mono"
-                                style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    fontSize: '11px',
-                                    color: 'var(--ns-text-4)'
-                                }}
-                            >
+                            <div className="ns-mono ns-i-bar-legend">
                                 <span>
                                     in {formatTokenCount(modelPool.inputTokens)} - cache{' '}
                                     {formatTokenCount(modelPool.cacheReadTokens)} - out{' '}
@@ -644,78 +610,58 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     </>
                 )}
 
-                {/* 2. 装配 */}
-                {activeSubtab === 'ctx' && (
+                {/* 2. 净室装配审计 */}
+                {renderGroup(
+                    'ctx',
+                    '净室装配审计',
+                    <span className="ns-i-sum ns-i-sum-quiet">
+                        {budgetLimit > 0
+                            ? `${formatTokenCount(totalUsedTokens)}/${formatTokenCount(budgetLimit)}`
+                            : `${formatTokenCount(totalUsedTokens)} tok`}
+                    </span>,
                     <>
                         {/* 三池模型路由 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>三池模型路由 (modelRouting)</span>
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: '1fr auto',
-                                        gap: '2px 8px',
-                                        padding: '8px 10px',
-                                        borderRadius: 'var(--ns-r-md)',
-                                        background: 'var(--ns-bg-surface-2)',
-                                        fontSize: '12px'
-                                    }}
-                                >
-                                    <strong>强创作池 (strong_creative)</strong>
-                                    <span className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-brand-ink)' }}>
+                            <div className="ns-i-route-list">
+                                <div className="ns-i-route">
+                                    <span className="ns-i-route-name">强创作池 (strong_creative)</span>
+                                    <span
+                                        className="ns-mono ns-i-route-model ns-i-route-model-brand"
+                                        title={resolvedRouting.strong_creative}
+                                    >
                                         {resolvedRouting.strong_creative}
                                     </span>
-                                    <span style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>
-                                        Planner - Writer
-                                    </span>
+                                    <span className="ns-i-route-role">Planner - Writer</span>
                                 </div>
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: '1fr auto',
-                                        gap: '2px 8px',
-                                        padding: '8px 10px',
-                                        borderRadius: 'var(--ns-r-md)',
-                                        background: 'var(--ns-bg-surface-2)',
-                                        fontSize: '12px'
-                                    }}
-                                >
-                                    <strong>检索快池 (fast_retrieval)</strong>
-                                    <span className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-green-ink)' }}>
+                                <div className="ns-i-route">
+                                    <span className="ns-i-route-name">检索快池 (fast_retrieval)</span>
+                                    <span
+                                        className="ns-mono ns-i-route-model ns-i-route-model-green"
+                                        title={resolvedRouting.fast_retrieval}
+                                    >
                                         {resolvedRouting.fast_retrieval}
                                     </span>
-                                    <span style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>
-                                        Librarian
-                                    </span>
+                                    <span className="ns-i-route-role">Librarian</span>
                                 </div>
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: '1fr auto',
-                                        gap: '2px 8px',
-                                        padding: '8px 10px',
-                                        borderRadius: 'var(--ns-r-md)',
-                                        background: 'var(--ns-bg-surface-2)',
-                                        fontSize: '12px'
-                                    }}
-                                >
-                                    <strong>异构核查池 (audit)</strong>
-                                    <span className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-amber-ink)' }}>
+                                <div className="ns-i-route">
+                                    <span className="ns-i-route-name">异构核查池 (audit)</span>
+                                    <span
+                                        className="ns-mono ns-i-route-model ns-i-route-model-amber"
+                                        title={resolvedRouting.audit}
+                                    >
                                         {resolvedRouting.audit}
                                     </span>
-                                    <span style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>
-                                        Fact Checker
-                                    </span>
+                                    <span className="ns-i-route-role">Fact Checker</span>
                                 </div>
                             </div>
                         </div>
 
                         {/* 静态前缀与 budget 降级状态 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>写手窗口与 budget 降级</span>
                                 <span
                                     className={
@@ -727,230 +673,179 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                     {degradationLevel > 0 ? `降级 ${degradationLevel} 级` : '0 级正常'}
                                 </span>
                             </div>
-                            <div className="ns-mono" style={{ fontSize: '11.5px', color: 'var(--ns-text-2)' }}>
+                            <div className="ns-mono ns-i-budget-total">
                                 {budgetLimit > 0
                                     ? `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`
                                     : `总装配 ${formatTokenCount(totalUsedTokens)} tokens`}
                             </div>
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    gap: '2px',
-                                    height: '8px',
-                                    borderRadius: '4px',
-                                    overflow: 'hidden',
-                                    background: 'var(--ns-bg-surface-2)'
-                                }}
-                            >
+                            <div className="ns-i-bar">
                                 <div
+                                    className="ns-i-bar-seg ns-i-seg-brand"
                                     style={{
-                                        width: `${budgetLimit > 0 ? staticPct : 50}%`,
-                                        background: 'var(--ns-brand)'
+                                        width: `${budgetLimit > 0 ? staticPct : 50}%`
                                     }}
                                 />
                                 <div
+                                    className="ns-i-bar-seg ns-i-seg-green"
                                     style={{
-                                        width: `${budgetLimit > 0 ? dynamicPct : 30}%`,
-                                        background: 'var(--ns-green)'
+                                        width: `${budgetLimit > 0 ? dynamicPct : 30}%`
                                     }}
                                 />
                             </div>
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    gap: '12px',
-                                    flexWrap: 'wrap',
-                                    fontSize: '11px',
-                                    color: 'var(--ns-text-4)'
-                                }}
-                            >
+                            <div className="ns-i-budget-legend">
                                 <span>静态前缀 {formatTokenCount(staticTokens)}</span>
                                 <span>动态尾 {formatTokenCount(dynamicTokens)}</span>
                             </div>
                         </div>
 
                         {/* 当前阶段产物摘要 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>
-                                    阶段 #{stageArtifact.selectedStageIndex + 1} - {stageArtifact.stageName}
+                                    阶段 #{stageArtifact.selectedStageIndex + 1} -{' '}
+                                    {stageArtifact.stageName}
                                 </span>
                                 <span className="ns-pill ns-pill-brand">
                                     {stageArtifact.stageStatus || '就绪'}
                                 </span>
                             </div>
-                            <div style={{ fontSize: '12px', color: 'var(--ns-text-2)' }}>
-                                {stageArtifact.stageSummary}
-                            </div>
+                            <div className="ns-i-text-2">{stageArtifact.stageSummary}</div>
                             {stageArtifact.voiceLruSummary && (
-                                <div style={{ fontSize: '11.5px', color: 'var(--ns-text-3)' }}>
-                                    <strong>声纹 LRU</strong>: {stageArtifact.voiceLruSummary}
+                                <div className="ns-i-text-3">
+                                    <span className="ns-i-strong">声纹 LRU</span>: {stageArtifact.voiceLruSummary}
                                 </div>
                             )}
                             {stageArtifact.strippedItemsSummary && (
-                                <div style={{ fontSize: '11.5px', color: 'var(--ns-green-ink)' }}>
-                                    <strong>物理剥离</strong>: {stageArtifact.strippedItemsSummary}
+                                <div className="ns-i-text-3 ns-i-green-ink">
+                                    <span className="ns-i-strong">物理剥离</span>: {stageArtifact.strippedItemsSummary}
                                 </div>
                             )}
                         </div>
                     </>
                 )}
 
-                {/* 3. 实体 */}
-                {activeSubtab === 'ent' && (
-                    <>
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
-                                <span>活跃实体列表</span>
-                                <span className="ns-mono" style={{ color: 'var(--ns-text-4)' }}>
-                                    {resolvedEntities.length} 活跃 - {dreaming.coldArchiveCount} 冷归档
-                                </span>
+                {/* 3. 活跃实体 */}
+                {renderGroup(
+                    'ent',
+                    '活跃实体',
+                    <span className="ns-i-sum ns-i-sum-quiet">
+                        {resolvedEntities.length} 实体
+                    </span>,
+                    <div className="ns-i-card">
+                        <div className="ns-i-card-head">
+                            <span>活跃实体列表</span>
+                            <span className="ns-mono ns-i-muted">
+                                {resolvedEntities.length} 活跃 - {dreaming.coldArchiveCount} 冷归档
+                            </span>
+                        </div>
+                        {resolvedEntities.length === 0 ? (
+                            <div className="ns-i-empty">
+                                暂无活跃实体记录，可在运行写章或刷新工作区后查看。
                             </div>
-                            {resolvedEntities.length === 0 ? (
-                                <div style={{ fontSize: '12px', color: 'var(--ns-text-4)' }}>
-                                    暂无活跃实体记录，可在运行写章或刷新工作区后查看。
-                                </div>
-                            ) : (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                    {resolvedEntities.map((ent) => {
-                                        const isExpanded = expandedEntityId === ent.id;
-                                        return (
-                                            <div
-                                                key={ent.id}
-                                                style={{
-                                                    borderRadius: 'var(--ns-r-md)',
-                                                    background: 'var(--ns-bg-surface-2)',
-                                                    border: ent.warped
-                                                        ? '1px dashed var(--ns-violet)'
-                                                        : '1px solid var(--ns-border-1)',
-                                                    overflow: 'hidden'
+                        ) : (
+                            <div className="ns-i-entity-list">
+                                {resolvedEntities.map((ent) => {
+                                    const isExpanded = expandedEntityId === ent.id;
+                                    return (
+                                        <div
+                                            key={ent.id}
+                                            className={`ns-i-entity${
+                                                ent.warped ? ' ns-i-entity-warped' : ''
+                                            }`}
+                                        >
+                                            <button
+                                                type="button"
+                                                className="ns-i-entity-btn"
+                                                onClick={() => {
+                                                    setExpandedEntityId(isExpanded ? null : ent.id);
+                                                    if (onSelectEntity) {
+                                                        onSelectEntity(ent.id, ent.lastChapter);
+                                                    } else if (ent.lastChapter && onSelectChapter) {
+                                                        onSelectChapter(ent.lastChapter);
+                                                    }
                                                 }}
                                             >
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setExpandedEntityId(isExpanded ? null : ent.id);
-                                                        if (onSelectEntity) {
-                                                            onSelectEntity(ent.id, ent.lastChapter);
-                                                        } else if (ent.lastChapter && onSelectChapter) {
-                                                            onSelectChapter(ent.lastChapter);
-                                                        }
-                                                    }}
-                                                    style={{
-                                                        width: '100%',
-                                                        padding: '9px 10px',
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                        gap: '8px',
-                                                        textAlign: 'left',
-                                                        background: 'transparent',
-                                                        border: 'none',
-                                                        color: 'var(--ns-text-1)',
-                                                        cursor: 'pointer'
-                                                    }}
+                                                <span
+                                                    className={`ns-i-entity-avatar${
+                                                        ent.warped
+                                                            ? ' ns-i-entity-avatar-warped'
+                                                            : ''
+                                                    }`}
+                                                    aria-hidden="true"
                                                 >
-                                                    <span
-                                                        style={{
-                                                            width: '26px',
-                                                            height: '26px',
-                                                            borderRadius: '50%',
-                                                            background: ent.warped
-                                                                ? 'var(--ns-violet)'
-                                                                : 'var(--ns-brand)',
-                                                            color: '#fff',
-                                                            display: 'grid',
-                                                            placeItems: 'center',
-                                                            fontSize: '12px',
-                                                            fontWeight: 700,
-                                                            flexShrink: 0
-                                                        }}
-                                                    >
-                                                        {ent.name.slice(0, 1) || '?'}
+                                                    {ent.name.slice(0, 1) || '?'}
+                                                </span>
+                                                <span className="ns-i-entity-main">
+                                                    <span className="ns-i-entity-name">
+                                                        {ent.name}
                                                     </span>
-                                                    <span style={{ flex: 1, minWidth: 0 }}>
-                                                        <strong style={{ display: 'block', fontSize: '12.5px' }}>
-                                                            {ent.name}
-                                                        </strong>
-                                                        <span
-                                                            className="ns-mono"
-                                                            style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}
-                                                        >
-                                                            {ent.id}
-                                                            {ent.role ? ` - ${ent.role}` : ''}
-                                                        </span>
+                                                    <span className="ns-mono ns-i-entity-meta">
+                                                        {ent.id}
+                                                        {ent.role ? ` - ${ent.role}` : ''}
                                                     </span>
-                                                    {typeof ent.lastChapter === 'number' && (
-                                                        <span className="ns-pill ns-pill-muted ns-mono">
-                                                            Ch.{ent.lastChapter}
-                                                        </span>
-                                                    )}
-                                                </button>
-                                                {ent.brief && (isExpanded || !onSelectEntity) && (
-                                                    <div
-                                                        style={{
-                                                            padding: '0 10px 8px 44px',
-                                                            fontSize: '11.5px',
-                                                            color: 'var(--ns-text-3)'
-                                                        }}
-                                                    >
-                                                        {ent.brief}
-                                                    </div>
+                                                </span>
+                                                {typeof ent.lastChapter === 'number' && (
+                                                    <span className="ns-pill ns-pill-muted ns-mono">
+                                                        Ch.{ent.lastChapter}
+                                                    </span>
                                                 )}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-                    </>
+                                            </button>
+                                            {ent.brief && (isExpanded || !onSelectEntity) && (
+                                                <div className="ns-i-entity-brief">{ent.brief}</div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
                 )}
 
-                {/* 4. 伏笔 */}
-                {activeSubtab === 'arc' && (
+                {/* 4. 伏笔 · Spotlight · Dreaming 水位 */}
+                {renderGroup(
+                    'arc',
+                    '伏笔·Spotlight·Dreaming 水位',
+                    <span className="ns-i-sum ns-i-sum-quiet">
+                        {triggeredSpotlightCount > 0
+                            ? `切镜 ${triggeredSpotlightCount}`
+                            : `伏笔 ${resolvedThreads.length}`}
+                    </span>,
                     <>
                         {/* Spotlight Trigger 信号队列 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>Spotlight Trigger 信号</span>
-                                <span className="ns-mono" style={{ color: 'var(--ns-amber-ink)' }}>
+                                <span className="ns-mono ns-i-amber-ink">
                                     {dreaming.spotlightQueue.length} 项
                                 </span>
                             </div>
                             {dreaming.spotlightQueue.length === 0 ? (
-                                <div style={{ fontSize: '12px', color: 'var(--ns-text-4)' }}>
-                                    暂无待切镜幕后角色信号
-                                </div>
+                                <div className="ns-i-empty">暂无待切镜幕后角色信号</div>
                             ) : (
                                 dreaming.spotlightQueue.map((item) => {
                                     const pct = Math.min(100, Math.max(0, item.progressPct));
                                     return (
-                                        <div key={item.entityId} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                            <div
-                                                style={{
-                                                    display: 'flex',
-                                                    justifyContent: 'space-between',
-                                                    fontSize: '12px'
-                                                }}
-                                            >
-                                                <span>
+                                        <div key={item.entityId} className="ns-i-spotlight-item">
+                                            <div className="ns-i-spotlight-row">
+                                                <span className="ns-i-spotlight-label">
                                                     {item.label}{' '}
-                                                    <span className="ns-mono" style={{ color: 'var(--ns-text-4)' }}>
+                                                    <span className="ns-mono ns-i-muted">
                                                         ({item.entityId})
                                                     </span>
                                                 </span>
                                                 <span className="ns-mono">
-                                                    {Math.round(pct)}%{item.triggered ? ' - 已触发' : ''}
+                                                    {Math.round(pct)}%
+                                                    {item.triggered ? ' - 已触发' : ''}
                                                 </span>
                                             </div>
-                                            <div className="ns-prog-bar" style={{ marginTop: 0 }}>
+                                            <div className="ns-prog-bar ns-i-prog-flat">
                                                 <div
-                                                    className="ns-prog-fill"
-                                                    style={{
-                                                        width: `${pct}%`,
-                                                        background: item.triggered
-                                                            ? 'var(--ns-amber)'
-                                                            : 'var(--ns-brand)'
-                                                    }}
+                                                    className={`ns-prog-fill ${
+                                                        item.triggered
+                                                            ? 'ns-i-fill-amber'
+                                                            : 'ns-i-fill-brand'
+                                                    }`}
+                                                    style={{ width: `${pct}%` }}
                                                 />
                                             </div>
                                         </div>
@@ -960,44 +855,37 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         </div>
 
                         {/* open_threads 跨卷伏笔 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>跨卷伏笔 (open_threads)</span>
                                 <span className="ns-mono">{resolvedThreads.length}</span>
                             </div>
                             {resolvedThreads.length === 0 ? (
-                                <div style={{ fontSize: '12px', color: 'var(--ns-text-4)' }}>
+                                <div className="ns-i-empty">
                                     当前未挂载单独的 open_threads 明细。
                                 </div>
                             ) : (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                <div className="ns-i-thread-list">
                                     {resolvedThreads.map((thd, idx) => (
                                         <div
                                             key={thd.id ?? `${thd.title}-${idx}`}
-                                            style={{
-                                                display: 'grid',
-                                                gridTemplateColumns: '48px 1fr auto',
-                                                gap: '8px',
-                                                alignItems: 'center',
-                                                padding: '8px 10px',
-                                                borderRadius: 'var(--ns-r-md)',
-                                                background: 'var(--ns-bg-surface-2)',
-                                                fontSize: '12px'
-                                            }}
+                                            className="ns-i-thread"
                                         >
-                                            <span className="ns-mono" style={{ color: 'var(--ns-text-4)' }}>
-                                                {typeof thd.chapter === 'number' ? `Ch.${thd.chapter}` : '--'}
+                                            <span className="ns-mono ns-i-thread-ch">
+                                                {typeof thd.chapter === 'number'
+                                                    ? `Ch.${thd.chapter}`
+                                                    : '--'}
                                             </span>
-                                            <div>
-                                                <div style={{ color: 'var(--ns-text-1)' }}>{thd.title}</div>
+                                            <div className="ns-i-thread-main">
+                                                <div className="ns-i-thread-title">{thd.title}</div>
                                                 {thd.hint && (
-                                                    <div style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>
-                                                        {thd.hint}
-                                                    </div>
+                                                    <div className="ns-i-thread-hint">{thd.hint}</div>
                                                 )}
                                             </div>
                                             {thd.scope && (
-                                                <span className="ns-pill ns-pill-brand">{thd.scope}</span>
+                                                <span className="ns-pill ns-pill-brand">
+                                                    {thd.scope}
+                                                </span>
                                             )}
                                         </div>
                                     ))}
@@ -1006,26 +894,24 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         </div>
 
                         {/* Dreaming 脏页水位 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>Dreaming 脏页水位</span>
                                 <span className="ns-mono">
-                                    {dreaming.dirtyEntityCount} / {dreaming.dirtyThreshold} ({dirtyRatioPct}%)
+                                    {dreaming.dirtyEntityCount} / {dreaming.dirtyThreshold} (
+                                    {dirtyRatioPct}%)
                                 </span>
                             </div>
-                            <div className="ns-prog-bar" style={{ marginTop: 0 }}>
+                            <div className="ns-prog-bar ns-i-prog-flat">
                                 <div
-                                    className="ns-prog-fill"
-                                    style={{
-                                        width: `${dirtyRatioPct}%`,
-                                        background: 'var(--ns-violet)'
-                                    }}
+                                    className="ns-prog-fill ns-i-fill-violet"
+                                    style={{ width: `${dirtyRatioPct}%` }}
                                 />
                             </div>
                             {onTriggerDreaming && (
                                 <button
                                     type="button"
-                                    className="ns-btn-ghost ns-btn-sm"
+                                    className="ns-btn ns-btn-ghost ns-btn-sm"
                                     onClick={onTriggerDreaming}
                                     disabled={busy}
                                 >
@@ -1036,59 +922,31 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     </>
                 )}
 
-                {/* 5. 提交 */}
-                {activeSubtab === 'git' && (
+                {/* 5. Git WAL 与提交 */}
+                {renderGroup(
+                    'git',
+                    'Git WAL 与提交',
+                    <span className={`ns-i-sum ${resolveWalBadgeClass(walLock.walPhase)}`}>
+                        {walLock.walPhase}
+                    </span>,
                     <>
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>WAL 相位状态</span>
                                 <span className={resolveWalBadgeClass(walLock.walPhase)}>
                                     {walLock.walPhase}
                                 </span>
                             </div>
-                            <div
-                                style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: 'repeat(4, 1fr)',
-                                    gap: '4px'
-                                }}
-                            >
+                            <div className="ns-i-wal-grid">
                                 {WAL_PHASES.map((phase) => {
-                                    const stepSt = resolveWalPhaseStepStatus(phase, walLock.walPhase);
-                                    const color =
-                                        stepSt === 'done'
-                                            ? 'var(--ns-green-ink)'
-                                            : stepSt === 'cur'
-                                              ? 'var(--ns-brand-ink)'
-                                              : stepSt === 'halt'
-                                                ? 'var(--ns-red-ink)'
-                                                : 'var(--ns-text-4)';
-                                    const bg =
-                                        stepSt === 'done'
-                                            ? 'var(--ns-green-soft)'
-                                            : stepSt === 'cur'
-                                              ? 'var(--ns-brand-soft)'
-                                              : stepSt === 'halt'
-                                                ? 'var(--ns-red-soft)'
-                                                : 'var(--ns-bg-surface-2)';
+                                    const stepSt = resolveWalPhaseStepStatus(
+                                        phase,
+                                        walLock.walPhase
+                                    );
                                     return (
                                         <div
                                             key={phase}
-                                            className="ns-mono"
-                                            style={{
-                                                padding: '6px 2px',
-                                                borderRadius: 'var(--ns-r-sm)',
-                                                textAlign: 'center',
-                                                fontSize: '9.5px',
-                                                color,
-                                                background: bg,
-                                                border:
-                                                    stepSt === 'cur'
-                                                        ? '1px solid var(--ns-brand-line)'
-                                                        : stepSt === 'halt'
-                                                          ? '1px solid var(--ns-red-line)'
-                                                          : '1px solid var(--ns-border-1)'
-                                            }}
+                                            className={`ns-mono ns-i-wal-cell ns-i-wal-${stepSt}`}
                                         >
                                             {phase.replace('_COMMITTED', '')}
                                         </div>
@@ -1099,13 +957,11 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                 <div className="ns-metric">
                                     <div className="ns-metric-k">.ops/tx.lock</div>
                                     <div
-                                        className="ns-metric-v ns-mono"
-                                        style={{
-                                            color:
-                                                walLock.txLockStatus === 'locked'
-                                                    ? 'var(--ns-amber-ink)'
-                                                    : 'var(--ns-green-ink)'
-                                        }}
+                                        className={`ns-metric-v ns-mono ${
+                                            walLock.txLockStatus === 'locked'
+                                                ? 'ns-i-amber-ink'
+                                                : 'ns-i-green-ink'
+                                        }`}
                                     >
                                         {walLock.txLockStatus === 'locked' ? 'LOCKED' : 'free'}
                                     </div>
@@ -1118,56 +974,53 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                 </div>
                             </div>
                             {walLock.txLockStatus === 'locked' && walLock.txLockHolder && (
-                                <div className="ns-mono" style={{ fontSize: '11.5px', color: 'var(--ns-amber-ink)' }}>
+                                <div className="ns-mono ns-i-lock-holder">
                                     锁持有者: {walLock.txLockHolder}
                                 </div>
                             )}
                             {(walLock.featCommitSha || walLock.stateCommitSha) && (
-                                <div className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-text-4)' }}>
-                                    feat: {walLock.featCommitSha ? walLock.featCommitSha.slice(0, 7) : '--'} -
-                                    state: {walLock.stateCommitSha ? walLock.stateCommitSha.slice(0, 7) : '--'}
+                                <div className="ns-mono ns-i-commit-sha">
+                                    feat: {walLock.featCommitSha ? walLock.featCommitSha.slice(0, 7) : '--'}{' '}
+                                    - state:{' '}
+                                    {walLock.stateCommitSha
+                                        ? walLock.stateCommitSha.slice(0, 7)
+                                        : '--'}
                                 </div>
                             )}
                         </div>
 
                         {/* SAFE_HALT / QUARANTINED 诊断块 */}
                         {hasHalt && haltDiagnostic && (
-                            <div
-                                style={{
-                                    ...cardStyle,
-                                    border: '1px solid var(--ns-red-line)',
-                                    background: 'var(--ns-red-soft)'
-                                }}
-                            >
-                                <div style={subSectionTitleStyle}>
-                                    <span style={{ color: 'var(--ns-red-ink)' }}>
+                            <div className="ns-i-card ns-i-card-halt">
+                                <div className="ns-i-card-head">
+                                    <span className="ns-i-red-ink">
                                         {haltDiagnostic.kind} - 冲突诊断
                                     </span>
-                                    <span className="ns-pill ns-pill-red">{haltDiagnostic.kind}</span>
+                                    <span className="ns-pill ns-pill-red">
+                                        {haltDiagnostic.kind}
+                                    </span>
                                 </div>
-                                <div style={{ fontSize: '12px', color: 'var(--ns-text-1)' }}>
-                                    {haltDiagnostic.reason}
-                                </div>
+                                <div className="ns-i-halt-reason">{haltDiagnostic.reason}</div>
                                 {(haltDiagnostic.leftRef || haltDiagnostic.rightRef) && (
-                                    <div className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-text-2)' }}>
+                                    <div className="ns-mono ns-i-halt-refs">
                                         <div>
                                             冲突双侧: {haltDiagnostic.leftRef || '--'} vs{' '}
                                             {haltDiagnostic.rightRef || '--'}
                                         </div>
                                         {haltDiagnostic.leftExcerpt && (
-                                            <div style={{ marginTop: '4px' }}>
+                                            <div className="ns-i-halt-excerpt">
                                                 [前文] {haltDiagnostic.leftExcerpt}
                                             </div>
                                         )}
                                         {haltDiagnostic.rightExcerpt && (
-                                            <div style={{ marginTop: '2px' }}>
+                                            <div className="ns-i-halt-excerpt-tight">
                                                 [当章] {haltDiagnostic.rightExcerpt}
                                             </div>
                                         )}
                                     </div>
                                 )}
                                 {typeof haltDiagnostic.affectedChapters === 'number' && (
-                                    <div className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-text-3)' }}>
+                                    <div className="ns-mono ns-i-halt-scope">
                                         波及范围: {haltDiagnostic.affectedChapters} 章
                                         {typeof haltDiagnostic.rollbackThreshold === 'number'
                                             ? ` (自动回滚阈值 ${haltDiagnostic.rollbackThreshold} 章)`
@@ -1177,7 +1030,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                 {onInspectHalt && (
                                     <button
                                         type="button"
-                                        className="ns-btn-stop ns-btn-sm"
+                                        className="ns-btn ns-btn-stop ns-btn-sm"
                                         onClick={onInspectHalt}
                                     >
                                         定位冲突快照与恢复方案
@@ -1188,66 +1041,73 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     </>
                 )}
 
-                {/* 6. 卷纲 */}
-                {activeSubtab === 'vol' && (
+                {/* 6. 卷纲进度 */}
+                {renderGroup(
+                    'vol',
+                    '卷纲进度',
+                    <span className="ns-i-sum ns-i-sum-quiet">{volumePct}%</span>,
                     <>
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>
                                     {volumeProgress?.volumeLabel || '当前卷进度'}
-                                    {volumeProgress?.volumeTitle ? ` - ${volumeProgress.volumeTitle}` : ''}
+                                    {volumeProgress?.volumeTitle
+                                        ? ` - ${volumeProgress.volumeTitle}`
+                                        : ''}
                                 </span>
                                 <span className="ns-mono">
                                     {completedCh} / {totalVolCh} ({volumePct}%)
                                 </span>
                             </div>
-                            <div className="ns-prog-bar" style={{ marginTop: 0 }}>
-                                <div className="ns-prog-fill" style={{ width: `${volumePct}%` }} />
+                            <div className="ns-prog-bar ns-i-prog-flat">
+                                <div
+                                    className="ns-prog-fill"
+                                    style={{ width: `${volumePct}%` }}
+                                />
                             </div>
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    fontSize: '11px',
-                                    color: 'var(--ns-text-4)'
-                                }}
-                            >
+                            <div className="ns-i-vol-meta">
                                 <span>timeline_mode: {walLock.timelineMode}</span>
-                                <span>已提交 Ch.{String(walLock.lastCommittedChapter).padStart(4, '0')}</span>
+                                <span>
+                                    已提交 Ch.
+                                    {String(walLock.lastCommittedChapter).padStart(4, '0')}
+                                </span>
                             </div>
                         </div>
 
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>future_horizon 与细纲摘要</span>
                             </div>
-                            <div style={{ fontSize: '12px', color: 'var(--ns-text-2)', lineHeight: 1.6 }}>
+                            <div className="ns-i-future">
                                 {volumeProgress?.futureHorizon ||
                                     stageArtifact.outlineSummary ||
                                     '暂无 future_horizon 文本，将在 Planner 产出细纲后同步展示。'}
                             </div>
                             {volumeProgress?.milestoneLock && (
-                                <div
-                                    style={{
-                                        padding: '8px 10px',
-                                        borderRadius: 'var(--ns-r-md)',
-                                        background: 'var(--ns-bg-surface-2)',
-                                        fontSize: '11.5px',
-                                        color: 'var(--ns-text-3)'
-                                    }}
-                                >
-                                    <strong>终局/里程碑锁</strong>: {volumeProgress.milestoneLock}
+                                <div className="ns-i-milestone">
+                                    <span className="ns-i-strong">终局/里程碑锁</span>: {volumeProgress.milestoneLock}
                                 </div>
                             )}
                         </div>
                     </>
                 )}
 
-                {/* 7. 门禁 */}
-                {activeSubtab === 'gate' && (
+                {/* 7. 静态门禁与核查 */}
+                {renderGroup(
+                    'gate',
+                    '静态门禁与核查',
+                    <span
+                        className={`ns-i-sum ${
+                            proseGate.recentViolations.length > 0
+                                ? 'ns-i-sum-alert'
+                                : 'ns-i-sum-quiet'
+                        }`}
+                    >
+                        命中 {proseGate.recentViolations.length}
+                    </span>,
                     <>
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>Static Prose Gate (8 条核心规则)</span>
                                 <span
                                     className={
@@ -1259,38 +1119,23 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                     命中 {proseGate.recentViolations.length}
                                 </span>
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <div className="ns-i-rule-list">
                                 {gateRuleStats.map((rule) => {
                                     const triggered = rule.hits > 0;
                                     return (
-                                        <div
-                                            key={rule.id}
-                                            style={{
-                                                display: 'grid',
-                                                gridTemplateColumns: '1fr auto auto',
-                                                gap: '8px',
-                                                alignItems: 'center',
-                                                padding: '7px 9px',
-                                                borderRadius: 'var(--ns-r-md)',
-                                                background: 'var(--ns-bg-surface-2)'
-                                            }}
-                                        >
-                                            <div>
-                                                <div className="ns-mono" style={{ fontSize: '11px', color: 'var(--ns-text-1)' }}>
+                                        <div key={rule.id} className="ns-i-rule">
+                                            <div className="ns-i-rule-main">
+                                                <div className="ns-mono ns-i-rule-id">
                                                     {rule.id}
                                                 </div>
-                                                <div style={{ fontSize: '10.5px', color: 'var(--ns-text-4)' }}>
+                                                <div className="ns-i-rule-label">
                                                     {rule.label}
                                                 </div>
                                             </div>
                                             <span
-                                                className="ns-mono"
-                                                style={{
-                                                    fontSize: '10.5px',
-                                                    color: triggered
-                                                        ? 'var(--ns-amber-ink)'
-                                                        : 'var(--ns-text-4)'
-                                                }}
+                                                className={`ns-mono ns-i-rule-count${
+                                                    triggered ? ' ns-i-rule-count-on' : ''
+                                                }`}
                                             >
                                                 {rule.hits} / {rule.threshold}
                                             </span>
@@ -1314,8 +1159,8 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         </div>
 
                         {/* Fact Checker 核查概览 */}
-                        <div style={cardStyle}>
-                            <div style={subSectionTitleStyle}>
+                        <div className="ns-i-card">
+                            <div className="ns-i-card-head">
                                 <span>Fact Checker 双侧原句验真</span>
                                 <span className="ns-pill ns-pill-brand">
                                     通过 {factChecker.verifiedPassCount} / 过滤 {factChecker.filteredOutCount}

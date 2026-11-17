@@ -1029,10 +1029,12 @@ export class NarrateRuntimeController {
                 case 'signals': {
                     const raw = await readOptionalText(join(this._bookRoot, '.ops/signals.jsonl'));
                     const all = parseJsonLines(raw);
+                    const consumed = Math.min(this.signalsConsumedLines, all.length);
                     sendJson(res, 200, {
                         kind: 'signals',
                         signals: all,
-                        pendingCount: Math.max(0, all.length - this.signalsConsumedLines)
+                        pending: all.slice(consumed),
+                        pendingCount: all.length - consumed
                     });
                     return;
                 }
@@ -1507,6 +1509,87 @@ export class NarrateRuntimeController {
         sendJson(res, 201, { status: 'QUEUED', signal: signalRecord });
     }
 
+    /** DELETE /api/narrate/signals：按 created_at + reason 撤回一条未消费信号（按内容匹配重写 jsonl，非行号） */
+    async handleSignalDelete(req: IncomingMessage, res: ServerResponse): Promise<void> {
+        if (!assertMethod(req, res, 'DELETE')) return;
+
+        let body: Record<string, unknown>;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        const createdAt = typeof body['created_at'] === 'string' ? body['created_at'] : null;
+        const reason = typeof body['reason'] === 'string' ? body['reason'] : null;
+        if (!createdAt || !reason) {
+            sendJson(res, 400, { error: '撤回信号需要 created_at 与 reason 两个匹配字段' });
+            return;
+        }
+
+        try {
+            await this.assertNoActiveTxLock('流水线运行中（.ops/tx.lock），禁止撤回纸条');
+
+            const filePath = join(this._bookRoot, '.ops/signals.jsonl');
+            const raw = await readOptionalText(filePath);
+            if (raw === null) {
+                sendJson(res, 404, { error: '信号队列不存在' });
+                return;
+            }
+
+            // 保留损坏行原样;仅剔除首条内容完全匹配的记录(下标与 parseJsonLines 的非空行序一致)
+            const kept: string[] = [];
+            let removedIdx = -1;
+            let lineIdx = 0;
+            for (const line of raw.split(/\r?\n/)) {
+                const trimmed = line.trim();
+                if (trimmed.length === 0) continue;
+                const currentIdx = lineIdx;
+                lineIdx += 1;
+                if (removedIdx < 0) {
+                    try {
+                        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+                        const parsedReason =
+                            typeof parsed['reason'] === 'string'
+                                ? parsed['reason']
+                                : typeof parsed['content'] === 'string'
+                                  ? parsed['content']
+                                  : typeof parsed['instruction'] === 'string'
+                                    ? parsed['instruction']
+                                    : null;
+                        if (parsed['created_at'] === createdAt && parsedReason === reason) {
+                            removedIdx = currentIdx;
+                            continue;
+                        }
+                    } catch {
+                        // 损坏行不参与匹配
+                    }
+                }
+                kept.push(trimmed);
+            }
+
+            if (removedIdx < 0) {
+                sendJson(res, 404, { error: '未找到匹配的待撤回信号（可能已被消费或队列已变化）' });
+                return;
+            }
+
+            await writeFile(filePath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8');
+            // 消费游标按删除位点平移:删已消费行则前移一格,删未消费行不动,避免旧信号被重投
+            if (removedIdx < this.signalsConsumedLines) {
+                this.signalsConsumedLines -= 1;
+            }
+            this.emitEvent('signal:withdrawn', { created_at: createdAt, reason });
+            sendJson(res, 200, { status: 'WITHDRAWN', remaining: kept.length });
+        } catch (err) {
+            if (err instanceof TxLockConflictError) {
+                sendJson(res, 409, { error: err.message });
+                return;
+            }
+            sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+    }
+
     /** POST /api/narrate/halt */
     async handleHalt(req: IncomingMessage, res: ServerResponse): Promise<void> {
         if (!assertMethod(req, res, 'POST')) return;
@@ -1641,6 +1724,11 @@ export function registerNarrateRoutes(
             kind: 'exact',
             path: '/api/narrate/signals',
             handler: (req, res) => controller.handleSignals(req, res)
+        }),
+        webServer.register({
+            kind: 'exact',
+            path: '/api/narrate/signals/delete',
+            handler: (req, res) => controller.handleSignalDelete(req, res)
         }),
         webServer.register({
             kind: 'exact',

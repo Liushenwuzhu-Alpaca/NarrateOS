@@ -46,6 +46,10 @@ declare namespace React {
         current: T;
     }
 
+    interface RefObject<T> {
+        readonly current: T | null;
+    }
+
     interface IntrinsicElementProps {
         children?: ReactNode;
         className?: string | undefined;
@@ -86,6 +90,7 @@ declare module 'react' {
     export type MouseEvent<T = Element> = React.MouseEvent<T>;
     export type KeyboardEvent<T = Element> = React.KeyboardEvent<T>;
     export type MutableRefObject<T> = React.MutableRefObject<T>;
+    export type RefObject<T> = React.RefObject<T>;
 
     export function useState<S>(
         initialState: S | (() => S)
@@ -102,6 +107,7 @@ declare module 'react' {
     ): T;
     export function useMemo<T>(factory: () => T, deps: readonly unknown[]): T;
     export function useRef<T>(initialValue: T): MutableRefObject<T>;
+    export function useRef<T>(initialValue: T | null): RefObject<T>;
     export function useRef<T = undefined>(): MutableRefObject<T | undefined>;
 
     export const Fragment: (props: {

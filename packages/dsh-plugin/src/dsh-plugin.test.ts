@@ -2009,4 +2009,194 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
 
         sseAbort.abort();
     });
+
+    it('DELETE /api/narrate/signals/delete 应真删匹配纸条且不重投已消费信号', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => {
+            await rm(bookRoot, { recursive: true, force: true });
+        });
+
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+
+        const stepGoals: string[] = [];
+        let completedStepCount = 0;
+        const fakeEngine = {
+            async stepChapter(options: { chapterGoal: string }) {
+                stepGoals.push(options.chapterGoal);
+                const ch = 2 + completedStepCount;
+                completedStepCount++;
+                return {
+                    status: 'COMMITTED' as const,
+                    chapterNumber: ch,
+                    manuscriptPath: `manuscripts/ch_000${ch}.md`,
+                    featCommitSha: 'sha1',
+                    stateCommitSha: 'sha2',
+                    outline: null,
+                    replanCount: 0,
+                    rewriteCount: 0,
+                    patchRounds: 0,
+                    telemetry: {
+                        charCount: 1000,
+                        wordCount: 500,
+                        sentenceCount: 20,
+                        mattr500: 0.7,
+                        kontoyiannisEntropy: 4.0,
+                        sentenceLengthCv: 0.4,
+                        clicheDensityPer1k: 0.2
+                    },
+                    totalUsage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 },
+                    updatedEntities: [],
+                    nextChapterOptions: []
+                };
+            },
+            async syncManuscripts() {
+                return {
+                    status: 'CLEAN' as const,
+                    dirtyChapters: [],
+                    updatedEntities: [],
+                    downstreamConflicts: [],
+                    totalUsage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+        const fakeDreaming = {
+            async runDreaming() {
+                return {
+                    skipped: true,
+                    vacuumedEntities: [],
+                    warpedNodesFlipped: 0,
+                    archivedFiles: [],
+                    spotlightTriggers: [],
+                    committedTxState: null,
+                    usage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }
+                };
+            }
+        };
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => {
+                    if (cleanup) void cleanup();
+                };
+            }
+        };
+        apply(ctx, {
+            bookRoot,
+            poolRouting: DEFAULT_ROUTING,
+            store,
+            engine: fakeEngine as never,
+            dreamingRunner: fakeDreaming as never
+        });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+        const baseUrl = await webServer.listen();
+
+        const postSignal = async (reason: string) => {
+            const res = await fetch(`${baseUrl}/api/narrate/signals`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'SPOTLIGHT_TRIGGER',
+                    chapter: 1,
+                    entity_id: 'char_lin',
+                    suggested_mode: 'MAINLINE',
+                    reason
+                })
+            });
+            expect(res.status).toBe(201);
+            return (await res.json()) as { signal: { created_at: string; reason: string } };
+        };
+
+        const sigA = await postSignal('信号A-将被消费');
+        const sigB = await postSignal('信号B-待消费时撤回');
+
+        // YOLO 连跑 1 章消费掉 A 与 B,游标推进到 2
+        const yolo1 = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 1, defaultGoal: '第一轮' })
+        });
+        expect(yolo1.status).toBe(202);
+        // 以 SSE yolo_completed 事件为收尾信号,不做定时轮询
+        const sseAbort = new AbortController();
+        cleanups.push(async () => sseAbort.abort());
+        const sseRes = await fetch(`${baseUrl}/api/narrate/events`, { signal: sseAbort.signal });
+        const reader = sseRes.body!.getReader();
+        const decoder = new TextDecoder();
+        let sseBuf = '';
+        const waitCompleted = async () => {
+            const target = (sseBuf.match(/event: yolo_completed/g) ?? []).length + 1;
+            const deadline = Date.now() + 5000;
+            while ((sseBuf.match(/event: yolo_completed/g) ?? []).length < target) {
+                if (Date.now() > deadline) throw new Error(`等待 yolo_completed 超时:\n${sseBuf}`);
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                sseBuf += decoder.decode(chunk.value, { stream: true });
+            }
+        };
+        await waitCompleted();
+        expect(stepGoals[0]).toContain('信号A-将被消费');
+        expect(stepGoals[0]).toContain('信号B-待消费时撤回');
+
+        // 再投递 C(未消费);撤回已消费的 A:游标应前移,pendingCount 仍为 1
+        await postSignal('信号C-保持待消费');
+        const delA = await fetch(`${baseUrl}/api/narrate/signals/delete`, {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ created_at: sigA.signal.created_at, reason: sigA.signal.reason })
+        });
+        expect(delA.status).toBe(200);
+        const afterDelA = (await (await fetch(`${baseUrl}/api/narrate/status`)).json()) as {
+            pendingSignalsCount: number;
+        };
+        expect(afterDelA.pendingSignalsCount).toBe(1);
+        const fileAfterA = await readFile(join(bookRoot, '.ops/signals.jsonl'), 'utf8');
+        expect(fileAfterA).not.toContain('信号A-将被消费');
+
+        // 撤回未消费的 B:游标不动,pendingCount 归零
+        const delB = await fetch(`${baseUrl}/api/narrate/signals/delete`, {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ created_at: sigB.signal.created_at, reason: sigB.signal.reason })
+        });
+        expect(delB.status).toBe(200);
+        const afterDelB = (await (await fetch(`${baseUrl}/api/narrate/status`)).json()) as {
+            pendingSignalsCount: number;
+        };
+        expect(afterDelB.pendingSignalsCount).toBe(1);
+
+        // 重复撤回应 404
+        const delAgain = await fetch(`${baseUrl}/api/narrate/signals/delete`, {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ created_at: sigA.signal.created_at, reason: sigA.signal.reason })
+        });
+        expect(delAgain.status).toBe(404);
+
+        // 第二轮 YOLO:只消费 C,不得重投 A/B
+        const yolo2 = await fetch(`${baseUrl}/api/narrate/yolo/start`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetChapters: 1, defaultGoal: '第二轮' })
+        });
+        expect(yolo2.status).toBe(202);
+        await waitCompleted();
+        expect(stepGoals[1]).toContain('信号C-保持待消费');
+        expect(stepGoals[1]).not.toContain('信号A-将被消费');
+        expect(stepGoals[1]).not.toContain('信号B-待消费时撤回');
+    });
 });

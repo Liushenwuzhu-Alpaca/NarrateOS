@@ -195,6 +195,17 @@ export function postSignal(payload: PostSignalRequest): Promise<PostSignalRespon
     });
 }
 
+/** 撤回一条未消费导演信号（按 created_at + reason 内容匹配删除） */
+export function deleteSignal(payload: {
+    created_at: string;
+    reason: string;
+}): Promise<{ status: string; remaining: number }> {
+    return requestJson<{ status: string; remaining: number }>('/api/narrate/signals/delete', {
+        method: 'DELETE',
+        body: payload
+    });
+}
+
 /** 请求在安全检查点停机（Safe-Point Halt） */
 export function requestHalt(): Promise<HaltResponse> {
     return requestJson<HaltResponse>('/api/narrate/halt', {
