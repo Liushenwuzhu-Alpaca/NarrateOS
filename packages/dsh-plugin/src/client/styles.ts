@@ -33,6 +33,9 @@ export const STUDIO_CSS = `
     --ns-brand-ink: #86a8ff;
     --ns-brand-soft: rgba(86, 134, 254, 0.14);
     --ns-brand-line: rgba(86, 134, 254, 0.42);
+    /* 实心主按钮专用填充: 白字基态与悬停均 >= 4.5:1, 不动 --ns-brand 焦点主蓝 */
+    --ns-brand-fill: #3560d2;
+    --ns-brand-fill-hover: #456dd6;
     --ns-green: #4ed17e;
     --ns-green-ink: #4ed17e;
     --ns-green-soft: rgba(78, 209, 126, 0.12);
@@ -114,6 +117,9 @@ body:not([data-ds-dark-theme]) .ns-studio-shell {
     --ns-brand-ink: #2b5cc9;
     --ns-brand-soft: rgba(59, 111, 224, 0.1);
     --ns-brand-line: rgba(59, 111, 224, 0.4);
+    /* 浅色实心填充保持基态白字 >= 4.5:1, 悬停改为加深而非提亮 */
+    --ns-brand-fill: #3b6fe0;
+    --ns-brand-fill-hover: #3866cc;
     --ns-green: #1f9d55;
     --ns-green-ink: #15703c;
     --ns-green-soft: rgba(31, 157, 85, 0.1);
@@ -422,31 +428,6 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     color: var(--ns-text-1);
 }
 
-.ns-mode-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 24px;
-    padding: 0 9px;
-    border-radius: 999px;
-    background: var(--ns-bg-hover);
-    border: 1px solid var(--ns-border-1);
-    font-size: 12px;
-    color: var(--ns-text-2);
-    white-space: nowrap;
-    flex-shrink: 0;
-    cursor: pointer;
-    transition: background 0.15s ease, border-color 0.15s ease;
-}
-
-.ns-seal-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--ns-seal);
-    flex-shrink: 0;
-}
-
 .ns-icon-btn {
     position: relative;
     width: 28px;
@@ -734,7 +715,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-btn-xs {
-    height: 22px;
+    height: 24px;
     padding: 0 7px;
     font-size: 11px;
     border-radius: var(--ns-r-sm);
@@ -742,7 +723,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-btn-primary {
     height: 30px;
-    background: var(--ns-brand);
+    background: var(--ns-brand-fill);
     border: 1px solid transparent;
     color: #fff;
     padding: 0 11px;
@@ -770,7 +751,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-btn-yolo {
     height: 30px;
-    background: var(--ns-brand);
+    background: var(--ns-brand-fill);
     border: 1px solid transparent;
     box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.24);
     color: #fff;
@@ -814,7 +795,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-btn-ghost.ns-btn-xs {
-    height: 22px;
+    height: 24px;
     padding: 0 7px;
     font-size: 11px;
     border-radius: var(--ns-r-sm);
@@ -1488,14 +1469,20 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-v-opt.ns-go {
-    background: var(--ns-brand);
-    border-color: var(--ns-brand);
+    background: var(--ns-brand-fill);
+    border-color: var(--ns-brand-fill);
     color: #ffffff;
 }
 
 .ns-v-opt.ns-go .ns-v-opt-ico,
 .ns-v-opt.ns-go small {
     color: rgba(255, 255, 255, 0.84);
+}
+
+/* 填充底上的图标与副文案用纯白: 0.96 透明度在浅色基态不足 4.5:1, 层级改由字号承担 */
+.ns-studio-shell .ns-v-opt.ns-go .ns-v-opt-ico,
+.ns-studio-shell .ns-v-opt.ns-go small {
+    color: #fff;
 }
 
 .ns-v-more {
@@ -1664,6 +1651,11 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-editor-textarea:focus {
     border-color: var(--ns-brand-line);
+}
+
+/* 占位文字统一用弱化文字 token, 两主题对各自底色均 >= 4.5:1 */
+.ns-editor-textarea::placeholder {
+    color: var(--ns-text-4);
 }
 
 .ns-patch-mark {
@@ -1923,7 +1915,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     height: 30px;
     border-radius: 50%;
     border: 0;
-    background: var(--ns-brand);
+    background: var(--ns-brand-fill);
     color: #fff;
     font-size: 14px;
     font-weight: 500;
@@ -1939,29 +1931,28 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     cursor: not-allowed;
 }
 
-.ns-composer-telemetry {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: center;
-    gap: 4px 10px;
-    font: 11px var(--ns-font-mono);
+/* 输入框下方运行状态: 13px 界面字体, 居中可换行; role=status + aria-live 承载语义 */
+.ns-runtime-status {
+    font-size: 13px;
+    line-height: 1.5;
     color: var(--ns-text-4);
+    text-align: center;
 }
 
-.ns-composer-telemetry button {
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    padding: 1px 4px;
-    border-radius: 4px;
-    cursor: pointer;
-    white-space: nowrap;
+/* 等待安全点: 琥珀墨色 + 左侧呼吸圆点 + 文案写明等待, 不只靠颜色 */
+.ns-runtime-status-waiting {
+    color: var(--ns-amber-ink);
 }
 
-.ns-tel-sep {
-    opacity: 0.45;
+.ns-runtime-status-waiting::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 7px;
+    border-radius: 50%;
+    background: var(--ns-amber);
+    animation: ns-ping 1.4s infinite;
 }
 
 /* 3. 右侧三页签辅助栏（目录 / 检查器 / 工具） */
@@ -2861,11 +2852,6 @@ details.ns-acc[open] summary {
         border-color: var(--ns-border-1);
     }
 
-    .ns-mode-pill:hover {
-        background: var(--ns-bg-press);
-        border-color: var(--ns-border-2);
-    }
-
     .ns-icon-btn:hover:not(:disabled) {
         background: var(--ns-bg-hover);
         color: var(--ns-text-1);
@@ -2878,7 +2864,7 @@ details.ns-acc[open] summary {
 
     .ns-btn-primary:hover:not(:disabled),
     .ns-btn-yolo:hover:not(:disabled) {
-        background: color-mix(in srgb, var(--ns-brand) 86%, #fff);
+        background: var(--ns-brand-fill-hover);
     }
 
     .ns-btn-ghost:hover:not(:disabled) {
@@ -2897,9 +2883,8 @@ details.ns-acc[open] summary {
     }
 
     .ns-v-opt.ns-go:hover:not(:disabled) {
-        background: var(--ns-brand);
-        border-color: var(--ns-brand);
-        filter: brightness(1.06);
+        background: var(--ns-brand-fill-hover);
+        border-color: var(--ns-brand-fill-hover);
     }
 
     .ns-choice-btn:hover {
@@ -2923,12 +2908,7 @@ details.ns-acc[open] summary {
     }
 
     .ns-send-circle:hover:not(:disabled) {
-        background: color-mix(in srgb, var(--ns-brand) 86%, #fff);
-    }
-
-    .ns-composer-telemetry button:hover {
-        background: var(--ns-bg-hover);
-        color: var(--ns-text-2);
+        background: var(--ns-brand-fill-hover);
     }
 
     .ns-r-tab:hover {
@@ -2965,6 +2945,26 @@ details.ns-acc[open] summary {
 
     .ns-studio-shell ::-webkit-scrollbar-thumb:hover {
         background-color: var(--ns-border-3);
+    }
+}
+
+/* 触屏粗指针: xs 按钮命中区放大到 32px; 目录排序命中区放大到 40px 高 */
+@media (pointer: coarse) {
+    .ns-btn-xs,
+    .ns-btn-ghost.ns-btn-xs {
+        height: 32px;
+        padding: 0 12px;
+    }
+
+    .ns-send-circle {
+        width: 40px;
+        height: 40px;
+        font-size: 16px;
+    }
+
+    .ns-group-title .ns-link-btn {
+        min-height: 40px;
+        padding: 0 8px;
     }
 }
 
@@ -3066,7 +3066,9 @@ details.ns-acc[open] summary {
 .ns-link-btn {
     background: transparent;
     border: none;
-    padding: 0;
+    /* 命中区至少 24px 高, 视觉字级保持不变 */
+    min-height: 24px;
+    padding: 0 4px;
     font-size: 10.5px;
     color: var(--ns-text-4);
     cursor: pointer;

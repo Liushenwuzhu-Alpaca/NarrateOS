@@ -222,6 +222,59 @@ async function cancelBoot(mode: '普通' | '守卫'): Promise<void> {
 }
 
 describe('真实根组件的草稿身份与异步隔离', () => {
+    it('真实 SSE 订阅接收停止等待与完成事件，状态不依赖完成后的 HTTP 可用性', async () => {
+        const streams: EventTarget[] = [];
+        class TestEventSource extends EventTarget {
+            constructor(_url: string) { super(); streams.push(this); }
+            close() {}
+        }
+        vi.stubGlobal('EventSource', TestEventSource);
+        const realApi = await vi.importActual<typeof api>('../src/client/api.js');
+        vi.mocked(api.subscribeNarrateEvents).mockImplementation(realApi.subscribeNarrateEvents);
+        const container = await mountStudio();
+        const send = async (event: string, data: Record<string, unknown> = {}) => act(async () => {
+            streams[0]!.dispatchEvent(new MessageEvent(event, { data: JSON.stringify(data) }));
+        });
+        await send('stage', { stage: 'STARTING' });
+        await send('halt:requested');
+        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('等待');
+        expect(container.querySelector('.ns-runtime-status')?.textContent).not.toContain('已停止');
+        await send('halt:waiting', { activeTask: 'STEPPING' });
+        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('当前任务仍在执行');
+        vi.mocked(api.fetchStatus).mockRejectedValue(new Error('宿主已经关闭'));
+        await send('halt:completed');
+        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('已停止');
+        await send('stage', { stage: 'STARTING' });
+        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('正在生成');
+        expect(container.querySelector('.ns-runtime-status')?.textContent).not.toContain('等待');
+    });
+
+    it.each(['章节视图', '作品辅助视图'])('%s支持方向键和首尾键，焦点、选择和面板身份同步', async (label) => {
+        const container = await mountStudio();
+        await edit(container, '键盘切换页签也必须保留的草稿。');
+        const list = container.querySelector<HTMLElement>(`[role="tablist"][aria-label="${label}"]`)!;
+        const tabs = Array.from(list.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+        const move = (from: HTMLButtonElement, key: string) => act(async () => {
+            from.focus();
+            from.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+        });
+        await move(tabs[0]!, 'ArrowRight');
+        expect(document.activeElement).toBe(tabs[1]);
+        expect(tabs[1]?.getAttribute('aria-selected')).toBe('true');
+        expect(tabs.filter((tab) => tab.tabIndex === 0)).toEqual([tabs[1]]);
+        const panel = document.getElementById(tabs[1]!.getAttribute('aria-controls')!);
+        expect(panel?.getAttribute('aria-labelledby')).toBe(tabs[1]?.id);
+        await move(tabs[1]!, 'End');
+        expect(document.activeElement).toBe(tabs.at(-1));
+        await move(tabs.at(-1)!, 'ArrowRight');
+        expect(document.activeElement).toBe(tabs[0]);
+        await move(tabs[0]!, 'ArrowLeft');
+        expect(document.activeElement).toBe(tabs.at(-1));
+        await move(tabs.at(-1)!, 'Home');
+        expect(document.activeElement).toBe(tabs[0]);
+        expect(editor(container).value).toBe('键盘切换页签也必须保留的草稿。');
+    });
+
     it('第 2 章 GET 在途时编辑仍属于第 1 章，迟到详情不清稿且保存写回第 1 章', async () => {
         const container = await mountStudio();
         const secondChapter = Promise.withResolvers<ChapterDetail>();

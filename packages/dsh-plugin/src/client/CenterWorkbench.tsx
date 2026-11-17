@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives';
+import { handleTabKeyDown } from './tab-keyboard';
 
 /** 6 节点流水线 ID：只画真正跑大模型的节点 + Dreaming（0-LLM 静态门禁不占节点） */
 export type PipelineStageId =
@@ -126,6 +127,7 @@ export interface MaterializedViewsData {
 /** YOLO 连跑状态 */
 export interface YoloStatusData {
     running: boolean;
+    stopRequested?: boolean | undefined;
     completedChapters: number;
     targetChapters: number;
     currentStage?: string | null | undefined;
@@ -153,14 +155,6 @@ export interface CenterBookSummary {
     currentChapter: number;
 }
 
-/** 底部遥测尾注摘要 */
-export interface CenterTelemetrySummary {
-    cacheHitRate?: number | undefined;
-    inputTokens?: number | undefined;
-    cacheReadTokens?: number | undefined;
-    outputTokens?: number | undefined;
-    kontoyiannisHk?: number | undefined;
-}
 
 /** 中栏草稿命令式句柄（根组件守卫在保存成功/放弃修改后调用） */
 export interface CenterWorkbenchDraftHandle {
@@ -179,6 +173,8 @@ export interface CenterWorkbenchProps {
     timelineMode?: string | undefined;
     walPhase?: string | undefined;
     activeTask?: 'IDLE' | 'STEPPING' | 'SYNCING' | 'DREAMING' | 'BOOTING' | undefined;
+    haltRequested?: boolean | undefined;
+    haltWaiting?: boolean | undefined;
     yolo?: YoloStatusData | undefined;
     chapters?: ChapterSummaryItem[] | undefined;
     chapterDetail?: ChapterDetailData | null | undefined;
@@ -192,7 +188,6 @@ export interface CenterWorkbenchProps {
     materializedViews?: MaterializedViewsData | undefined;
     dirtyChaptersCount?: number | undefined;
     externalViewCommand?: ExternalViewCommand | undefined;
-    telemetrySummary?: CenterTelemetrySummary | undefined;
     leftCollapsed?: boolean | undefined;
     rightOpen?: boolean | undefined;
     hasSafeHalt?: boolean | undefined;
@@ -1037,6 +1032,8 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     timelineMode = 'MAINLINE',
     walPhase = 'STATE_COMMITTED',
     activeTask = 'IDLE',
+    haltRequested = false,
+    haltWaiting = false,
     yolo,
     chapters = [],
     chapterDetail,
@@ -1050,7 +1047,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     materializedViews,
     dirtyChaptersCount = 0,
     externalViewCommand,
-    telemetrySummary,
     rightOpen = true,
     hasSafeHalt = false,
     onSelectBook,
@@ -1738,31 +1734,30 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         [pendingSignals]
     );
 
-    // 底部遥测尾注格式化
-    const telemetryCacheRate =
-        telemetrySummary?.cacheHitRate !== undefined && Number.isFinite(telemetrySummary.cacheHitRate)
-            ? `${(telemetrySummary.cacheHitRate * 100).toFixed(1)}%`
-            : '--';
-    const telemetryTotalTokens =
-        (telemetrySummary?.inputTokens ?? 0) +
-        (telemetrySummary?.cacheReadTokens ?? 0) +
-        (telemetrySummary?.outputTokens ?? 0);
-    const telemetryTokensLabel =
-        telemetryTotalTokens >= 1_000_000
-            ? `${(telemetryTotalTokens / 1_000_000).toFixed(2)}M tokens`
-            : telemetryTotalTokens >= 1_000
-                ? `${(telemetryTotalTokens / 1_000).toFixed(1)}k tokens`
-                : telemetryTotalTokens > 0
-                    ? `${telemetryTotalTokens} tokens`
-                    : '0 tokens';
-    const telemetryHkLabel =
-        telemetrySummary?.kontoyiannisHk !== undefined && Number.isFinite(telemetrySummary.kontoyiannisHk)
-            ? telemetrySummary.kontoyiannisHk.toFixed(2)
-            : '--';
+    const stopPending = haltRequested || Boolean(yolo?.stopRequested);
+    const runtimeStatus = safeHalt
+        ? '运行已暂停，请在检查器查看冲突'
+        : savingEdit
+          ? '正在保存本章并同步'
+          : stopPending && isBusy
+            ? haltWaiting
+                ? '停止请求已收到，当前任务仍在执行，正在等待安全点'
+                : '已请求停止，等待当前任务到达安全点'
+            : activeTask === 'SYNCING'
+              ? '正在同步手改内容'
+              : activeTask === 'DREAMING'
+                ? '正在整理作品资料'
+                : activeTask === 'BOOTING'
+                  ? '正在编译开书设置'
+                  : isBusy
+                    ? '正在生成章节'
+                    : stopPending
+                      ? '已停止，可以继续审阅或推进'
+                      : '就绪，可审阅正文或推进下一章';
 
     return (
         <main className="ns-center-workbench">
-            {/* 顶栏第一行：作品切换下拉 + • narrate-studio + 开新书 | 刷新 / 推进 1 章 / YOLO / 右栏开关 */}
+            {/* 顶栏：作品切换与开书，右侧为运行操作 */}
             <header className="ns-topbar">
                 <div className="ns-top-left">
                     {books.length > 0 && onSelectBook ? (
@@ -1789,15 +1784,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         </span>
                     )}
 
-                    <button
-                        type="button"
-                        className="ns-mode-pill"
-                        onClick={onOpenInspector}
-                        title="查看引擎运行时检查器"
-                    >
-                        <span className="ns-seal-dot" aria-hidden="true" />
-                        <span>narrate-studio</span>
-                    </button>
 
                     {onNewBook ? (
                         <button
@@ -1855,9 +1841,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             <button
                                 type="button"
                                 className="ns-btn ns-btn-stop ns-btn-sm"
+                                disabled={stopPending}
                                 onClick={handleStopYolo}
                             >
-                                安全点停止
+                                {stopPending ? '等待安全点…' : '安全点停止'}
                             </button>
                         </div>
                     ) : (
@@ -1927,10 +1914,13 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
             {/* 顶栏第二行：蓝底线页签（正文 | 细纲 | 修改 | 视图） + 6 圆点连线进度胶囊 + Aa + ✎ 编辑 */}
             <div className="ns-top-2">
-                <div className="ns-dsh-tabs" role="tablist">
+                <div className="ns-dsh-tabs" role="tablist" aria-label="章节视图" onKeyDown={handleTabKeyDown}>
                     <button
                         type="button"
                         role="tab"
+                        id="ns-tab-prose"
+                        aria-controls="ns-chapter-panel"
+                        tabIndex={viewTab === 'prose' ? 0 : -1}
                         aria-selected={viewTab === 'prose'}
                         className={`ns-dsh-tab ${viewTab === 'prose' ? 'on' : ''}`}
                         onClick={() => setViewTab('prose')}
@@ -1940,6 +1930,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     <button
                         type="button"
                         role="tab"
+                        id="ns-tab-plan"
+                        aria-controls="ns-chapter-panel"
+                        tabIndex={viewTab === 'plan' ? 0 : -1}
                         aria-selected={viewTab === 'plan'}
                         className={`ns-dsh-tab ${viewTab === 'plan' ? 'on' : ''}`}
                         onClick={() => setViewTab('plan')}
@@ -1949,6 +1942,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     <button
                         type="button"
                         role="tab"
+                        id="ns-tab-diff"
+                        aria-controls="ns-chapter-panel"
+                        tabIndex={viewTab === 'diff' ? 0 : -1}
                         aria-selected={viewTab === 'diff'}
                         className={`ns-dsh-tab ${viewTab === 'diff' ? 'on' : ''}`}
                         onClick={() => setViewTab('diff')}
@@ -1961,6 +1957,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     <button
                         type="button"
                         role="tab"
+                        id="ns-tab-views"
+                        aria-controls="ns-chapter-panel"
+                        tabIndex={viewTab === 'views' ? 0 : -1}
                         aria-selected={viewTab === 'views'}
                         className={`ns-dsh-tab ${viewTab === 'views' ? 'on' : ''}`}
                         onClick={() => {
@@ -2153,7 +2152,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             ) : null}
 
             {/* 主内容区 */}
-            <div className="ns-stage-body">
+            <div className="ns-stage-body" id="ns-chapter-panel" role="tabpanel" aria-labelledby={`ns-tab-${viewTab}`} tabIndex={0}>
                 {viewTab === 'prose' ? (
                     <article
                         className="ns-prose-col"
@@ -3028,22 +3027,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         </div>
                     </div>
 
-                    <div className="ns-composer-telemetry">
-                        <button type="button" onClick={onOpenInspector}>
-                            WAL {walPhase}
-                        </button>
-                        <span className="ns-tel-sep">·</span>
-                        <button type="button" onClick={onOpenInspector}>
-                            缓存命中 {telemetryCacheRate}
-                        </button>
-                        <span className="ns-tel-sep">·</span>
-                        <button type="button" onClick={onOpenInspector}>
-                            {telemetryTokensLabel}
-                        </button>
-                        <span className="ns-tel-sep">·</span>
-                        <button type="button" onClick={onOpenInspector}>
-                            H_K {telemetryHkLabel}
-                        </button>
+                    <div
+                        className={`ns-runtime-status${stopPending && isBusy ? ' ns-runtime-status-waiting' : ''}`}
+                        role="status"
+                        aria-live="polite"
+                    >
+                        {runtimeStatus}
                     </div>
                 </div>
             </footer>

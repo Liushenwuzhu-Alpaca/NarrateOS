@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { computeCacheHitRate } from './token-telemetry';
 
 /** 1. WAL & 事务锁状态 */
 export interface WalLockTelemetry {
@@ -17,11 +18,12 @@ export interface ModelPoolTelemetry {
     fastModel: string;
     strongModel: string;
     auditModel: string;
+    /** 未缓存输入 Token（与缓存读取/写入互不重叠） */
     inputTokens: number;
     cacheReadTokens: number;
+    /** 缓存写入 Token；旧调用方可缺省按 0，生产端始终传入 */
+    cacheWriteTokens?: number;
     outputTokens?: number;
-    /** 缓存命中率 (0-100 百分比或 0-1 小数，组件内部自动兼容格式化) */
-    cacheHitRate?: number;
 }
 
 /** 三池模型路由明细 (兼容 modelRouting 配置对象) */
@@ -235,14 +237,15 @@ function formatMetricNumber(value: number | null | undefined, digits = 2): strin
     return value.toFixed(digits);
 }
 
-function computeCacheHitRatePct(pool: ModelPoolTelemetry): number {
-    if (typeof pool.cacheHitRate === 'number' && Number.isFinite(pool.cacheHitRate)) {
-        const raw = pool.cacheHitRate <= 1 ? pool.cacheHitRate * 100 : pool.cacheHitRate;
-        return Math.min(100, Math.max(0, raw));
-    }
-    const denom = pool.inputTokens + pool.cacheReadTokens;
-    if (denom <= 0) return 0;
-    return Math.min(100, Math.max(0, (pool.cacheReadTokens / denom) * 100));
+/** 命中率百分比：口径复用 computeCacheHitRate；无 prompt 数据返回 null（未提供，不按 0 呈现） */
+function computeCacheHitRatePct(pool: ModelPoolTelemetry): number | null {
+    const rate = computeCacheHitRate(
+        pool.inputTokens,
+        pool.cacheReadTokens,
+        pool.cacheWriteTokens ?? 0
+    );
+    if (rate === undefined) return null;
+    return Math.min(100, Math.max(0, rate * 100));
 }
 
 function resolveWalBadgeClass(phase: string): string {
@@ -301,6 +304,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
     const [expandedEntityId, setExpandedEntityId] = useState<string | null>(null);
 
     const cacheHitPct = computeCacheHitRatePct(modelPool);
+    const cacheHitLabel = cacheHitPct === null ? '未提供' : `${cacheHitPct.toFixed(1)}%`;
     const hasHalt = haltDiagnostic !== null;
     const hasGateAlert =
         proseGate.recentViolations.length > 0 || (factChecker.blockedCount ?? 0) > 0;
@@ -421,13 +425,13 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
             ? Math.min(100, Math.round((volumeCompletedCh / volumeTotalCh) * 100))
             : null;
 
-    // Token 占比条 (遥测分组)
-    const uncachedInputTokens = Math.max(0, modelPool.inputTokens - modelPool.cacheReadTokens);
-    const outputTokens = modelPool.outputTokens ?? 0;
-    const barTotalTokens = Math.max(
-        1,
-        uncachedInputTokens + modelPool.cacheReadTokens + outputTokens
-    );
+    // Token 占比条 (遥测分组)：四项互不重叠，input 已是未缓存输入，不再二次扣减
+    const inputTokens = Math.max(0, modelPool.inputTokens);
+    const cacheReadTokens = Math.max(0, modelPool.cacheReadTokens);
+    const cacheWriteTokens = Math.max(0, modelPool.cacheWriteTokens ?? 0);
+    const outputTokens = Math.max(0, modelPool.outputTokens ?? 0);
+    const totalTokens = inputTokens + cacheReadTokens + cacheWriteTokens + outputTokens;
+    const barTotalTokens = Math.max(1, totalTokens);
 
     const toggleGroup = (key: InspectorSubtabKey): void => {
         setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -517,26 +521,28 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     'tel',
                     '遥测与健康度',
                     <span className="ns-i-sum ns-i-sum-quiet">
-                        缓存 {cacheHitPct.toFixed(1)}%
+                        缓存 {cacheHitLabel}
                     </span>,
                     <>
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
                                 <span>静态前缀缓存命中</span>
-                                <span className="ns-mono ns-i-green-ink">
-                                    {cacheHitPct.toFixed(1)}%
-                                </span>
+                                <span className="ns-mono ns-i-green-ink">{cacheHitLabel}</span>
                             </div>
                             <div className="ns-i-big">
-                                {cacheHitPct.toFixed(1)}
-                                <small className="ns-i-big-unit">%</small>
+                                {cacheHitPct === null ? '未提供' : cacheHitPct.toFixed(1)}
+                                {cacheHitPct !== null && (
+                                    <small className="ns-i-big-unit">%</small>
+                                )}
                             </div>
-                            <div className="ns-prog-bar ns-i-prog-top">
-                                <div
-                                    className="ns-prog-fill ns-i-fill-green"
-                                    style={{ width: `${cacheHitPct}%` }}
-                                />
-                            </div>
+                            {cacheHitPct !== null && (
+                                <div className="ns-prog-bar ns-i-prog-top">
+                                    <div
+                                        className="ns-prog-fill ns-i-fill-green"
+                                        style={{ width: `${cacheHitPct}%` }}
+                                    />
+                                </div>
+                            )}
                         </div>
 
                         {/* 四联指标卡片 */}
@@ -613,27 +619,34 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             </div>
                         </div>
 
-                        {/* 本章实耗与 Token 分布进度条 */}
+                        {/* 章节生成累计 Token 分布（只统计已记录的章节生成，不是全书总成本） */}
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
-                                <span>本章实耗 Token 分布</span>
+                                <span>章节生成累计 Token</span>
                                 <span className="ns-mono ns-i-head-value">
-                                    {formatTokenCount(modelPool.inputTokens + outputTokens)}
+                                    {formatTokenCount(totalTokens)}
                                 </span>
                             </div>
                             <div className="ns-i-bar">
                                 <div
                                     className="ns-i-bar-seg ns-i-seg-in"
-                                    title={`未命中输入 ${formatTokenCount(uncachedInputTokens)}`}
+                                    title={`未缓存输入 ${formatTokenCount(inputTokens)}`}
                                     style={{
-                                        width: `${(uncachedInputTokens / barTotalTokens) * 100}%`
+                                        width: `${(inputTokens / barTotalTokens) * 100}%`
                                     }}
                                 />
                                 <div
                                     className="ns-i-bar-seg ns-i-seg-green"
-                                    title={`缓存读取 ${formatTokenCount(modelPool.cacheReadTokens)}`}
+                                    title={`缓存读取 ${formatTokenCount(cacheReadTokens)}`}
                                     style={{
-                                        width: `${(modelPool.cacheReadTokens / barTotalTokens) * 100}%`
+                                        width: `${(cacheReadTokens / barTotalTokens) * 100}%`
+                                    }}
+                                />
+                                <div
+                                    className="ns-i-bar-seg ns-i-seg-amber"
+                                    title={`缓存写入 ${formatTokenCount(cacheWriteTokens)}`}
+                                    style={{
+                                        width: `${(cacheWriteTokens / barTotalTokens) * 100}%`
                                     }}
                                 />
                                 <div
@@ -646,10 +659,14 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             </div>
                             <div className="ns-mono ns-i-bar-legend">
                                 <span>
-                                    in {formatTokenCount(modelPool.inputTokens)} - cache{' '}
-                                    {formatTokenCount(modelPool.cacheReadTokens)} - out{' '}
+                                    in {formatTokenCount(inputTokens)} - read{' '}
+                                    {formatTokenCount(cacheReadTokens)} - write{' '}
+                                    {formatTokenCount(cacheWriteTokens)} - out{' '}
                                     {formatTokenCount(outputTokens)}
                                 </span>
+                            </div>
+                            <div className="ns-i-scope-note">
+                                只统计已记录的章节生成；不含开书、手改同步与整理消耗，不是全书总成本。
                             </div>
                         </div>
                     </>

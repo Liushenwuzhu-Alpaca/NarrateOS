@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-17T07:12:48Z",
+  "generatedAt": "2026-11-17T11:16:32Z",
   "title": "Design System: NarrateOS Studio",
   "extensions": {
     "colorMeta": {
@@ -8,7 +8,7 @@
         "role": "primary",
         "displayName": "调度蓝",
         "canonical": "#5686fe",
-        "description": "主操作、激活点和键盘焦点；实心主按钮填充。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "description": "激活点、页签指示和键盘焦点；实心填充改用 primary-fill。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
         "metadata": {
           "tonalRamp": "synthesized for display only; not a production token"
         },
@@ -27,7 +27,7 @@
         "role": "primary",
         "displayName": "调度蓝·浅色",
         "canonical": "#3b6fe0",
-        "description": "浅色主题的主操作、激活点与键盘焦点。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "description": "浅色主题的激活点、页签指示与键盘焦点；实心填充改用 primary-fill-light。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
         "metadata": {
           "tonalRamp": "synthesized for display only; not a production token"
         },
@@ -40,6 +40,82 @@
           "oklch(72% 0.1597 263.2)",
           "oklch(84% 0.1125 263.2)",
           "oklch(95% 0.0581 263.2)"
+        ]
+      },
+      "primary-fill": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充",
+        "canonical": "#3560d2",
+        "description": "深色主题主按钮、组合推进右半键与圆形发送键的实心填充，白字对比达标。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0822 265.0)",
+          "oklch(27% 0.1278 265.0)",
+          "oklch(39% 0.1643 265.0)",
+          "oklch(50% 0.1826 265.0)",
+          "oklch(61% 0.1826 265.0)",
+          "oklch(72% 0.1607 265.0)",
+          "oklch(84% 0.1132 265.0)",
+          "oklch(95% 0.0584 265.0)"
+        ]
+      },
+      "primary-fill-light": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充·浅色",
+        "canonical": "#3b6fe0",
+        "description": "浅色主题的实心填充，与浅色品牌主蓝同值但作为独立 token 维护。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0817 263.2)",
+          "oklch(27% 0.1270 263.2)",
+          "oklch(39% 0.1633 263.2)",
+          "oklch(50% 0.1814 263.2)",
+          "oklch(61% 0.1814 263.2)",
+          "oklch(72% 0.1597 263.2)",
+          "oklch(84% 0.1125 263.2)",
+          "oklch(95% 0.0581 263.2)"
+        ]
+      },
+      "primary-fill-hover": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充·悬停",
+        "canonical": "#456dd6",
+        "description": "深色主题实心按钮的悬停填充，直接切换 token，不做 color-mix 提亮。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0754 265.6)",
+          "oklch(27% 0.1172 265.6)",
+          "oklch(39% 0.1507 265.6)",
+          "oklch(50% 0.1675 265.6)",
+          "oklch(61% 0.1675 265.6)",
+          "oklch(72% 0.1474 265.6)",
+          "oklch(84% 0.1038 265.6)",
+          "oklch(95% 0.0536 265.6)"
+        ]
+      },
+      "primary-fill-hover-light": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充·悬停·浅色",
+        "canonical": "#3866cc",
+        "description": "浅色主题实心按钮的悬停填充，比基态更深。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0749 263.5)",
+          "oklch(27% 0.1165 263.5)",
+          "oklch(39% 0.1498 263.5)",
+          "oklch(50% 0.1664 263.5)",
+          "oklch(61% 0.1664 263.5)",
+          "oklch(72% 0.1464 263.5)",
+          "oklch(84% 0.1032 263.5)",
+          "oklch(95% 0.0532 263.5)"
         ]
       },
       "primary-ink": {
@@ -540,7 +616,7 @@
         "role": "secondary",
         "displayName": "朱印红",
         "canonical": "#e0664a",
-        "description": "深色主题模式标识朱印点与定稿钤印；不承担告警。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "description": "深色主题章末「定稿」钤印与开书强调标题色；不承担告警。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
         "metadata": {
           "tonalRamp": "synthesized for display only; not a production token"
         },
@@ -559,7 +635,7 @@
         "role": "secondary",
         "displayName": "朱印红·浅色",
         "canonical": "#c0492f",
-        "description": "浅色主题模式标识与钤印。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "description": "浅色主题章末钤印与开书强调标题色。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
         "metadata": {
           "tonalRamp": "synthesized for display only; not a production token"
         },
@@ -772,17 +848,17 @@
       "name": "主按钮",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "单步推进、保存与确认动作；30px 高、10px 圆角，悬停仅在精细指针设备生效。与名义小号类并列时按源顺序仍为 30px，样例不触发真实业务。",
+      "description": "单步推进、保存与确认动作；30px 高、10px 圆角，实心填充与悬停使用专用 primary-fill 成对 token，白字不变；焦点外环仍用品牌主蓝。悬停仅在精细指针设备生效。与名义小号类并列时按源顺序仍为 30px，样例不触发真实业务。",
       "html": "<div class=\"ds-pbtn-demo\">\n  <section class=\"ds-pbtn-sample ds-pbtn-sample--dark\">\n    <div class=\"ds-pbtn-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-pbtn-row\">\n      <button type=\"button\" class=\"ds-pbtn-btn\">推进 1 章</button>\n      <button type=\"button\" class=\"ds-pbtn-btn ds-pbtn-btn--sm\">推进 1 章（小号类）</button>\n      <button type=\"button\" class=\"ds-pbtn-btn\" disabled>推进 1 章（禁用）</button>\n    </div>\n    <p class=\"ds-pbtn-note\">主按钮与名义小号类并列时，源码层叠后高度仍为 30px；样例不触发真实推进。</p>\n  </section>\n  <section class=\"ds-pbtn-sample ds-pbtn-sample--light\">\n    <div class=\"ds-pbtn-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-pbtn-row\">\n      <button type=\"button\" class=\"ds-pbtn-btn\">推进 1 章</button>\n      <button type=\"button\" class=\"ds-pbtn-btn ds-pbtn-btn--sm\">推进 1 章（小号类）</button>\n      <button type=\"button\" class=\"ds-pbtn-btn\" disabled>推进 1 章（禁用）</button>\n    </div>\n    <p class=\"ds-pbtn-note\">主按钮与名义小号类并列时，源码层叠后高度仍为 30px；样例不触发真实推进。</p>\n  </section>\n</div>",
-      "css": ".ds-pbtn-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-pbtn-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-pbtn-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-brand: #5686fe;\n  --ds-on-primary: #ffffff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n}\n.ds-pbtn-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-brand: #3b6fe0;\n  --ds-on-primary: #ffffff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n}\n.ds-pbtn-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-pbtn-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-pbtn-demo { grid-template-columns: minmax(0, 1fr); } }\n/* 小号类与主按钮同特异性，主按钮在源顺序中更晚，有效高度仍为 30px。 */\n.ds-pbtn-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n.ds-pbtn-btn { box-sizing: border-box; height: 30px; padding: 0 11px; border: 1px solid transparent; border-radius: 10px; background: var(--ds-brand); color: var(--ds-on-primary); font: 500 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; cursor: pointer; transition: background .15s ease, opacity .15s ease; }\n.ds-pbtn-btn:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-pbtn-btn:disabled { opacity: .45; cursor: not-allowed; }\n@media (hover: hover) and (pointer: fine) { .ds-pbtn-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--ds-brand) 86%, #fff); } }\n"
+      "css": ".ds-pbtn-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-pbtn-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-pbtn-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-brand: #5686fe;\n  --ds-brand-fill: #3560d2;\n  --ds-brand-fill-hover: #456dd6;\n  --ds-on-primary: #ffffff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n}\n.ds-pbtn-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-brand: #3b6fe0;\n  --ds-brand-fill: #3b6fe0;\n  --ds-brand-fill-hover: #3866cc;\n  --ds-on-primary: #ffffff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n}\n.ds-pbtn-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-pbtn-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-pbtn-demo { grid-template-columns: minmax(0, 1fr); } }\n/* 小号类与主按钮同特异性，主按钮在源顺序中更晚，有效高度仍为 30px。 */\n.ds-pbtn-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n.ds-pbtn-btn { box-sizing: border-box; height: 30px; padding: 0 11px; border: 1px solid transparent; border-radius: 10px; background: var(--ds-brand-fill); color: var(--ds-on-primary); font: 500 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; cursor: pointer; transition: background .15s ease, opacity .15s ease; }\n.ds-pbtn-btn:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-pbtn-btn:disabled { opacity: .45; cursor: not-allowed; }\n@media (hover: hover) and (pointer: fine) { .ds-pbtn-btn:hover:not(:disabled) { background: var(--ds-brand-fill-hover); } }\n"
     },
     {
       "name": "次按钮",
       "kind": "button",
       "refersTo": "button-ghost",
-      "description": "取消、编辑与开新书等次操作；30/26/22px 三档，选中态使用品牌浅底。悬停时背景被表面色覆盖、文字保持品牌强调。",
-      "html": "<div class=\"ds-gbtn-demo\">\n  <section class=\"ds-gbtn-sample ds-gbtn-sample--dark\">\n    <div class=\"ds-gbtn-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-gbtn-row\">\n      <button type=\"button\" class=\"ds-gbtn-btn\">取消</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--sm\">＋ 开新书</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--xs\">收起</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--on\">编辑中</button>\n      <button type=\"button\" class=\"ds-gbtn-btn\" disabled>取消（禁用）</button>\n    </div>\n    <p class=\"ds-gbtn-note\">次按钮 30px，小号 26px，极小号 22px；选中态只作外观示例。</p>\n  </section>\n  <section class=\"ds-gbtn-sample ds-gbtn-sample--light\">\n    <div class=\"ds-gbtn-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-gbtn-row\">\n      <button type=\"button\" class=\"ds-gbtn-btn\">取消</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--sm\">＋ 开新书</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--xs\">收起</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--on\">编辑中</button>\n      <button type=\"button\" class=\"ds-gbtn-btn\" disabled>取消（禁用）</button>\n    </div>\n    <p class=\"ds-gbtn-note\">次按钮 30px，小号 26px，极小号 22px；选中态只作外观示例。</p>\n  </section>\n</div>",
-      "css": ".ds-gbtn-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-gbtn-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-gbtn-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-card: #232324;\n  --ds-bg-surface-2: #2c2c2e;\n  --ds-border-2: rgba(255,255,255,0.12);\n  --ds-border-3: rgba(255,255,255,0.2);\n  --ds-text-1: #f9fafb;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-brand-line: rgba(86,134,254,0.42);\n  --ds-brand-soft: rgba(86,134,254,0.14);\n  --ds-brand-ink: #86a8ff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-gbtn-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-card: #fffdf9;\n  --ds-bg-surface-2: #fffefb;\n  --ds-border-2: rgba(28,25,21,0.18);\n  --ds-border-3: rgba(28,25,21,0.3);\n  --ds-text-1: #1c1a17;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-brand-line: rgba(59,111,224,0.4);\n  --ds-brand-soft: rgba(59,111,224,0.1);\n  --ds-brand-ink: #2b5cc9;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-gbtn-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-gbtn-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-gbtn-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-gbtn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }\n.ds-gbtn-btn { box-sizing: border-box; height: 30px; padding: 0 10px; border: 1px solid var(--ds-border-2); border-radius: 10px; background: var(--ds-bg-card); color: var(--ds-text-1); font: 500 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }\n.ds-gbtn-btn--sm { height: 26px; padding: 0 9px; border-radius: 6px; font-size: 12px; }\n.ds-gbtn-btn--xs { height: 22px; padding: 0 7px; border-radius: 6px; font-size: 11px; }\n.ds-gbtn-btn--on { border-color: var(--ds-brand-line); background: var(--ds-brand-soft); color: var(--ds-brand-ink); }\n.ds-gbtn-btn:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-gbtn-btn:disabled { opacity: .45; cursor: not-allowed; }\n@media (hover: hover) and (pointer: fine) { .ds-gbtn-btn:hover:not(:disabled) { background: var(--ds-bg-surface-2); border-color: var(--ds-border-3); } }\n"
+      "description": "取消、编辑与开新书等次操作；30/26/24px 三档，粗指针设备极小号放大到 32px（样例 CSS 含同一媒体条件），选中态使用品牌浅底。悬停时背景被表面色覆盖、文字保持品牌强调。",
+      "html": "<div class=\"ds-gbtn-demo\">\n  <section class=\"ds-gbtn-sample ds-gbtn-sample--dark\">\n    <div class=\"ds-gbtn-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-gbtn-row\">\n      <button type=\"button\" class=\"ds-gbtn-btn\">取消</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--sm\">＋ 开新书</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--xs\">收起</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--on\">编辑中</button>\n      <button type=\"button\" class=\"ds-gbtn-btn\" disabled>取消（禁用）</button>\n    </div>\n    <p class=\"ds-gbtn-note\">次按钮 30px，小号 26px，极小号 24px（粗指针 32px）；选中态只作外观示例。</p>\n  </section>\n  <section class=\"ds-gbtn-sample ds-gbtn-sample--light\">\n    <div class=\"ds-gbtn-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-gbtn-row\">\n      <button type=\"button\" class=\"ds-gbtn-btn\">取消</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--sm\">＋ 开新书</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--xs\">收起</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--on\">编辑中</button>\n      <button type=\"button\" class=\"ds-gbtn-btn\" disabled>取消（禁用）</button>\n    </div>\n    <p class=\"ds-gbtn-note\">次按钮 30px，小号 26px，极小号 24px（粗指针 32px）；选中态只作外观示例。</p>\n  </section>\n</div>",
+      "css": ".ds-gbtn-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-gbtn-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-gbtn-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-card: #232324;\n  --ds-bg-surface-2: #2c2c2e;\n  --ds-border-2: rgba(255,255,255,0.12);\n  --ds-border-3: rgba(255,255,255,0.2);\n  --ds-text-1: #f9fafb;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-brand-line: rgba(86,134,254,0.42);\n  --ds-brand-soft: rgba(86,134,254,0.14);\n  --ds-brand-ink: #86a8ff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-gbtn-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-card: #fffdf9;\n  --ds-bg-surface-2: #fffefb;\n  --ds-border-2: rgba(28,25,21,0.18);\n  --ds-border-3: rgba(28,25,21,0.3);\n  --ds-text-1: #1c1a17;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-brand-line: rgba(59,111,224,0.4);\n  --ds-brand-soft: rgba(59,111,224,0.1);\n  --ds-brand-ink: #2b5cc9;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-gbtn-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-gbtn-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-gbtn-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-gbtn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }\n.ds-gbtn-btn { box-sizing: border-box; height: 30px; padding: 0 10px; border: 1px solid var(--ds-border-2); border-radius: 10px; background: var(--ds-bg-card); color: var(--ds-text-1); font: 500 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }\n.ds-gbtn-btn--sm { height: 26px; padding: 0 9px; border-radius: 6px; font-size: 12px; }\n.ds-gbtn-btn--xs { height: 24px; padding: 0 7px; border-radius: 6px; font-size: 11px; }\n.ds-gbtn-btn--on { border-color: var(--ds-brand-line); background: var(--ds-brand-soft); color: var(--ds-brand-ink); }\n.ds-gbtn-btn:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-gbtn-btn:disabled { opacity: .45; cursor: not-allowed; }\n@media (hover: hover) and (pointer: fine) { .ds-gbtn-btn:hover:not(:disabled) { background: var(--ds-bg-surface-2); border-color: var(--ds-border-3); } }\n@media (pointer: coarse) { .ds-gbtn-btn--xs { height: 32px; padding: 0 12px; } }\n"
     },
     {
       "name": "输入与文本域",
@@ -796,8 +872,8 @@
       "name": "页签",
       "kind": "nav",
       "refersTo": "nav-tabs",
-      "description": "中栏底部蓝线与右栏浅底两种页签；仅外观示例，不实现方向键切换、roving tabindex 或真实视图切换。",
-      "html": "<div class=\"ds-tabs-demo\">\n  <section class=\"ds-tabs-sample ds-tabs-sample--dark\">\n    <div class=\"ds-tabs-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">中栏页签 · 底部蓝线</div>\n      <div class=\"ds-tabs-bar\">\n        <button type=\"button\" class=\"ds-tabs-tab ds-tabs-tab--on\" aria-selected=\"true\">正文</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">细纲</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">修改 <span class=\"ds-tabs-count\">2</span></button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">视图</button>\n      </div>\n    </div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">右栏页签 · 浅底选中</div>\n      <div class=\"ds-tabs-rhead\">\n        <button type=\"button\" class=\"ds-tabs-rtab ds-tabs-rtab--on\" aria-selected=\"true\">目录</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">检查器</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">工具</button>\n      </div>\n    </div>\n    <p class=\"ds-tabs-note\">页签是原生按钮外观；样例不实现方向键切换或 roving tabindex。</p>\n  </section>\n  <section class=\"ds-tabs-sample ds-tabs-sample--light\">\n    <div class=\"ds-tabs-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">中栏页签 · 底部蓝线</div>\n      <div class=\"ds-tabs-bar\">\n        <button type=\"button\" class=\"ds-tabs-tab ds-tabs-tab--on\" aria-selected=\"true\">正文</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">细纲</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">修改 <span class=\"ds-tabs-count\">2</span></button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">视图</button>\n      </div>\n    </div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">右栏页签 · 浅底选中</div>\n      <div class=\"ds-tabs-rhead\">\n        <button type=\"button\" class=\"ds-tabs-rtab ds-tabs-rtab--on\" aria-selected=\"true\">目录</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">检查器</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">工具</button>\n      </div>\n    </div>\n    <p class=\"ds-tabs-note\">页签是原生按钮外观；样例不实现方向键切换或 roving tabindex。</p>\n  </section>\n</div>",
+      "description": "中栏底部蓝线与右栏浅底两种页签。生产 tablist 已支持 ArrowLeft / ArrowRight / Home / End 自动激活与 roving tabindex，并以 aria-controls 关联 tabpanel；本样例是静态外观，不实现键盘行为或真实视图切换。",
+      "html": "<div class=\"ds-tabs-demo\">\n  <section class=\"ds-tabs-sample ds-tabs-sample--dark\">\n    <div class=\"ds-tabs-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">中栏页签 · 底部蓝线</div>\n      <div class=\"ds-tabs-bar\">\n        <button type=\"button\" class=\"ds-tabs-tab ds-tabs-tab--on\" aria-selected=\"true\">正文</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">细纲</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">修改 <span class=\"ds-tabs-count\">2</span></button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">视图</button>\n      </div>\n    </div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">右栏页签 · 浅底选中</div>\n      <div class=\"ds-tabs-rhead\">\n        <button type=\"button\" class=\"ds-tabs-rtab ds-tabs-rtab--on\" aria-selected=\"true\">目录</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">检查器</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">工具</button>\n      </div>\n    </div>\n    <p class=\"ds-tabs-note\">生产页签已支持 ArrowLeft / ArrowRight / Home / End 与 roving tabindex；本样例仅静态外观。</p>\n  </section>\n  <section class=\"ds-tabs-sample ds-tabs-sample--light\">\n    <div class=\"ds-tabs-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">中栏页签 · 底部蓝线</div>\n      <div class=\"ds-tabs-bar\">\n        <button type=\"button\" class=\"ds-tabs-tab ds-tabs-tab--on\" aria-selected=\"true\">正文</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">细纲</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">修改 <span class=\"ds-tabs-count\">2</span></button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">视图</button>\n      </div>\n    </div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">右栏页签 · 浅底选中</div>\n      <div class=\"ds-tabs-rhead\">\n        <button type=\"button\" class=\"ds-tabs-rtab ds-tabs-rtab--on\" aria-selected=\"true\">目录</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">检查器</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">工具</button>\n      </div>\n    </div>\n    <p class=\"ds-tabs-note\">生产页签已支持 ArrowLeft / ArrowRight / Home / End 与 roving tabindex；本样例仅静态外观。</p>\n  </section>\n</div>",
       "css": ".ds-tabs-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-tabs-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-tabs-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-panel: #18181a;\n  --ds-bg-hover: rgba(255,255,255,0.05);\n  --ds-bg-press: rgba(255,255,255,0.09);\n  --ds-border-1: rgba(255,255,255,0.06);\n  --ds-text-1: #f9fafb;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n}\n.ds-tabs-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-panel: #f3efe7;\n  --ds-bg-hover: rgba(28,25,21,0.05);\n  --ds-bg-press: rgba(28,25,21,0.09);\n  --ds-border-1: rgba(28,25,21,0.1);\n  --ds-text-1: #1c1a17;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n}\n.ds-tabs-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-tabs-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-tabs-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-tabs-block { margin-bottom: 16px; }\n.ds-tabs-block:last-of-type { margin-bottom: 0; }\n.ds-tabs-caption { margin-bottom: 6px; font: 500 10.5px/1.4 var(--ds-font-sans); color: var(--ds-text-4); }\n.ds-tabs-bar { box-sizing: border-box; height: 38px; display: flex; align-items: center; gap: 6px; padding: 0 14px; border-bottom: 1px solid var(--ds-border-1); background: var(--ds-bg-base); }\n/* 中栏页签的 hover 在源码中不设媒体门控；右栏页签有门控。 */\n.ds-tabs-tab { position: relative; box-sizing: border-box; height: 100%; padding: 0 6px; border: 0; background: transparent; color: var(--ds-text-3); font: 400 13px/1 var(--ds-font-sans); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; cursor: pointer; transition: color .15s ease; }\n.ds-tabs-tab:hover { color: var(--ds-text-1); }\n.ds-tabs-tab--on { color: var(--ds-text-1); font-weight: 500; }\n.ds-tabs-tab--on::after { content: \"\"; position: absolute; left: 4px; right: 4px; bottom: 0; height: 2px; border-radius: 2px; background: var(--ds-brand); }\n.ds-tabs-count { font: 500 10.5px/1 var(--ds-font-mono); color: var(--ds-text-4); }\n.ds-tabs-rhead { box-sizing: border-box; height: 46px; display: flex; align-items: center; gap: 2px; padding: 0 10px 0 12px; border-bottom: 1px solid var(--ds-border-1); background: var(--ds-bg-panel); }\n.ds-tabs-rtab { box-sizing: border-box; height: 30px; padding: 0 10px; border-radius: 6px; border: 0; background: transparent; color: var(--ds-text-3); font: 400 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; transition: background .12s ease, color .12s ease; }\n.ds-tabs-rtab--on { background: var(--ds-bg-press); color: var(--ds-text-1); font-weight: 500; }\n@media (hover: hover) and (pointer: fine) { .ds-tabs-rtab:hover { background: var(--ds-bg-hover); color: var(--ds-text-1); } }\n.ds-tabs-tab:focus-visible, .ds-tabs-rtab:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n"
     },
     {

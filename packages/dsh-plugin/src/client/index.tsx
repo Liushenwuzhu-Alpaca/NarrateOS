@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives';
+import { handleTabKeyDown } from './tab-keyboard';
+import { aggregateTelemetryTokens } from './token-telemetry';
 import {
     bootBook,
     deleteSignal,
@@ -108,18 +110,6 @@ function asString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-/** 兼容嵌套 token_usage 与扁平字段读取 Token 消耗 */
-function readTelemetryTokens(item: TelemetryItem | null | undefined): {
-    inputTokens: number;
-    cacheReadTokens: number;
-    outputTokens: number;
-} {
-    return {
-        inputTokens: item?.token_usage?.inputTokens ?? item?.inputTokens ?? 0,
-        cacheReadTokens: item?.token_usage?.cacheReadTokens ?? item?.cacheReadTokens ?? 0,
-        outputTokens: item?.token_usage?.outputTokens ?? item?.outputTokens ?? 0
-    };
-}
 
 /** 兼容嵌套 metrics 与扁平字段读取文风四联指标 */
 function readTelemetryMetrics(item: TelemetryItem | null | undefined): {
@@ -309,6 +299,7 @@ export function NarrateStudioRoot(): React.ReactElement {
     const [haltView, setHaltView] = useState<HaltViewPayload | null>(null);
 
     const [latestSseStage, setLatestSseStage] = useState<string | null>(null);
+    const [haltWaiting, setHaltWaiting] = useState(false);
     const [stageOverrides, setStageOverrides] = useState<Partial<Record<PipelineStageId, StageNodeState>>>({});
     const [liveTelemetry, setLiveTelemetry] = useState<TelemetryItem | null>(null);
     const [gateViolations, setGateViolations] = useState<ProseGateViolationItem[]>([]);
@@ -571,8 +562,10 @@ export function NarrateStudioRoot(): React.ReactElement {
                 workspaceEpochRef.current += 1;
                 chapterRequestSeqRef.current += 1;
                 currentBookRootRef.current = bookRoot;
+                setHaltWaiting(false);
                 setStageOverrides({});
                 setLiveTelemetry(null);
+                setTelemetryView(null);
                 setGateViolations([]);
                 showToast('已切换当前作品仓库');
                 void refreshAllRef.current(null);
@@ -585,13 +578,15 @@ export function NarrateStudioRoot(): React.ReactElement {
                 if (!stageName) return;
 
                 if (stageName === 'STARTING') {
+                    setHaltWaiting(false);
                     setStageOverrides({});
                     setLatestSseStage('LIBRARIAN');
                     setStatus((prev) =>
                         prev
                             ? {
                                   ...prev,
-                                  runtime: { ...prev.runtime, activeTask: 'STEPPING' }
+                                  yolo: { ...prev.yolo, stopRequested: false },
+                                  runtime: { ...prev.runtime, activeTask: 'STEPPING', haltRequested: false }
                               }
                             : prev
                     );
@@ -763,9 +758,22 @@ export function NarrateStudioRoot(): React.ReactElement {
                 return;
             }
 
+            if (event === 'halt:waiting') {
+                setHaltWaiting(true);
+                setStatus((prev) => prev
+                    ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } }
+                    : prev);
+                return;
+            }
+
             if (event === 'halt:completed') {
-                void loadStatus().catch(() => undefined);
-                void loadViewsRef.current();
+                setHaltWaiting(false);
+                // 完成事件之后宿主会关闭 SSE，不能依赖随后 HTTP 读取来结束等待。
+                setStatus((prev) => prev ? {
+                    ...prev,
+                    runtime: { ...prev.runtime, activeTask: 'IDLE', haltRequested: true },
+                    yolo: { ...prev.yolo, running: false, stopRequested: true, currentStage: null }
+                } : prev);
                 return;
             }
 
@@ -843,6 +851,7 @@ export function NarrateStudioRoot(): React.ReactElement {
             try {
                 await selectBook({ bookRoot });
                 currentBookRootRef.current = bookRoot;
+                setHaltWaiting(false);
                 setEntitiesView(null);
                 setHorizonView(null);
                 setThreadsView(null);
@@ -1101,30 +1110,10 @@ export function NarrateStudioRoot(): React.ReactElement {
         return entries.length > 0 ? entries[entries.length - 1]! : null;
     }, [liveTelemetry, telemetryView]);
 
-    const aggregateTokens = useMemo(() => {
-        const entries = telemetryView?.entries ?? [];
-        let inputTokens = 0;
-        let cacheReadTokens = 0;
-        let outputTokens = 0;
-        for (const item of entries) {
-            const tokens = readTelemetryTokens(item);
-            inputTokens += tokens.inputTokens;
-            cacheReadTokens += tokens.cacheReadTokens;
-            outputTokens += tokens.outputTokens;
-        }
-        const latestTokens = readTelemetryTokens(latestTelemetryEntry);
-        const finalInputTokens = inputTokens || latestTokens.inputTokens;
-        const finalCacheReadTokens = cacheReadTokens || latestTokens.cacheReadTokens;
-        const finalOutputTokens = outputTokens || latestTokens.outputTokens;
-        return {
-            inputTokens: finalInputTokens,
-            cacheReadTokens: finalCacheReadTokens,
-            outputTokens: finalOutputTokens,
-            cacheHitRate:
-                latestTelemetryEntry?.cacheHitRate ??
-                (finalInputTokens > 0 ? finalCacheReadTokens / finalInputTokens : undefined)
-        };
-    }, [latestTelemetryEntry, telemetryView]);
+    const aggregateTokens = useMemo(
+        () => aggregateTelemetryTokens(telemetryView?.entries ?? []),
+        [telemetryView]
+    );
 
     const latestMetrics = useMemo(
         () => readTelemetryMetrics(latestTelemetryEntry),
@@ -1250,6 +1239,8 @@ export function NarrateStudioRoot(): React.ReactElement {
                 timelineMode={String(status?.worldState.timeline_mode ?? 'MAINLINE')}
                 walPhase={status?.walPhase ?? 'IDLE'}
                 activeTask={activeTask}
+                haltRequested={status?.runtime.haltRequested}
+                haltWaiting={haltWaiting}
                 yolo={status?.yolo}
                 chapters={chapters}
                 chapterDetail={centerChapterDetail}
@@ -1267,13 +1258,6 @@ export function NarrateStudioRoot(): React.ReactElement {
                 }}
                 dirtyChaptersCount={dirtyChaptersCount}
                 externalViewCommand={externalViewCommand}
-                telemetrySummary={{
-                    cacheHitRate: aggregateTokens.cacheHitRate,
-                    inputTokens: aggregateTokens.inputTokens,
-                    cacheReadTokens: aggregateTokens.cacheReadTokens,
-                    outputTokens: aggregateTokens.outputTokens,
-                    kontoyiannisHk: latestMetrics.kontoyiannisEntropy ?? undefined
-                }}
                 rightOpen={rightOpen}
                 hasSafeHalt={Boolean(safeHaltInfo)}
                 onSelectBook={handleSelectBook}
@@ -1315,10 +1299,13 @@ export function NarrateStudioRoot(): React.ReactElement {
             {/* 右侧三页签辅助栏：目录 | 检查器 | 工具 */}
             <aside className="ns-right" aria-label="右侧辅助栏">
                 <div className="ns-r-head">
-                    <div className="ns-r-tabs" role="tablist">
+                    <div className="ns-r-tabs" role="tablist" aria-label="作品辅助视图" onKeyDown={handleTabKeyDown}>
                         <button
                             type="button"
                             role="tab"
+                            id="ns-right-tab-toc"
+                            aria-controls="ns-right-panel"
+                            tabIndex={rightTab === 'toc' ? 0 : -1}
                             aria-selected={rightTab === 'toc'}
                             className={`ns-r-tab ${rightTab === 'toc' ? 'on' : ''}`}
                             onClick={() => setRightTab('toc')}
@@ -1328,6 +1315,9 @@ export function NarrateStudioRoot(): React.ReactElement {
                         <button
                             type="button"
                             role="tab"
+                            id="ns-right-tab-insp"
+                            aria-controls="ns-right-panel"
+                            tabIndex={rightTab === 'insp' ? 0 : -1}
                             aria-selected={rightTab === 'insp'}
                             className={`ns-r-tab ${rightTab === 'insp' ? 'on' : ''}`}
                             onClick={() => setRightTab('insp')}
@@ -1338,6 +1328,9 @@ export function NarrateStudioRoot(): React.ReactElement {
                         <button
                             type="button"
                             role="tab"
+                            id="ns-right-tab-tools"
+                            aria-controls="ns-right-panel"
+                            tabIndex={rightTab === 'tools' ? 0 : -1}
                             aria-selected={rightTab === 'tools'}
                             className={`ns-r-tab ${rightTab === 'tools' ? 'on' : ''}`}
                             onClick={() => setRightTab('tools')}
@@ -1356,7 +1349,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                     </button>
                 </div>
 
-                <div className="ns-r-body">
+                <div className="ns-r-body" id="ns-right-panel" role="tabpanel" aria-labelledby={`ns-right-tab-${rightTab}`} tabIndex={0}>
                     {rightTab === 'toc' ? (
                         <LeftBookNav
                             embedded
@@ -1404,10 +1397,8 @@ export function NarrateStudioRoot(): React.ReactElement {
                                 auditModel: modelPools.auditModel,
                                 inputTokens: aggregateTokens.inputTokens,
                                 cacheReadTokens: aggregateTokens.cacheReadTokens,
-                                outputTokens: aggregateTokens.outputTokens,
-                                ...(aggregateTokens.cacheHitRate !== undefined
-                                    ? { cacheHitRate: aggregateTokens.cacheHitRate }
-                                    : {})
+                                cacheWriteTokens: aggregateTokens.cacheWriteTokens,
+                                outputTokens: aggregateTokens.outputTokens
                             }}
                             stageArtifact={stageArtifact}
                             proseGate={{

@@ -46,6 +46,9 @@ export const BOOT_CSS = `
     --ns-brand-ink: #86a8ff;
     --ns-brand-soft: rgba(86, 134, 254, 0.14);
     --ns-brand-line: rgba(86, 134, 254, 0.42);
+    /* 实心主按钮专用填充: 白字基态与悬停均 >= 4.5:1, 不动 --ns-brand 焦点主蓝 */
+    --ns-brand-fill: #3560d2;
+    --ns-brand-fill-hover: #456dd6;
     --ns-green: #4ed17e;
     --ns-green-ink: #4ed17e;
     --ns-green-soft: rgba(78, 209, 126, 0.12);
@@ -96,6 +99,9 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell {
     --ns-brand-ink: #2b5cc9;
     --ns-brand-soft: rgba(59, 111, 224, 0.1);
     --ns-brand-line: rgba(59, 111, 224, 0.4);
+    /* 浅色实心填充保持基态白字 >= 4.5:1, 悬停改为加深而非提亮 */
+    --ns-brand-fill: #3b6fe0;
+    --ns-brand-fill-hover: #3866cc;
     --ns-green: #1f9d55;
     --ns-green-ink: #15703c;
     --ns-green-soft: rgba(31, 157, 85, 0.1);
@@ -195,6 +201,12 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell {
     min-height: 84px;
     resize: vertical;
     font-family: inherit;
+}
+
+/* 占位文字统一用弱化文字 token, 两主题对 --ns-bg-base 均 >= 4.5:1 */
+.ns-input::placeholder,
+.ns-textarea::placeholder {
+    color: var(--ns-text-4);
 }
 
 .ns-input:focus,

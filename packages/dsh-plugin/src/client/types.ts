@@ -160,6 +160,7 @@ export interface TelemetryItem {
     cacheHitRate?: number | undefined;
     inputTokens?: number | undefined;
     cacheReadTokens?: number | undefined;
+    cacheWriteTokens?: number | undefined;
     outputTokens?: number | undefined;
     metrics?: TelemetryMetrics | undefined;
     token_usage?: TelemetryTokenUsage | undefined;
@@ -353,6 +354,7 @@ export type SseEventName =
     | 'connected'
     | 'book_switched'
     | 'halt:requested'
+    | 'halt:waiting'
     | 'halt:completed'
     | 'sync:started'
     | 'sync:completed'
