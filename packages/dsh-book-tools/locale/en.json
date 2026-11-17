@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS Book Tools",
+        "description": "Scoped book read/grep/glob/edit tools, yield_* terminal gates, boot charter compiler, and turn-stopping enforcement hooks."
+    }
+}

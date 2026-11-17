@@ -1,0 +1,618 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Context } from '@deepseek-ai/cordis';
+import * as bookStorePlugin from '@narrateos/dsh-book-store';
+import {
+    ForeignKeyError,
+    InnateLockViolationError,
+    NodeSystemAdapter
+} from '@narrateos/dsh-book-store';
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
+import { afterEach, describe, expect, it } from 'vitest';
+import { GateValidationError } from '../errors.js';
+import * as bookToolsPlugin from '../index.js';
+
+const tempDirs: string[] = [];
+
+function createSpyExec(name: string, args: unknown): {
+    exec: ToolRunContext;
+    concludedCount: () => number;
+} {
+    let concluded = 0;
+    const exec: ToolRunContext = {
+        token: Symbol('exec') as ToolRunContext['token'],
+        callId: 'call-1' as ToolRunContext['callId'],
+        rootCallId: 'call-1' as ToolRunContext['rootCallId'],
+        name,
+        arguments: args,
+        signal: new AbortController().signal,
+        deferContext() {},
+        concludeTurn() {
+            concluded += 1;
+        }
+    };
+    return { exec, concludedCount: () => concluded };
+}
+
+async function createInitializedGitBook(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'narrateos-yield-test-'));
+    tempDirs.push(dir);
+
+    for (const sub of ['world', 'lore_library', 'index/L2_cards', 'entities', 'entities/cold_archive', 'manuscripts', '.ops']) {
+        await mkdir(join(dir, sub), { recursive: true });
+    }
+
+    await writeFile(
+        join(dir, 'world/book_config.yaml'),
+        'book_slug: yield-book\ntitle: 门禁测试作品\ntokens_per_char: 0.6\n',
+        'utf8'
+    );
+    await writeFile(
+        join(dir, 'world/world_state.md'),
+        '---\nstory_day: 1\ncurrent_volume: 1\ncurrent_chapter: 1\npov_character: char_001\ntimeline_mode: MAINLINE\n---\n\n开局稳定。\n',
+        'utf8'
+    );
+    await writeFile(
+        join(dir, 'world/open_threads.md'),
+        '# 跨卷伏笔台账\n\n- [thread_001 | status: ACTIVE] item_001 黄铜钥匙去向\n',
+        'utf8'
+    );
+    await writeFile(
+        join(dir, 'entities/char_001.md'),
+        [
+            '---',
+            'entity_id: char_001',
+            'canonical_name: 沈默',
+            'unique_aliases: []',
+            'contextual_titles: []',
+            'historical_anchors:',
+            '  - ch_0001:旧码头接货',
+            'last_seen_ch: 1',
+            '---',
+            '',
+            '## 1. Innate Locks (先天/底层永久红线 · since_day: -inf · 插叙永不屏蔽)',
+            '- [vis: PUBLIC] 左肩旧伤无法负重',
+            '',
+            '## 2. Acquired State & Numeric Ledger (跨章后天状态与数值账本 · 行级更新)',
+            '- [day:1 | ch:01 | vis: PUBLIC] 位于旧码头',
+            '',
+            '## 3. Irreversible Trajectory (不可逆极性变迁史 · 纪元内禁删)',
+            '- [day:1 | ch:01] 在旧码头清点木箱',
+            '',
+            '## 4. Recent Sliding Buffer & Voice (近期跨章缓冲与专属声纹)',
+            '- [day:1 | ch:01] 检视铁柜锁扣',
+            ''
+        ].join('\n'),
+        'utf8'
+    );
+    await writeFile(
+        join(dir, 'entities/item_001.md'),
+        [
+            '---',
+            'entity_id: item_001',
+            'canonical_name: 黄铜钥匙',
+            'unique_aliases: []',
+            'contextual_titles: []',
+            'historical_anchors: []',
+            'last_seen_ch: 1',
+            '---',
+            '',
+            '## 1. Innate Locks (先天/底层永久红线 · since_day: -inf · 插叙永不屏蔽)',
+            '- [vis: PUBLIC] 齿痕带编号 K-07',
+            '',
+            '## 2. Acquired State & Numeric Ledger (跨章后天状态与数值账本 · 行级更新)',
+            '- [day:1 | ch:01 | vis: PUBLIC] 由 char_001 暂存',
+            '',
+            '## 3. Irreversible Trajectory (不可逆极性变迁史 · 纪元内禁删)',
+            '',
+            '## 4. Recent Sliding Buffer & Voice (近期跨章缓冲与专属声纹)',
+            ''
+        ].join('\n'),
+        'utf8'
+    );
+    await writeFile(
+        join(dir, 'manuscripts/ch_0001.md'),
+        '# 第一章 旧码头\n\n沈默站在旧码头边，手里攥着那把黄铜钥匙。\n\n铁皮棚门吱呀一声推开。\n',
+        'utf8'
+    );
+
+    const system = new NodeSystemAdapter();
+    const ctx = new Context();
+    const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot: dir });
+    const store = ctx.narrateStore.openStore(dir);
+    await store.initializeWalFromDisk();
+    await system.initRepo(dir);
+    await system.commitPaths(dir, ['.'], 'chore(boot): init yield test book');
+    await storeFiber.dispose();
+
+    return dir;
+}
+
+afterEach(async () => {
+    while (tempDirs.length > 0) {
+        const dir = tempDirs.pop();
+        if (dir) {
+            await rm(dir, { recursive: true, force: true });
+        }
+    }
+});
+
+describe('yield_* 终态门禁工具确定性校验', () => {
+    it('yield_context_pack 强制检验成对挂载，缺 L3 原稿切片时打回，齐备后放行并结束回合', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-librarian',
+            bookRoot,
+            yieldTool: 'yield_context_pack',
+            targetChapter: 2,
+            targetDay: 2,
+            chapterGoal: '查明 item_001 归属'
+        });
+
+        const yieldPack = roleSet.toolMap.get('yield_context_pack')!;
+        expect(yieldPack.isConcurrencySafe?.({})).toBe(false);
+
+        // 选了 item_001 但既无 recall_queries 也无 recall_slices -> 必须拒绝
+        const badSpy = createSpyExec('yield_context_pack', {});
+        await expect(
+            yieldPack.execute(
+                {
+                    selected_entity_ids: ['item_001'],
+                    recall_queries: [],
+                    selected_lore_files: []
+                },
+                badSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(badSpy.concludedCount()).toBe(0);
+        expect(roleSet.hasYielded()).toBe(false);
+
+        // 同时携带 selected_entity_ids 与 recall_queries（命中文稿 ch_0001.md）-> 通过并 concludeTurn
+        const goodSpy = createSpyExec('yield_context_pack', {});
+        const okRes = (await yieldPack.execute(
+            {
+                selected_entity_ids: ['item_001', 'char_001'],
+                recall_queries: [
+                    { entity_id: 'item_001', extra_keywords: [] },
+                    { entity_id: 'char_001', extra_keywords: [] }
+                ],
+                selected_lore_files: []
+            },
+            goodSpy.exec
+        )) as { accepted: boolean; recalledSliceCount: number };
+
+        expect(okRes.accepted).toBe(true);
+        expect(okRes.recalledSliceCount).toBeGreaterThanOrEqual(2);
+        expect(goodSpy.concludedCount()).toBe(1);
+        expect(roleSet.hasYielded()).toBe(true);
+
+        roleSet.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+
+    it('yield_outline 拒绝 outline_text 直接拷贝 director_rationale，分离后正常提交', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-planner',
+            bookRoot,
+            yieldTool: 'yield_outline'
+        });
+        const yieldOutline = roleSet.toolMap.get('yield_outline')!;
+
+        const secretRationale = '全知幕后推演：真正的接头人将在第三章才现身，此处只是虚晃一枪';
+        const badSpy = createSpyExec('yield_outline', {});
+        await expect(
+            yieldOutline.execute(
+                {
+                    chapter_title: '第二章 货仓',
+                    target_word_count: 2500,
+                    focus_cast: ['char_001'],
+                    director_rationale: secretRationale,
+                    chapter_turn: '账本少了一页',
+                    scene_plan: [{ scene_index: 1, location: '旧货仓', summary: '核对装箱单' }],
+                    outline_text: `按计划执行，注意${secretRationale}`
+                },
+                badSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(badSpy.concludedCount()).toBe(0);
+
+        const goodSpy = createSpyExec('yield_outline', {});
+        await yieldOutline.execute(
+            {
+                chapter_title: '第二章 货仓',
+                target_word_count: 2500,
+                focus_cast: ['char_001'],
+                director_rationale: secretRationale,
+                chapter_turn: '账本少了一页',
+                scene_plan: [{ scene_index: 1, location: '旧货仓', summary: '核对装箱单', is_spotlight: true }],
+                outline_text: '沈默提灯照向货柜夹缝，发现三号箱封条有二次粘合痕迹，随后停下笔等待窗外脚步声。'
+            },
+            goodSpy.exec
+        );
+        expect(goodSpy.concludedCount()).toBe(1);
+
+        roleSet.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+
+    it('yield_verdict 对捏造引文立即报错打回，真实原句（去标点匹配）通过验真', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const draftText = '沈默低头看了一眼左手，掌心攥紧了黄铜钥匙，抬头望向仓库尽头。';
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-fc',
+            bookRoot,
+            yieldTool: 'yield_verdict',
+            draftText
+        });
+        const yieldVerdict = roleSet.toolMap.get('yield_verdict')!;
+
+        // 捏造草稿引文 -> 拒绝
+        const fakeDraftSpy = createSpyExec('yield_verdict', {});
+        await expect(
+            yieldVerdict.execute(
+                {
+                    passed: false,
+                    issues: [
+                        {
+                            severity: 'LOCAL_PATCH',
+                            paragraph_index: 0,
+                            description: '举重物违背左肩旧伤',
+                            quote_draft: '沈默单手扛起两百斤铁箱',
+                            quote_source: '左肩旧伤无法负重',
+                            source_ref: 'entities/char_001.md'
+                        }
+                    ]
+                },
+                fakeDraftSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(fakeDraftSpy.concludedCount()).toBe(0);
+
+        // 捏造档案引文 -> 拒绝
+        const fakeSourceSpy = createSpyExec('yield_verdict', {});
+        await expect(
+            yieldVerdict.execute(
+                {
+                    passed: false,
+                    issues: [
+                        {
+                            severity: 'LOCAL_PATCH',
+                            paragraph_index: 0,
+                            description: '与档案不符',
+                            quote_draft: '掌心攥紧了黄铜钥匙',
+                            quote_source: '角色其实右手残缺',
+                            source_ref: 'entities/char_001.md'
+                        }
+                    ]
+                },
+                fakeSourceSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(fakeSourceSpy.concludedCount()).toBe(0);
+
+        // 双侧真实原句 -> 放行
+        const validSpy = createSpyExec('yield_verdict', {});
+        const okRes = (await yieldVerdict.execute(
+            {
+                passed: false,
+                issues: [
+                    {
+                        severity: 'LOCAL_PATCH',
+                        paragraph_index: 0,
+                        description: '核对钥匙归属表述',
+                        quote_draft: '掌心攥紧了黄铜钥匙',
+                        quote_source: '由 char_001 暂存',
+                        source_ref: 'entities/item_001.md'
+                    }
+                ]
+            },
+            validSpy.exec
+        )) as { accepted: boolean };
+        expect(okRes.accepted).toBe(true);
+        expect(validSpy.concludedCount()).toBe(1);
+
+        roleSet.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+
+    it('yield_state_patch 拒绝篡改 Innate Locks、缺中文 canonical_name、断链外键，且仅在 commit 后 concludeTurn', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        // 先走完第 2 章正文 feat 提交以进入 FEAT_COMMITTED
+        const store = ctx.narrateStore.openStore(bookRoot);
+        await store.beginDraft(2);
+        await store.commitDraft(2, '# 第二章\n\n林舟在雨中等候。\n');
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-extractor',
+            bookRoot,
+            yieldTool: 'yield_state_patch',
+            chapterNumber: 2
+        });
+        const yieldPatch = roleSet.toolMap.get('yield_state_patch')!;
+
+        // 1. 篡改既有实体 Innate Locks -> 拒绝
+        const innateSpy = createSpyExec('yield_state_patch', {});
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_001',
+                            innate_locks_ops: [{ op: 'append', entry: { text: '强行改写红线' } }]
+                        }
+                    ],
+                    story_day_delta: 1,
+                    chapter_summary: '摘要'
+                },
+                innateSpy.exec
+            )
+        ).rejects.toThrow(InnateLockViolationError);
+        expect(innateSpy.concludedCount()).toBe(0);
+
+        // 2. 新建实体缺少中文 canonical_name -> 拒绝
+        const noChineseSpy = createSpyExec('yield_state_patch', {});
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_002',
+                            canonical_name: 'LinZhou'
+                        }
+                    ],
+                    story_day_delta: 0,
+                    chapter_summary: '摘要'
+                },
+                noChineseSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(noChineseSpy.concludedCount()).toBe(0);
+
+        // 3. 断链外键 -> 拒绝且磁盘无 char_002.md
+        const fkSpy = createSpyExec('yield_state_patch', {});
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_002',
+                            canonical_name: '林舟',
+                            acquired_state_ops: [
+                                {
+                                    op: 'append',
+                                    entry: { storyDay: 2, chapter: 2, visibility: 'PUBLIC', text: '持有 item_missing' }
+                                }
+                            ]
+                        }
+                    ],
+                    story_day_delta: 1,
+                    chapter_summary: '摘要'
+                },
+                fkSpy.exec
+            )
+        ).rejects.toThrow(ForeignKeyError);
+        expect(fkSpy.concludedCount()).toBe(0);
+
+        // 4. 合法补丁 -> state 提交成功并触发 concludeTurn
+        const okSpy = createSpyExec('yield_state_patch', {});
+        const okRes = (await yieldPatch.execute(
+            {
+                entity_patches: [
+                    {
+                        entity_id: 'char_002',
+                        canonical_name: '林舟',
+                        last_seen_ch: 2,
+                        acquired_state_ops: [
+                            {
+                                op: 'append',
+                                entry: { storyDay: 2, chapter: 2, visibility: 'PUBLIC', text: '与 char_001 接头' }
+                            }
+                        ]
+                    }
+                ],
+                story_day_delta: 1,
+                chapter_summary: '沈默与林舟接头。',
+                next_chapter_options: ['继续追踪钥匙']
+            },
+            okSpy.exec
+        )) as { accepted: boolean; commitSha?: string; updatedEntities: string[] };
+
+        expect(okRes.accepted).toBe(true);
+        expect(okRes.commitSha).toBeTruthy();
+        expect(okRes.updatedEntities).toEqual(['char_002']);
+        expect(okSpy.concludedCount()).toBe(1);
+        expect((await store.readTxState()).phase).toBe('STATE_COMMITTED');
+
+        roleSet.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+
+    it('yield_dream_commit 在门禁失败时磁盘零变动，全部通过后原子落盘、更新水位、commit 并 concludeTurn', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const diskCharBefore = await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8');
+        const diskThreadsBefore = await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8');
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        // 非安全相位 (FEAT_COMMITTED) 时必须拒绝 Dreaming
+        const store = ctx.narrateStore.openStore(bookRoot);
+        await store.beginDraft(2);
+        await store.commitDraft(2, '# 第二章\n\n过渡文本。\n');
+
+        const roleSetPhaseFail = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-phase-fail',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        const phaseSpy = createSpyExec('yield_dream_commit', {});
+        await expect(
+            roleSetPhaseFail.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '相位校验' },
+                phaseSpy.exec
+            )
+        ).rejects.toThrow(/FEAT_COMMITTED/);
+        expect(phaseSpy.concludedCount()).toBe(0);
+        roleSetPhaseFail.cleanup();
+
+        // 补齐 state 提交以进入 STATE_COMMITTED
+        await store.applyStatePatch(2, []);
+
+        // 测试 1：篡改 Innate Locks -> 拒绝且磁盘零写入
+        const roleSetInnate = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-innate',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        await roleSetInnate.toolMap.get('book_edit')!.execute(
+            {
+                path: 'entities/char_001.md',
+                target_text: '- [vis: PUBLIC] 左肩旧伤无法负重',
+                replacement_text: '- [vis: PUBLIC] 左肩完好无损'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        const innateSpy = createSpyExec('yield_dream_commit', {});
+        await expect(
+            roleSetInnate.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '试图改写红线' },
+                innateSpy.exec
+            )
+        ).rejects.toThrow(InnateLockViolationError);
+        expect(innateSpy.concludedCount()).toBe(0);
+        expect(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8')).toBe(diskCharBefore);
+        roleSetInnate.cleanup();
+
+        // 测试 2：>15 条活跃伏笔 -> 拒绝且磁盘零写入
+        const roleSetThreads = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-threads',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        const sixteenThreads = [
+            '# 跨卷伏笔台账',
+            '',
+            ...Array.from({ length: 16 }, (_, idx) => `- [thread_${String(idx + 1).padStart(3, '0')} | status: ACTIVE] 伏笔 ${idx + 1}`)
+        ].join('\n');
+        await roleSetThreads.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/open_threads.md',
+                mode: 'write',
+                replacement_text: sixteenThreads
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        const threadSpy = createSpyExec('yield_dream_commit', {});
+        await expect(
+            roleSetThreads.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '超限伏笔' },
+                threadSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(threadSpy.concludedCount()).toBe(0);
+        expect(await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8')).toBe(diskThreadsBefore);
+        roleSetThreads.cleanup();
+
+        // 测试 3：断链外键 -> 拒绝且磁盘零写入
+        const roleSetFk = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-fk',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        await roleSetFk.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/open_threads.md',
+                target_text: 'item_001 黄铜钥匙去向',
+                replacement_text: 'item_999 不存在的钥匙'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        const fkSpy = createSpyExec('yield_dream_commit', {});
+        await expect(
+            roleSetFk.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '断链测试' },
+                fkSpy.exec
+            )
+        ).rejects.toThrow(ForeignKeyError);
+        expect(fkSpy.concludedCount()).toBe(0);
+        expect(await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8')).toBe(diskThreadsBefore);
+        roleSetFk.cleanup();
+
+        // 测试 4：全部合规（归档伏笔 + 更新实体履历 + 投递 Spotlight Trigger）-> 原子提交并清理暂存
+        const roleSetOk = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-ok',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        await roleSetOk.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/open_threads.md',
+                target_text: '- [thread_001 | status: ACTIVE] item_001 黄铜钥匙去向',
+                replacement_text: '- [thread_001 | status: RESOLVED] item_001 黄铜钥匙去向（已核实）'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await roleSetOk.toolMap.get('book_edit')!.execute(
+            {
+                path: 'entities/char_001.md',
+                target_text: '- [day:1 | ch:01] 检视铁柜锁扣',
+                replacement_text: '- [day:1 | ch:01] 检视铁柜锁扣（已完成整理）'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+
+        const okSpy = createSpyExec('yield_dream_commit', {});
+        const commitRes = (await roleSetOk.toolMap.get('yield_dream_commit')!.execute(
+            {
+                summary: '完成第 2 章后整理',
+                chapter_number: 2,
+                accumulated_words: 3200,
+                spotlight_triggers: [
+                    {
+                        entity_id: 'char_001',
+                        reason: '旧码头线人已到达汇合临界点',
+                        suggested_mode: 'MAINLINE'
+                    }
+                ]
+            },
+            okSpy.exec
+        )) as { accepted: boolean; chapterNumber: number; committedPaths: string[] };
+
+        expect(commitRes.accepted).toBe(true);
+        expect(commitRes.chapterNumber).toBe(2);
+        expect(okSpy.concludedCount()).toBe(1);
+        expect(ctx.narrateStore.staging.has('run-dream-ok')).toBe(false);
+        expect((await store.readTxState()).phase).toBe('DREAM_COMMITTED');
+        expect((await store.readDreamWatermark())?.last_dream_ch).toBe(2);
+        expect(await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8')).toContain('status: RESOLVED');
+        expect(await readFile(join(bookRoot, '.ops/signals.jsonl'), 'utf8')).toContain('SPOTLIGHT_TRIGGER');
+
+        roleSetOk.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+});

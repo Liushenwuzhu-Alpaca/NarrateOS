@@ -1,0 +1,39 @@
+{
+    "name": "@narrateos/dsh-book-tools",
+    "version": "0.1.0",
+    "private": true,
+    "description": "NarrateOS 受控作品读写检索工具、Read-Your-Own-Writes 暂存编辑、yield_* 终态门禁与防逃逸 Hook",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./locale/*.json": "./locale/*.json",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist",
+        "locale/*.json",
+        "package.json"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "vitest run --root ../.. packages/dsh-book-tools"
+    },
+    "dependencies": {
+        "@deepseek-ai/schemastery": "~3.19.0",
+        "@narrateos/dsh-book-store": "workspace:*",
+        "yaml": "^2.7.0",
+        "zod": "^3.24.0"
+    },
+    "peerDependencies": {
+        "@deepseek-ai/cordis": "~4.1.0",
+        "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+        "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+        "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+    }
+}
