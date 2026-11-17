@@ -735,4 +735,92 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(container.textContent).toContain('sess-detail-1');
         expect(container.textContent).toContain('run-detail-1');
     });
+
+    it('sessions.retain 异步 reject 时回源 GET /api/narrate/runs/detail 并解析 events (thinking + tool-call/result)', async () => {
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-events-1',
+            runId: 'run-events-1',
+            stage: 'LIBRARIAN',
+            status: 'completed',
+            events: [
+                {
+                    seq: 0,
+                    kind: 'thinking',
+                    text: '正在检索第 1 章出场人物与三号栈桥伏笔'
+                },
+                {
+                    seq: 1,
+                    kind: 'tool-call',
+                    toolName: 'book_read',
+                    callId: 'c1',
+                    text: '{"path":"entities/char_chen.md"}'
+                },
+                {
+                    seq: 2,
+                    kind: 'tool-result',
+                    toolName: 'book_read',
+                    callId: 'c1',
+                    text: '# 陈砚\n持有夜查手令',
+                    status: 'completed'
+                },
+                {
+                    seq: 3,
+                    kind: 'tool-call',
+                    toolName: 'yield_context_pack',
+                    callId: 'c2',
+                    text: '{"selected_entity_ids":["char_chen"]}'
+                },
+                {
+                    seq: 4,
+                    kind: 'tool-result',
+                    toolName: 'yield_context_pack',
+                    callId: 'c2',
+                    text: 'ContextPack 已提交',
+                    status: 'completed'
+                }
+            ]
+        });
+
+        const rejectingSessions: StudioSessionsService = {
+            retain: vi.fn((target) => ({
+                sessionId: typeof target === 'string' ? target : target.childSessionId,
+                ready: Promise.reject(new Error('sessions.retain: unknown session sess-events-1')),
+                release: vi.fn()
+            }))
+        };
+
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'LIBRARIAN',
+                        stageLabel: '1. Librarian',
+                        sessionId: 'sess-events-1',
+                        runId: 'run-events-1',
+                        status: 'done'
+                    },
+                    sessionsService: rejectingSessions,
+                    SessionProvider: ({ children }) => createElement('div', null, children),
+                    renderStageConversation: () => createElement('div')
+                })
+            );
+        });
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        const detailEl = container.querySelector('[data-session-detail="true"]');
+        expect(detailEl).not.toBeNull();
+        expect(container.textContent).not.toContain('会话加载失败');
+        expect(detailEl?.textContent).toContain('正在检索第 1 章出场人物与三号栈桥伏笔');
+        expect(detailEl?.textContent).toContain('book_read');
+        expect(detailEl?.textContent).toContain('yield_context_pack');
+        expect(detailEl?.textContent).toContain('ContextPack 已提交');
+    });
 });

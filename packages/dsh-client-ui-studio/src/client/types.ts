@@ -23,7 +23,7 @@ export interface BookSummary {
 
 /** 作品列表响应载荷 */
 export interface BooksListPayload {
-    currentBookRoot: string;
+    currentBookRoot: string | null;
     books: BookSummary[];
 }
 
@@ -167,6 +167,17 @@ export interface RunDetailTurn {
     [key: string]: unknown;
 }
 
+/** 阶段会话轨迹中的单条落盘事件（对齐 .ops/session_logs/<sessionId>.json events） */
+export interface StageSessionDetailEvent {
+    seq?: number | undefined;
+    timestamp?: string | undefined;
+    kind: string;
+    toolName?: string | undefined;
+    callId?: string | undefined;
+    text?: string | undefined;
+    status?: string | undefined;
+}
+
 /** 阶段会话历史详情响应载荷（对应 GET /api/narrate/runs/detail?sessionId=...） */
 export interface RunDetailPayload {
     sessionId: string;
@@ -177,6 +188,8 @@ export interface RunDetailPayload {
     mode?: StageSessionSubagentMode | string | undefined;
     startedAt?: string | undefined;
     finishedAt?: string | undefined;
+    events?: StageSessionDetailEvent[] | undefined;
+    usage?: TelemetryTokenUsage | undefined;
     turns?: RunDetailTurn[] | undefined;
     thinking?: string | undefined;
     reasoning?: string | undefined;

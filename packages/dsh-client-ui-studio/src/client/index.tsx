@@ -398,7 +398,7 @@ export function NarrateStudioRoot({
         typeof window !== 'undefined' ? window.innerWidth : 1280
     );
     const [rightOpen, setRightOpen] = useState<boolean>(() =>
-        typeof window !== 'undefined' ? window.innerWidth >= 1060 : true
+        typeof window !== 'undefined' ? window.innerWidth >= 720 : true
     );
     const [rightTab, setRightTab] = useState<'toc' | 'insp' | 'session' | 'tools'>('toc');
 
@@ -427,7 +427,7 @@ export function NarrateStudioRoot({
         const updateWidth = (width: number) => {
             if (width <= 0) return;
             setContainerWidth(width);
-            if (prevWidthRef.current >= 1060 && width < 1060) {
+            if (prevWidthRef.current >= 720 && width < 720) {
                 setRightOpen(false);
             }
             prevWidthRef.current = width;
@@ -591,18 +591,47 @@ export function NarrateStudioRoot({
         const chapterSeq = chapterRequestSeqRef.current;
         setLoading(true);
         try {
-            const [booksRes, statusRes, chaptersRes] = await Promise.all([
-                fetchBooks(),
+            let booksRes = await fetchBooks();
+            if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+
+            if (!booksRes.currentBookRoot && booksRes.books.length > 0 && !currentBookRootRef.current) {
+                const defaultBook = booksRes.books[0];
+                if (defaultBook) {
+                    await selectBook({ bookRoot: defaultBook.bookRoot });
+                    if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                    booksRes = await fetchBooks();
+                    if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                }
+            }
+
+            setBooksState(booksRes);
+            const activeRoot = booksRes.currentBookRoot;
+            if (!activeRoot) {
+                currentBookRootRef.current = '';
+                setStatus(null);
+                setChapters([]);
+                setSelectedChapter(null);
+                setChapterDetail(null);
+                setHistoricalRuns([]);
+                setEntitiesView(null);
+                setHorizonView(null);
+                setThreadsView(null);
+                setTelemetryView(null);
+                setSignalsView(null);
+                setHaltView(null);
+                return;
+            }
+
+            const [statusRes, chaptersRes] = await Promise.all([
                 fetchStatus(),
                 fetchChapters(),
                 loadViews()
             ]);
             if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
-            if (booksRes.currentBookRoot !== statusRes.bookRoot ||
-                (currentBookRootRef.current && booksRes.currentBookRoot !== currentBookRootRef.current)) return;
+            if (activeRoot !== statusRes.bookRoot ||
+                (currentBookRootRef.current && activeRoot !== currentBookRootRef.current)) return;
 
-            setBooksState(booksRes);
-            currentBookRootRef.current = booksRes.currentBookRoot;
+            currentBookRootRef.current = activeRoot;
             if (statusSeq === statusRequestRef.current) setStatus(statusRes);
             setChapters(chaptersRes.chapters);
             setLatestSseStage(statusRes.yolo.currentStage ?? null);
@@ -1488,9 +1517,9 @@ export function NarrateStudioRoot({
         };
     }, [chapterDetail, chapters]);
 
-    const isNarrow = containerWidth < 1060;
+    const isNarrow = containerWidth < 720;
     const shellStyle = {
-        '--ns-right-w': rightOpen && !isNarrow ? '332px' : '0px'
+        '--ns-right-w': rightOpen && !isNarrow ? (containerWidth < 1040 ? '296px' : '332px') : '0px'
     } as React.CSSProperties;
 
     return (
@@ -1502,7 +1531,7 @@ export function NarrateStudioRoot({
             <CenterWorkbench
                 bookTitle={status?.title ?? activeBookSummary?.title}
                 bookSlug={status?.bookSlug ?? activeBookSummary?.slug}
-                currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot}
+                currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot ?? undefined}
                 books={booksState.books}
                 currentChapter={status?.worldState.current_chapter ?? status?.latestChapter ?? 0}
                 selectedChapter={selectedChapter ?? undefined}
@@ -1639,7 +1668,7 @@ export function NarrateStudioRoot({
                     {rightTab === 'toc' ? (
                         <LeftBookNav
                             embedded
-                            currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot}
+                            currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot ?? ''}
                             currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
                             currentSlug={status?.bookSlug ?? activeBookSummary?.slug ?? ''}
                             chapterCount={status?.chapterCount ?? chapters.length}
@@ -2054,10 +2083,8 @@ export function StageConversationSlotPanel({
 function readContextService(ctx: unknown, serviceName: string): unknown {
     if (!ctx || typeof ctx !== 'object') return undefined;
     const record = ctx as Record<string, unknown>;
-    if (record[serviceName] !== undefined) {
-        return record[serviceName];
-    }
     const getter = record['get'];
+    // Cordis Context 为严格代理：直接访问未注入的属性会抛错，须优先走 ctx.get() 并全程 try/catch
     if (typeof getter === 'function') {
         try {
             return (getter as (name: string) => unknown).call(ctx, serviceName);
@@ -2065,7 +2092,11 @@ function readContextService(ctx: unknown, serviceName: string): unknown {
             return undefined;
         }
     }
-    return undefined;
+    try {
+        return record[serviceName];
+    } catch {
+        return undefined;
+    }
 }
 
 function readSessionsService(ctx: unknown): StudioSessionsService | undefined {
@@ -2123,15 +2154,52 @@ export function apply(ctx: Context): void {
             inject?: (deps: string[], callback: (scope: Context) => void | (() => void)) => unknown;
         }
     ).inject;
+    const disposeDynamicResult = (handle: unknown): void => {
+        if (typeof handle === 'function') {
+            (handle as () => void)();
+            return;
+        }
+        if (
+            handle &&
+            typeof handle === 'object' &&
+            typeof (handle as { dispose?: unknown }).dispose === 'function'
+        ) {
+            void (handle as { dispose: () => unknown }).dispose();
+        }
+    };
+    const registerScopeEffect = (
+        scope: Context,
+        setup: () => void | (() => void),
+        label: string
+    ): void => {
+        const scopeEffect = (
+            scope as unknown as {
+                effect?: (callback: () => void | (() => void), name?: string) => unknown;
+            }
+        ).effect;
+        if (typeof scopeEffect === 'function') {
+            scopeEffect.call(scope, setup, label);
+        } else {
+            setup();
+        }
+    };
+
     if (typeof dynamicInject === 'function') {
         try {
             dynamicInject.call(ctx, ['sessions'], (scope: Context) => {
-                currentSessionsService = readSessionsService(scope) ?? readSessionsService(ctx);
-                notifySessionSubscribers();
-                return () => {
-                    currentSessionsService = readSessionsService(ctx);
-                    notifySessionSubscribers();
-                };
+                registerScopeEffect(
+                    scope,
+                    () => {
+                        currentSessionsService =
+                            readSessionsService(scope) ?? readSessionsService(ctx);
+                        notifySessionSubscribers();
+                        return () => {
+                            currentSessionsService = readSessionsService(ctx);
+                            notifySessionSubscribers();
+                        };
+                    },
+                    'narrateos-studio:optional-sessions'
+                );
             });
         } catch {
             // 宿主未提供可选 sessions 服务时保持静默降级
@@ -2277,23 +2345,31 @@ export function apply(ctx: Context): void {
 
         if (typeof dynamicInject === 'function') {
             try {
-                const disposeSessionUiInject = dynamicInject.call(
+                const sessionUiInjectHandle = dynamicInject.call(
                     ctx,
                     ['uiSession', 'uiConversation'],
                     (sessionUiCtx: Context) => {
-                        if (!hasSessionUiServices(sessionUiCtx, ctx)) {
-                            return;
-                        }
-                        syncMainRegistration(true);
-                        return () => {
-                            if (!disposedAll) {
-                                syncMainRegistration(false);
-                            }
-                        };
+                        registerScopeEffect(
+                            sessionUiCtx,
+                            () => {
+                                if (!hasSessionUiServices(sessionUiCtx, ctx)) {
+                                    return;
+                                }
+                                syncMainRegistration(true);
+                                return () => {
+                                    if (!disposedAll) {
+                                        syncMainRegistration(false);
+                                    }
+                                };
+                            },
+                            'narrateos-studio:optional-session-ui'
+                        );
                     }
                 );
-                if (typeof disposeSessionUiInject === 'function') {
-                    disposers.push(disposeSessionUiInject as () => void);
+                if (sessionUiInjectHandle) {
+                    disposers.push(() => {
+                        disposeDynamicResult(sessionUiInjectHandle);
+                    });
                 }
             } catch {
                 // 宿主不支持多服务动态注入时安全回退为基础槽位

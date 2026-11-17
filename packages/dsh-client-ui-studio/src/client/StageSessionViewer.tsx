@@ -5,6 +5,7 @@ import type {
     RunDetailPayload,
     RunDetailToolCall,
     RunDetailTurn,
+    StageSessionDetailEvent,
     StageSessionSubagentMode
 } from './types';
 
@@ -147,6 +148,67 @@ function renderToolCallList(calls: readonly RunDetailToolCall[] | undefined, key
             })}
         </div>
     );
+}
+
+function normalizeEventsPayload(events: readonly StageSessionDetailEvent[] | undefined): {
+    thinking: string | undefined;
+    toolCalls: RunDetailToolCall[];
+    output: string | undefined;
+} {
+    if (!events || events.length === 0) {
+        return { thinking: undefined, toolCalls: [], output: undefined };
+    }
+    const thinkingParts: string[] = [];
+    const outputParts: string[] = [];
+    const toolCalls: RunDetailToolCall[] = [];
+    const callById = new Map<string, RunDetailToolCall>();
+
+    for (const ev of events) {
+        if (!ev || typeof ev !== 'object') continue;
+        if (ev.kind === 'thinking' && ev.text) {
+            thinkingParts.push(ev.text);
+        } else if ((ev.kind === 'text' || ev.kind === 'error') && ev.text) {
+            outputParts.push(ev.kind === 'error' ? `[ERROR] ${ev.text}` : ev.text);
+        } else if (ev.kind === 'tool-call') {
+            let parsedArgs: unknown = ev.text;
+            if (typeof ev.text === 'string' && ev.text.trim().length > 0) {
+                try {
+                    parsedArgs = JSON.parse(ev.text);
+                } catch {
+                    parsedArgs = ev.text;
+                }
+            }
+            const entry: RunDetailToolCall = {
+                id: ev.callId,
+                name: ev.toolName || 'tool',
+                arguments: parsedArgs,
+                status: ev.status
+            };
+            toolCalls.push(entry);
+            if (ev.callId) {
+                callById.set(ev.callId, entry);
+            }
+        } else if (ev.kind === 'tool-result') {
+            const matched = ev.callId ? callById.get(ev.callId) : undefined;
+            if (matched) {
+                matched.result = ev.text ?? '';
+                matched.status = ev.status ?? matched.status ?? 'completed';
+            } else {
+                toolCalls.push({
+                    id: ev.callId,
+                    name: ev.toolName || 'tool-result',
+                    result: ev.text ?? '',
+                    status: ev.status ?? 'completed'
+                });
+            }
+        }
+    }
+
+    return {
+        thinking: thinkingParts.length > 0 ? thinkingParts.join('\n') : undefined,
+        toolCalls,
+        output: outputParts.length > 0 ? outputParts.join('\n') : undefined
+    };
 }
 
 function renderRunTurn(turn: RunDetailTurn, index: number): React.ReactNode {
@@ -363,13 +425,23 @@ export function StageSessionViewer({
             !retainError
     );
 
-    const topLevelThinking = runDetail?.thinking ?? runDetail?.reasoning;
-    const topLevelOutput = runDetail?.output ?? runDetail?.finalOutput ?? runDetail?.summary;
+    const normalizedEvents = normalizeEventsPayload(runDetail?.events);
+    const topLevelThinking =
+        runDetail?.thinking ?? runDetail?.reasoning ?? normalizedEvents.thinking;
+    const mergedToolCalls =
+        runDetail?.toolCalls && runDetail.toolCalls.length > 0
+            ? runDetail.toolCalls
+            : normalizedEvents.toolCalls;
+    const topLevelOutput =
+        runDetail?.output ??
+        runDetail?.finalOutput ??
+        runDetail?.summary ??
+        normalizedEvents.output;
     const hasDetailBody = Boolean(
         runDetail &&
             ((Array.isArray(runDetail.turns) && runDetail.turns.length > 0) ||
                 topLevelThinking ||
-                (Array.isArray(runDetail.toolCalls) && runDetail.toolCalls.length > 0) ||
+                mergedToolCalls.length > 0 ||
                 topLevelOutput)
     );
 
@@ -467,18 +539,22 @@ export function StageSessionViewer({
                 ) : (
                     <div className="ns-session-fallback" data-session-fallback="true">
                         <div className="ns-session-fallback-title">
-                            {retainError ? '会话加载失败' : '原生 DSH 会话预览不可用'}
+                            {hasDetailBody
+                                ? '已加载阶段会话轨迹（.ops/session_logs 归档回放）'
+                                : retainError
+                                  ? '会话加载失败'
+                                  : '原生 DSH 会话预览不可用'}
                         </div>
-                        {retainError ? (
+                        {retainError && !hasDetailBody ? (
                             <p className="ns-session-error" role="alert">
                                 {retainError}
                             </p>
-                        ) : (
+                        ) : !hasDetailBody ? (
                             <p>
                                 当前运行环境未注入宿主 <code>sessions</code> / <code>slots</code> 渲染器，
                                 无法挂载原生 {viewMode === 'chat' ? 'Conversation' : 'Trajectory'} 视图；已在上方保留完整标识。
                             </p>
-                        )}
+                        ) : null}
                         <dl className="ns-session-kv ns-mono">
                             <dt>stageId</dt>
                             <dd>{selection.stageId}</dd>
@@ -510,7 +586,7 @@ export function StageSessionViewer({
                                         <pre className="ns-session-pre">{topLevelThinking}</pre>
                                     </details>
                                 ) : null}
-                                {renderToolCallList(runDetail.toolCalls, 'root')}
+                                {renderToolCallList(mergedToolCalls, 'root')}
                                 {Array.isArray(runDetail.turns) && runDetail.turns.length > 0 ? (
                                     <div className="ns-session-turns">
                                         {runDetail.turns.map((turn, idx) => renderRunTurn(turn, idx))}
@@ -518,6 +594,23 @@ export function StageSessionViewer({
                                 ) : null}
                                 {topLevelOutput ? (
                                     <div className="ns-session-turn-output">{topLevelOutput}</div>
+                                ) : null}
+                                {viewMode === 'trajectory' &&
+                                Array.isArray(runDetail.events) &&
+                                runDetail.events.length > 0 ? (
+                                    <details className="ns-session-turn-thinking">
+                                        <summary>原始 Trajectory 事件流 ({runDetail.events.length})</summary>
+                                        <pre className="ns-session-pre ns-mono">
+                                            {JSON.stringify(
+                                                {
+                                                    usage: runDetail.usage,
+                                                    events: runDetail.events
+                                                },
+                                                null,
+                                                2
+                                            )}
+                                        </pre>
+                                    </details>
                                 ) : null}
                             </div>
                         ) : null}
