@@ -18,7 +18,7 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
     return {
         ...original,
         fetchBooks: vi.fn(), selectBook: vi.fn(), bootBook: vi.fn(),
-        fetchStatus: vi.fn(), fetchChapters: vi.fn(), fetchChapter: vi.fn(), fetchRunRecords: vi.fn(), saveChapter: vi.fn(),
+        fetchStatus: vi.fn(), fetchChapters: vi.fn(), fetchChapter: vi.fn(), fetchRunRecords: vi.fn(), fetchRunDetail: vi.fn(), saveChapter: vi.fn(),
         fetchViewEntities: vi.fn(), fetchViewHorizon: vi.fn(), fetchViewThreads: vi.fn(),
         fetchViewTelemetry: vi.fn(), fetchViewSignals: vi.fn(), fetchViewHalt: vi.fn(),
         stepChapter: vi.fn(), syncManuscripts: vi.fn(), runDreaming: vi.fn(),

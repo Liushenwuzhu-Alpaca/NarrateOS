@@ -11,10 +11,17 @@ import React, { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../src/client/api.js';
-import { apply, NarrateStudioRoot, PANEL_ID } from '../src/client/index.js';
-import type {
-    StudioSessionReference,
-    StudioSessionsService
+import {
+    apply,
+    NarrateStudioRoot,
+    PANEL_ID,
+    STAGE_CONVERSATION_SLOT,
+    StageConversationSlotPanel
+} from '../src/client/index.js';
+import {
+    StageSessionViewer,
+    type StudioSessionReference,
+    type StudioSessionsService
 } from '../src/client/StageSessionViewer.js';
 import type {
     BookSummary,
@@ -36,6 +43,7 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
         fetchChapters: vi.fn(),
         fetchChapter: vi.fn(),
         fetchRunRecords: vi.fn(),
+        fetchRunDetail: vi.fn(),
         saveChapter: vi.fn(),
         fetchViewEntities: vi.fn(),
         fetchViewHorizon: vi.fn(),
@@ -179,6 +187,7 @@ beforeEach(() => {
     vi.mocked(api.fetchRunRecords).mockImplementation(async (ch) => ({
         runs: ch !== undefined ? (runsByChapter.get(ch) ?? []) : []
     }));
+    vi.mocked(api.fetchRunDetail).mockRejectedValue(new api.NarrateApiError('Not Found', 404));
     vi.mocked(api.fetchViewEntities).mockResolvedValue({
         kind: 'entities',
         entities: [],
@@ -432,38 +441,282 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(fallback?.textContent).toContain('trajectory');
     });
 
-    it('apply(ctx) 在无 sessions 的极简宿主下不阻塞，在有 sessions 时透传会话服务与子槽位', () => {
-        const registeredSlots: Array<{ name: string; meta: Record<string, unknown> }> = [];
-        const injectedCallbacks = new Map<string, () => unknown>();
+    it('apply(ctx) 在无 uiSession/uiConversation 的极简宿主下不声明 session 子槽位，仅在双方均就绪时动态升级', () => {
+        const registeredSlots: Array<{ name: string; meta: Record<string, unknown>; dispose: ReturnType<typeof vi.fn> }> = [];
 
         const minimalCtx = {
             slots: {
-                inject: vi.fn((slotName: string, factory: () => unknown) => {
-                    injectedCallbacks.set(slotName, factory);
-                    const result = factory();
-                    return () => result;
+                inject: vi.fn((_slotName: string, factory: () => unknown) => {
+                    const dispose = factory() as (() => void) | undefined;
+                    return () => {
+                        if (typeof dispose === 'function') dispose();
+                    };
                 }),
                 register: vi.fn((meta: Record<string, unknown>) => {
-                    registeredSlots.push({ name: String(meta['name'] ?? ''), meta });
-                    return vi.fn();
+                    const dispose = vi.fn();
+                    registeredSlots.push({ name: String(meta['name'] ?? ''), meta, dispose });
+                    return dispose;
                 })
             }
         };
 
-        // 极简宿主无 sessions、无 ctx.effect 时直接完成注册而不抛错
+        // 1. 极简宿主无 uiSession/uiConversation/sessions -> 不声明 scope: 'session' 子槽位，不触发 SlotAssemblyError
         expect(() => apply(minimalCtx as never)).not.toThrow();
-        expect(registeredSlots.some((entry) => entry.name === 'main' && entry.meta['key'] === PANEL_ID)).toBe(
-            true
-        );
-        expect(registeredSlots.some((entry) => entry.name === 'narrateos.stage.conversation')).toBe(true);
+        const mainMinimal = registeredSlots.find((entry) => entry.name === 'main' && entry.meta['key'] === PANEL_ID);
+        expect(mainMinimal).toBeDefined();
+        expect(mainMinimal?.meta['children']).toBeUndefined();
+        expect(registeredSlots.some((entry) => entry.name === STAGE_CONVERSATION_SLOT)).toBe(false);
         expect(registeredSlots.some((entry) => entry.name === 'sidebar.panellist')).toBe(true);
 
-        const mainMeta = registeredSlots.find((entry) => entry.name === 'main')?.meta;
-        expect(mainMeta?.['children']).toEqual({
-            'narrateos.stage.conversation': {
+        // 2. 仅有 uiSession 而缺少 uiConversation 时同样不得注册 scope: 'session' 子槽位
+        const partialInjectListeners = new Map<string, (scope: unknown) => void | (() => void)>();
+        const partialRegistered: Array<{ name: string; meta: Record<string, unknown> }> = [];
+        const partialCtx = {
+            uiSession: {},
+            get: vi.fn((key: string) => (key === 'uiSession' ? {} : undefined)),
+            inject: vi.fn((deps: string[], cb: (scope: unknown) => void | (() => void)) => {
+                partialInjectListeners.set(deps.join(','), cb);
+                return () => {};
+            }),
+            slots: {
+                inject: vi.fn((_slotName: string, factory: () => unknown) => {
+                    const dispose = factory() as (() => void) | undefined;
+                    return () => {
+                        if (typeof dispose === 'function') dispose();
+                    };
+                }),
+                register: vi.fn((meta: Record<string, unknown>) => {
+                    partialRegistered.push({ name: String(meta['name'] ?? ''), meta });
+                    return vi.fn();
+                })
+            }
+        };
+        apply(partialCtx as never);
+        expect(partialRegistered.find((e) => e.name === 'main')?.meta['children']).toBeUndefined();
+        expect(partialRegistered.some((e) => e.name === STAGE_CONVERSATION_SLOT)).toBe(false);
+
+        // 3. 当 uiSession 与 uiConversation 同时就绪后，动态重注册 main 并挂载 narrateos.stage.conversation
+        const activeEntries = new Map<string, Record<string, unknown>>();
+        const fullCtx = {
+            uiSession: {},
+            uiConversation: {},
+            sessions: { retain: vi.fn() },
+            get: vi.fn((key: string) => {
+                if (key === 'uiSession' || key === 'uiConversation') return {};
+                if (key === 'sessions') return fullCtx.sessions;
+                return undefined;
+            }),
+            inject: vi.fn((deps: string[], cb: (scope: unknown) => void | (() => void)) => {
+                if (deps.every((dep) => fullCtx.get(dep) !== undefined)) {
+                    cb(fullCtx);
+                }
+                return () => {};
+            }),
+            slots: {
+                inject: vi.fn((slotName: string, factory: () => unknown) => {
+                    const dispose = factory() as (() => void) | undefined;
+                    return () => {
+                        if (typeof dispose === 'function') dispose();
+                        activeEntries.delete(slotName);
+                    };
+                }),
+                register: vi.fn((meta: Record<string, unknown>) => {
+                    const slotName = String(meta['name'] ?? '');
+                    activeEntries.set(slotName, meta);
+                    return () => {
+                        activeEntries.delete(slotName);
+                    };
+                })
+            }
+        };
+        apply(fullCtx as never);
+        expect(activeEntries.get('main')?.['children']).toEqual({
+            [STAGE_CONVERSATION_SLOT]: {
                 kind: 'single',
                 scope: 'session'
             }
         });
+        expect(activeEntries.has(STAGE_CONVERSATION_SLOT)).toBe(true);
+    });
+
+    it('StageConversationSlotPanel 在缺少 useConversation 或未加载 Factory 时安全降级而不抛出 TypeError', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        await act(async () => {
+            root.render(
+                createElement(StageConversationSlotPanel, {
+                    sessionId: 'sess-missing-hooks',
+                    view: 'chat'
+                })
+            );
+        });
+        expect(container.querySelector('[data-stage-conversation-fallback="true"]')?.textContent).toContain(
+            'sess-missing-hooks'
+        );
+
+        const renderFactorySlot = vi.fn((_name, _props, overrides) => overrides.fallback ?? null);
+        await act(async () => {
+            root.render(
+                createElement(StageConversationSlotPanel, {
+                    sessionId: 'sess-missing-factory',
+                    view: 'trajectory',
+                    useSession: ((sel: (s: Record<string, unknown>) => unknown) =>
+                        sel({ blank: false, awaitingFirstTurn: false })) as never,
+                    useConversation: ((sel: (s: Record<string, unknown>) => unknown) =>
+                        sel({ activeTargets: { size: 1 } })) as never,
+                    useSessions: ((sel: (s: { byId?: Record<string, { blank?: boolean }> }) => unknown) =>
+                        sel({ byId: {} })) as never,
+                    renderFactorySlot: renderFactorySlot as never
+                })
+            );
+        });
+        expect(renderFactorySlot).toHaveBeenCalledTimes(1);
+        expect(container.querySelector('[data-stage-conversation-fallback="true"]')?.textContent).toContain(
+            'sess-missing-factory'
+        );
+    });
+
+    it('StageSessionViewer 切换 sessionId 时立即屏蔽旧 sessionRef 并按 sessionId 重新 keyed 挂载，且支持 parentSessionId/mode', async () => {
+        const mountedSessions: Array<{ keySeen: string; providerRenderSessionId: string }> = [];
+        const retainCalls: Array<unknown> = [];
+
+        const mockSessions: StudioSessionsService = {
+            retain: vi.fn((target) => {
+                retainCalls.push(target);
+                const sid = typeof target === 'string' ? target : target.childSessionId;
+                return {
+                    sessionId: sid,
+                    ready: Promise.resolve(),
+                    release: vi.fn()
+                };
+            })
+        };
+
+        const StrictSessionProvider: React.FC<{ session: unknown; children?: React.ReactNode }> = ({
+            session,
+            children
+        }) => {
+            const refId = (session as StudioSessionReference).sessionId;
+            return createElement('div', { 'data-strict-provider': refId }, children);
+        };
+
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        const renderStageConversation = ({ view }: { view?: string }) => {
+            const providerSession =
+                container.querySelector('[data-strict-provider]')?.getAttribute('data-strict-provider') ??
+                '';
+            mountedSessions.push({ keySeen: view ?? 'chat', providerRenderSessionId: providerSession });
+            return createElement('div', { 'data-child-view': view ?? 'chat' });
+        };
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'LIBRARIAN',
+                        stageLabel: 'Librarian',
+                        sessionId: 'sess-A',
+                        status: 'active'
+                    },
+                    sessionsService: mockSessions,
+                    SessionProvider: StrictSessionProvider,
+                    renderStageConversation
+                })
+            );
+        });
+        expect(container.querySelector('[data-strict-provider="sess-A"]')).not.toBeNull();
+        expect(retainCalls[0]).toBe('sess-A');
+
+        // 切换至携带 parentSessionId 的 sess-B：不得把旧 sess-A 引用传给新 sessionId 子树
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'PLANNER',
+                        stageLabel: 'Planner',
+                        sessionId: 'sess-B',
+                        parentSessionId: 'sess-parent-1',
+                        status: 'done'
+                    },
+                    sessionsService: mockSessions,
+                    SessionProvider: StrictSessionProvider,
+                    renderStageConversation
+                })
+            );
+        });
+
+        expect(retainCalls[1]).toEqual({
+            parentSessionId: 'sess-parent-1',
+            childSessionId: 'sess-B',
+            mode: 'one-shot'
+        });
+        expect(container.querySelector('[data-strict-provider="sess-A"]')).toBeNull();
+        expect(container.querySelector('[data-strict-provider="sess-B"]')).not.toBeNull();
+    });
+
+    it('sessionsService 缺失或 retain() 失败时自动回源 GET /api/narrate/runs/detail 并容忍 404', async () => {
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-detail-1',
+            runId: 'run-detail-1',
+            turns: [
+                {
+                    turnIndex: 0,
+                    role: 'assistant',
+                    thinking: '先核对港口三号仓实体关系',
+                    toolCalls: [
+                        {
+                            name: 'book_read',
+                            arguments: { path: 'entities/char_001.md' },
+                            result: 'ok'
+                        }
+                    ],
+                    content: '已完成上下文召回打包'
+                }
+            ]
+        });
+
+        const failingSessions: StudioSessionsService = {
+            retain: vi.fn(() => {
+                throw new Error('Session reference is not active in this Controller');
+            })
+        };
+
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'LIBRARIAN',
+                        stageLabel: 'Librarian',
+                        sessionId: 'sess-detail-1',
+                        runId: 'run-detail-1',
+                        status: 'done'
+                    },
+                    sessionsService: failingSessions,
+                    SessionProvider: ({ children }) => createElement('div', null, children),
+                    renderStageConversation: () => createElement('div')
+                })
+            );
+        });
+
+        expect(api.fetchRunDetail).toHaveBeenCalledWith('sess-detail-1');
+        const detailEl = container.querySelector('[data-session-detail="true"]');
+        expect(detailEl).not.toBeNull();
+        expect(detailEl?.textContent).toContain('先核对港口三号仓实体关系');
+        expect(detailEl?.textContent).toContain('book_read');
+        expect(detailEl?.textContent).toContain('已完成上下文召回打包');
+        expect(container.textContent).toContain('sess-detail-1');
+        expect(container.textContent).toContain('run-detail-1');
     });
 });

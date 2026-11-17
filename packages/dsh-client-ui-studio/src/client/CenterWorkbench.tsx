@@ -28,6 +28,10 @@ export interface StageNodeState {
     badge?: string | undefined;
     /** 当前或最近一次绑定的 DSH Agent Session ID（供右侧原生轨迹钻取） */
     sessionId?: string | undefined;
+    /** 可选父会话 ID（存在时按父子 SubagentAddress retain） */
+    parentSessionId?: string | undefined;
+    /** 可选子代理地址模式（one-shot / continuable / unknown） */
+    mode?: string | undefined;
     /** 所属运行批次 ID (.ops/runs.jsonl runId) */
     runId?: string | undefined;
 }
@@ -2108,6 +2112,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                                     stageId: stage.id,
                                                     stageLabel: stage.label,
                                                     sessionId: boundSessionId,
+                                                    ...(nodeState.parentSessionId !== undefined
+                                                        ? { parentSessionId: nodeState.parentSessionId }
+                                                        : {}),
+                                                    ...(nodeState.mode !== undefined
+                                                        ? { mode: nodeState.mode }
+                                                        : {}),
                                                     runId: nodeState.runId,
                                                     status: nodeState.status
                                                 });
@@ -2179,6 +2189,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                                     stageId: inspectedStageDef.id,
                                                     stageLabel: inspectedStageDef.label,
                                                     sessionId: st.sessionId,
+                                                    ...(st.parentSessionId !== undefined
+                                                        ? { parentSessionId: st.parentSessionId }
+                                                        : {}),
+                                                    ...(st.mode !== undefined ? { mode: st.mode } : {}),
                                                     runId: st.runId,
                                                     status: st.status
                                                 });

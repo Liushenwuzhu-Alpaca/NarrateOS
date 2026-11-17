@@ -103,6 +103,9 @@ export interface ChapterDetail {
 /** 6 节点运行阶段状态 */
 export type StageNodeStatus = 'pending' | 'active' | 'done' | 'patch' | 'halt' | 'dormant';
 
+/** 会话级子代理挂载模式 */
+export type StageSessionSubagentMode = 'one-shot' | 'continuable' | 'unknown';
+
 /** 6 节点运行阶段图单个节点状态 */
 export interface StageNodeState {
     id: string;
@@ -114,6 +117,8 @@ export interface StageNodeState {
     durationLabel?: string | undefined;
     updatedAt?: string | undefined;
     sessionId?: string | undefined;
+    parentSessionId?: string | undefined;
+    mode?: StageSessionSubagentMode | string | undefined;
     runId?: string | undefined;
 }
 
@@ -124,6 +129,8 @@ export interface StageRunRecord {
     stage: string;
     role?: string | undefined;
     sessionId: string;
+    parentSessionId?: string | undefined;
+    mode?: StageSessionSubagentMode | string | undefined;
     status: string;
     timestamp?: string | undefined;
     startedAt?: string | undefined;
@@ -133,6 +140,52 @@ export interface StageRunRecord {
 /** 工种运行会话索引响应载荷 */
 export interface RunsListPayload {
     runs: StageRunRecord[];
+}
+
+/** 阶段会话轨迹中的单次工具调用明细 */
+export interface RunDetailToolCall {
+    id?: string | undefined;
+    name: string;
+    arguments?: unknown;
+    result?: unknown;
+    status?: string | undefined;
+    durationMs?: number | undefined;
+}
+
+/** 阶段会话轨迹中的单轮对话/推演记录 */
+export interface RunDetailTurn {
+    turnIndex?: number | undefined;
+    role?: string | undefined;
+    timestamp?: string | undefined;
+    thinking?: string | undefined;
+    reasoning?: string | undefined;
+    content?: string | undefined;
+    output?: string | undefined;
+    text?: string | undefined;
+    toolCalls?: RunDetailToolCall[] | undefined;
+    tool_calls?: RunDetailToolCall[] | undefined;
+    [key: string]: unknown;
+}
+
+/** 阶段会话历史详情响应载荷（对应 GET /api/narrate/runs/detail?sessionId=...） */
+export interface RunDetailPayload {
+    sessionId: string;
+    runId?: string | undefined;
+    stage?: string | undefined;
+    status?: string | undefined;
+    parentSessionId?: string | undefined;
+    mode?: StageSessionSubagentMode | string | undefined;
+    startedAt?: string | undefined;
+    finishedAt?: string | undefined;
+    turns?: RunDetailTurn[] | undefined;
+    thinking?: string | undefined;
+    reasoning?: string | undefined;
+    toolCalls?: RunDetailToolCall[] | undefined;
+    output?: string | undefined;
+    finalOutput?: string | undefined;
+    summary?: string | undefined;
+    error?: string | undefined;
+    [key: string]: unknown;
 }
 
 /** 一次性导演信号条目（对应 .ops/signals.jsonl） */

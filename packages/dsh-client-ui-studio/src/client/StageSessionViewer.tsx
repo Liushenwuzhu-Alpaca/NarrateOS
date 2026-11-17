@@ -1,5 +1,12 @@
 import React, { useEffect, useState } from 'react';
+import { fetchRunDetail } from './api';
 import type { StageNodeStatus } from './CenterWorkbench';
+import type {
+    RunDetailPayload,
+    RunDetailToolCall,
+    RunDetailTurn,
+    StageSessionSubagentMode
+} from './types';
 
 /** 阶段会话视图模式：chat=原生 Conversation 思考与工具流；trajectory=原生 Trajectory 轮次明细 */
 export type StageSessionViewMode = 'chat' | 'trajectory';
@@ -9,6 +16,8 @@ export interface StageSessionSelection {
     stageId: string;
     stageLabel: string;
     sessionId: string;
+    parentSessionId?: string | undefined;
+    mode?: StageSessionSubagentMode | string | undefined;
     runId?: string | undefined;
     status: StageNodeStatus;
     cleanroom?: boolean | undefined;
@@ -21,10 +30,19 @@ export interface StudioSessionReference {
     release(): void;
 }
 
+/** 宿主 sessions.retain 支持的会话定位目标（SessionId 或父子 SubagentAddress） */
+export type StudioSessionTarget =
+    | string
+    | {
+          parentSessionId: string;
+          childSessionId: string;
+          mode: StageSessionSubagentMode;
+      };
+
 /** 宿主 ctx.sessions 最小结构接口 */
 export interface StudioSessionsService {
     retain(
-        target: string,
+        target: StudioSessionTarget,
         options: {
             source: string;
             signal?: AbortSignal | undefined;
@@ -85,14 +103,88 @@ function formatStageStatusText(status: StageNodeStatus): {
     }
 }
 
+function normalizeSubagentMode(mode: string | undefined): StageSessionSubagentMode {
+    if (mode === 'one-shot' || mode === 'continuable' || mode === 'unknown') {
+        return mode;
+    }
+    return 'one-shot';
+}
+
+function formatDetailValue(value: unknown): string {
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'string') return value;
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value);
+    }
+}
+
+function renderToolCallList(calls: readonly RunDetailToolCall[] | undefined, keyPrefix: string): React.ReactNode {
+    if (!calls || calls.length === 0) return null;
+    return (
+        <div className="ns-session-tool-list">
+            {calls.map((call, idx) => {
+                const argsText = formatDetailValue(call.arguments);
+                const resultText = formatDetailValue(call.result);
+                return (
+                    <div key={call.id ?? `${keyPrefix}-tool-${idx}`} className="ns-session-tool-call">
+                        <div className="ns-session-tool-head ns-mono">
+                            <strong>{call.name}</strong>
+                            {call.status ? <span className="ns-muted">{call.status}</span> : null}
+                            {typeof call.durationMs === 'number' ? (
+                                <span className="ns-muted">{call.durationMs}ms</span>
+                            ) : null}
+                        </div>
+                        {argsText ? (
+                            <pre className="ns-session-pre ns-mono">{argsText}</pre>
+                        ) : null}
+                        {resultText ? (
+                            <pre className="ns-session-pre ns-session-pre-result ns-mono">{resultText}</pre>
+                        ) : null}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+function renderRunTurn(turn: RunDetailTurn, index: number): React.ReactNode {
+    const turnNumber = typeof turn.turnIndex === 'number' ? turn.turnIndex + 1 : index + 1;
+    const thinking = turn.thinking ?? turn.reasoning;
+    const outputText = turn.content ?? turn.output ?? turn.text;
+    const calls = turn.toolCalls ?? turn.tool_calls;
+
+    return (
+        <article key={`turn-${turnNumber}-${index}`} className="ns-session-turn">
+            <div className="ns-session-turn-head ns-mono">
+                <strong>Turn #{turnNumber}</strong>
+                {turn.role ? <span className="ns-pill ns-pill-muted">{turn.role}</span> : null}
+                {turn.timestamp ? <span className="ns-muted">{turn.timestamp}</span> : null}
+            </div>
+            {thinking ? (
+                <details className="ns-session-turn-thinking" open>
+                    <summary>Thinking</summary>
+                    <pre className="ns-session-pre">{thinking}</pre>
+                </details>
+            ) : null}
+            {renderToolCallList(calls, `turn-${index}`)}
+            {outputText ? (
+                <div className="ns-session-turn-output">{outputText}</div>
+            ) : null}
+        </article>
+    );
+}
+
 /**
  * 阶段工种原生 DSH Conversation / Trajectory 会话钻取检查器：
  * - 完整宿主环境（sessionsService + SessionProvider + renderStageConversation）下：
- *   调用 sessionsService.retain(sessionId, { source: 'narrateosStudio' }) 获取实时/历史引用，
- *   并在卸载或切换 sessionId 时准确调用 reference.release() 释放引用。
+ *   调用 sessionsService.retain(...) 获取实时/历史引用（有 parentSessionId 时透传父子地址），
+ *   并在卸载或切换 sessionId 时立即屏蔽旧 sessionRef 并准确调用 reference.release() 释放引用。
  * - 在内部通过 SessionProvider 挂载 'narrateos.stage.conversation' -> 'conversation.content'，
  *   支持在原生 Conversation（实时思考块与工具流）与 Trajectory（轮次耗时/Token/JSON 明细）间切换。
- * - 无宿主会话服务时（单测/独立预览）：降级为信息丰富的元数据面板，展示 sessionId、stageId、运行状态与复制入口。
+ * - 无宿主会话服务或 retain() 失败时：自动回源 GET /api/narrate/runs/detail?sessionId=... 展示回合、思考、工具调用与输出，
+ *   并在接口返回 404 或不可用时静默保留元数据与复制入口。
  */
 export function StageSessionViewer({
     selection,
@@ -107,6 +199,8 @@ export function StageSessionViewer({
     const [sessionRef, setSessionRef] = useState<StudioSessionReference | null>(null);
     const [readyState, setReadyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
     const [retainError, setRetainError] = useState<string | null>(null);
+    const [runDetail, setRunDetail] = useState<RunDetailPayload | null>(null);
+    const [detailLoading, setDetailLoading] = useState<boolean>(false);
     const [copied, setCopied] = useState<boolean>(false);
 
     useEffect(() => {
@@ -116,10 +210,12 @@ export function StageSessionViewer({
 
     useEffect(() => {
         const targetSessionId = selection?.sessionId;
+        // 切换会话或清理选中前立刻清空旧 sessionRef，防止切换瞬间把旧句柄传给新子树
+        setSessionRef(null);
+        setRetainError(null);
+        setReadyState('idle');
+
         if (!sessionsService || !targetSessionId || selection?.cleanroom) {
-            setSessionRef(null);
-            setReadyState('idle');
-            setRetainError(null);
             return;
         }
 
@@ -127,8 +223,16 @@ export function StageSessionViewer({
         let disposed = false;
         let acquired: StudioSessionReference | null = null;
 
+        const retainTarget: StudioSessionTarget = selection.parentSessionId
+            ? {
+                  parentSessionId: selection.parentSessionId,
+                  childSessionId: targetSessionId,
+                  mode: normalizeSubagentMode(selection.mode)
+              }
+            : targetSessionId;
+
         try {
-            acquired = sessionsService.retain(targetSessionId, {
+            acquired = sessionsService.retain(retainTarget, {
                 source: 'narrateosStudio',
                 signal: controller.signal
             });
@@ -145,6 +249,7 @@ export function StageSessionViewer({
                     },
                     (err: unknown) => {
                         if (!disposed) {
+                            setSessionRef(null);
                             setReadyState('error');
                             setRetainError(err instanceof Error ? err.message : String(err));
                         }
@@ -170,7 +275,52 @@ export function StageSessionViewer({
                 }
             }
         };
-    }, [sessionsService, selection?.sessionId, selection?.cleanroom]);
+    }, [
+        sessionsService,
+        selection?.sessionId,
+        selection?.parentSessionId,
+        selection?.mode,
+        selection?.cleanroom
+    ]);
+
+    const shouldFetchDetail = Boolean(
+        selection &&
+            !selection.cleanroom &&
+            selection.sessionId &&
+            (!sessionsService || !SessionProvider || !renderStageConversation || Boolean(retainError))
+    );
+
+    useEffect(() => {
+        setRunDetail(null);
+        if (!shouldFetchDetail || !selection?.sessionId) {
+            setDetailLoading(false);
+            return;
+        }
+
+        let cancelled = false;
+        setDetailLoading(true);
+        void fetchRunDetail(selection.sessionId)
+            .then((detail) => {
+                if (!cancelled && detail && detail.sessionId === selection.sessionId) {
+                    setRunDetail(detail);
+                }
+            })
+            .catch(() => {
+                // 独立单测或旧后端返回 404 / 网络失败时静默降级为元数据面板
+                if (!cancelled) {
+                    setRunDetail(null);
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setDetailLoading(false);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [shouldFetchDetail, selection?.sessionId]);
 
     const handleCopySessionId = () => {
         if (!selection?.sessionId) return;
@@ -203,12 +353,24 @@ export function StageSessionViewer({
     }
 
     const statusMeta = formatStageStatusText(selection.status);
+    const activeSessionRef =
+        sessionRef && sessionRef.sessionId === selection.sessionId ? sessionRef : null;
     const canMountNative = Boolean(
         !selection.cleanroom &&
-            sessionRef &&
+            activeSessionRef &&
             SessionProvider &&
             renderStageConversation &&
             !retainError
+    );
+
+    const topLevelThinking = runDetail?.thinking ?? runDetail?.reasoning;
+    const topLevelOutput = runDetail?.output ?? runDetail?.finalOutput ?? runDetail?.summary;
+    const hasDetailBody = Boolean(
+        runDetail &&
+            ((Array.isArray(runDetail.turns) && runDetail.turns.length > 0) ||
+                topLevelThinking ||
+                (Array.isArray(runDetail.toolCalls) && runDetail.toolCalls.length > 0) ||
+                topLevelOutput)
     );
 
     return (
@@ -287,7 +449,7 @@ export function StageSessionViewer({
                             <code>.ops/traces/</code>。
                         </p>
                     </div>
-                ) : canMountNative && SessionProvider && renderStageConversation ? (
+                ) : canMountNative && SessionProvider && renderStageConversation && activeSessionRef ? (
                     <div
                         className="ns-stage-session-embed"
                         data-stage-session-mode={viewMode}
@@ -298,7 +460,7 @@ export function StageSessionViewer({
                                 正在加载原生 {viewMode === 'chat' ? 'Conversation' : 'Trajectory'} 会话…
                             </div>
                         ) : null}
-                        <SessionProvider session={sessionRef}>
+                        <SessionProvider key={activeSessionRef.sessionId} session={activeSessionRef}>
                             {renderStageConversation({ view: viewMode })}
                         </SessionProvider>
                     </div>
@@ -333,6 +495,32 @@ export function StageSessionViewer({
                                 </>
                             ) : null}
                         </dl>
+
+                        {detailLoading ? (
+                            <div className="ns-session-loading-bar" role="status">
+                                正在拉取历史会话明细…
+                            </div>
+                        ) : null}
+
+                        {hasDetailBody && runDetail ? (
+                            <div className="ns-session-detail" data-session-detail="true">
+                                {topLevelThinking ? (
+                                    <details className="ns-session-turn-thinking" open>
+                                        <summary>Thinking</summary>
+                                        <pre className="ns-session-pre">{topLevelThinking}</pre>
+                                    </details>
+                                ) : null}
+                                {renderToolCallList(runDetail.toolCalls, 'root')}
+                                {Array.isArray(runDetail.turns) && runDetail.turns.length > 0 ? (
+                                    <div className="ns-session-turns">
+                                        {runDetail.turns.map((turn, idx) => renderRunTurn(turn, idx))}
+                                    </div>
+                                ) : null}
+                                {topLevelOutput ? (
+                                    <div className="ns-session-turn-output">{topLevelOutput}</div>
+                                ) : null}
+                            </div>
+                        ) : null}
                     </div>
                 )}
             </div>

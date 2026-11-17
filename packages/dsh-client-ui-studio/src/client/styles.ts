@@ -3513,6 +3513,97 @@ details.ns-acc[open] summary {
     color: var(--ns-text-2);
     word-break: break-all;
 }
+
+.ns-session-detail {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--ns-border-1);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ns-session-turns {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ns-session-turn {
+    padding: 8px;
+    border: 1px solid var(--ns-border-1);
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-base);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ns-session-turn-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 11px;
+}
+
+.ns-session-turn-thinking {
+    font-size: 11.5px;
+    color: var(--ns-text-3);
+}
+
+.ns-session-turn-thinking summary {
+    cursor: pointer;
+    font-weight: 500;
+    color: var(--ns-text-2);
+}
+
+.ns-session-tool-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ns-session-tool-call {
+    padding: 6px 8px;
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-hover);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.ns-session-tool-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--ns-text-1);
+}
+
+.ns-session-pre {
+    margin: 4px 0 0;
+    padding: 6px;
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-surface-2);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ns-text-2);
+}
+
+.ns-session-pre-result {
+    border-left: 2px solid var(--ns-border-3);
+}
+
+.ns-session-turn-output {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--ns-text-1);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
 `;
 
 /**
