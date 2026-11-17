@@ -87,6 +87,7 @@ narrateos/
   - 自动化测试完整覆盖并断言通过：① 并发/顺序行级补丁零状态丢失；② 企图修改实体 `canonical_name` 或 `Innate Locks` 已锁条目的补丁 100% 被拦截报错；③ 引用不存在的 `char_XXX` / `item_XXX` / `ch_XXXX` 触发外键异常阻止 `state` 提交；④ 模拟 `FEAT_COMMITTED` 后断电重启，`recoverWal()` 精确识别未完成状态并保持 Git 树零脏文件。
   - 事务锁仅在持锁进程已退出时回收；锁龄不能使存活进程失去互斥保护。释放时核验本次获取的所有权，不删除其他持有者的锁。损坏锁仅按超时规则恢复。
   - WAL 恢复以 Git 已提交的事务状态为相位依据；工作区中提前写入的 FEAT/STATE/DREAM 不构成提交成功证据。正文提交失败返回起草恢复，状态提交失败继续从已提交正文抽取。
+  - 恢复仅回退持久化写集内的文件，先将这些文件备份到 `.ops/recovery/`；历史章手改、未登记实体及未跟踪笔记原地保留并继续报告脏状态，不执行整仓 reset/clean。恢复备份不参与工作区干净度判断。
 
 ### Phase 2：确定性裁剪、成对检索与静态门禁内核 (`ViewSlicer` + `IndexRecall` + `ProseGateAndTelemetry`)
 - **交付内容**：零 LLM 调用完整实现 `ViewSlicer`、`IndexRecall` 与 `ProseGateAndTelemetry` 三个纯确定性深模块。

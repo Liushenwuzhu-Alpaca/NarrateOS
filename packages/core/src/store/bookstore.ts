@@ -1,8 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { z } from 'zod';
 import { SystemPort } from '../ports/system.js';
 import {
     DEFAULT_SECTION_HEADINGS,
@@ -39,6 +40,11 @@ const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
 const ENTITY_ID_RE = /^(?:char|item)_[a-zA-Z0-9_]+$/;
 const BEGIN_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
 const COMMIT_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'DRAFTING', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
+const PendingWritesSchema = z.object({
+    baseWal: z.string().nullable(),
+    paths: z.array(z.string().min(1).refine((path) =>
+        !isAbsolute(path) && !path.split(/[\\/]/).some((part) => part === '..' || part === '.git')))
+});
 
 export interface TxLockOptions {
     staleMs?: number | undefined;
@@ -382,6 +388,41 @@ export class BookStore {
         };
     }
 
+    private async recordPendingWrites(paths: string[]): Promise<void> {
+        const record = PendingWritesSchema.parse({
+            baseWal: await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json'),
+            paths: [...new Set([...paths, '.ops/tx_state.json'])]
+        });
+        await mkdir(this.opsDir, { recursive: true });
+        const temporaryPath = join(this.opsDir, 'pending_writes.tmp');
+        await writeFile(temporaryPath, JSON.stringify(record), 'utf8');
+        await rename(temporaryPath, join(this.opsDir, 'pending_writes.json'));
+    }
+
+    private async restorePendingWrites(committedRaw: string, fallbackPaths: string[]): Promise<void> {
+        const pendingPath = join(this.opsDir, 'pending_writes.json');
+        let paths = fallbackPaths;
+        try {
+            const record = PendingWritesSchema.parse(JSON.parse(await readFile(pendingPath, 'utf8')));
+            paths = record.baseWal === committedRaw ? record.paths : fallbackPaths;
+        } catch (error: unknown) {
+            if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+        }
+        const backupRoot = join(this.opsDir, 'recovery', randomUUID());
+        for (const path of paths) {
+            try {
+                const content = await readFile(join(this.bookRoot, path));
+                const backupPath = join(backupRoot, path);
+                await mkdir(dirname(backupPath), { recursive: true });
+                await writeFile(backupPath, content);
+            } catch (error: unknown) {
+                if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+            }
+        }
+        await this.system.restorePaths(this.bookRoot, paths);
+        await rm(pendingPath, { force: true });
+    }
+
     /** 标记进入起草相位 (IDLE/STATE_COMMITTED/DREAM_COMMITTED -> DRAFTING) */
     async beginDraft(chapterNumber: number): Promise<TxState> {
         return await this.runWithTxLock(async () => {
@@ -411,6 +452,7 @@ export class BookStore {
             await mkdir(this.manuscriptsDir, { recursive: true });
             const chKey = formatChapterKey(chapterNumber);
             const relChapterPath = `manuscripts/${chKey}.md`;
+            await this.recordPendingWrites([relChapterPath]);
             await writeFile(join(this.bookRoot, relChapterPath), manuscriptText, 'utf8');
 
             const next: TxState = {
@@ -430,6 +472,7 @@ export class BookStore {
                 [relChapterPath, '.ops/tx_state.json'],
                 `feat(${formatChapterTag(chapterNumber)}): settle manuscript`
             );
+            await rm(join(this.opsDir, 'pending_writes.json'), { force: true });
             return { sha: commitRes.sha, txState: next };
         });
     }
@@ -483,6 +526,11 @@ export class BookStore {
             }
 
             // 第三阶段：全部校验通过后落盘并提交 Git
+            await this.recordPendingWrites([
+                ...[...stagedProfiles.keys()].map((id) => `entities/${id}.md`),
+                ...(options?.worldStateUpdate ? ['world/world_state.md'] : []),
+                ...(options?.extraCommitPaths ?? [])
+            ]);
             const commitPaths: string[] = [];
             const updatedEntities: string[] = [];
             for (const [entityId, profile] of stagedProfiles.entries()) {
@@ -524,6 +572,7 @@ export class BookStore {
                 commitPaths,
                 `state(${formatChapterTag(chapterNumber)}): update entity pages & L2 card`
             );
+            await rm(join(this.opsDir, 'pending_writes.json'), { force: true });
 
             return {
                 sha: commitRes.sha,
@@ -537,6 +586,7 @@ export class BookStore {
     async markDreamCommitted(chapterNumber: number, extraPaths: string[] = []): Promise<TxState> {
         return await this.runWithTxLock(async () => {
             const current = await this.readTxState();
+            await this.recordPendingWrites(extraPaths);
             const next: TxState = {
                 ...current,
                 phase: 'DREAM_COMMITTED',
@@ -549,6 +599,7 @@ export class BookStore {
                 [...extraPaths, '.ops/tx_state.json'],
                 `dream(${formatChapterTag(chapterNumber)}): vacuum & archive`
             );
+            await rm(join(this.opsDir, 'pending_writes.json'), { force: true });
             return next;
         });
     }
@@ -565,8 +616,7 @@ export class BookStore {
             if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) !== JSON.stringify(committed)) {
                 const pendingChapter = txState.active_chapter;
                 const pendingDraft = txState.phase === 'FEAT_COMMITTED' && committed.phase !== 'FEAT_COMMITTED';
-                await this.system.resetHard(this.bookRoot, 'HEAD');
-                await this.system.cleanUntracked(this.bookRoot, ['.ops/']);
+                await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
                 txState = committed;
                 if (pendingDraft) {
                     return {
@@ -578,14 +628,11 @@ export class BookStore {
             }
 
             if (txState.phase === 'DRAFTING') {
-                await this.system.resetHard(this.bookRoot, 'HEAD');
-                await this.system.cleanUntracked(this.bookRoot, ['.ops/']);
-                if (txState.active_chapter !== null) {
-                    const draftPath = join(this.manuscriptsDir, `${formatChapterKey(txState.active_chapter)}.md`);
-                    if (!txState.chapter_hashes[formatChapterKey(txState.active_chapter)]) {
-                        await rm(draftPath, { force: true });
-                    }
+                const paths = ['.ops/tx_state.json'];
+                if (txState.active_chapter !== null && !txState.chapter_hashes[formatChapterKey(txState.active_chapter)]) {
+                    paths.push(`manuscripts/${formatChapterKey(txState.active_chapter)}.md`);
                 }
+                await this.restorePendingWrites(committedRaw, paths);
                 const restored = await this.readTxState();
                 return {
                     action: 'ROLLED_BACK_DRAFT',
@@ -595,8 +642,7 @@ export class BookStore {
             }
 
             if (txState.phase === 'FEAT_COMMITTED') {
-                await this.system.resetHard(this.bookRoot, 'HEAD');
-                await this.system.cleanUntracked(this.bookRoot, ['.ops/']);
+                await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
                 return {
                     action: 'NEEDS_STATE_EXTRACTION',
                     phase: 'FEAT_COMMITTED',

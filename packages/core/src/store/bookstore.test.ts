@@ -519,8 +519,9 @@ describe('BookStore', () => {
         expect(walAfterFeat.chapter_hashes['ch_0002']).toHaveLength(64);
         expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
 
-        // 模拟 Extractor 写入半成品后进程崩溃
-        await writeFile(join(bookRoot, 'entities/char_001.md'), 'CORRUPTED HALF WRITE', 'utf8');
+        // 模拟真实状态提交失败，写集先于实体文件持久化。
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('状态提交中断'));
+        await expect(store.applyStatePatch(2, [{ entity_id: 'char_001', last_seen_ch: 2 }])).rejects.toThrow('状态提交中断');
         expect(await system.isWorkingTreeClean(bookRoot)).toBe(false);
 
         // 重启执行 recoverWal()
@@ -610,21 +611,26 @@ describe('BookStore', () => {
         await expect(holder).resolves.toBe('holder-done');
     });
 
-    it('回归：FEAT_COMMITTED 恢复清理新建未跟踪实体残留文件并保持 Git 干净', async () => {
+    it('FEAT 恢复保留未登记的实体、历史章手改和未跟踪笔记', async () => {
         const { bookRoot, system, store } = await createTempBookRepo();
 
         await store.commitDraft(2, '第2章定稿内容\n');
-        // 模拟 Extractor 写入新建未跟踪实体后崩溃
+        // 未登记的文件不能假定为引擎崩溃残留。
         const untrackedEntityPath = join(bookRoot, 'entities/char_temp.md');
         await writeFile(untrackedEntityPath, 'UNTRACKED ENTITY DRAFT', 'utf8');
+        const oldChapter = join(bookRoot, 'manuscripts/ch_0001.md');
+        await writeFile(oldChapter, '作者修改的历史章', 'utf8');
+        await writeFile(join(bookRoot, 'notes.md'), '作者笔记', 'utf8');
         expect(await system.isWorkingTreeClean(bookRoot)).toBe(false);
 
         const recovery = await store.recoverWal();
         expect(recovery.action).toBe('NEEDS_STATE_EXTRACTION');
         expect(recovery.phase).toBe('FEAT_COMMITTED');
-        expect(recovery.clean).toBe(true);
-        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
-        await expect(access(untrackedEntityPath)).rejects.toThrow();
+        expect(recovery.clean).toBe(false);
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(false);
+        expect(await readFile(untrackedEntityPath, 'utf8')).toBe('UNTRACKED ENTITY DRAFT');
+        expect(await readFile(oldChapter, 'utf8')).toBe('作者修改的历史章');
+        expect(await readFile(join(bookRoot, 'notes.md'), 'utf8')).toBe('作者笔记');
     });
 
     it('回归：拦截非法 entity_id 与路径穿越，并校验 WAL 非法前置相位', async () => {

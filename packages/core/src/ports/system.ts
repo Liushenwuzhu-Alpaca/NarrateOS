@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, rm } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -28,6 +28,7 @@ export interface SystemPort {
     diffFile(bookRoot: string, refA: string, refB: string, relativePath: string): Promise<string>;
     resetHard(bookRoot: string, ref: string): Promise<void>;
     cleanUntracked(bookRoot: string, excludePaths?: string[]): Promise<void>;
+    restorePaths(bookRoot: string, paths: string[]): Promise<void>;
     isWorkingTreeClean(bookRoot: string): Promise<boolean>;
     ripgrepSearch(
         bookRoot: string,
@@ -103,8 +104,24 @@ export class NodeSystemAdapter implements SystemPort {
         await this.runGit(bookRoot, args);
     }
 
+    /** 仅恢复事务登记的文件，不清理其他工作区改动。 */
+    async restorePaths(bookRoot: string, paths: string[]): Promise<void> {
+        for (const path of paths) {
+            if (isAbsolute(path) || path.split(/[\\/]/).some((part) => part === '..' || part === '.git')) {
+                throw new Error(`非法恢复路径: ${path}`);
+            }
+            const original = await this.readFileAtRef(bookRoot, 'HEAD', path);
+            if (original !== null) {
+                await this.runGit(bookRoot, ['restore', '--source=HEAD', '--staged', '--worktree', '--', path]);
+            } else {
+                await this.runGit(bookRoot, ['reset', 'HEAD', '--', path]);
+                await rm(join(bookRoot, path), { force: true });
+            }
+        }
+    }
+
     async isWorkingTreeClean(bookRoot: string): Promise<boolean> {
-        const { stdout } = await this.runGit(bookRoot, ['status', '--porcelain']);
+        const { stdout } = await this.runGit(bookRoot, ['status', '--porcelain', '--', '.', ':(exclude).ops/recovery/**']);
         return stdout.trim().length === 0;
     }
 
