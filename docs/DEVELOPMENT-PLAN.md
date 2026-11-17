@@ -94,6 +94,7 @@ narrateos/
   - Librarian 声明的回表查询必须通过成对校验，实体档案同步加入挂载集。每个必需章节至少保留一条证据，写手预算裁剪只删除可选切片；缺少证据或可见档案时停止生成。
   - Dreaming 未显式传参时从作品快照取得真实 story_day、上次整理后出场实体与累计正文字符数；成功整理在同一提交更新 `.ops/dream_watermark.json`，避免 YOLO 因空参数永久跳过或重复计数。
   - 四级裁剪后必需上下文仍超出 writer_token_budget 时，报告最低估算量与预算并停止写手请求；不能返回超预算请求或删除必需证据伪装达标。
+  - 实体文本渲染保留 visibility、owner、status 分类标签，Planner 可区分里表账本；Writer 仍先经 POV/WARPED 物理裁剪再渲染，不通过省略标签掩盖私密数据。
 
 ### Phase 2：确定性裁剪、成对检索与静态门禁内核 (`ViewSlicer` + `IndexRecall` + `ProseGateAndTelemetry`)
 - **交付内容**：零 LLM 调用完整实现 `ViewSlicer`、`IndexRecall` 与 `ProseGateAndTelemetry` 三个纯确定性深模块。

@@ -24,6 +24,9 @@ function formatEntryLine(entry: EntityEntry): string {
     if (entry.storyDay !== undefined) tags.push(`day:${entry.storyDay}`);
     if (entry.chapter !== undefined) tags.push(`ch:${entry.chapter}`);
     if (entry.slotKey) tags.push(`slot:${entry.slotKey}`);
+    if (entry.visibility) tags.push(`vis:${entry.visibility}`);
+    if (entry.owner) tags.push(`owner:${entry.owner}`);
+    if (entry.status) tags.push(`status:${entry.status}`);
     const prefix = tags.length > 0 ? `[${tags.join(' | ')}] ` : '';
     const extra = entry.continuationLines.length > 0 ? `\n  ${entry.continuationLines.join('\n  ')}` : '';
     return `- ${prefix}${entry.text}${extra}`;

@@ -323,6 +323,14 @@ describe('PrefixAssembler', () => {
             chapterGoal: '第45章：林雾在档案室外与神代雪乃试探交锋。',
             opsStyleAmendments: '对话避免连续三轮以上纯站桩问答。'
         });
+        const ledgerProfile = plannerView45.entities['char_001']!;
+        ledgerProfile.acquiredState.push({ text: '分类测试事实', continuationLines: [], visibility: 'OMNISCIENT_SECRET', owner: 'char_001', status: 'ACTIVE' });
+        const tagged = assembler.assemblePlannerRequest({ config: snapshot.config, staticPrefix: staticInputs, slicedView: plannerView45, chapterGoal: '核对账本分类' });
+        expect(tagged.request.dynamicTail).toContain('vis:OMNISCIENT_SECRET | owner:char_001 | status:ACTIVE');
+        ledgerProfile.acquiredState.at(-1)!.visibility = 'PUBLIC';
+        const publicTagged = assembler.assemblePlannerRequest({ config: snapshot.config, staticPrefix: staticInputs, slicedView: plannerView45, chapterGoal: '核对账本分类' });
+        expect(publicTagged.request.dynamicTail).toContain('vis:PUBLIC | owner:char_001 | status:ACTIVE');
+        expect(publicTagged.request.dynamicTail).not.toBe(tagged.request.dynamicTail);
         const reqWriter45 = assembler.assembleWriterRequest({
             config: snapshot.config,
             staticPrefix: staticInputs,
