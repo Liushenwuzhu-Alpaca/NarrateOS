@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS Pipeline & Runtime Service",
+        "description": "Host-only multi-agent pipeline orchestrating externalized role configs, 6-stage chapter production, YOLO loop, Sync, multi-turn Dreaming, 3-tier self-healing, volume handoff, REST/SSE, and zero-token slash commands."
+    }
+}
