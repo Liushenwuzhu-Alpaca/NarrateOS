@@ -99,6 +99,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
 
     ctx.effect(function* () {
         yield ctx.provide('narratePipeline', controller);
+        void controller.ensureDefaultBookSelected();
 
         // 独立子插件隔离 RoleRunner 动态挂载点（session/event 监听与 agents.create 作用域），
         // 确保卸载时先由 controller.shutdown() 排空活跃运行，再释放 runnerFiber。

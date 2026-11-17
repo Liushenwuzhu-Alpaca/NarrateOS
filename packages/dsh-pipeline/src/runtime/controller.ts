@@ -1517,6 +1517,22 @@ export class NarrateRuntimeController {
         };
     }
 
+    /** 宿主未显式指定单书时，自动激活 booksRoot 下第一部有效作品以便命令与控制面开箱即用 */
+    async ensureDefaultBookSelected(): Promise<string | null> {
+        if (this.bookRoot || this.shuttingDown || this.activeTask !== 'IDLE') {
+            return this.bookRoot;
+        }
+        try {
+            const { books } = await this.listBooks();
+            if (books.length > 0 && !this.bookRoot && !this.shuttingDown && this.activeTask === 'IDLE') {
+                await this.switchBook(books[0]!.bookRoot);
+            }
+        } catch {
+            // 扫描失败或并发切换时保持静默，由后续显式 switchBook 或 bootBook 处理
+        }
+        return this.bookRoot;
+    }
+
     /** 列出当前作品章节摘要 */
     async listChapters(): Promise<{
         chapters: Array<{
