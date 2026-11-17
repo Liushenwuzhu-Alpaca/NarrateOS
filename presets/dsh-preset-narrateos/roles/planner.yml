@@ -1,0 +1,12 @@
+id: planner
+pool: strong_creative
+cleanroom: false
+promptFile: ./prompts/planner.md
+temperature: 0.5
+reasoningEffort: high
+maxSteps: 6
+maxReadCalls: 3
+tools:
+    - book_read
+    - book_grep
+yieldTool: yield_outline

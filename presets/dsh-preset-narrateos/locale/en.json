@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS Creative Preset",
+        "description": "Registers the single NarrateOS Creative Mode preset with book store, scoped book tools, multi-role pipeline, Studio UI, and boot skill while disabling coding tools."
+    }
+}
