@@ -38,6 +38,8 @@ import {
     type BookSnapshot,
     type DirtyChapter,
     type EntityPatch,
+    type PlannerOutline,
+    PlannerOutlineSchema,
     type TimelineMode,
     TxStateSchema
 } from '../store/schemas.js';
@@ -58,8 +60,6 @@ import {
     LibrarianOutputSchema,
     NextVolumeEnvelopeOutputSchema,
     PlanConflictError,
-    type PlannerOutline,
-    PlannerOutlineSchema,
     SafeHaltError,
     type SafeHaltSnapshot,
     type StepChapterOptions,
@@ -1572,12 +1572,12 @@ export class NarrativeEngine {
             }
         }
 
-        // Step 6: WAL 第 1 粒度提交 (feat 正文真源) -> Extractor -> WAL 第 2 粒度提交 (state 视图)
+        // Step 6: WAL 第 1 粒度提交 (feat 正文真源 + 最终实际使用的细纲快照) -> Extractor -> WAL 第 2 粒度提交 (state 视图)
         await this.store.beginDraft(chapterNumber);
         const featRes = await this.store.commitDraft(chapterNumber, activeProse, {
             timelineMode, targetDay, povCharIds,
             ...(parallel ? { parallelWindowId: parallel.windowId, parallelBranchId: parallel.branchId } : {})
-        });
+        }, { outline: activeOutline });
 
         emit('EXTRACTOR', chapterNumber, '增量抽取实体状态与四联遥测');
         const stateRes = await this.runExtractorAndCommitState(

@@ -900,13 +900,17 @@ export class NarrateRuntimeController {
             const recordedHash = txState.chapter_hashes[formatChapterFileName(chNum).replace(/\.md$/, '')] ?? null;
             const dirty = recordedHash === null || recordedHash !== sha256;
             const diffOut = await runGitCommand(this._bookRoot, ['diff', 'HEAD', '--', relPath]);
+            // 细纲快照损坏只降级为 error，不让整章正文失效，也不泄漏原始异常或路径
+            const outline = await this.store.readChapterOutline(chNum);
 
             sendJson(res, 200, {
                 chapterNumber: chNum,
                 content,
                 dirty,
                 sha256,
-                diffFromHead: diffOut ?? ''
+                diffFromHead: diffOut ?? '',
+                outlineText: outline.outlineText,
+                outlineStatus: outline.status
             });
         } catch (err) {
             sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });

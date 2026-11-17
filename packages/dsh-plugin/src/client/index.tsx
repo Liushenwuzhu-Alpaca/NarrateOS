@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives';
+import { handleTabKeyDown } from './tab-keyboard';
+import { aggregateTelemetryTokens } from './token-telemetry';
 import {
     bootBook,
     deleteSignal,
@@ -30,6 +32,7 @@ import {
     CenterWorkbench,
     resolveStageId,
     type CenterWorkbenchProps,
+    type CenterWorkbenchDraftHandle,
     type DirectorSignalKind,
     type ExternalViewCommand,
     type PendingSignalItem,
@@ -38,6 +41,13 @@ import {
     type StageNodeState,
     type SubmitSignalPayload
 } from './CenterWorkbench';
+import { DraftGuardModal } from './DraftGuardModal';
+import {
+    decideDraftNavigation,
+    resolveBackgroundCommitAction,
+    type DraftLocation,
+    type DraftNavigationIntent
+} from './draft-guard';
 import { LeftBookNav, type MaterializedViewKind } from './LeftBookNav';
 import {
     RightOpsInspector,
@@ -100,18 +110,6 @@ function asString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-/** 兼容嵌套 token_usage 与扁平字段读取 Token 消耗 */
-function readTelemetryTokens(item: TelemetryItem | null | undefined): {
-    inputTokens: number;
-    cacheReadTokens: number;
-    outputTokens: number;
-} {
-    return {
-        inputTokens: item?.token_usage?.inputTokens ?? item?.inputTokens ?? 0,
-        cacheReadTokens: item?.token_usage?.cacheReadTokens ?? item?.cacheReadTokens ?? 0,
-        outputTokens: item?.token_usage?.outputTokens ?? item?.outputTokens ?? 0
-    };
-}
 
 /** 兼容嵌套 metrics 与扁平字段读取文风四联指标 */
 function readTelemetryMetrics(item: TelemetryItem | null | undefined): {
@@ -301,6 +299,7 @@ export function NarrateStudioRoot(): React.ReactElement {
     const [haltView, setHaltView] = useState<HaltViewPayload | null>(null);
 
     const [latestSseStage, setLatestSseStage] = useState<string | null>(null);
+    const [haltWaiting, setHaltWaiting] = useState(false);
     const [stageOverrides, setStageOverrides] = useState<Partial<Record<PipelineStageId, StageNodeState>>>({});
     const [liveTelemetry, setLiveTelemetry] = useState<TelemetryItem | null>(null);
     const [gateViolations, setGateViolations] = useState<ProseGateViolationItem[]>([]);
@@ -374,7 +373,31 @@ export function NarrateStudioRoot(): React.ReactElement {
         return () => window.removeEventListener('resize', onResize);
     }, []);
 
+    // 作品切换、保存交接会使旧读取失效；切换请求在途期间不读取全局当前作品。
+    const workspaceEpochRef = useRef(0);
+    const switchingBookRef = useRef(false);
+    const refreshRequestRef = useRef(0);
+    const viewsRequestRef = useRef(0);
+    const statusRequestRef = useRef(0);
+    const saveInFlightRef = useRef(false);
+    const isCurrentWorkspace = useCallback((epoch: number) =>
+        epoch === workspaceEpochRef.current && !switchingBookRef.current, []);
+
+    const loadStatus = useCallback(async () => {
+        if (switchingBookRef.current) return;
+        const epoch = workspaceEpochRef.current;
+        const seq = ++statusRequestRef.current;
+        const next = await fetchStatus();
+        if (isCurrentWorkspace(epoch) && seq === statusRequestRef.current &&
+            (!currentBookRootRef.current || next.bookRoot === currentBookRootRef.current)) {
+            setStatus(next);
+        }
+    }, [isCurrentWorkspace]);
+
     const loadViews = useCallback(async () => {
+        if (switchingBookRef.current) return;
+        const epoch = workspaceEpochRef.current;
+        const seq = ++viewsRequestRef.current;
         const [entities, horizon, threads, telemetry, signals, halt] = await Promise.all([
             fetchViewEntities().catch(() => null),
             fetchViewHorizon().catch(() => null),
@@ -383,32 +406,87 @@ export function NarrateStudioRoot(): React.ReactElement {
             fetchViewSignals().catch(() => null),
             fetchViewHalt().catch(() => null)
         ]);
+        if (!isCurrentWorkspace(epoch) || seq !== viewsRequestRef.current) return;
         if (entities) setEntitiesView(entities);
         if (horizon) setHorizonView(horizon);
         if (threads) setThreadsView(threads);
         if (telemetry) setTelemetryView(telemetry);
         if (signals) setSignalsView(signals);
         if (halt) setHaltView(halt);
-    }, []);
+    }, [isCurrentWorkspace]);
 
     const [chapterLoading, setChapterLoading] = useState<boolean>(false);
+    // 章节详情请求序号：乱序返回时只采纳最后一次请求，失败/空详情不清空既有详情与草稿
+    const chapterRequestSeqRef = useRef(0);
+    // 当前作品身份 ref：详情采纳前核对，防止切作品后旧书响应串章
+    const currentBookRootRef = useRef<string>('');
     const loadChapterByNumber = useCallback(async (chapterNumber: number) => {
-        if (!Number.isFinite(chapterNumber) || chapterNumber <= 0) {
-            setChapterDetail(null);
+        if (switchingBookRef.current || !Number.isFinite(chapterNumber) || chapterNumber <= 0) {
             return;
         }
+        const seq = ++chapterRequestSeqRef.current;
+        const epoch = workspaceEpochRef.current;
         setChapterLoading(true);
         try {
             const detail = await fetchChapter(chapterNumber);
+            if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
+            // 请求在途期间用户可能已开始改稿：采纳前再核对最新脏态，不同章/不同作品不得覆盖
+            const dirtyNow = draftLocationRef.current;
+            if (
+                dirtyNow &&
+                (dirtyNow.chapterNumber !== detail.chapterNumber ||
+                    dirtyNow.bookRoot !== currentBookRootRef.current)
+            ) {
+                return;
+            }
+            setSelectedChapter(detail.chapterNumber);
             setChapterDetail(detail);
         } catch (err) {
+            if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
             showToast(err instanceof Error ? err.message : String(err), 'error');
         } finally {
-            setChapterLoading(false);
+            if (isCurrentWorkspace(epoch) && seq === chapterRequestSeqRef.current) {
+                setChapterLoading(false);
+            }
         }
-    }, [showToast]);
+    }, [isCurrentWorkspace, showToast]);
+
+    // 运行态忙判定提前派生：守卫保存与刷新回调都依赖它
+    const activeTask = status?.runtime.activeTask ?? 'IDLE';
+    const isBusy = activeTask !== 'IDLE' || Boolean(status?.yolo.running);
+
+    // 未保存草稿位置（由中栏编辑器上报）；ref 供事件回调与守卫读取最新值
+    const [draftLocation, setDraftLocation] = useState<DraftLocation | null>(null);
+    const draftLocationRef = useRef<DraftLocation | null>(null);
+    const handleDraftDirtyChange = useCallback((dirty: DraftLocation | null) => {
+        // 同步写 ref：同一 tick 内的导航守卫/详情采纳立刻可见，不等下一次 render
+        draftLocationRef.current = dirty;
+        setDraftLocation(dirty);
+    }, []);
+    // 中栏草稿控制句柄：守卫保存成功/放弃修改后强制结束编辑态
+    const draftControlRef = useRef<CenterWorkbenchDraftHandle | null>(null);
+    const handleDraftControlReady = useCallback((handle: CenterWorkbenchDraftHandle | null) => {
+        draftControlRef.current = handle;
+    }, []);
+
+    // 浏览器关闭/刷新时脏草稿保护（不要求跨重启恢复）
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const onBeforeUnload = (ev: BeforeUnloadEvent) => {
+            if (!draftLocationRef.current) return;
+            ev.preventDefault();
+            ev.returnValue = '';
+        };
+        window.addEventListener('beforeunload', onBeforeUnload);
+        return () => window.removeEventListener('beforeunload', onBeforeUnload);
+    }, []);
 
     const refreshAll = useCallback(async (preferredChapter?: number | null) => {
+        if (switchingBookRef.current) return;
+        const epoch = workspaceEpochRef.current;
+        const seq = ++refreshRequestRef.current;
+        const statusSeq = ++statusRequestRef.current;
+        const chapterSeq = chapterRequestSeqRef.current;
         setLoading(true);
         try {
             const [booksRes, statusRes, chaptersRes] = await Promise.all([
@@ -417,11 +495,24 @@ export function NarrateStudioRoot(): React.ReactElement {
                 fetchChapters(),
                 loadViews()
             ]);
+            if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+            if (booksRes.currentBookRoot !== statusRes.bookRoot ||
+                (currentBookRootRef.current && booksRes.currentBookRoot !== currentBookRootRef.current)) return;
 
             setBooksState(booksRes);
-            setStatus(statusRes);
+            currentBookRootRef.current = booksRes.currentBookRoot;
+            if (statusSeq === statusRequestRef.current) setStatus(statusRes);
             setChapters(chaptersRes.chapters);
             setLatestSseStage(statusRes.yolo.currentStage ?? null);
+
+            // 编辑中的脏草稿优先：任何后台刷新不得换章或替换详情
+            const draft = draftLocationRef.current;
+            if (draft && draft.bookRoot === booksRes.currentBookRoot) {
+                setSelectedChapter(draft.chapterNumber);
+                return;
+            }
+            // 用户在刷新期间主动选章或完成保存后，后台刷新不得覆盖其选择。
+            if (chapterSeq !== chapterRequestSeqRef.current) return;
 
             const fallbackChapter =
                 chaptersRes.chapters.length > 0
@@ -433,19 +524,19 @@ export function NarrateStudioRoot(): React.ReactElement {
                 (statusRes.latestChapter > 0 ? statusRes.latestChapter : fallbackChapter);
 
             if (candidate !== null && candidate > 0) {
-                setSelectedChapter(candidate);
-                const detail = await fetchChapter(candidate).catch(() => null);
-                setChapterDetail(detail);
+                await loadChapterByNumber(candidate);
             } else {
                 setSelectedChapter(null);
                 setChapterDetail(null);
             }
         } catch (err) {
-            showToast(err instanceof Error ? err.message : String(err), 'error');
+            if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
+                showToast(err instanceof Error ? err.message : String(err), 'error');
+            }
         } finally {
-            setLoading(false);
+            if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
         }
-    }, [loadViews, showToast]);
+    }, [isCurrentWorkspace, loadChapterByNumber, loadViews, showToast]);
 
     useEffect(() => {
         void refreshAll();
@@ -464,26 +555,38 @@ export function NarrateStudioRoot(): React.ReactElement {
             const { event, data } = payload;
 
             if (event === 'book_switched') {
+                if (switchingBookRef.current) return;
+                const bookRoot = asString(data['bookRoot']);
+                // HTTP 切书已确认后，同次 SSE 可能迟到；重复通知不能使本书在途保存失效。
+                if (!bookRoot || bookRoot === currentBookRootRef.current) return;
+                workspaceEpochRef.current += 1;
+                chapterRequestSeqRef.current += 1;
+                currentBookRootRef.current = bookRoot;
+                setHaltWaiting(false);
                 setStageOverrides({});
                 setLiveTelemetry(null);
+                setTelemetryView(null);
                 setGateViolations([]);
                 showToast('已切换当前作品仓库');
                 void refreshAllRef.current(null);
                 return;
             }
+            if (switchingBookRef.current) return;
 
             if (event === 'stage' || event === 'chapter:phase') {
                 const stageName = asString(data['stage']) ?? asString(data['phase']);
                 if (!stageName) return;
 
                 if (stageName === 'STARTING') {
+                    setHaltWaiting(false);
                     setStageOverrides({});
                     setLatestSseStage('LIBRARIAN');
                     setStatus((prev) =>
                         prev
                             ? {
                                   ...prev,
-                                  runtime: { ...prev.runtime, activeTask: 'STEPPING' }
+                                  yolo: { ...prev.yolo, stopRequested: false },
+                                  runtime: { ...prev.runtime, activeTask: 'STEPPING', haltRequested: false }
                               }
                             : prev
                     );
@@ -493,7 +596,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                 if (stageName === 'FAILED') {
                     const errText = asString(data['error']) ?? '章节推进失败';
                     showToast(errText, 'error');
-                    void fetchStatus().then(setStatus).catch(() => undefined);
+                    void loadStatus().catch(() => undefined);
                     return;
                 }
 
@@ -531,7 +634,15 @@ export function NarrateStudioRoot(): React.ReactElement {
                             ? `Ch.${String(committedCh).padStart(4, '0')} 已提交至 Git WAL`
                             : '章节已提交至 Git WAL'
                     );
-                    void refreshAllRef.current(committedCh ?? selectedChapterRef.current);
+                    // 后台提交不抢编辑章：有脏草稿只刷新数据；无脏草稿保持自动跟随
+                    const commitAction = resolveBackgroundCommitAction(
+                        committedCh ?? null,
+                        selectedChapterRef.current,
+                        draftLocationRef.current !== null
+                    );
+                    void refreshAllRef.current(
+                        commitAction === 'follow' ? committedCh : selectedChapterRef.current
+                    );
                 }
                 return;
             }
@@ -590,14 +701,14 @@ export function NarrateStudioRoot(): React.ReactElement {
             }
 
             if (event === 'signal:received') {
-                void fetchViewSignals().then(setSignalsView).catch(() => undefined);
-                void fetchStatus().then(setStatus).catch(() => undefined);
+                void loadViewsRef.current();
+                void loadStatus().catch(() => undefined);
                 showToast('导演信号已入队');
                 return;
             }
 
             if (event === 'signal:withdrawn') {
-                void fetchViewSignals().then(setSignalsView).catch(() => undefined);
+                void loadViewsRef.current();
                 return;
             }
 
@@ -615,8 +726,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                         ? `Ch.${String(ch).padStart(4, '0')} 手改同步完成`
                         : '全书手改差异同步完成'
                 );
-                void fetchStatus().then(setStatus).catch(() => undefined);
-                void fetchChapters().then((res) => setChapters(res.chapters)).catch(() => undefined);
+                void refreshAllRef.current(selectedChapterRef.current);
                 if (ch && ch === selectedChapterRef.current) {
                     void loadChapterRef.current(ch);
                 } else if (selectedChapterRef.current) {
@@ -635,7 +745,7 @@ export function NarrateStudioRoot(): React.ReactElement {
 
             if (event === 'dream:completed') {
                 showToast('Dreaming 睡眠 VACUUM 与连续性整理完成');
-                void fetchStatus().then(setStatus).catch(() => undefined);
+                void loadStatus().catch(() => undefined);
                 void loadViewsRef.current();
                 return;
             }
@@ -648,9 +758,22 @@ export function NarrateStudioRoot(): React.ReactElement {
                 return;
             }
 
+            if (event === 'halt:waiting') {
+                setHaltWaiting(true);
+                setStatus((prev) => prev
+                    ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } }
+                    : prev);
+                return;
+            }
+
             if (event === 'halt:completed') {
-                void fetchStatus().then(setStatus).catch(() => undefined);
-                void fetchViewHalt().then(setHaltView).catch(() => undefined);
+                setHaltWaiting(false);
+                // 完成事件之后宿主会关闭 SSE，不能依赖随后 HTTP 读取来结束等待。
+                setStatus((prev) => prev ? {
+                    ...prev,
+                    runtime: { ...prev.runtime, activeTask: 'IDLE', haltRequested: true },
+                    yolo: { ...prev.yolo, running: false, stopRequested: true, currentStage: null }
+                } : prev);
                 return;
             }
 
@@ -712,25 +835,43 @@ export function NarrateStudioRoot(): React.ReactElement {
         return () => {
             unsubscribe();
         };
-    }, [showToast]);
+    }, [loadStatus, showToast]);
 
-    // 交互操作回调
-    const handleSelectBook = useCallback(
+    // 交互操作回调：主动导航先经脏草稿守卫，确认后才执行
+    const executeSelectBook = useCallback(
         async (bookRoot: string) => {
+            if (switchingBookRef.current || saveInFlightRef.current) return;
+            switchingBookRef.current = true;
+            workspaceEpochRef.current += 1;
+            chapterRequestSeqRef.current += 1;
+            setLoading(true);
+            setChapterLoading(true);
+            setChapterDetail(null);
+            setSelectedChapter(null);
             try {
                 await selectBook({ bookRoot });
+                currentBookRootRef.current = bookRoot;
+                setHaltWaiting(false);
+                setEntitiesView(null);
+                setHorizonView(null);
+                setThreadsView(null);
+                setTelemetryView(null);
+                setSignalsView(null);
+                setHaltView(null);
                 showToast('正在切换作品目录…');
-                await refreshAll(null);
             } catch (err) {
                 showToast(err instanceof Error ? err.message : String(err), 'error');
+            } finally {
+                switchingBookRef.current = false;
+                setChapterLoading(false);
+                await refreshAll(null);
             }
         },
         [refreshAll, showToast]
     );
 
-    const handleSelectChapter = useCallback(
+    const executeSelectChapter = useCallback(
         (chapterNumber: number) => {
-            setSelectedChapter(chapterNumber);
             viewCommandNonceRef.current += 1;
             setExternalViewCommand({
                 viewTab: 'prose',
@@ -741,6 +882,58 @@ export function NarrateStudioRoot(): React.ReactElement {
         [loadChapterByNumber]
     );
 
+    const executeNavigationIntent = useCallback(
+        (intent: DraftNavigationIntent) => {
+            if (intent.kind === 'chapter') {
+                executeSelectChapter(intent.chapterNumber);
+            } else if (intent.kind === 'book') {
+                void executeSelectBook(intent.bookRoot);
+            } else {
+                setBootModalOpen(true);
+            }
+        },
+        [executeSelectBook, executeSelectChapter]
+    );
+
+    // 待确认导航（宿主 Modal：保存并继续 / 放弃修改 / 取消）
+    const [pendingNavigation, setPendingNavigation] = useState<DraftNavigationIntent | null>(null);
+    const [guardSaving, setGuardSaving] = useState(false);
+    const [guardError, setGuardError] = useState<string | null>(null);
+
+    const requestNavigation = useCallback(
+        (intent: DraftNavigationIntent) => {
+            if (saveInFlightRef.current || switchingBookRef.current) {
+                showToast('正在保存或切换作品，请等待操作完成后再导航');
+                return;
+            }
+            if (decideDraftNavigation(draftLocationRef.current, intent) === 'confirm') {
+                setGuardError(null);
+                setPendingNavigation(intent);
+                return;
+            }
+            executeNavigationIntent(intent);
+        },
+        [executeNavigationIntent, showToast]
+    );
+
+    const handleSelectBook = useCallback(
+        (bookRoot: string) => {
+            requestNavigation({ kind: 'book', bookRoot });
+        },
+        [requestNavigation]
+    );
+
+    const handleSelectChapter = useCallback(
+        (chapterNumber: number) => {
+            requestNavigation({ kind: 'chapter', chapterNumber });
+        },
+        [requestNavigation]
+    );
+
+    const handleOpenNewBook = useCallback(() => {
+        requestNavigation({ kind: 'new-book' });
+    }, [requestNavigation]);
+
     const handleOpenView = useCallback(
         (kind: MaterializedViewKind) => {
             setActiveViewKind(kind);
@@ -750,15 +943,9 @@ export function NarrateStudioRoot(): React.ReactElement {
                 materialKind: kind,
                 nonce: viewCommandNonceRef.current
             });
-            if (kind === 'entities') {
-                void fetchViewEntities().then(setEntitiesView).catch(() => undefined);
-            } else if (kind === 'horizon') {
-                void fetchViewHorizon().then(setHorizonView).catch(() => undefined);
-            } else if (kind === 'threads') {
-                void fetchViewThreads().then(setThreadsView).catch(() => undefined);
-            }
+            void loadViews();
         },
-        []
+        [loadViews]
     );
 
     const handleStepOne = useCallback(async () => {
@@ -771,17 +958,15 @@ export function NarrateStudioRoot(): React.ReactElement {
     const handleStartYolo = useCallback(
         async (targetChapters: number) => {
             await startYolo({ targetChapters });
-            const nextStatus = await fetchStatus();
-            setStatus(nextStatus);
+            await loadStatus();
         },
-        []
+        [loadStatus]
     );
 
     const handleStopYolo = useCallback(async () => {
         await stopYolo();
-        const nextStatus = await fetchStatus();
-        setStatus(nextStatus);
-    }, []);
+        await loadStatus();
+    }, [loadStatus]);
 
     const handleSync = useCallback(async () => {
         await syncManuscripts();
@@ -790,31 +975,95 @@ export function NarrateStudioRoot(): React.ReactElement {
 
     const handleDream = useCallback(async () => {
         await runDreaming({ force: true });
-        await Promise.all([fetchStatus().then(setStatus), loadViews()]);
-    }, [loadViews]);
+        await Promise.all([loadStatus(), loadViews()]);
+    }, [loadStatus, loadViews]);
 
     const handleRequestHalt = useCallback(async () => {
         try {
             await requestHalt();
             showToast('已发送安全停机请求，将在安全检查点挂起');
-            const nextStatus = await fetchStatus();
-            setStatus(nextStatus);
+            await loadStatus();
         } catch (err) {
             showToast(err instanceof Error ? err.message : String(err), 'error');
         }
-    }, [showToast]);
+    }, [loadStatus, showToast]);
 
+    // 两个保存入口共用：已提交正文先交给渲染数据源，后续读取失败不改写保存结果。
     const handleSaveChapter = useCallback(
         async (chapterNumber: number, content: string) => {
-            await saveChapter({ chapterNumber, content });
-            await Promise.all([
-                fetchStatus().then(setStatus),
-                fetchChapters().then((res) => setChapters(res.chapters)),
-                loadChapterByNumber(chapterNumber)
-            ]);
+            if (saveInFlightRef.current || switchingBookRef.current) {
+                throw new Error('正在保存或切换作品，请等待当前操作完成');
+            }
+            const bookRoot = currentBookRootRef.current;
+            const epoch = workspaceEpochRef.current;
+            saveInFlightRef.current = true;
+            try {
+                await saveChapter({ chapterNumber, content });
+                if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
+                // PUT 之前启动的详情和整批刷新均不能再发布旧正文或旧状态。
+                workspaceEpochRef.current += 1;
+                chapterRequestSeqRef.current += 1;
+                setChapterLoading(false);
+                setChapterDetail((prev) =>
+                    currentBookRootRef.current === bookRoot && prev?.chapterNumber === chapterNumber
+                        ? { ...prev, content }
+                        : prev
+                );
+                void Promise.allSettled([
+                    refreshAll(chapterNumber),
+                    loadChapterByNumber(chapterNumber)
+                ]);
+            } finally {
+                saveInFlightRef.current = false;
+            }
         },
-        [loadChapterByNumber]
+        [isCurrentWorkspace, loadChapterByNumber, refreshAll]
     );
+
+    // 确认弹窗「保存并继续」：busy 或保存失败时留在原地，草稿不丢、不导航
+    const handleGuardSaveAndContinue = useCallback(async () => {
+        if (saveInFlightRef.current || switchingBookRef.current) return;
+        const intent = pendingNavigation;
+        const draft = draftLocationRef.current;
+        if (!intent || !draft) {
+            setPendingNavigation(null);
+            return;
+        }
+        if (isBusy) {
+            setGuardError('引擎正在执行任务，暂时无法保存；请待任务结束后重试或放弃修改');
+            return;
+        }
+        setGuardSaving(true);
+        setGuardError(null);
+        try {
+            await handleSaveChapter(draft.chapterNumber, draft.content);
+        } catch (err) {
+            setGuardError(err instanceof Error ? err.message : String(err));
+            setGuardSaving(false);
+            return;
+        }
+        // PUT 已成功即放行导航；保存后的状态刷新失败不阻塞导航
+        setGuardSaving(false);
+        setPendingNavigation(null);
+        setDraftLocation(null);
+        draftLocationRef.current = null;
+        draftControlRef.current?.resetDraft(draft.content);
+        executeNavigationIntent(intent);
+    }, [executeNavigationIntent, handleSaveChapter, isBusy, pendingNavigation]);
+
+    // 确认弹窗「放弃修改」：立即结束编辑态并清脏标记，再执行导航
+    const handleGuardDiscardAndContinue = useCallback(() => {
+        if (saveInFlightRef.current || switchingBookRef.current) return;
+        const intent = pendingNavigation;
+        setPendingNavigation(null);
+        setGuardError(null);
+        draftControlRef.current?.resetDraft();
+        draftLocationRef.current = null;
+        setDraftLocation(null);
+        if (intent) {
+            executeNavigationIntent(intent);
+        }
+    }, [executeNavigationIntent, pendingNavigation]);
 
     const handleSubmitSignal = useCallback(
         async (payload: SubmitSignalPayload) => {
@@ -822,14 +1071,14 @@ export function NarrateStudioRoot(): React.ReactElement {
             const req = buildSignalPayload(payload.kind, payload.content, currentCh);
             await postSignal(req);
             await Promise.all([
-                fetchViewSignals().then(setSignalsView),
-                fetchStatus().then(setStatus)
+                loadViews(),
+                loadStatus()
             ]);
             if (payload.runAfter) {
                 await handleStepOne();
             }
         },
-        [handleStepOne, status]
+        [handleStepOne, loadStatus, loadViews, status]
     );
 
     // 撤回纸条:后端按内容匹配真删,失败时保留队列并就地报错
@@ -842,12 +1091,12 @@ export function NarrateStudioRoot(): React.ReactElement {
         }
         try {
             await deleteSignal({ created_at: item.created_at, reason });
-            setSignalsView(await fetchViewSignals());
+            await loadViews();
             showToast('纸条已撤回');
         } catch (err) {
             showToast(err instanceof Error ? err.message : '撤回纸条失败', 'error');
         }
-    }, [signalsView, showToast]);
+    }, [loadViews, signalsView, showToast]);
 
     // 派生右侧与中间栏视图模型
     const activeBookSummary = useMemo(
@@ -861,30 +1110,10 @@ export function NarrateStudioRoot(): React.ReactElement {
         return entries.length > 0 ? entries[entries.length - 1]! : null;
     }, [liveTelemetry, telemetryView]);
 
-    const aggregateTokens = useMemo(() => {
-        const entries = telemetryView?.entries ?? [];
-        let inputTokens = 0;
-        let cacheReadTokens = 0;
-        let outputTokens = 0;
-        for (const item of entries) {
-            const tokens = readTelemetryTokens(item);
-            inputTokens += tokens.inputTokens;
-            cacheReadTokens += tokens.cacheReadTokens;
-            outputTokens += tokens.outputTokens;
-        }
-        const latestTokens = readTelemetryTokens(latestTelemetryEntry);
-        const finalInputTokens = inputTokens || latestTokens.inputTokens;
-        const finalCacheReadTokens = cacheReadTokens || latestTokens.cacheReadTokens;
-        const finalOutputTokens = outputTokens || latestTokens.outputTokens;
-        return {
-            inputTokens: finalInputTokens,
-            cacheReadTokens: finalCacheReadTokens,
-            outputTokens: finalOutputTokens,
-            cacheHitRate:
-                latestTelemetryEntry?.cacheHitRate ??
-                (finalInputTokens > 0 ? finalCacheReadTokens / finalInputTokens : undefined)
-        };
-    }, [latestTelemetryEntry, telemetryView]);
+    const aggregateTokens = useMemo(
+        () => aggregateTelemetryTokens(telemetryView?.entries ?? []),
+        [telemetryView]
+    );
 
     const latestMetrics = useMemo(
         () => readTelemetryMetrics(latestTelemetryEntry),
@@ -927,18 +1156,16 @@ export function NarrateStudioRoot(): React.ReactElement {
         if (!status && !horizonView?.content) return null;
         const statusExt = status as (NarrateStatusPayload & { volumeProgress?: VolumeProgressSnapshot }) | null;
         const rawVol = statusExt?.volumeProgress;
-        const completedChapters =
-            rawVol?.completedChapters ??
-            status?.lastCommittedChapter ??
-            status?.worldState.current_chapter ??
-            0;
         const horizonExcerpt = horizonView?.content?.trim()
             ? horizonView.content.trim().slice(0, 240)
             : null;
+        // 只透传真实的当前卷数据；缺完成数/目标时不得用全书章号伪装卷进度
         return {
             ...(rawVol?.volumeLabel ? { volumeLabel: rawVol.volumeLabel } : {}),
             ...(rawVol?.volumeTitle ? { volumeTitle: rawVol.volumeTitle } : {}),
-            completedChapters,
+            ...(rawVol?.completedChapters !== undefined
+                ? { completedChapters: rawVol.completedChapters }
+                : {}),
             ...(rawVol?.totalChapters !== undefined ? { totalChapters: rawVol.totalChapters } : {}),
             futureHorizon: rawVol?.futureHorizon ?? horizonExcerpt,
             ...(rawVol?.milestoneLock !== undefined ? { milestoneLock: rawVol.milestoneLock } : {})
@@ -976,9 +1203,6 @@ export function NarrateStudioRoot(): React.ReactElement {
         };
     }, [status?.modelRouting]);
 
-    const activeTask = status?.runtime.activeTask ?? 'IDLE';
-    const isBusy = activeTask !== 'IDLE' || Boolean(status?.yolo.running);
-
     const centerChapterDetail: CenterWorkbenchProps['chapterDetail'] = useMemo(() => {
         if (!chapterDetail) return null;
         const summary = chapters.find((c) => c.chapterNumber === chapterDetail.chapterNumber);
@@ -988,7 +1212,9 @@ export function NarrateStudioRoot(): React.ReactElement {
             content: chapterDetail.content,
             dirty: chapterDetail.dirty,
             sha256: chapterDetail.sha256,
-            diffFromHead: chapterDetail.diffFromHead
+            diffFromHead: chapterDetail.diffFromHead,
+            outlineText: chapterDetail.outlineText,
+            outlineStatus: chapterDetail.outlineStatus
         };
     }, [chapterDetail, chapters]);
 
@@ -1013,6 +1239,8 @@ export function NarrateStudioRoot(): React.ReactElement {
                 timelineMode={String(status?.worldState.timeline_mode ?? 'MAINLINE')}
                 walPhase={status?.walPhase ?? 'IDLE'}
                 activeTask={activeTask}
+                haltRequested={status?.runtime.haltRequested}
+                haltWaiting={haltWaiting}
                 yolo={status?.yolo}
                 chapters={chapters}
                 chapterDetail={centerChapterDetail}
@@ -1030,19 +1258,10 @@ export function NarrateStudioRoot(): React.ReactElement {
                 }}
                 dirtyChaptersCount={dirtyChaptersCount}
                 externalViewCommand={externalViewCommand}
-                telemetrySummary={{
-                    cacheHitRate: aggregateTokens.cacheHitRate,
-                    inputTokens: aggregateTokens.inputTokens,
-                    cacheReadTokens: aggregateTokens.cacheReadTokens,
-                    outputTokens: aggregateTokens.outputTokens,
-                    kontoyiannisHk: latestMetrics.kontoyiannisEntropy ?? undefined
-                }}
                 rightOpen={rightOpen}
                 hasSafeHalt={Boolean(safeHaltInfo)}
-                onSelectBook={(root) => {
-                    void handleSelectBook(root);
-                }}
-                onNewBook={() => setBootModalOpen(true)}
+                onSelectBook={handleSelectBook}
+                onNewBook={handleOpenNewBook}
                 onToggleRight={() => setRightOpen((prev) => !prev)}
                 onOpenInspector={() => {
                     setRightOpen(true);
@@ -1060,6 +1279,13 @@ export function NarrateStudioRoot(): React.ReactElement {
                 onSaveChapter={handleSaveChapter}
                 onSubmitSignal={handleSubmitSignal}
                 onRefreshViews={loadViews}
+                onDraftDirtyChange={handleDraftDirtyChange}
+                onDraftControlReady={handleDraftControlReady}
+                onRetryChapterDetail={() => {
+                    if (chapterDetail) {
+                        void loadChapterByNumber(chapterDetail.chapterNumber);
+                    }
+                }}
             />
 
             {isNarrow && rightOpen ? (
@@ -1073,10 +1299,13 @@ export function NarrateStudioRoot(): React.ReactElement {
             {/* 右侧三页签辅助栏：目录 | 检查器 | 工具 */}
             <aside className="ns-right" aria-label="右侧辅助栏">
                 <div className="ns-r-head">
-                    <div className="ns-r-tabs" role="tablist">
+                    <div className="ns-r-tabs" role="tablist" aria-label="作品辅助视图" onKeyDown={handleTabKeyDown}>
                         <button
                             type="button"
                             role="tab"
+                            id="ns-right-tab-toc"
+                            aria-controls="ns-right-panel"
+                            tabIndex={rightTab === 'toc' ? 0 : -1}
                             aria-selected={rightTab === 'toc'}
                             className={`ns-r-tab ${rightTab === 'toc' ? 'on' : ''}`}
                             onClick={() => setRightTab('toc')}
@@ -1086,6 +1315,9 @@ export function NarrateStudioRoot(): React.ReactElement {
                         <button
                             type="button"
                             role="tab"
+                            id="ns-right-tab-insp"
+                            aria-controls="ns-right-panel"
+                            tabIndex={rightTab === 'insp' ? 0 : -1}
                             aria-selected={rightTab === 'insp'}
                             className={`ns-r-tab ${rightTab === 'insp' ? 'on' : ''}`}
                             onClick={() => setRightTab('insp')}
@@ -1096,6 +1328,9 @@ export function NarrateStudioRoot(): React.ReactElement {
                         <button
                             type="button"
                             role="tab"
+                            id="ns-right-tab-tools"
+                            aria-controls="ns-right-panel"
+                            tabIndex={rightTab === 'tools' ? 0 : -1}
                             aria-selected={rightTab === 'tools'}
                             className={`ns-r-tab ${rightTab === 'tools' ? 'on' : ''}`}
                             onClick={() => setRightTab('tools')}
@@ -1114,7 +1349,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                     </button>
                 </div>
 
-                <div className="ns-r-body">
+                <div className="ns-r-body" id="ns-right-panel" role="tabpanel" aria-labelledby={`ns-right-tab-${rightTab}`} tabIndex={0}>
                     {rightTab === 'toc' ? (
                         <LeftBookNav
                             embedded
@@ -1133,10 +1368,8 @@ export function NarrateStudioRoot(): React.ReactElement {
                             openThreadsCount={openThreadsCount}
                             activeViewKind={activeViewKind}
                             loading={loading}
-                            onSelectBook={(root) => {
-                                void handleSelectBook(root);
-                            }}
-                            onNewBook={() => setBootModalOpen(true)}
+                            onSelectBook={handleSelectBook}
+                            onNewBook={handleOpenNewBook}
                             onSelectChapter={(ch) => {
                                 handleSelectChapter(ch);
                                 if (isNarrow) setRightOpen(false);
@@ -1164,10 +1397,8 @@ export function NarrateStudioRoot(): React.ReactElement {
                                 auditModel: modelPools.auditModel,
                                 inputTokens: aggregateTokens.inputTokens,
                                 cacheReadTokens: aggregateTokens.cacheReadTokens,
-                                outputTokens: aggregateTokens.outputTokens,
-                                ...(aggregateTokens.cacheHitRate !== undefined
-                                    ? { cacheHitRate: aggregateTokens.cacheHitRate }
-                                    : {})
+                                cacheWriteTokens: aggregateTokens.cacheWriteTokens,
+                                outputTokens: aggregateTokens.outputTokens
                             }}
                             stageArtifact={stageArtifact}
                             proseGate={{
@@ -1179,10 +1410,10 @@ export function NarrateStudioRoot(): React.ReactElement {
                             }}
                             factChecker={factChecker}
                             dreaming={{
-                                dirtyEntityCount: 0,
-                                dirtyThreshold: 5,
+                                dirtyEntityCount: null,
+                                dirtyThreshold: null,
                                 coldArchiveCount: entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
-                                spotlightQueue: []
+                                spotlightQueue: null
                             }}
                             haltDiagnostic={haltDiagnostic}
                             entities={inspectorEntities}
@@ -1203,7 +1434,9 @@ export function NarrateStudioRoot(): React.ReactElement {
                                 });
                             }}
                             onInspectHalt={() => {
+                                const epoch = workspaceEpochRef.current;
                                 void fetchViewHalt().then((nextHalt) => {
+                                    if (!isCurrentWorkspace(epoch)) return;
                                     setHaltView(nextHalt);
                                     const diag = mapHaltDiagnostic(nextHalt);
                                     if (diag) {
@@ -1305,8 +1538,31 @@ export function NarrateStudioRoot(): React.ReactElement {
                 onClose={() => setBootModalOpen(false)}
                 onSubmitBoot={(payload) => bootBook(payload)}
                 onBootSuccess={(data) => {
+                    workspaceEpochRef.current += 1;
+                    chapterRequestSeqRef.current += 1;
+                    currentBookRootRef.current = data.bookRoot;
+                    setChapterDetail(null);
                     showToast(`新书编译完成：${data.bookRoot}`);
                     void refreshAll(null);
+                }}
+            />
+
+            {/* 未保存草稿导航确认（目录/上下章/检查器跳章/切作品/开新书共用） */}
+            <DraftGuardModal
+                open={pendingNavigation !== null}
+                intent={pendingNavigation}
+                draftChapter={draftLocation?.chapterNumber ?? null}
+                bookTitle={status?.title ?? activeBookSummary?.title}
+                saving={guardSaving}
+                error={guardError}
+                onSave={() => {
+                    void handleGuardSaveAndContinue();
+                }}
+                onDiscard={handleGuardDiscardAndContinue}
+                onCancel={() => {
+                    if (saveInFlightRef.current) return;
+                    setPendingNavigation(null);
+                    setGuardError(null);
                 }}
             />
 

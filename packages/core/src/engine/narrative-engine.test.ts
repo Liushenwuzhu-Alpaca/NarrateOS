@@ -1381,4 +1381,129 @@ describe('NarrativeEngine', () => {
         const afterState = await store.readWorldState();
         expect(afterState.frontmatter.current_volume).toBe(1);
     });
+
+    it('生成的细纲随正文 feat 持久化，重启后按章读取不串纲，旧章保持 missing', async () => {
+        const { bookRoot, system, store } = await createEngineFixture();
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK), jsonResponse(PLANNER_OK), textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }), jsonResponse(EXTRACTOR_OK)
+        ]);
+        const result = await makeEngine(store, llm, system).stepChapter({ chapterGoal: '推进票据核验' });
+        expect(result.status).toBe('COMMITTED');
+        expect(result.chapterNumber).toBe(2);
+
+        // 细纲与正文必须同属 feat 提交
+        const outlineRel = '.ops/chapter_outlines/ch_0002.json';
+        const atFeat = await system.readFileAtRef(bookRoot, result.featCommitSha, outlineRel);
+        expect(atFeat).not.toBeNull();
+        expect(JSON.parse(atFeat!)).toEqual(result.outline);
+
+        // 模拟重启：新实例读取历史章细纲，与旧章互不串纲
+        const restarted = new BookStore(bookRoot, new NodeSystemAdapter());
+        const ch2 = await restarted.readChapterOutline(2);
+        expect(ch2.status).toBe('available');
+        expect(JSON.parse(ch2.outlineText!)).toEqual(result.outline);
+        expect(await restarted.readChapterOutline(1)).toEqual({ outlineText: null, status: 'missing' });
+    });
+
+    it('PlanConflict 改纲后持久化最终实际使用的细纲 v2，而非首版废纲', async () => {
+        const { bookRoot, store, system } = await createEngineFixture();
+        const outlineV2 = { ...PLANNER_OK, chapter_title: '第二章 门锁与票据（改纲 v2）', outline_text: '改纲后场景一：陆沉在票据核验期限前开锁清点。' };
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK), jsonResponse(PLANNER_OK), textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({
+                passed: false,
+                issues: [{
+                    severity: 'PLAN_CONFLICT',
+                    description: '细纲让陆沉使用了尚未取回的钥匙，存在因果悖论',
+                    quote_draft: '',
+                    quote_source: ''
+                }]
+            }),
+            jsonResponse(outlineV2), textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }), jsonResponse(EXTRACTOR_OK)
+        ]);
+        const result = await makeEngine(store, llm, system).stepChapter({ chapterGoal: '推进票据核验' });
+        expect(result.replanCount).toBe(1);
+        const saved = await store.readChapterOutline(2);
+        expect(saved.status).toBe('available');
+        const persisted = JSON.parse(saved.outlineText!);
+        expect(persisted.chapter_title).toBe('第二章 门锁与票据（改纲 v2）');
+        expect(persisted).toEqual(result.outline);
+        expect(await system.readFileAtRef(bookRoot, result.featCommitSha, '.ops/chapter_outlines/ch_0002.json')).toContain('改纲 v2');
+    });
+
+    it('FEAT_COMMITTED 崩溃恢复沿已存细纲继续抽取，不重新调用 Planner', async () => {
+        const { store, system } = await createEngineFixture();
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK), jsonResponse(PLANNER_OK), textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }), jsonResponse(EXTRACTOR_OK)
+        ]);
+        const engine = makeEngine(store, llm, system);
+        const commitPaths = system.commitPaths.bind(system);
+        let failed = false;
+        vi.spyOn(system, 'commitPaths').mockImplementation(async (root, paths, message) => {
+            if (!failed && message.startsWith('state(')) { failed = true; throw new Error('状态提交中断'); }
+            return await commitPaths(root, paths, message);
+        });
+        await expect(engine.stepChapter({ chapterGoal: '推进票据核验' })).rejects.toThrow('状态提交中断');
+        const savedBefore = await store.readChapterOutline(2);
+        expect(savedBefore.status).toBe('available');
+
+        const callsBefore = llm.history.length;
+        llm.enqueue(jsonResponse(EXTRACTOR_OK));
+        const recovered = await engine.stepChapter({ chapterGoal: '恢复' });
+        expect(recovered.recoveredFromPhase).toBe('FEAT_COMMITTED');
+        // 恢复只补 Extractor 一次调用，绝不重跑 Librarian/Planner/Writer
+        expect(llm.history.length).toBe(callsBefore + 1);
+        expect(await store.readChapterOutline(2)).toEqual(savedBefore);
+    });
+
+    it('syncManuscripts 手改重提交不得覆盖已持久化的原细纲', async () => {
+        const { bookRoot, store, system } = await createEngineFixture();
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK), jsonResponse(PLANNER_OK), textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }), jsonResponse(EXTRACTOR_OK)
+        ]);
+        const engine = makeEngine(store, llm, system);
+        await engine.stepChapter({ chapterGoal: '推进票据核验' });
+        const savedBefore = await store.readChapterOutline(2);
+        expect(savedBefore.status).toBe('available');
+
+        const ch2Path = join(bookRoot, 'manuscripts/ch_0002.md');
+        await writeFile(ch2Path, `${await readFile(ch2Path, 'utf8')}\n陆沉把票据按日期排好。\n`, 'utf8');
+        llm.enqueue(
+            jsonResponse({ is_prose_polish_only: false, reason: '新增整理票据动作', affected_entity_ids: ['char_001'] }),
+            jsonResponse({ entity_patches: [], story_day_delta: 0, chapter_summary: '陆沉整理票据' })
+        );
+        const res = await engine.syncManuscripts();
+        expect(res.status).toBe('STATE_SYNCED');
+        expect(await store.readChapterOutline(2)).toEqual(savedBefore);
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+    });
+
+    it('PARALLEL 支线细纲按章号隔离持久化，汇合后仍可按章读取', async () => {
+        const { store, system } = await createEngineFixture();
+        const llm = new ScriptedLlmAdapter([]);
+        const engine = makeEngine(store, llm, system);
+        await engine.forkParallelWindow({ windowId: 'outlines', maxChapters: 2 });
+        for (const branch of ['a', 'b']) {
+            const title = branch === 'a' ? '第二章 甲线细纲' : '第三章 乙线细纲';
+            llm.enqueue(
+                jsonResponse({ ...LIBRARIAN_OK, recall_queries: [] }),
+                jsonResponse({ ...PLANNER_OK, chapter_title: title }),
+                textResponse(CLEAN_CHAPTER_PROSE),
+                jsonResponse({ passed: true, issues: [] }),
+                jsonResponse({ ...EXTRACTOR_OK, entity_patches: [] })
+            );
+            await engine.stepChapter({ chapterGoal: '并行推进', timelineMode: 'PARALLEL', parallelWindowId: 'outlines', parallelBranchId: branch });
+        }
+        const outlineA = await store.readChapterOutline(2);
+        const outlineB = await store.readChapterOutline(3);
+        expect(JSON.parse(outlineA.outlineText!).chapter_title).toBe('第二章 甲线细纲');
+        expect(JSON.parse(outlineB.outlineText!).chapter_title).toBe('第三章 乙线细纲');
+        await engine.mergeParallelWindow({ windowId: 'outlines' });
+        expect(await store.readChapterOutline(2)).toEqual(outlineA);
+        expect(await store.readChapterOutline(3)).toEqual(outlineB);
+    });
 });

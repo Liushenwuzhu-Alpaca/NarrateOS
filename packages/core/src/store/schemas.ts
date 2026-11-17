@@ -1,5 +1,34 @@
 import { z } from 'zod';
 
+/** Step 2: Planner 结构化细纲输出 Schema（store 层持有：随正文 feat 持久化的规划快照契约） */
+export const PlannerSceneSchema = z.object({
+    scene_index: z.number().int().positive(),
+    location: z.string().min(1),
+    summary: z.string().min(1),
+    is_spotlight: z.boolean().default(false)
+});
+
+export const PlannerOutlineSchema = z.object({
+    chapter_title: z.string().min(1),
+    target_word_count: z.number().int().positive(),
+    focus_cast: z.array(z.string()).min(1),
+    background_cast: z.array(z.string()).default([]),
+    ending_beat: z.enum(['HOOK', 'AFTERGLOW', 'CLOSURE']).default('HOOK'),
+    director_rationale: z.string().default(''),
+    chapter_turn: z.string().min(1),
+    scene_plan: z.array(PlannerSceneSchema).min(1),
+    outline_text: z.string().min(1),
+    preferred_voice_tag: z.string().optional()
+});
+
+export type PlannerOutline = z.infer<typeof PlannerOutlineSchema>;
+
+/** 章节细纲快照读取结果：missing=旧章未留存，error=快照损坏/非法（正文不受影响） */
+export interface ChapterOutlineSnapshot {
+    outlineText: string | null;
+    status: 'available' | 'missing' | 'error';
+}
+
 /** 作品可配变量 Schema (world/book_config.yaml) */
 export const BookConfigSchema = z.object({
     book_slug: z.string().min(1),

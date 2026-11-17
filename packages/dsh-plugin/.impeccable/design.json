@@ -1,0 +1,912 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-17T11:16:32Z",
+  "title": "Design System: NarrateOS Studio",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "调度蓝",
+        "canonical": "#5686fe",
+        "description": "激活点、页签指示和键盘焦点；实心填充改用 primary-fill。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0836 265.2)",
+          "oklch(27% 0.1301 265.2)",
+          "oklch(39% 0.1672 265.2)",
+          "oklch(50% 0.1858 265.2)",
+          "oklch(61% 0.1858 265.2)",
+          "oklch(72% 0.1635 265.2)",
+          "oklch(84% 0.1152 265.2)",
+          "oklch(95% 0.0595 265.2)"
+        ]
+      },
+      "primary-light": {
+        "role": "primary",
+        "displayName": "调度蓝·浅色",
+        "canonical": "#3b6fe0",
+        "description": "浅色主题的激活点、页签指示与键盘焦点；实心填充改用 primary-fill-light。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0817 263.2)",
+          "oklch(27% 0.1270 263.2)",
+          "oklch(39% 0.1633 263.2)",
+          "oklch(50% 0.1814 263.2)",
+          "oklch(61% 0.1814 263.2)",
+          "oklch(72% 0.1597 263.2)",
+          "oklch(84% 0.1125 263.2)",
+          "oklch(95% 0.0581 263.2)"
+        ]
+      },
+      "primary-fill": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充",
+        "canonical": "#3560d2",
+        "description": "深色主题主按钮、组合推进右半键与圆形发送键的实心填充，白字对比达标。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0822 265.0)",
+          "oklch(27% 0.1278 265.0)",
+          "oklch(39% 0.1643 265.0)",
+          "oklch(50% 0.1826 265.0)",
+          "oklch(61% 0.1826 265.0)",
+          "oklch(72% 0.1607 265.0)",
+          "oklch(84% 0.1132 265.0)",
+          "oklch(95% 0.0584 265.0)"
+        ]
+      },
+      "primary-fill-light": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充·浅色",
+        "canonical": "#3b6fe0",
+        "description": "浅色主题的实心填充，与浅色品牌主蓝同值但作为独立 token 维护。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0817 263.2)",
+          "oklch(27% 0.1270 263.2)",
+          "oklch(39% 0.1633 263.2)",
+          "oklch(50% 0.1814 263.2)",
+          "oklch(61% 0.1814 263.2)",
+          "oklch(72% 0.1597 263.2)",
+          "oklch(84% 0.1125 263.2)",
+          "oklch(95% 0.0581 263.2)"
+        ]
+      },
+      "primary-fill-hover": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充·悬停",
+        "canonical": "#456dd6",
+        "description": "深色主题实心按钮的悬停填充，直接切换 token，不做 color-mix 提亮。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0754 265.6)",
+          "oklch(27% 0.1172 265.6)",
+          "oklch(39% 0.1507 265.6)",
+          "oklch(50% 0.1675 265.6)",
+          "oklch(61% 0.1675 265.6)",
+          "oklch(72% 0.1474 265.6)",
+          "oklch(84% 0.1038 265.6)",
+          "oklch(95% 0.0536 265.6)"
+        ]
+      },
+      "primary-fill-hover-light": {
+        "role": "primary",
+        "displayName": "调度蓝·实心填充·悬停·浅色",
+        "canonical": "#3866cc",
+        "description": "浅色主题实心按钮的悬停填充，比基态更深。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0749 263.5)",
+          "oklch(27% 0.1165 263.5)",
+          "oklch(39% 0.1498 263.5)",
+          "oklch(50% 0.1664 263.5)",
+          "oklch(61% 0.1664 263.5)",
+          "oklch(72% 0.1464 263.5)",
+          "oklch(84% 0.1032 263.5)",
+          "oklch(95% 0.0532 263.5)"
+        ]
+      },
+      "primary-ink": {
+        "role": "primary",
+        "displayName": "调度蓝文字",
+        "canonical": "#86a8ff",
+        "description": "深色主题中文字型品牌强调与链接式标记。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0594 267.0)",
+          "oklch(27% 0.0923 267.0)",
+          "oklch(39% 0.1187 267.0)",
+          "oklch(50% 0.1319 267.0)",
+          "oklch(61% 0.1319 267.0)",
+          "oklch(72% 0.1161 267.0)",
+          "oklch(84% 0.0818 267.0)",
+          "oklch(95% 0.0422 267.0)"
+        ]
+      },
+      "primary-ink-light": {
+        "role": "primary",
+        "displayName": "调度蓝文字·浅色",
+        "canonical": "#2b5cc9",
+        "description": "浅色主题中文字型品牌强调。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0802 263.2)",
+          "oklch(27% 0.1247 263.2)",
+          "oklch(39% 0.1603 263.2)",
+          "oklch(50% 0.1781 263.2)",
+          "oklch(61% 0.1781 263.2)",
+          "oklch(72% 0.1568 263.2)",
+          "oklch(84% 0.1105 263.2)",
+          "oklch(95% 0.0570 263.2)"
+        ]
+      },
+      "graphite": {
+        "role": "neutral",
+        "displayName": "石墨黑",
+        "canonical": "#151517",
+        "description": "深色主题主画布与组件底色基线。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0018 286.0)",
+          "oklch(27% 0.0028 286.0)",
+          "oklch(39% 0.0036 286.0)",
+          "oklch(50% 0.0040 286.0)",
+          "oklch(61% 0.0040 286.0)",
+          "oklch(72% 0.0035 286.0)",
+          "oklch(84% 0.0025 286.0)",
+          "oklch(95% 0.0013 286.0)"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "暖纸白",
+        "canonical": "#faf8f4",
+        "description": "浅色主题主画布，带暖感而非机械反白。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0026 84.6)",
+          "oklch(27% 0.0040 84.6)",
+          "oklch(39% 0.0051 84.6)",
+          "oklch(50% 0.0057 84.6)",
+          "oklch(61% 0.0057 84.6)",
+          "oklch(72% 0.0050 84.6)",
+          "oklch(84% 0.0035 84.6)",
+          "oklch(95% 0.0018 84.6)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "石墨面板",
+        "canonical": "#18181a",
+        "description": "深色主题侧栏、顶栏外层与分组底。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0018 286.1)",
+          "oklch(27% 0.0027 286.1)",
+          "oklch(39% 0.0035 286.1)",
+          "oklch(50% 0.0039 286.1)",
+          "oklch(61% 0.0039 286.1)",
+          "oklch(72% 0.0034 286.1)",
+          "oklch(84% 0.0024 286.1)",
+          "oklch(95% 0.0012 286.1)"
+        ]
+      },
+      "panel-light": {
+        "role": "neutral",
+        "displayName": "暖纸面板",
+        "canonical": "#f3efe7",
+        "description": "浅色主题侧栏与顶栏外层。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0052 84.6)",
+          "oklch(27% 0.0080 84.6)",
+          "oklch(39% 0.0103 84.6)",
+          "oklch(50% 0.0115 84.6)",
+          "oklch(61% 0.0115 84.6)",
+          "oklch(72% 0.0101 84.6)",
+          "oklch(84% 0.0071 84.6)",
+          "oklch(95% 0.0037 84.6)"
+        ]
+      },
+      "card": {
+        "role": "neutral",
+        "displayName": "石墨卡片",
+        "canonical": "#232324",
+        "description": "深色主题卡片与控件表面。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0008 286.3)",
+          "oklch(27% 0.0013 286.3)",
+          "oklch(39% 0.0017 286.3)",
+          "oklch(50% 0.0019 286.3)",
+          "oklch(61% 0.0019 286.3)",
+          "oklch(72% 0.0016 286.3)",
+          "oklch(84% 0.0011 286.3)",
+          "oklch(95% 0.0006 286.3)"
+        ]
+      },
+      "card-light": {
+        "role": "neutral",
+        "displayName": "暖纸卡片",
+        "canonical": "#fffdf9",
+        "description": "浅色主题卡片与控件表面。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0026 84.6)",
+          "oklch(27% 0.0040 84.6)",
+          "oklch(39% 0.0051 84.6)",
+          "oklch(50% 0.0057 84.6)",
+          "oklch(61% 0.0057 84.6)",
+          "oklch(72% 0.0050 84.6)",
+          "oklch(84% 0.0035 84.6)",
+          "oklch(95% 0.0018 84.6)"
+        ]
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "石墨浮起面",
+        "canonical": "#2c2c2e",
+        "description": "深色主题检查器卡片与弹层表面。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0016 286.2)",
+          "oklch(27% 0.0025 286.2)",
+          "oklch(39% 0.0032 286.2)",
+          "oklch(50% 0.0036 286.2)",
+          "oklch(61% 0.0036 286.2)",
+          "oklch(72% 0.0032 286.2)",
+          "oklch(84% 0.0022 286.2)",
+          "oklch(95% 0.0011 286.2)"
+        ]
+      },
+      "raised-light": {
+        "role": "neutral",
+        "displayName": "暖纸浮起面",
+        "canonical": "#fffefb",
+        "description": "浅色主题检查器卡片与弹层表面。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0018 91.4)",
+          "oklch(27% 0.0029 91.4)",
+          "oklch(39% 0.0037 91.4)",
+          "oklch(50% 0.0041 91.4)",
+          "oklch(61% 0.0041 91.4)",
+          "oklch(72% 0.0036 91.4)",
+          "oklch(84% 0.0025 91.4)",
+          "oklch(95% 0.0013 91.4)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "石墨主文字",
+        "canonical": "#f9fafb",
+        "description": "深色主题标题与主要信息。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0008 247.8)",
+          "oklch(27% 0.0012 247.8)",
+          "oklch(39% 0.0015 247.8)",
+          "oklch(50% 0.0017 247.8)",
+          "oklch(61% 0.0017 247.8)",
+          "oklch(72% 0.0015 247.8)",
+          "oklch(84% 0.0011 247.8)",
+          "oklch(95% 0.0005 247.8)"
+        ]
+      },
+      "text-light": {
+        "role": "neutral",
+        "displayName": "暖纸主文字",
+        "canonical": "#1c1a17",
+        "description": "浅色主题标题与主要信息。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0029 78.2)",
+          "oklch(27% 0.0046 78.2)",
+          "oklch(39% 0.0059 78.2)",
+          "oklch(50% 0.0065 78.2)",
+          "oklch(61% 0.0065 78.2)",
+          "oklch(72% 0.0057 78.2)",
+          "oklch(84% 0.0040 78.2)",
+          "oklch(95% 0.0021 78.2)"
+        ]
+      },
+      "text-secondary": {
+        "role": "neutral",
+        "displayName": "次级文字",
+        "canonical": "#cfd3d6",
+        "description": "深色主题说明、元信息与次级值。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0027 239.8)",
+          "oklch(27% 0.0042 239.8)",
+          "oklch(39% 0.0054 239.8)",
+          "oklch(50% 0.0060 239.8)",
+          "oklch(61% 0.0060 239.8)",
+          "oklch(72% 0.0053 239.8)",
+          "oklch(84% 0.0037 239.8)",
+          "oklch(95% 0.0019 239.8)"
+        ]
+      },
+      "text-secondary-light": {
+        "role": "neutral",
+        "displayName": "次级文字·浅色",
+        "canonical": "#45413b",
+        "description": "浅色主题说明与次级值。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0051 78.2)",
+          "oklch(27% 0.0080 78.2)",
+          "oklch(39% 0.0103 78.2)",
+          "oklch(50% 0.0114 78.2)",
+          "oklch(61% 0.0114 78.2)",
+          "oklch(72% 0.0100 78.2)",
+          "oklch(84% 0.0071 78.2)",
+          "oklch(95% 0.0036 78.2)"
+        ]
+      },
+      "text-muted": {
+        "role": "neutral",
+        "displayName": "弱化文字",
+        "canonical": "#8c9199",
+        "description": "深色主题弱化标签、占位与辅助说明。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0059 259.8)",
+          "oklch(27% 0.0093 259.8)",
+          "oklch(39% 0.0119 259.8)",
+          "oklch(50% 0.0132 259.8)",
+          "oklch(61% 0.0132 259.8)",
+          "oklch(72% 0.0116 259.8)",
+          "oklch(84% 0.0082 259.8)",
+          "oklch(95% 0.0042 259.8)"
+        ]
+      },
+      "text-muted-light": {
+        "role": "neutral",
+        "displayName": "弱化文字·浅色",
+        "canonical": "#6b665e",
+        "description": "浅色主题弱化标签与辅助说明。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0062 79.7)",
+          "oklch(27% 0.0097 79.7)",
+          "oklch(39% 0.0125 79.7)",
+          "oklch(50% 0.0139 79.7)",
+          "oklch(61% 0.0139 79.7)",
+          "oklch(72% 0.0122 79.7)",
+          "oklch(84% 0.0086 79.7)",
+          "oklch(95% 0.0044 79.7)"
+        ]
+      },
+      "prose": {
+        "role": "neutral",
+        "displayName": "小说正文",
+        "canonical": "#e6e3dc",
+        "description": "深色主题宋体阅读正文。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0045 87.5)",
+          "oklch(27% 0.0070 87.5)",
+          "oklch(39% 0.0090 87.5)",
+          "oklch(50% 0.0100 87.5)",
+          "oklch(61% 0.0100 87.5)",
+          "oklch(72% 0.0088 87.5)",
+          "oklch(84% 0.0062 87.5)",
+          "oklch(95% 0.0032 87.5)"
+        ]
+      },
+      "prose-light": {
+        "role": "neutral",
+        "displayName": "小说正文·浅色",
+        "canonical": "#262420",
+        "description": "浅色主题宋体阅读正文。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0035 84.6)",
+          "oklch(27% 0.0055 84.6)",
+          "oklch(39% 0.0071 84.6)",
+          "oklch(50% 0.0079 84.6)",
+          "oklch(61% 0.0079 84.6)",
+          "oklch(72% 0.0069 84.6)",
+          "oklch(84% 0.0049 84.6)",
+          "oklch(95% 0.0025 84.6)"
+        ]
+      },
+      "success-ink": {
+        "role": "tertiary",
+        "displayName": "完成绿",
+        "canonical": "#4ed17e",
+        "description": "深色主题完成、正常与已归档语义。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0743 152.3)",
+          "oklch(27% 0.1156 152.3)",
+          "oklch(39% 0.1487 152.3)",
+          "oklch(50% 0.1652 152.3)",
+          "oklch(61% 0.1652 152.3)",
+          "oklch(72% 0.1454 152.3)",
+          "oklch(84% 0.1024 152.3)",
+          "oklch(95% 0.0529 152.3)"
+        ]
+      },
+      "success-ink-light": {
+        "role": "tertiary",
+        "displayName": "完成绿·浅色",
+        "canonical": "#15703c",
+        "description": "浅色主题完成与正常语义文字色。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0523 152.5)",
+          "oklch(27% 0.0813 152.5)",
+          "oklch(39% 0.1046 152.5)",
+          "oklch(50% 0.1162 152.5)",
+          "oklch(61% 0.1162 152.5)",
+          "oklch(72% 0.1023 152.5)",
+          "oklch(84% 0.0721 152.5)",
+          "oklch(95% 0.0372 152.5)"
+        ]
+      },
+      "warning-ink": {
+        "role": "tertiary",
+        "displayName": "修复琥珀",
+        "canonical": "#f7ad31",
+        "description": "深色主题手改、修复与告警语义。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0696 74.8)",
+          "oklch(27% 0.1083 74.8)",
+          "oklch(39% 0.1392 74.8)",
+          "oklch(50% 0.1547 74.8)",
+          "oklch(61% 0.1547 74.8)",
+          "oklch(72% 0.1361 74.8)",
+          "oklch(84% 0.0959 74.8)",
+          "oklch(95% 0.0495 74.8)"
+        ]
+      },
+      "warning-ink-light": {
+        "role": "tertiary",
+        "displayName": "修复琥珀·浅色",
+        "canonical": "#8a4a05",
+        "description": "浅色主题修复与告警语义文字色。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0503 58.3)",
+          "oklch(27% 0.0782 58.3)",
+          "oklch(39% 0.1005 58.3)",
+          "oklch(50% 0.1117 58.3)",
+          "oklch(61% 0.1117 58.3)",
+          "oklch(72% 0.0983 58.3)",
+          "oklch(84% 0.0692 58.3)",
+          "oklch(95% 0.0357 58.3)"
+        ]
+      },
+      "danger-ink": {
+        "role": "tertiary",
+        "displayName": "告警红",
+        "canonical": "#f26d6d",
+        "description": "深色主题失败、冲突与安全停机语义。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0740 22.3)",
+          "oklch(27% 0.1151 22.3)",
+          "oklch(39% 0.1480 22.3)",
+          "oklch(50% 0.1645 22.3)",
+          "oklch(61% 0.1645 22.3)",
+          "oklch(72% 0.1447 22.3)",
+          "oklch(84% 0.1020 22.3)",
+          "oklch(95% 0.0526 22.3)"
+        ]
+      },
+      "danger-ink-light": {
+        "role": "tertiary",
+        "displayName": "告警红·浅色",
+        "canonical": "#b02a2a",
+        "description": "浅色主题失败与冲突语义文字色。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0769 25.9)",
+          "oklch(27% 0.1196 25.9)",
+          "oklch(39% 0.1537 25.9)",
+          "oklch(50% 0.1708 25.9)",
+          "oklch(61% 0.1708 25.9)",
+          "oklch(72% 0.1503 25.9)",
+          "oklch(84% 0.1059 25.9)",
+          "oklch(95% 0.0547 25.9)"
+        ]
+      },
+      "warped": {
+        "role": "tertiary",
+        "displayName": "偏转紫",
+        "canonical": "#a78bfa",
+        "description": "深色主题既有偏转状态，仅作状态标识。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0716 293.5)",
+          "oklch(27% 0.1114 293.5)",
+          "oklch(39% 0.1433 293.5)",
+          "oklch(50% 0.1592 293.5)",
+          "oklch(61% 0.1592 293.5)",
+          "oklch(72% 0.1401 293.5)",
+          "oklch(84% 0.0987 293.5)",
+          "oklch(95% 0.0509 293.5)"
+        ]
+      },
+      "warped-light": {
+        "role": "tertiary",
+        "displayName": "偏转紫·浅色",
+        "canonical": "#6d4bd0",
+        "description": "浅色主题既有偏转状态。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0877 289.7)",
+          "oklch(27% 0.1364 289.7)",
+          "oklch(39% 0.1753 289.7)",
+          "oklch(50% 0.1948 289.7)",
+          "oklch(61% 0.1948 289.7)",
+          "oklch(72% 0.1714 289.7)",
+          "oklch(84% 0.1208 289.7)",
+          "oklch(95% 0.0623 289.7)"
+        ]
+      },
+      "seal": {
+        "role": "secondary",
+        "displayName": "朱印红",
+        "canonical": "#e0664a",
+        "description": "深色主题章末「定稿」钤印与开书强调标题色；不承担告警。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0715 34.3)",
+          "oklch(27% 0.1112 34.3)",
+          "oklch(39% 0.1429 34.3)",
+          "oklch(50% 0.1588 34.3)",
+          "oklch(61% 0.1588 34.3)",
+          "oklch(72% 0.1397 34.3)",
+          "oklch(84% 0.0985 34.3)",
+          "oklch(95% 0.0508 34.3)"
+        ]
+      },
+      "seal-light": {
+        "role": "secondary",
+        "displayName": "朱印红·浅色",
+        "canonical": "#c0492f",
+        "description": "浅色主题章末钤印与开书强调标题色。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0713 33.9)",
+          "oklch(27% 0.1109 33.9)",
+          "oklch(39% 0.1426 33.9)",
+          "oklch(50% 0.1584 33.9)",
+          "oklch(61% 0.1584 33.9)",
+          "oklch(72% 0.1394 33.9)",
+          "oklch(84% 0.0982 33.9)",
+          "oklch(95% 0.0507 33.9)"
+        ]
+      },
+      "on-primary": {
+        "role": "primary",
+        "displayName": "主按钮文字白",
+        "canonical": "#ffffff",
+        "description": "实心主按钮与发送钮上的白色文字。 tonalRamp 为仅用于展示的合成 OKLCH 色阶，不冒充生产 token。",
+        "metadata": {
+          "tonalRamp": "synthesized for display only; not a production token"
+        },
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(27% 0.0000 89.9)",
+          "oklch(39% 0.0000 89.9)",
+          "oklch(50% 0.0000 89.9)",
+          "oklch(61% 0.0000 89.9)",
+          "oklch(72% 0.0000 89.9)",
+          "oklch(84% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "界面正文",
+        "purpose": "工具说明、常规信息与界面基础节奏；Inter 与中文无衬线回退。"
+      },
+      "prose": {
+        "displayName": "小说正文",
+        "purpose": "默认 17px、行高 2 的宋体阅读；另有 15px/19px 两档。"
+      },
+      "title": {
+        "displayName": "章名",
+        "purpose": "章标题，宋体 28px/1.3、字重 500。"
+      },
+      "label": {
+        "displayName": "按钮与小标题",
+        "purpose": "12.5px/500 的操作文字与检查器标题。"
+      },
+      "label-small": {
+        "displayName": "小号标签",
+        "purpose": "12px/500 的紧凑操作与辅助标题。"
+      },
+      "mono-summary": {
+        "displayName": "度量摘要",
+        "purpose": "等宽 11px 的 WAL、缓存与状态摘要。"
+      },
+      "chapter-number": {
+        "displayName": "章号",
+        "purpose": "84px/0.82、字重 200 的既有章号锚点，不推广为通用大标题。"
+      },
+      "metric": {
+        "displayName": "指标大数",
+        "purpose": "28px/1.1、字重 300 的既有检查器大数。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "overlay-dark",
+        "value": "0 18px 48px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.12)",
+        "purpose": "深色主题弹出菜单、窄屏右栏抽屉与开书弹窗的覆盖层阴影。"
+      },
+      {
+        "name": "overlay-light",
+        "value": "0 18px 48px rgba(40,36,30,0.18), 0 0 0 1px rgba(28,25,21,0.18)",
+        "purpose": "浅色主题弹出菜单、抽屉与弹窗的覆盖层阴影。"
+      },
+      {
+        "name": "focus-ring-dark",
+        "value": "0 0 0 3px rgba(86,134,254,0.14)",
+        "purpose": "深色主题输入框与 composer 的焦点外环，属于交互指示。"
+      },
+      {
+        "name": "focus-ring-light",
+        "value": "0 0 0 3px rgba(59,111,224,0.1)",
+        "purpose": "浅色主题输入框与 composer 的焦点外环。"
+      },
+      {
+        "name": "alert-ring-dark",
+        "value": "0 0 0 1px rgba(242,109,109,0.42)",
+        "purpose": "深色主题安全停机按钮的极细红环。"
+      },
+      {
+        "name": "alert-ring-light",
+        "value": "0 0 0 1px rgba(214,69,69,0.38)",
+        "purpose": "浅色主题安全停机按钮的极细红环。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "0.12s ease",
+        "purpose": "列表行、图标按钮和右栏页签的悬停/按下反馈。"
+      },
+      {
+        "name": "state-standard",
+        "value": "0.15s ease",
+        "purpose": "按钮、边框、输入与步骤按钮的状态过渡。"
+      },
+      {
+        "name": "surface-fade",
+        "value": "0.2s ease",
+        "purpose": "右栏与左栏目录的透明度淡出。"
+      },
+      {
+        "name": "layout-collapse",
+        "value": "0.24s cubic-bezier(0.2,0.7,0.2,1)",
+        "purpose": "外壳网格列宽与右栏覆盖层的展开/收起。"
+      },
+      {
+        "name": "prose-rise",
+        "value": "0.28s cubic-bezier(0.2,0.7,0.2,1)",
+        "purpose": "正文栏内容轻移入；外壳的 prefers-reduced-motion 会关闭它。"
+      },
+      {
+        "name": "status-ping",
+        "value": "1.4s infinite",
+        "purpose": "运行中状态点的脉冲外环。"
+      },
+      {
+        "name": "caret-blink",
+        "value": "1.05s steps(1) infinite",
+        "purpose": "既有流式正文光标的闪动。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "container-narrow",
+        "value": "1060px",
+        "purpose": "右栏切换为覆盖抽屉的容器宽度阈值；由 JS 的容器宽度判定，不是媒体查询。"
+      },
+      {
+        "name": "verdict-stack",
+        "value": "720px",
+        "purpose": "裁决卡证据双栏与动作双栏在视口宽度 720px 以下改为单列。"
+      },
+      {
+        "name": "boot-stack",
+        "value": "640px",
+        "purpose": "开书弹窗路径卡、字段、红线与校准网格改为单列。"
+      },
+      {
+        "name": "compact",
+        "value": "480px",
+        "purpose": "顶栏与动作允许换行，工作区水平内距缩小，正文底部余量改为 72px。"
+      }
+    ]
+  },
+  "narrative": {
+    "northStar": "安静的导演书桌",
+    "overview": "克制、清晰、耐读。创作内容与运行控制共处，但不争夺同一种注意力：宋体正文承接连续阅读，无衬线界面负责导航和操作，等宽信息用于代码、度量与状态识别。工具的精确不需要依靠粗重标题、装饰图表或持续闪动来表达。\n\n常驻区平整，浮层以柔和阴影表达结构。组件轻巧克制，状态明确；暖纸浅色与石墨深色是同一系统的两种使用环境，不是两套品牌。保留现有设计中的文学阅读质感，同时让控制、选中与异常有各自清楚的表达。",
+    "keyCharacteristics": [
+      "宋体阅读、无衬线操作、等宽度量，各自承担明确职责。",
+      "中性色构成常驻表面，调度蓝识别动作，状态色不与朱印语义混用。",
+      "以字级、留白、细线和表面层次组织密度，显式设计字重不超过 500。",
+      "常驻区平整，弹出层的阴影说明覆盖关系而非装饰。",
+      "深浅主题共享布局与交互结构，宿主原语和插件内容保持清晰边界。"
+    ],
+    "rules": [
+      {
+        "name": "The 语义分色 Rule",
+        "body": "调度蓝负责动作，状态色负责运行事实，朱印红不承担告警。不能为了页面更鲜艳而交换这些角色。",
+        "section": "colors"
+      },
+      {
+        "name": "The 主题同源 Rule",
+        "body": "宿主 `body` 带 `data-ds-dark-theme` 时进入深色，否则进入浅色。独立预览的浅色覆盖是额外入口，不代表存在对称的 `data-theme=\"dark\"` 契约。Portal 内的开书内容必须拥有自己的主题变量，不能假定继承 Studio 外壳。",
+        "section": "colors"
+      },
+      {
+        "name": "The 轻字重 Rule",
+        "body": "设计字重上限为 500。层级优先靠字级、字体职责、对比和间距，而不是叠加粗体。",
+        "section": "typography"
+      },
+      {
+        "name": "The 结构深度 Rule",
+        "body": "常驻信息不靠阴影竞争层级；覆盖关系与焦点变化才需要额外的深度提示。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** 让阅读文字、操作文字和度量文字承担不同职责，保留源码已有的字体栈与回退。",
+      "**Do** 成对维护深浅主题，并让脱离外壳的 Portal 内容自带必要变量。",
+      "**Do** 用字级、间距、细边框与表面层次组织信息，遵守设计字重不超过 500 的约束。",
+      "**Do** 保留 hover 的设备条件、明确的焦点反馈与真实的禁用状态。",
+      "**Do** 以实际挂载的组件和最终层叠值更新本记录，重新生成扩展样例以保持一致。"
+    ],
+    "donts": [
+      "**Don't** 把朱印红当作告警色，或将运行状态色扩展成无语义装饰。",
+      "**Don't** 将宿主导航、Modal 或 Toast 伪装成插件自有组件与自有交互契约。",
+      "**Don't** 把旧原型、死样式、名义按钮尺寸或未加载的首选字体写成当前实机事实。",
+      "**Don't** 将局部控件的抽样验证扩写成整个界面已通过对比度、键盘或减少动效审计。",
+      "**Don't** 把扩展记录里用于展示的色阶当作新增生产 token；它们不替代 frontmatter 与源码主题值。"
+    ]
+  },
+  "components": [
+    {
+      "name": "主按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "单步推进、保存与确认动作；30px 高、10px 圆角，实心填充与悬停使用专用 primary-fill 成对 token，白字不变；焦点外环仍用品牌主蓝。悬停仅在精细指针设备生效。与名义小号类并列时按源顺序仍为 30px，样例不触发真实业务。",
+      "html": "<div class=\"ds-pbtn-demo\">\n  <section class=\"ds-pbtn-sample ds-pbtn-sample--dark\">\n    <div class=\"ds-pbtn-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-pbtn-row\">\n      <button type=\"button\" class=\"ds-pbtn-btn\">推进 1 章</button>\n      <button type=\"button\" class=\"ds-pbtn-btn ds-pbtn-btn--sm\">推进 1 章（小号类）</button>\n      <button type=\"button\" class=\"ds-pbtn-btn\" disabled>推进 1 章（禁用）</button>\n    </div>\n    <p class=\"ds-pbtn-note\">主按钮与名义小号类并列时，源码层叠后高度仍为 30px；样例不触发真实推进。</p>\n  </section>\n  <section class=\"ds-pbtn-sample ds-pbtn-sample--light\">\n    <div class=\"ds-pbtn-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-pbtn-row\">\n      <button type=\"button\" class=\"ds-pbtn-btn\">推进 1 章</button>\n      <button type=\"button\" class=\"ds-pbtn-btn ds-pbtn-btn--sm\">推进 1 章（小号类）</button>\n      <button type=\"button\" class=\"ds-pbtn-btn\" disabled>推进 1 章（禁用）</button>\n    </div>\n    <p class=\"ds-pbtn-note\">主按钮与名义小号类并列时，源码层叠后高度仍为 30px；样例不触发真实推进。</p>\n  </section>\n</div>",
+      "css": ".ds-pbtn-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-pbtn-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-pbtn-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-brand: #5686fe;\n  --ds-brand-fill: #3560d2;\n  --ds-brand-fill-hover: #456dd6;\n  --ds-on-primary: #ffffff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n}\n.ds-pbtn-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-brand: #3b6fe0;\n  --ds-brand-fill: #3b6fe0;\n  --ds-brand-fill-hover: #3866cc;\n  --ds-on-primary: #ffffff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n}\n.ds-pbtn-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-pbtn-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-pbtn-demo { grid-template-columns: minmax(0, 1fr); } }\n/* 小号类与主按钮同特异性，主按钮在源顺序中更晚，有效高度仍为 30px。 */\n.ds-pbtn-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n.ds-pbtn-btn { box-sizing: border-box; height: 30px; padding: 0 11px; border: 1px solid transparent; border-radius: 10px; background: var(--ds-brand-fill); color: var(--ds-on-primary); font: 500 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; cursor: pointer; transition: background .15s ease, opacity .15s ease; }\n.ds-pbtn-btn:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-pbtn-btn:disabled { opacity: .45; cursor: not-allowed; }\n@media (hover: hover) and (pointer: fine) { .ds-pbtn-btn:hover:not(:disabled) { background: var(--ds-brand-fill-hover); } }\n"
+    },
+    {
+      "name": "次按钮",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "取消、编辑与开新书等次操作；30/26/24px 三档，粗指针设备极小号放大到 32px（样例 CSS 含同一媒体条件），选中态使用品牌浅底。悬停时背景被表面色覆盖、文字保持品牌强调。",
+      "html": "<div class=\"ds-gbtn-demo\">\n  <section class=\"ds-gbtn-sample ds-gbtn-sample--dark\">\n    <div class=\"ds-gbtn-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-gbtn-row\">\n      <button type=\"button\" class=\"ds-gbtn-btn\">取消</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--sm\">＋ 开新书</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--xs\">收起</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--on\">编辑中</button>\n      <button type=\"button\" class=\"ds-gbtn-btn\" disabled>取消（禁用）</button>\n    </div>\n    <p class=\"ds-gbtn-note\">次按钮 30px，小号 26px，极小号 24px（粗指针 32px）；选中态只作外观示例。</p>\n  </section>\n  <section class=\"ds-gbtn-sample ds-gbtn-sample--light\">\n    <div class=\"ds-gbtn-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-gbtn-row\">\n      <button type=\"button\" class=\"ds-gbtn-btn\">取消</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--sm\">＋ 开新书</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--xs\">收起</button>\n      <button type=\"button\" class=\"ds-gbtn-btn ds-gbtn-btn--on\">编辑中</button>\n      <button type=\"button\" class=\"ds-gbtn-btn\" disabled>取消（禁用）</button>\n    </div>\n    <p class=\"ds-gbtn-note\">次按钮 30px，小号 26px，极小号 24px（粗指针 32px）；选中态只作外观示例。</p>\n  </section>\n</div>",
+      "css": ".ds-gbtn-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-gbtn-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-gbtn-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-card: #232324;\n  --ds-bg-surface-2: #2c2c2e;\n  --ds-border-2: rgba(255,255,255,0.12);\n  --ds-border-3: rgba(255,255,255,0.2);\n  --ds-text-1: #f9fafb;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-brand-line: rgba(86,134,254,0.42);\n  --ds-brand-soft: rgba(86,134,254,0.14);\n  --ds-brand-ink: #86a8ff;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-gbtn-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-card: #fffdf9;\n  --ds-bg-surface-2: #fffefb;\n  --ds-border-2: rgba(28,25,21,0.18);\n  --ds-border-3: rgba(28,25,21,0.3);\n  --ds-text-1: #1c1a17;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-brand-line: rgba(59,111,224,0.4);\n  --ds-brand-soft: rgba(59,111,224,0.1);\n  --ds-brand-ink: #2b5cc9;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-gbtn-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-gbtn-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-gbtn-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-gbtn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }\n.ds-gbtn-btn { box-sizing: border-box; height: 30px; padding: 0 10px; border: 1px solid var(--ds-border-2); border-radius: 10px; background: var(--ds-bg-card); color: var(--ds-text-1); font: 500 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }\n.ds-gbtn-btn--sm { height: 26px; padding: 0 9px; border-radius: 6px; font-size: 12px; }\n.ds-gbtn-btn--xs { height: 24px; padding: 0 7px; border-radius: 6px; font-size: 11px; }\n.ds-gbtn-btn--on { border-color: var(--ds-brand-line); background: var(--ds-brand-soft); color: var(--ds-brand-ink); }\n.ds-gbtn-btn:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-gbtn-btn:disabled { opacity: .45; cursor: not-allowed; }\n@media (hover: hover) and (pointer: fine) { .ds-gbtn-btn:hover:not(:disabled) { background: var(--ds-bg-surface-2); border-color: var(--ds-border-3); } }\n@media (pointer: coarse) { .ds-gbtn-btn--xs { height: 32px; padding: 0 12px; } }\n"
+    },
+    {
+      "name": "输入与文本域",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "开书字段与正文编辑的基础输入；焦点用 Tab 触发，边框转品牌色并出现 3px 半透明外环。禁用态没有额外样式，也不含提交行为。",
+      "html": "<div class=\"ds-inp-demo\">\n  <section class=\"ds-inp-sample ds-inp-sample--dark\">\n    <div class=\"ds-inp-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-inp-fields\">\n      <label class=\"ds-inp-label\">作品标识（slug）<input type=\"text\" class=\"ds-inp-field ds-inp-mono\" value=\"causality-soda\" /></label>\n      <label class=\"ds-inp-label\">开局种子<textarea class=\"ds-inp-field ds-inp-area\" rows=\"3\">雨夜，旧校舍的钟声比平时早了七分钟。</textarea></label>\n      <label class=\"ds-inp-label\">禁用字段<input type=\"text\" class=\"ds-inp-field\" value=\"提交期间不可编辑\" disabled /></label>\n    </div>\n    <p class=\"ds-inp-note\">焦点请用 Tab 键触发；禁用态源码未定义额外样式，仅依赖原生属性。</p>\n  </section>\n  <section class=\"ds-inp-sample ds-inp-sample--light\">\n    <div class=\"ds-inp-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-inp-fields\">\n      <label class=\"ds-inp-label\">作品标识（slug）<input type=\"text\" class=\"ds-inp-field ds-inp-mono\" value=\"causality-soda\" /></label>\n      <label class=\"ds-inp-label\">开局种子<textarea class=\"ds-inp-field ds-inp-area\" rows=\"3\">雨夜，旧校舍的钟声比平时早了七分钟。</textarea></label>\n      <label class=\"ds-inp-label\">禁用字段<input type=\"text\" class=\"ds-inp-field\" value=\"提交期间不可编辑\" disabled /></label>\n    </div>\n    <p class=\"ds-inp-note\">焦点请用 Tab 键触发；禁用态源码未定义额外样式，仅依赖原生属性。</p>\n  </section>\n</div>",
+      "css": ".ds-inp-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-inp-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-inp-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-border-2: rgba(255,255,255,0.12);\n  --ds-text-1: #f9fafb;\n  --ds-text-2: #cfd3d6;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand-line: rgba(86,134,254,0.42);\n  --ds-brand-soft: rgba(86,134,254,0.14);\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n}\n.ds-inp-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-border-2: rgba(28,25,21,0.18);\n  --ds-text-1: #1c1a17;\n  --ds-text-2: #45413b;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand-line: rgba(59,111,224,0.4);\n  --ds-brand-soft: rgba(59,111,224,0.1);\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n}\n.ds-inp-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-inp-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-inp-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-inp-fields { display: flex; flex-direction: column; gap: 12px; }\n.ds-inp-label { display: flex; flex-direction: column; gap: 5px; font: 400 12px/1.5 var(--ds-font-sans); color: var(--ds-text-2); }\n.ds-inp-field { box-sizing: border-box; width: 100%; background: var(--ds-bg-base); border: 1px solid var(--ds-border-2); border-radius: 10px; padding: 8px 11px; color: var(--ds-text-1); font: 400 12.5px/1.5 var(--ds-font-sans); outline: none; transition: border-color .15s ease, box-shadow .15s ease; }\n.ds-inp-field:focus-visible { border-color: var(--ds-brand-line); box-shadow: 0 0 0 3px var(--ds-brand-soft); outline: none; }\n.ds-inp-area { min-height: 84px; resize: vertical; font-family: inherit; }\n.ds-inp-mono { font-family: var(--ds-font-mono); }\n"
+    },
+    {
+      "name": "页签",
+      "kind": "nav",
+      "refersTo": "nav-tabs",
+      "description": "中栏底部蓝线与右栏浅底两种页签。生产 tablist 已支持 ArrowLeft / ArrowRight / Home / End 自动激活与 roving tabindex，并以 aria-controls 关联 tabpanel；本样例是静态外观，不实现键盘行为或真实视图切换。",
+      "html": "<div class=\"ds-tabs-demo\">\n  <section class=\"ds-tabs-sample ds-tabs-sample--dark\">\n    <div class=\"ds-tabs-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">中栏页签 · 底部蓝线</div>\n      <div class=\"ds-tabs-bar\">\n        <button type=\"button\" class=\"ds-tabs-tab ds-tabs-tab--on\" aria-selected=\"true\">正文</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">细纲</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">修改 <span class=\"ds-tabs-count\">2</span></button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">视图</button>\n      </div>\n    </div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">右栏页签 · 浅底选中</div>\n      <div class=\"ds-tabs-rhead\">\n        <button type=\"button\" class=\"ds-tabs-rtab ds-tabs-rtab--on\" aria-selected=\"true\">目录</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">检查器</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">工具</button>\n      </div>\n    </div>\n    <p class=\"ds-tabs-note\">生产页签已支持 ArrowLeft / ArrowRight / Home / End 与 roving tabindex；本样例仅静态外观。</p>\n  </section>\n  <section class=\"ds-tabs-sample ds-tabs-sample--light\">\n    <div class=\"ds-tabs-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">中栏页签 · 底部蓝线</div>\n      <div class=\"ds-tabs-bar\">\n        <button type=\"button\" class=\"ds-tabs-tab ds-tabs-tab--on\" aria-selected=\"true\">正文</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">细纲</button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">修改 <span class=\"ds-tabs-count\">2</span></button>\n        <button type=\"button\" class=\"ds-tabs-tab\" aria-selected=\"false\">视图</button>\n      </div>\n    </div>\n    <div class=\"ds-tabs-block\">\n      <div class=\"ds-tabs-caption\">右栏页签 · 浅底选中</div>\n      <div class=\"ds-tabs-rhead\">\n        <button type=\"button\" class=\"ds-tabs-rtab ds-tabs-rtab--on\" aria-selected=\"true\">目录</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">检查器</button>\n        <button type=\"button\" class=\"ds-tabs-rtab\" aria-selected=\"false\">工具</button>\n      </div>\n    </div>\n    <p class=\"ds-tabs-note\">生产页签已支持 ArrowLeft / ArrowRight / Home / End 与 roving tabindex；本样例仅静态外观。</p>\n  </section>\n</div>",
+      "css": ".ds-tabs-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-tabs-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-tabs-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-panel: #18181a;\n  --ds-bg-hover: rgba(255,255,255,0.05);\n  --ds-bg-press: rgba(255,255,255,0.09);\n  --ds-border-1: rgba(255,255,255,0.06);\n  --ds-text-1: #f9fafb;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n}\n.ds-tabs-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-panel: #f3efe7;\n  --ds-bg-hover: rgba(28,25,21,0.05);\n  --ds-bg-press: rgba(28,25,21,0.09);\n  --ds-border-1: rgba(28,25,21,0.1);\n  --ds-text-1: #1c1a17;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n}\n.ds-tabs-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-tabs-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-tabs-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-tabs-block { margin-bottom: 16px; }\n.ds-tabs-block:last-of-type { margin-bottom: 0; }\n.ds-tabs-caption { margin-bottom: 6px; font: 500 10.5px/1.4 var(--ds-font-sans); color: var(--ds-text-4); }\n.ds-tabs-bar { box-sizing: border-box; height: 38px; display: flex; align-items: center; gap: 6px; padding: 0 14px; border-bottom: 1px solid var(--ds-border-1); background: var(--ds-bg-base); }\n/* 中栏页签的 hover 在源码中不设媒体门控；右栏页签有门控。 */\n.ds-tabs-tab { position: relative; box-sizing: border-box; height: 100%; padding: 0 6px; border: 0; background: transparent; color: var(--ds-text-3); font: 400 13px/1 var(--ds-font-sans); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; cursor: pointer; transition: color .15s ease; }\n.ds-tabs-tab:hover { color: var(--ds-text-1); }\n.ds-tabs-tab--on { color: var(--ds-text-1); font-weight: 500; }\n.ds-tabs-tab--on::after { content: \"\"; position: absolute; left: 4px; right: 4px; bottom: 0; height: 2px; border-radius: 2px; background: var(--ds-brand); }\n.ds-tabs-count { font: 500 10.5px/1 var(--ds-font-mono); color: var(--ds-text-4); }\n.ds-tabs-rhead { box-sizing: border-box; height: 46px; display: flex; align-items: center; gap: 2px; padding: 0 10px 0 12px; border-bottom: 1px solid var(--ds-border-1); background: var(--ds-bg-panel); }\n.ds-tabs-rtab { box-sizing: border-box; height: 30px; padding: 0 10px; border-radius: 6px; border: 0; background: transparent; color: var(--ds-text-3); font: 400 12.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; transition: background .12s ease, color .12s ease; }\n.ds-tabs-rtab--on { background: var(--ds-bg-press); color: var(--ds-text-1); font-weight: 500; }\n@media (hover: hover) and (pointer: fine) { .ds-tabs-rtab:hover { background: var(--ds-bg-hover); color: var(--ds-text-1); } }\n.ds-tabs-tab:focus-visible, .ds-tabs-rtab:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n"
+    },
+    {
+      "name": "状态标签",
+      "kind": "chip",
+      "refersTo": "status-chip",
+      "description": "WAL 与章节状态胶囊；颜色与文字同时承载语义。样例为非交互标签，不提供筛选或撤回行为。",
+      "html": "<div class=\"ds-chip-demo\">\n  <section class=\"ds-chip-sample ds-chip-sample--dark\">\n    <div class=\"ds-chip-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-chip-row\">\n      <span class=\"ds-chip ds-chip-green\">已归档</span>\n      <span class=\"ds-chip ds-chip-amber\">有手改</span>\n      <span class=\"ds-chip ds-chip-red\">冲突</span>\n      <span class=\"ds-chip ds-chip-brand\">草稿中</span>\n      <span class=\"ds-chip ds-chip-muted\">只读</span>\n    </div>\n    <p class=\"ds-chip-note\">状态标签以文字加语义浅底表达，不是可点击筛选器。</p>\n  </section>\n  <section class=\"ds-chip-sample ds-chip-sample--light\">\n    <div class=\"ds-chip-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-chip-row\">\n      <span class=\"ds-chip ds-chip-green\">已归档</span>\n      <span class=\"ds-chip ds-chip-amber\">有手改</span>\n      <span class=\"ds-chip ds-chip-red\">冲突</span>\n      <span class=\"ds-chip ds-chip-brand\">草稿中</span>\n      <span class=\"ds-chip ds-chip-muted\">只读</span>\n    </div>\n    <p class=\"ds-chip-note\">状态标签以文字加语义浅底表达，不是可点击筛选器。</p>\n  </section>\n</div>",
+      "css": ".ds-chip-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-chip-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-chip-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-green-soft: rgba(78,209,126,0.12);\n  --ds-green-ink: #4ed17e;\n  --ds-amber-soft: rgba(247,173,49,0.12);\n  --ds-amber-ink: #f7ad31;\n  --ds-red-soft: rgba(242,109,109,0.12);\n  --ds-red-ink: #f26d6d;\n  --ds-brand-soft: rgba(86,134,254,0.14);\n  --ds-brand-ink: #86a8ff;\n  --ds-bg-hover: rgba(255,255,255,0.05);\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-chip-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-green-soft: rgba(31,157,85,0.1);\n  --ds-green-ink: #15703c;\n  --ds-amber-soft: rgba(217,119,6,0.1);\n  --ds-amber-ink: #8a4a05;\n  --ds-red-soft: rgba(214,69,69,0.09);\n  --ds-red-ink: #b02a2a;\n  --ds-brand-soft: rgba(59,111,224,0.1);\n  --ds-brand-ink: #2b5cc9;\n  --ds-bg-hover: rgba(28,25,21,0.05);\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-chip-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-chip-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-chip-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }\n.ds-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font: 500 11px/1.5 var(--ds-font-sans); white-space: nowrap; flex-shrink: 0; }\n.ds-chip-green { background: var(--ds-green-soft); color: var(--ds-green-ink); }\n.ds-chip-amber { background: var(--ds-amber-soft); color: var(--ds-amber-ink); }\n.ds-chip-red { background: var(--ds-red-soft); color: var(--ds-red-ink); }\n.ds-chip-brand { background: var(--ds-brand-soft); color: var(--ds-brand-ink); }\n.ds-chip-muted { background: var(--ds-bg-hover); color: var(--ds-text-3); }\n"
+    },
+    {
+      "name": "检查器卡片",
+      "kind": "card",
+      "refersTo": "inspector-card",
+      "description": "检查器内容卡：14px 圆角、12px 内距、raised 表面、无投影。样例只展示外观，不代表真实遥测数据。",
+      "html": "<div class=\"ds-icard-demo\">\n  <section class=\"ds-icard-sample ds-icard-sample--dark\">\n    <div class=\"ds-icard-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-icard-card\">\n      <div class=\"ds-icard-head\"><span>静态前缀缓存命中</span><span class=\"ds-icard-mono ds-icard-green\">83.2%</span></div>\n      <div class=\"ds-icard-big\">83.2<small class=\"ds-icard-unit\">%</small></div>\n      <div class=\"ds-icard-bar\"><span class=\"ds-icard-fill\"></span></div>\n      <div class=\"ds-icard-meta\">检查器分组内容卡 · 外观样例</div>\n    </div>\n    <p class=\"ds-icard-note\">平整卡片，无投影；层级来自表面色、细边框与内距。</p>\n  </section>\n  <section class=\"ds-icard-sample ds-icard-sample--light\">\n    <div class=\"ds-icard-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-icard-card\">\n      <div class=\"ds-icard-head\"><span>静态前缀缓存命中</span><span class=\"ds-icard-mono ds-icard-green\">83.2%</span></div>\n      <div class=\"ds-icard-big\">83.2<small class=\"ds-icard-unit\">%</small></div>\n      <div class=\"ds-icard-bar\"><span class=\"ds-icard-fill\"></span></div>\n      <div class=\"ds-icard-meta\">检查器分组内容卡 · 外观样例</div>\n    </div>\n    <p class=\"ds-icard-note\">平整卡片，无投影；层级来自表面色、细边框与内距。</p>\n  </section>\n</div>",
+      "css": ".ds-icard-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-icard-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-icard-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-surface-2: #2c2c2e;\n  --ds-border-1: rgba(255,255,255,0.06);\n  --ds-text-1: #f9fafb;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-green: #4ed17e;\n  --ds-green-ink: #4ed17e;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n  --ds-font-display: \"Inter Display\", Inter, system-ui, sans-serif;\n}\n.ds-icard-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-surface-2: #fffefb;\n  --ds-border-1: rgba(28,25,21,0.1);\n  --ds-text-1: #1c1a17;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-green: #1f9d55;\n  --ds-green-ink: #15703c;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n  --ds-font-display: \"Inter Display\", Inter, system-ui, sans-serif;\n}\n.ds-icard-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-icard-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-icard-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-icard-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--ds-border-1); border-radius: 14px; background: var(--ds-bg-surface-2); min-width: 0; }\n.ds-icard-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; font: 500 11px/1.4 var(--ds-font-sans); color: var(--ds-text-3); letter-spacing: 0.02em; }\n.ds-icard-mono { font-family: var(--ds-font-mono); }\n.ds-icard-green { color: var(--ds-green-ink); }\n.ds-icard-big { font: 300 28px/1.1 var(--ds-font-display); color: var(--ds-text-1); }\n.ds-icard-unit { margin-left: 1px; font: 400 14px/1 var(--ds-font-sans); color: var(--ds-text-4); }\n.ds-icard-bar { height: 4px; border-radius: 999px; background: var(--ds-border-1); overflow: hidden; margin-top: 5px; }\n.ds-icard-fill { display: block; height: 100%; width: 83.2%; background: var(--ds-green); }\n.ds-icard-meta { font: 400 11px/1.5 var(--ds-font-sans); color: var(--ds-text-4); }\n"
+    },
+    {
+      "name": "阶段节点",
+      "kind": "custom",
+      "refersTo": "stage-node",
+      "description": "阶段流水线节点；状态由边框、底色与 6px 点共同表达，休眠用虚线。悬停仅在精细指针设备生效，样例不触发真实推进。",
+      "html": "<div class=\"ds-stage-demo\">\n  <section class=\"ds-stage-sample ds-stage-sample--dark\">\n    <div class=\"ds-stage-cap\">深色主题样例 · 仅外观</div>\n    <div class=\"ds-stage-row\">\n      <button type=\"button\" class=\"ds-stage-node ds-stage-done\"><i class=\"ds-stage-dot\"></i><span>已提交</span><span class=\"ds-stage-badge ds-stage-badge-green\">完成</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-active\"><i class=\"ds-stage-dot ds-stage-dot-active\"></i><span>运行中</span><span class=\"ds-stage-badge ds-stage-badge-brand\">写入</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-healing\"><i class=\"ds-stage-dot ds-stage-dot-healing\"></i><span>修复中</span><span class=\"ds-stage-badge ds-stage-badge-amber\">局部修补</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-halt\"><i class=\"ds-stage-dot ds-stage-dot-halt\"></i><span>已挂起</span><span class=\"ds-stage-badge ds-stage-badge-red\">停机</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-dormant\"><i class=\"ds-stage-dot\"></i><span>休眠</span><span class=\"ds-stage-badge ds-stage-badge-muted\">条件未达</span></button>\n    </div>\n    <p class=\"ds-stage-note\">状态由边框、底色与 6px 点共同表达；点链可横向滚动。</p>\n  </section>\n  <section class=\"ds-stage-sample ds-stage-sample--light\">\n    <div class=\"ds-stage-cap\">浅色主题样例 · 仅外观</div>\n    <div class=\"ds-stage-row\">\n      <button type=\"button\" class=\"ds-stage-node ds-stage-done\"><i class=\"ds-stage-dot\"></i><span>已提交</span><span class=\"ds-stage-badge ds-stage-badge-green\">完成</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-active\"><i class=\"ds-stage-dot ds-stage-dot-active\"></i><span>运行中</span><span class=\"ds-stage-badge ds-stage-badge-brand\">写入</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-healing\"><i class=\"ds-stage-dot ds-stage-dot-healing\"></i><span>修复中</span><span class=\"ds-stage-badge ds-stage-badge-amber\">局部修补</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-halt\"><i class=\"ds-stage-dot ds-stage-dot-halt\"></i><span>已挂起</span><span class=\"ds-stage-badge ds-stage-badge-red\">停机</span></button>\n      <span class=\"ds-stage-arrow\">›</span>\n      <button type=\"button\" class=\"ds-stage-node ds-stage-dormant\"><i class=\"ds-stage-dot\"></i><span>休眠</span><span class=\"ds-stage-badge ds-stage-badge-muted\">条件未达</span></button>\n    </div>\n    <p class=\"ds-stage-note\">状态由边框、底色与 6px 点共同表达；点链可横向滚动。</p>\n  </section>\n</div>",
+      "css": ".ds-stage-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-stage-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-stage-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-card: #232324;\n  --ds-bg-hover: rgba(255,255,255,0.05);\n  --ds-border-1: rgba(255,255,255,0.06);\n  --ds-border-2: rgba(255,255,255,0.12);\n  --ds-border-3: rgba(255,255,255,0.2);\n  --ds-text-1: #f9fafb;\n  --ds-text-2: #cfd3d6;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-brand-line: rgba(86,134,254,0.42);\n  --ds-brand-soft: rgba(86,134,254,0.14);\n  --ds-brand-ink: #86a8ff;\n  --ds-green: #4ed17e;\n  --ds-green-soft: rgba(78,209,126,0.12);\n  --ds-green-ink: #4ed17e;\n  --ds-amber: #f7ad31;\n  --ds-amber-soft: rgba(247,173,49,0.12);\n  --ds-amber-ink: #f7ad31;\n  --ds-amber-line: rgba(247,173,49,0.4);\n  --ds-red: #f26d6d;\n  --ds-red-soft: rgba(242,109,109,0.12);\n  --ds-red-ink: #f26d6d;\n  --ds-red-line: rgba(242,109,109,0.42);\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-stage-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-card: #fffdf9;\n  --ds-bg-hover: rgba(28,25,21,0.05);\n  --ds-border-1: rgba(28,25,21,0.1);\n  --ds-border-2: rgba(28,25,21,0.18);\n  --ds-border-3: rgba(28,25,21,0.3);\n  --ds-text-1: #1c1a17;\n  --ds-text-2: #45413b;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-brand-line: rgba(59,111,224,0.4);\n  --ds-brand-soft: rgba(59,111,224,0.1);\n  --ds-brand-ink: #2b5cc9;\n  --ds-green: #1f9d55;\n  --ds-green-soft: rgba(31,157,85,0.1);\n  --ds-green-ink: #15703c;\n  --ds-amber: #d97706;\n  --ds-amber-soft: rgba(217,119,6,0.1);\n  --ds-amber-ink: #8a4a05;\n  --ds-amber-line: rgba(217,119,6,0.45);\n  --ds-red: #d64545;\n  --ds-red-soft: rgba(214,69,69,0.09);\n  --ds-red-ink: #b02a2a;\n  --ds-red-line: rgba(214,69,69,0.38);\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n}\n.ds-stage-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-stage-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-stage-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-stage-row { display: flex; align-items: center; gap: 5px; height: 30px; overflow-x: auto; overflow-y: hidden; }\n.ds-stage-node { box-sizing: border-box; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--ds-border-1); background: var(--ds-bg-card); color: var(--ds-text-2); font: 500 11.5px/1 var(--ds-font-sans); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }\n.ds-stage-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ds-text-4); flex-shrink: 0; }\n.ds-stage-dot-active { background: var(--ds-brand); animation: ds-stage-ping 1.4s infinite; }\n@keyframes ds-stage-ping { 0% { box-shadow: 0 0 0 0 currentColor; } 70% { box-shadow: 0 0 0 5px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }\n.ds-stage-done { border-color: color-mix(in srgb, var(--ds-green) 42%, transparent); }\n.ds-stage-done .ds-stage-dot { background: var(--ds-green); }\n.ds-stage-active { border-color: var(--ds-brand-line); background: var(--ds-brand-soft); color: var(--ds-text-1); }\n.ds-stage-healing { border-color: var(--ds-amber-line); background: var(--ds-amber-soft); }\n.ds-stage-healing .ds-stage-dot, .ds-stage-dot-healing { background: var(--ds-amber); }\n.ds-stage-halt { border-color: var(--ds-red-line); background: var(--ds-red-soft); }\n.ds-stage-halt .ds-stage-dot, .ds-stage-dot-halt { background: var(--ds-red); }\n.ds-stage-dormant { border-style: dashed; border-color: var(--ds-border-2); background: transparent; color: var(--ds-text-4); }\n.ds-stage-dormant .ds-stage-dot { background: transparent; box-shadow: inset 0 0 0 1.4px var(--ds-border-3); }\n.ds-stage-badge { padding: 1px 6px; border-radius: 999px; font: 400 10.5px/1.3 var(--ds-font-sans); white-space: nowrap; }\n.ds-stage-badge-green { background: var(--ds-green-soft); color: var(--ds-green-ink); }\n.ds-stage-badge-brand { background: var(--ds-brand-soft); color: var(--ds-brand-ink); }\n.ds-stage-badge-amber { background: var(--ds-amber-soft); color: var(--ds-amber-ink); }\n.ds-stage-badge-red { background: var(--ds-red-soft); color: var(--ds-red-ink); }\n.ds-stage-badge-muted { background: var(--ds-bg-hover); color: var(--ds-text-3); }\n.ds-stage-arrow { color: var(--ds-text-4); font-size: 12px; flex-shrink: 0; user-select: none; }\n.ds-stage-node:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n@media (hover: hover) and (pointer: fine) { .ds-stage-node:hover { border-color: var(--ds-border-2); color: var(--ds-text-1); } }\n@media (prefers-reduced-motion: reduce) { .ds-stage-dot-active { animation: none; } }\n"
+    },
+    {
+      "name": "检查器手风琴",
+      "kind": "custom",
+      "refersTo": "inspector-accordion",
+      "description": "检查器 7 组手风琴的组头与内容；原生 details 仅作开合视觉载体，不是实际 React 手风琴状态与 aria 行为实现。",
+      "html": "<div class=\"ds-acc-demo\">\n  <section class=\"ds-acc-sample ds-acc-sample--dark\">\n    <div class=\"ds-acc-cap\">深色主题样例 · 仅外观</div>\n    <details class=\"ds-acc-acc\" open>\n      <summary class=\"ds-acc-head\"><span class=\"ds-acc-title\">遥测与健康度</span><span class=\"ds-acc-sum\">缓存 83.2%</span><span class=\"ds-acc-chevron\">›</span></summary>\n      <div class=\"ds-acc-body\"><p>静态前缀命中与四联指标。折叠后组头摘要仍然可见。</p></div>\n    </details>\n    <details class=\"ds-acc-acc\">\n      <summary class=\"ds-acc-head\"><span class=\"ds-acc-title\">Git WAL 与提交</span><span class=\"ds-acc-sum\">草稿中</span><span class=\"ds-acc-chevron\">›</span></summary>\n      <div class=\"ds-acc-body\"><p>WAL 相位与事务锁详情。</p></div>\n    </details>\n    <p class=\"ds-acc-note\">原生 details 仅为开合的视觉载体，不是实际 React 手风琴状态与 aria 行为实现。</p>\n  </section>\n  <section class=\"ds-acc-sample ds-acc-sample--light\">\n    <div class=\"ds-acc-cap\">浅色主题样例 · 仅外观</div>\n    <details class=\"ds-acc-acc\" open>\n      <summary class=\"ds-acc-head\"><span class=\"ds-acc-title\">遥测与健康度</span><span class=\"ds-acc-sum\">缓存 83.2%</span><span class=\"ds-acc-chevron\">›</span></summary>\n      <div class=\"ds-acc-body\"><p>静态前缀命中与四联指标。折叠后组头摘要仍然可见。</p></div>\n    </details>\n    <details class=\"ds-acc-acc\">\n      <summary class=\"ds-acc-head\"><span class=\"ds-acc-title\">Git WAL 与提交</span><span class=\"ds-acc-sum\">草稿中</span><span class=\"ds-acc-chevron\">›</span></summary>\n      <div class=\"ds-acc-body\"><p>WAL 相位与事务锁详情。</p></div>\n    </details>\n    <p class=\"ds-acc-note\">原生 details 仅为开合的视觉载体，不是实际 React 手风琴状态与 aria 行为实现。</p>\n  </section>\n</div>",
+      "css": ".ds-acc-demo { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px; border-radius: 12px; background: #0c0c0d; color: #f9fafb; font-family: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif; }\n.ds-acc-sample { min-width: 0; padding: 16px; border-radius: 10px; }\n.ds-acc-sample--dark {\n  background: #151517;\n  color: #f9fafb;\n  --ds-bg-base: #151517;\n  --ds-bg-card: #232324;\n  --ds-bg-hover: rgba(255,255,255,0.05);\n  --ds-border-1: rgba(255,255,255,0.06);\n  --ds-text-1: #f9fafb;\n  --ds-text-2: #cfd3d6;\n  --ds-text-3: #adb2b8;\n  --ds-text-4: #8c9199;\n  --ds-brand: #5686fe;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n  --ds-ease: cubic-bezier(0.2,0.7,0.2,1);\n}\n.ds-acc-sample--light {\n  background: #faf8f4;\n  color: #1c1a17;\n  --ds-bg-base: #faf8f4;\n  --ds-bg-card: #fffdf9;\n  --ds-bg-hover: rgba(28,25,21,0.05);\n  --ds-border-1: rgba(28,25,21,0.1);\n  --ds-text-1: #1c1a17;\n  --ds-text-2: #45413b;\n  --ds-text-3: #625e57;\n  --ds-text-4: #6b665e;\n  --ds-brand: #3b6fe0;\n  --ds-font-sans: Inter, \"PingFang SC\", \"Microsoft YaHei\", \"Noto Sans CJK SC\", system-ui, sans-serif;\n  --ds-font-mono: \"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace;\n  --ds-ease: cubic-bezier(0.2,0.7,0.2,1);\n}\n.ds-acc-cap { margin-bottom: 14px; font: 500 10.5px/1.4 var(--ds-font-sans); letter-spacing: 0.04em; color: var(--ds-text-4); }\n.ds-acc-note { margin: 12px 0 0; font: 400 11px/1.6 var(--ds-font-sans); color: var(--ds-text-3); }\n@media (max-width: 720px) { .ds-acc-demo { grid-template-columns: minmax(0, 1fr); } }\n.ds-acc-acc { border: 1px solid var(--ds-border-1); border-radius: 14px; background: var(--ds-bg-card); overflow: hidden; margin-bottom: 8px; }\n.ds-acc-head { box-sizing: border-box; min-height: 36px; padding: 8px 10px; display: flex; align-items: center; gap: 6px; font: 500 12px/1.35 var(--ds-font-sans); color: var(--ds-text-1); cursor: pointer; list-style: none; transition: background .15s ease; }\n.ds-acc-head:hover { background: var(--ds-bg-hover); }\n.ds-acc-head::-webkit-details-marker { display: none; }\n.ds-acc-acc[open] .ds-acc-head { border-bottom: 1px solid var(--ds-border-1); }\n.ds-acc-head:focus-visible { outline: 2px solid var(--ds-brand); outline-offset: 2px; }\n.ds-acc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.ds-acc-sum { font: 400 11px/1.3 var(--ds-font-mono); color: var(--ds-text-4); white-space: nowrap; }\n.ds-acc-chevron { font-size: 12px; line-height: 1; color: var(--ds-text-4); transition: transform .18s var(--ds-ease); }\n.ds-acc-acc[open] .ds-acc-chevron { transform: rotate(90deg); }\n.ds-acc-body { padding: 10px; font: 400 12px/1.6 var(--ds-font-sans); color: var(--ds-text-2); }\n.ds-acc-body p { margin: 0; }\n"
+    }
+  ]
+}

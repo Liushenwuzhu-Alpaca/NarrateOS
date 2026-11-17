@@ -301,6 +301,10 @@ export const INSPECTOR_CSS = `
     background: var(--ns-green);
 }
 
+.ns-i-seg-amber {
+    background: var(--ns-amber);
+}
+
 .ns-i-seg-brand {
     background: var(--ns-brand);
 }
@@ -309,6 +313,14 @@ export const INSPECTOR_CSS = `
     display: flex;
     justify-content: space-between;
     font-size: 11px;
+    color: var(--ns-text-4);
+}
+
+/* Token 统计范围辅助说明：口径边界常驻可见 */
+.ns-i-scope-note {
+    margin-top: 4px;
+    font-size: 10.5px;
+    line-height: 1.5;
     color: var(--ns-text-4);
 }
 
@@ -427,7 +439,7 @@ export const INSPECTOR_CSS = `
     height: 26px;
     flex-shrink: 0;
     border-radius: 50%;
-    background: var(--ns-brand);
+    background: var(--ns-brand-fill);
     color: #fff;
     font-size: 12px;
     font-weight: 500;

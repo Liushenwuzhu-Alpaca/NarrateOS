@@ -82,6 +82,7 @@ books/<book-slug>/                 # 独立 Git 仓库（与引擎源码物理�
     ├── tx_state.json              # 原子事务预写相位锁（WAL）与章节 SHA-256 指纹表
     ├── signals.jsonl              # 外部微调指令、圆谎纸条与 Spotlight Trigger 队列（安全点消费）
     ├── parallel_deltas/           # PARALLEL 并行时间线窗口内的分支状态增量暂存区
+    ├── chapter_outlines/          # 章节规划快照：ch_XXXX.json 存该章最终实际使用的 PlannerOutline
     └── telemetry.jsonl            # 每章零模型开销采集的健康度与缓存遥测流水
 ```
 
@@ -89,10 +90,12 @@ books/<book-slug>/                 # 独立 Git 仓库（与引擎源码物理�
 
 单章落盘严格拆分为两次独立原子提交，由 `.ops/tx_state.json` 记录相位（`DRAFTING -> FEAT_COMMITTED -> STATE_COMMITTED -> [DREAM_COMMITTED]`）：
 
-1. **正文真源提交**：`feat(ch-0045): settle manuscript`（写入 `manuscripts/ch_0045.md` 并登记正文 `sha256`）。
+1. **正文真源提交**：`feat(ch-0045): settle manuscript`（写入 `manuscripts/ch_0045.md` 并登记正文 `sha256`；本章最终实际使用的细纲快照 `.ops/chapter_outlines/ch_0045.json` 同笔落盘并纳入既有写集恢复）。
 2. **物化视图提交**：`state(ch-0045): update entity pages & L2 card`（行级补丁过完固有属性锁与 1ms 外键可达性检查后提交；达离线水位时追加独立的 `dream(ch-0045)` 提交）。
 
 **崩溃恢复**：若进程在 `FEAT_COMMITTED` 后中断，重启自检自动跳过正文生成，直接重入 `Extractor` 补齐 `state` 提交；对 `HEAD` 若仅状态提取有瑕疵，可单独回退 `state` 重算视图而无损保留正文。
+
+**细纲规划快照契约**：`.ops/chapter_outlines/ch_XXXX.json` 仅是规划快照，正文仍是唯一剧情真源；快照不投回写手、不作为剧情事实。改纲 (`PlanConflict` v2) 后持久化最终实际使用版本；`FEAT_COMMITTED` 崩溃恢复沿已存快照继续抽取，不重新调用 Planner；`Sync` 手改重提交不覆盖原快照；PARALLEL 各支线按全局唯一章号落盘，互不串纲。旧章未留存快照时读取端明确返回 `missing`（不捏造、不调用模型补历史）；快照损坏或非法返回 `error` 且正文仍可审阅。插件 `GET /api/narrate/chapter` 据此返回 `outlineText: string | null`（完整 PlannerOutline JSON 字符串）与 `outlineStatus: 'available' | 'missing' | 'error'`。
 
 ---
 

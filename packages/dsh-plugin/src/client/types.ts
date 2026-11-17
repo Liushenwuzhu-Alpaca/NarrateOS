@@ -85,6 +85,9 @@ export interface ChaptersListPayload {
     chapters: ChapterSummary[];
 }
 
+/** 章节细纲快照状态：available=已留存可解析；missing=旧章未留存（不捏造）；error=快照损坏（正文仍可读） */
+export type ChapterOutlineStatus = 'available' | 'missing' | 'error';
+
 /** 单章详情与 Diff（对应 GET /api/narrate/chapter?ch=...） */
 export interface ChapterDetail {
     chapterNumber: number;
@@ -92,6 +95,9 @@ export interface ChapterDetail {
     dirty: boolean;
     sha256: string;
     diffFromHead: string;
+    /** 保存的完整 PlannerOutline JSON 字符串（规划快照，非剧情真源）；missing/error 时为 null */
+    outlineText: string | null;
+    outlineStatus: ChapterOutlineStatus;
 }
 
 /** 6 节点运行阶段状态 */
@@ -154,6 +160,7 @@ export interface TelemetryItem {
     cacheHitRate?: number | undefined;
     inputTokens?: number | undefined;
     cacheReadTokens?: number | undefined;
+    cacheWriteTokens?: number | undefined;
     outputTokens?: number | undefined;
     metrics?: TelemetryMetrics | undefined;
     token_usage?: TelemetryTokenUsage | undefined;
@@ -347,6 +354,7 @@ export type SseEventName =
     | 'connected'
     | 'book_switched'
     | 'halt:requested'
+    | 'halt:waiting'
     | 'halt:completed'
     | 'sync:started'
     | 'sync:completed'

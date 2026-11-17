@@ -234,6 +234,7 @@ const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
     'connected',
     'book_switched',
     'halt:requested',
+    'halt:waiting',
     'halt:completed',
     'sync:started',
     'sync:completed',

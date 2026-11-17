@@ -49,20 +49,20 @@ const BOOT_STEPS: readonly StepDescriptor[] = [
     {
         step: 2,
         shortLabel: '2 角色与红线',
-        title: '开局 POV 角色与时间锚点红线',
-        hint: '绑定开局第一视角实体与 T0 锚点，隔离未发生剧透与底牌'
+        title: '开局视角角色与时间锚点红线',
+        hint: '绑定开局第一视角角色与 T0 锚点，隔离未发生剧透与底牌'
     },
     {
         step: 3,
-        shortLabel: '3 试播标定',
-        title: '声纹标定与编译产物预检',
-        hint: '确认 Step 0 编译流向与静态世界基座生成策略'
+        shortLabel: '3 核对设置',
+        title: '核对开书设置',
+        hint: '本步仅核对已填设置；试播标定与编译在提交后才执行'
     },
     {
         step: 4,
         shortLabel: '4 启动创作',
-        title: '初始化独立书库并编译开机',
-        hint: '生成 books/<slug>/ 独立 Git 仓库与首卷骨架'
+        title: '提交开书请求并初始化作品仓库',
+        hint: '提交后引擎试播标定分词率并编译，生成 books/<slug>/ 独立 Git 仓库与首卷骨架'
     }
 ];
 
@@ -70,10 +70,11 @@ const SLUG_RE = /^[a-zA-Z0-9_-]+$/;
 
 /**
  * NarrateOS 开新书模态弹窗组件（Step 0 Bootloader 4 步引导）：
- * - 顶部 4 步引导条：1 设定输入 - 2 角色与红线 - 3 试播标定 - 4 启动创作
+ * - 顶部 4 步引导条：1 设定输入 - 2 角色与红线 - 3 核对设置 - 4 启动创作
  * - 支持清晰切换「路径 A：原创冷启动」与「路径 B：同人设定包 T0 切分」
- * - 填写 slug、书名、开局 POV 角色 ID、开局种子/同人设定包、T0 锚点
- * - 提交至 onSubmitBoot 或 POST /api/narrate/boot，并展示编译/标定加载态
+ * - 填写 slug、书名、开局视角角色、开局种子/同人设定包、T0 锚点；第 3 步仅核对设置，不调用后端
+ * - 第 4 步提交至 onSubmitBoot 或 POST /api/narrate/boot，引擎随后试播标定分词率并编译；
+ *   成功后回调宿主并关闭弹窗，工作区提示完成并刷新，弹窗内不设结果页
  */
 export const BootBookModal: React.FC<BootBookModalProps> = ({
     open,
@@ -108,14 +109,14 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
         const trimmedMaterial = materialText.trim();
 
         if (!trimmedSlug || !SLUG_RE.test(trimmedSlug)) {
-            return 'slug 必填，且仅允许字母、数字、下划线(_)与连字符(-)';
+            return '请填写作品标识，仅允许字母、数字、下划线(_)与连字符(-)';
         }
         if (!trimmedTitle) {
             return '请填写书名';
         }
         if (!trimmedMaterial) {
             return mode === 'original'
-                ? '请填写原创开局种子（世界观与核心冲突）'
+                ? '请填写开局种子（世界观与核心冲突）'
                 : '请粘贴同人设定包或原作切分素材';
         }
         return null;
@@ -126,7 +127,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
         const trimmedAnchor = t0Anchor.trim();
 
         if (!trimmedPov) {
-            return '请填写开局 POV 角色 ID（例如 char_000）';
+            return '请填写开局视角角色（例如 char_000）';
         }
         if (mode === 'fanfic' && !trimmedAnchor) {
             return '同人 T0 切分模式下必须填写 T0 锚点，以便剥离后续剧透与已知前提';
@@ -357,7 +358,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                                 <span className="ns-b-mode-code">original</span>
                                             </div>
                                             <span className="ns-b-mode-desc">
-                                                从一句话种子自爆题材俗套，生成戏核、静态世界基座与首卷倒推拐点
+                                                从一句话种子出发，生成戏核、静态世界基座与首卷倒推拐点
                                             </span>
                                         </button>
 
@@ -381,7 +382,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                                 <span className="ns-b-mode-code">fanfic</span>
                                             </div>
                                             <span className="ns-b-mode-desc">
-                                                用 T0 时间刀外科切分原作词条，剥离未发生剧情与人物底牌，消除早期剧透
+                                                用 T0 时间刀切分原作词条，剥离未发生剧情与人物底牌，避免开局剧透
                                             </span>
                                         </button>
                                     </div>
@@ -390,7 +391,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                 {/* slug 与书名 */}
                                 <div className="ns-b-form-grid">
                                     <label className="ns-field" htmlFor="ns-boot-slug">
-                                        <span>作品标识 (slug)</span>
+                                        <span>作品标识</span>
                                         <input
                                             id="ns-boot-slug"
                                             type="text"
@@ -402,6 +403,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                             placeholder="例如: causality-soda"
                                             required
                                         />
+                                        <small className="ns-muted">字段名 slug：仅限字母、数字、下划线(_)与连字符(-)，用作 books/ 下的目录名</small>
                                     </label>
 
                                     <label className="ns-field" htmlFor="ns-boot-title">
@@ -421,11 +423,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
 
                                 {/* 开局种子 / 同人设定包 */}
                                 <label className="ns-field" htmlFor="ns-boot-material">
-                                    <span>
-                                        {mode === 'original'
-                                            ? '开局种子 (premiseOrSeed)'
-                                            : '同人设定包 (sourceMaterial)'}
-                                    </span>
+                                    <span>{mode === 'original' ? '开局种子' : '同人设定包'}</span>
                                     <textarea
                                         id="ns-boot-material"
                                         className="ns-textarea"
@@ -440,6 +438,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                         }
                                         required
                                     />
+                                    <small className="ns-muted">字段名 {mode === 'original' ? 'premiseOrSeed' : 'sourceMaterial'}</small>
                                 </label>
                             </>
                         ) : null}
@@ -449,7 +448,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                             <>
                                 <div className="ns-b-form-grid">
                                     <label className="ns-field" htmlFor="ns-boot-pov">
-                                        <span>开局 POV 角色 ID</span>
+                                        <span>开局视角角色</span>
                                         <input
                                             id="ns-boot-pov"
                                             type="text"
@@ -460,6 +459,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                             placeholder="例如: char_000"
                                             required
                                         />
+                                        <small className="ns-muted">字段名 povCharacter：填实体 ID，开局章节以该角色为第一视角</small>
                                     </label>
 
                                     <label className="ns-field" htmlFor="ns-boot-t0">
@@ -478,6 +478,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                             }
                                             required={mode === 'fanfic'}
                                         />
+                                        <small className="ns-muted">字段名 t0Anchor：标记故事开局的时间位置，用于隔离开局之后的剧情</small>
                                     </label>
                                 </div>
 
@@ -485,8 +486,8 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                 <div className="ns-b-redline-card">
                                     <div className="ns-b-section-title">
                                         {mode === 'fanfic'
-                                            ? 'T0 时间刀外科切分红线'
-                                            : '四段式补集档案与 POV 剥离红线'}
+                                            ? 'T0 时间刀切分红线'
+                                            : '四段式补集档案与视角剥离红线'}
                                     </div>
                                     <div className="ns-b-redline-grid">
                                         <div className="ns-b-mini-card">
@@ -512,28 +513,29 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                             </>
                         ) : null}
 
-                        {/* 步骤 3：试播标定 */}
+                        {/* 步骤 3：核对开书设置（仅前端核对，不调用后端） */}
                         {activeStep === 3 ? (
                             <>
                                 <div className="ns-b-calib-card">
-                                    <div className="ns-b-calib-title">
-                                        Step 0 试播标定与编译管线
+                                    <div className="ns-b-calib-title">提交后执行的 Step 0 编译流程</div>
+                                    <div className="ns-b-check-row">
+                                        本步仅核对设置，不调用后端；以下环节在点击「创建并编译新书」后才开始，不代表已试播或已标定。
                                     </div>
                                     <div className="ns-b-calib-grid">
                                         <div className="ns-b-mini-card">
                                             <div className="ns-b-mini-title ns-b-accent-brand">
-                                                1. 黄金声纹锚定
+                                                1. 分词率标定
                                             </div>
                                             <div className="ns-b-mini-text">
-                                                提取句法节奏、冷暖意象与对白密度，固化至静态底座前缀。
+                                                用样本文本实测模型 token 用量，标定 tokens_per_char 系数，供后续字数预算使用。
                                             </div>
                                         </div>
                                         <div className="ns-b-mini-card">
                                             <div className="ns-b-mini-title ns-b-accent-amber">
-                                                2. 按需词条分离
+                                                2. 声纹与词条编译
                                             </div>
                                             <div className="ns-b-mini-text">
-                                                非高频背景移入 lore_library/，避免污染 1 小时静默缓存前缀。
+                                                编译生成声纹样本并固化至静态基座；低频背景词条分离到 lore_library/，保持缓存前缀稳定。
                                             </div>
                                         </div>
                                         <div className="ns-b-mini-card">
@@ -541,7 +543,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                                 3. 终局倒推骨架
                                             </div>
                                             <div className="ns-b-mini-text">
-                                                建立 future_horizon.md 阶段锁，细纲仅延迟展开首卷前段。
+                                                编译生成 future_horizon.md 阶段锁，细纲仅延迟展开首卷前段。
                                             </div>
                                         </div>
                                     </div>
@@ -549,7 +551,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
 
                                 {/* 当前配置核对表 */}
                                 <div className="ns-b-check-card">
-                                    <div className="ns-b-check-title">标定输入核对</div>
+                                    <div className="ns-b-check-title">开书设置核对</div>
                                     <div className="ns-b-check-row">
                                         路径：{mode === 'original' ? '路径 A - 原创冷启动 (original)' : '路径 B - 同人设定包 T0 切分 (fanfic)'}
                                     </div>
@@ -557,7 +559,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                         作品：<code>{trimmedSlugDisplay}</code> / {trimmedTitleDisplay}
                                     </div>
                                     <div className="ns-b-check-row">
-                                        开局 POV：<code>{trimmedPovDisplay}</code>
+                                        视角角色：<code>{trimmedPovDisplay}</code>
                                         {trimmedAnchorDisplay ? ` | T0 锚点：${trimmedAnchorDisplay}` : ' | T0 锚点：未指定'}
                                     </div>
                                     <div className="ns-b-check-row">
@@ -575,20 +577,20 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                         即将初始化独立作品仓库：books/{trimmedSlugDisplay}/
                                     </div>
                                     <div className="ns-b-tree">
-                                        <div>- world/static_base_and_voice.md  (静态世界基座与黄金声纹)</div>
+                                        <div>- world/static_base_and_voice.md  (静态世界基座与声纹样本)</div>
                                         <div>- world/future_horizon.md         (卷末终局倒推与阶段锁)</div>
-                                        <div>- entities/{trimmedPovDisplay}.md   (开局 POV 补集档案)</div>
+                                        <div>- entities/{trimmedPovDisplay}.md   (开局视角角色补集档案)</div>
                                         <div>- lore_library/                     (按需检索词条库)</div>
                                     </div>
                                 </div>
 
                                 <div className="ns-b-hint-card">
-                                    点击「创建并编译新书」后，引擎将执行 Step 0 编译与首章前置标定，完成后自动切换至新书工作台。
+                                    点击「创建并编译新书」后才会提交开书请求：引擎先标定分词率，再执行 Step 0 编译并初始化 Git 仓库。完成后弹窗自动关闭，工作区提示编译完成并刷新。
                                 </div>
                             </>
                         ) : null}
 
-                        {/* 编译/标定加载态提示 */}
+                        {/* 标定/编译加载态提示 */}
                         {submitting ? (
                             <div
                                 role="status"
@@ -597,7 +599,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                             >
                                 <span className="ns-pulse-dot" />
                                 <span>
-                                    正在执行 Step 0 编译与角色标定（创建 books/{slug.trim() || '...'} 并生成世界基座），请稍候…
+                                    正在标定分词率并编译新书（创建 books/{slug.trim() || '...'} 并生成世界基座），请稍候…
                                 </span>
                             </div>
                         ) : null}
@@ -646,7 +648,7 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
                                     className="ns-btn ns-btn-primary"
                                     disabled={submitting}
                                 >
-                                    {submitting ? '编译与标定中…' : '创建并编译新书'}
+                                    {submitting ? '标定与编译中…' : '创建并编译新书'}
                                 </button>
                             )}
                         </div>

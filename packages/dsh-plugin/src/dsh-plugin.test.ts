@@ -1,8 +1,8 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     generateTraced,
@@ -14,6 +14,8 @@ import {
     DEFAULT_SECTION_HEADINGS,
     NodeSystemAdapter,
     serializeEntityMarkdown,
+    ScriptedLlmAdapter,
+    NarrativeEngine,
     TxLockConflictError,
     type BookConfig,
     type WorldState
@@ -2306,5 +2308,164 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         expect(stepGoals[1]).toContain('信号C-保持待消费');
         expect(stepGoals[1]).not.toContain('信号A-将被消费');
         expect(stepGoals[1]).not.toContain('信号B-待消费时撤回');
+    });
+
+    it('GET 章节返回持久化细纲契约：生成后 available、重启不串纲、旧章 missing、损坏 error 且正文仍可读', async () => {
+        // 复用 core 引擎测试同源的作品夹具，走真实引擎 + 真实 Git 公共接缝
+        const bookRoot = await mkdtemp(join(tmpdir(), 'narrateos-dsh-outline-test-'));
+        cleanups.push(async () => { await rm(bookRoot, { recursive: true, force: true }); });
+        await cp(resolve(import.meta.dirname, '../../../fixtures/sample-book'), bookRoot, { recursive: true });
+        await mkdir(join(bookRoot, 'entities'), { recursive: true });
+        await writeFile(
+            join(bookRoot, 'entities/char_lin.md'),
+            serializeEntityMarkdown({
+                metadata: {
+                    entity_id: 'char_lin',
+                    canonical_name: '林彻',
+                    unique_aliases: [],
+                    contextual_titles: [],
+                    historical_anchors: [],
+                    last_seen_ch: 1
+                },
+                sectionHeadings: DEFAULT_SECTION_HEADINGS,
+                innateLocks: [{ visibility: 'PUBLIC', text: '左眉骨有旧疤', continuationLines: [] }],
+                acquiredState: [{ storyDay: 1, chapter: 1, visibility: 'PUBLIC', text: '抵达雾港码头', continuationLines: [] }],
+                irreversibleTrajectory: [],
+                recentBuffer: []
+            }),
+            'utf8'
+        );
+        // 夹具正文主角与测试实体不同，改写第 1 章为不含实体引用的短正文，避免召回/外键干扰
+        await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '# 第一章\n\n雾港雨夜，林彻在码头收起怀表。\n', 'utf8');
+
+        const system = new NodeSystemAdapter();
+        await system.initRepo(bookRoot);
+        const store = new BookStore(bookRoot, system);
+        const worldState = await store.readWorldState();
+        await store.writeWorldState({
+            ...worldState,
+            frontmatter: { ...worldState.frontmatter, pov_character: 'char_lin' }
+        });
+        await store.initializeWalFromDisk();
+        await system.commitPaths(bookRoot, ['.'], 'chore: init outline contract fixture');
+
+        const plannerOutline = {
+            chapter_title: '第二章 雾港钟声',
+            target_word_count: 2000,
+            focus_cast: ['char_lin'],
+            background_cast: [],
+            ending_beat: 'HOOK',
+            director_rationale: '幕后内参：怀表指针倒走暗示旧船坞阴谋，本章不揭底。',
+            chapter_turn: '钟楼在无人敲动的情况下敲响十二下，林彻决定夜探旧船坞。',
+            scene_plan: [
+                { scene_index: 1, location: '雾港码头', summary: '林彻听见无人敲动的钟声', is_spotlight: true }
+            ],
+            outline_text: '场景一（雾港码头）：雨夜里钟楼自鸣十二下，林彻攥紧怀表望向旧船坞方向。',
+            preferred_voice_tag: '对峙'
+        };
+        const prose = [
+            '雨点砸在雾港码头的木栈桥上，溅起灰白的水雾。',
+            '林彻把怀表按回大衣内袋，指腹隔着布料压住冰凉的表壳。',
+            '钟楼的第十二下钟声撞进雨幕，塔顶的铜钟纹丝未动，敲钟人今晚根本没有登塔。',
+            '他抬起头，旧船坞的黑色轮廓沉在灯影尽头，半扇铁皮门在风里来回磕碰。'
+        ].join('\n\n');
+        const scripted = new ScriptedLlmAdapter([
+            { text: `\`\`\`json\n${JSON.stringify({ selected_entity_ids: ['char_lin'], recall_queries: [], selected_lore_files: [] })}\n\`\`\``, usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 } },
+            { text: `\`\`\`json\n${JSON.stringify(plannerOutline)}\n\`\`\``, usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 } },
+            { text: prose, usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 } },
+            { text: `\`\`\`json\n${JSON.stringify({ passed: true, issues: [] })}\n\`\`\``, usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 } },
+            { text: `\`\`\`json\n${JSON.stringify({ entity_patches: [], story_day_delta: 0, chapter_summary: '钟楼自鸣，林彻决意夜探旧船坞', next_chapter_options: [] })}\n\`\`\``, usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10 } }
+        ]);
+        const engine = new NarrativeEngine({
+            store,
+            llm: scripted,
+            system,
+            retryOptions: { maxRetries: 2, backoffMs: [0, 0], sleepFn: async () => {} }
+        });
+
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        const ctx: DshCordisContext = {
+            llm: {
+                async *stream() {
+                    yield { type: 'text-delta', index: 0, text: '{}' };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                }
+            },
+            webServer,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers.push(cleanup);
+                return () => { if (cleanup) void cleanup(); };
+            }
+        };
+        apply(ctx, { bookRoot, poolRouting: DEFAULT_ROUTING, store, system, engine });
+        cleanups.push(async () => {
+            await Promise.all(disposers.map((d) => Promise.resolve(d())));
+        });
+        const baseUrl = await webServer.listen();
+
+        // 旧章（初始化夹具直写，无细纲留存）必须诚实 missing
+        const legacyRes = await fetch(`${baseUrl}/api/narrate/chapter?ch=1`);
+        expect(legacyRes.status).toBe(200);
+        const legacyJson = (await legacyRes.json()) as { content: string; outlineText: string | null; outlineStatus: string };
+        expect(legacyJson.outlineStatus).toBe('missing');
+        expect(legacyJson.outlineText).toBeNull();
+        expect(legacyJson.content).toContain('雾港雨夜');
+
+        // 通过真实引擎推进第 2 章后，GET 应返回完整可解析细纲
+        const stepRes = await fetch(`${baseUrl}/api/narrate/step`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chapterGoal: '夜探旧船坞前夜' })
+        });
+        expect(stepRes.status).toBe(200);
+        const stepJson = (await stepRes.json()) as { chapterNumber: number };
+        expect(stepJson.chapterNumber).toBe(2);
+
+        const ch2Res = await fetch(`${baseUrl}/api/narrate/chapter?ch=2`);
+        expect(ch2Res.status).toBe(200);
+        const ch2Json = (await ch2Res.json()) as { content: string; outlineText: string | null; outlineStatus: string };
+        expect(ch2Json.outlineStatus).toBe('available');
+        expect(ch2Json.outlineText).not.toBeNull();
+        expect(JSON.parse(ch2Json.outlineText!)).toMatchObject({ chapter_title: '第二章 雾港钟声' });
+        expect(ch2Json.content).toContain('钟楼');
+
+        // 模拟宿主重启：新 store/engine 重新挂载后，历史章细纲仍可读且与第 1 章不串纲
+        const restartedStore = new BookStore(bookRoot, system);
+        const restartedEngine = new NarrativeEngine({ store: restartedStore, llm: scripted, system });
+        const webServer2 = new MockWebServer();
+        cleanups.push(() => webServer2.close());
+        const disposers2: Array<() => void | Promise<void>> = [];
+        apply({
+            llm: ctx.llm,
+            webServer: webServer2,
+            effect(factory) {
+                const cleanup = factory();
+                if (cleanup) disposers2.push(cleanup);
+                return () => { if (cleanup) void cleanup(); };
+            }
+        }, { bookRoot, poolRouting: DEFAULT_ROUTING, store: restartedStore, system, engine: restartedEngine });
+        cleanups.push(async () => {
+            await Promise.all(disposers2.map((d) => Promise.resolve(d())));
+        });
+        const baseUrl2 = await webServer2.listen();
+        const restartCh2 = (await (await fetch(`${baseUrl2}/api/narrate/chapter?ch=2`)).json()) as { outlineText: string | null; outlineStatus: string };
+        expect(restartCh2.outlineStatus).toBe('available');
+        expect(JSON.parse(restartCh2.outlineText!).chapter_title).toBe('第二章 雾港钟声');
+        const restartCh1 = (await (await fetch(`${baseUrl2}/api/narrate/chapter?ch=1`)).json()) as { outlineStatus: string };
+        expect(restartCh1.outlineStatus).toBe('missing');
+
+        // 损坏细纲文件：error 且正文仍完整可读，不泄漏原始异常或路径
+        await writeFile(join(bookRoot, '.ops/chapter_outlines/ch_0002.json'), '{ broken json', 'utf8');
+        const brokenRes = await fetch(`${baseUrl2}/api/narrate/chapter?ch=2`);
+        expect(brokenRes.status).toBe(200);
+        const brokenJson = (await brokenRes.json()) as { content: string; outlineText: string | null; outlineStatus: string };
+        expect(brokenJson.outlineStatus).toBe('error');
+        expect(brokenJson.outlineText).toBeNull();
+        expect(brokenJson.content).toContain('钟楼');
+        expect(JSON.stringify(brokenJson)).not.toContain('chapter_outlines');
+        expect(JSON.stringify(brokenJson)).not.toContain(bookRoot);
     });
 });
