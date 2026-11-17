@@ -74,7 +74,7 @@ export interface PlannerAssembleInput {
     pool?: LlmPool | undefined;
     temperature?: number | undefined;
     maxTokens?: number | undefined;
-    reasoningEffort?: 'low' | 'medium' | 'high' | undefined;
+    reasoningEffort?: 'off' | 'low' | 'medium' | 'high' | 'max' | undefined;
 }
 
 /** Writer 净室请求装配输入 */
@@ -95,7 +95,7 @@ export interface WriterAssembleInput {
     pool?: LlmPool | undefined;
     temperature?: number | undefined;
     maxTokens?: number | undefined;
-    reasoningEffort?: 'low' | 'medium' | 'high' | undefined;
+    reasoningEffort?: 'off' | 'low' | 'medium' | 'high' | 'max' | undefined;
 }
 
 /** 预算降级级别：0 为无损直通，1-4 对应四级逐级裁剪 */

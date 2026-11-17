@@ -25,6 +25,7 @@ export interface RecordedAgentRun {
     provider: string | undefined;
     model: string | undefined;
     temperature: number | undefined;
+    reasoningEffort: string | undefined;
     toolNames: string[];
     systemPromptText: string;
     taskPrompt: string;
@@ -292,6 +293,7 @@ export async function createHeadlessMockServices(
     handlers: {
         onAgent: MockAgentDriver;
         onLlmStream: (options: GenerateOptions) => AsyncIterable<StreamChunk>;
+        resolveModelInfo?: LlmRuntime['resolveModelInfo'];
     }
 ): Promise<{
     agentRuns: RecordedAgentRun[];
@@ -304,7 +306,8 @@ export async function createHeadlessMockServices(
         stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
             llmCalls.push({ options });
             return handlers.onLlmStream(options);
-        }
+        },
+        ...(handlers.resolveModelInfo ? { resolveModelInfo: handlers.resolveModelInfo } : {})
     } as unknown as LlmRuntime;
 
     ctx.provide('llm', mockLlm);
@@ -431,6 +434,7 @@ export async function createHeadlessMockServices(
                             provider: options.agentOptions?.provider,
                             model: options.agentOptions?.model,
                             temperature: callConfig.temperature,
+                            reasoningEffort: options.agentOptions?.reasoningEffort,
                             toolNames: [...registeredTools.keys()],
                             systemPromptText: capturedSystemPrompt,
                             taskPrompt

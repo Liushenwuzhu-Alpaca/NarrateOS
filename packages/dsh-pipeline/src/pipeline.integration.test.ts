@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Context } from '@deepseek-ai/cordis';
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import { ToolsService } from '@deepseek-ai/dsh-tools';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
@@ -11,6 +12,7 @@ import { TxLockConflictError } from '@narrateos/dsh-book-store';
 import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from './index.js';
+import { DshLlmAdapter } from './runner/dsh-llm-adapter.js';
 import {
     createGitBookWorkspace,
     createHeadlessMockServices,
@@ -1225,5 +1227,132 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             cacheWriteTokens: 5,
             outputTokens: 40
         });
+    });
+
+    it('RoleRunner 与 DshLlmAdapter 按模型能力适配 reasoningEffort（如 deepseek-flash 仅支持 off）', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'effort-adapt', {
+            storyDay: 1,
+            currentChapter: 1,
+            extraChapters: {
+                'ch_0001.md': '# 第一章\n\n沈默站在码头边。\n'
+            }
+        });
+        await mkdir(join(bookRoot, 'roles'), { recursive: true });
+        await writeFile(
+            join(bookRoot, 'roles/dreamer.yml'),
+            [
+                'id: dreamer',
+                'pool: fast_retrieval',
+                'cleanroom: false',
+                'promptFile: ./prompts/dreamer.md',
+                'temperature: 0.2',
+                'reasoningEffort: medium',
+                'maxSteps: 6',
+                'maxReadCalls: 4',
+                'tools:',
+                '  - book_read',
+                'yieldTool: yield_dream_commit'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+        await mkdir(join(bookRoot, 'roles/prompts'), { recursive: true });
+        await writeFile(join(bookRoot, 'roles/prompts/dreamer.md'), '你是睡眠整理员。\n', 'utf8');
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const { agentRuns, llmCalls } = await createHeadlessMockServices(ctx, {
+            resolveModelInfo: async (provider, model) => ({
+                id: model,
+                name: model,
+                provider,
+                reasoning: {
+                    efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }],
+                    defaultEffort: ReasoningEffortId('off')
+                }
+            }),
+            onAgent: async ({ execTool }) => {
+                await execTool('yield_dream_commit', {
+                    summary: '适配 off 档推理',
+                    chapter_number: 1,
+                    accumulated_words: 100
+                });
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await ctx.narratePipeline.runDreaming({
+            currentChapter: 1,
+            force: true
+        });
+        expect(agentRuns[0]?.reasoningEffort).toBe('off');
+
+        const adapter = new DshLlmAdapter(ctx.llm, {
+            poolRouting: {
+                strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+                fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
+                audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
+            }
+        });
+        await adapter.generate({
+            pool: 'fast_retrieval',
+            staticPrefixBlocks: ['sys'],
+            dynamicTail: 'hi',
+            reasoningEffort: 'medium'
+        });
+        expect(llmCalls[0]?.options.reasoningEffort).toBe('off');
+    });
+
+    it('RoleRunner 在 agent/error 触发且未调用 yieldTool 时透传真实错误', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'agent-error-surface', {
+            storyDay: 1,
+            currentChapter: 1,
+            extraChapters: {
+                'ch_0001.md': '# 第一章\n\n沈默站在码头边。\n'
+            }
+        });
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ agentCtx }) => {
+                agentCtx.emit(
+                    'agent/error' as never,
+                    {
+                        error: new Error(
+                            'provider "deepseek-official" model "deepseek-flash" does not support reasoning effort "medium"'
+                        )
+                    } as never
+                );
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await expect(
+            ctx.narratePipeline.runDreaming({
+                currentChapter: 1,
+                force: true
+            })
+        ).rejects.toThrow(/does not support reasoning effort "medium"/);
     });
 });

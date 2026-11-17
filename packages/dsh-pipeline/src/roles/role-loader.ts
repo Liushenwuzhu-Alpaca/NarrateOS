@@ -36,7 +36,7 @@ export const RoleConfigSchema = z.object({
     cleanroom: z.boolean(),
     promptFile: z.string().min(1),
     temperature: z.number().min(0).max(2),
-    reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
+    reasoningEffort: z.enum(['off', 'low', 'medium', 'high', 'max']).optional(),
     maxSteps: z.number().int().positive(),
     maxReadCalls: z.number().int().nonnegative(),
     tools: z.array(ControlledBookToolNameSchema).default([]),
@@ -54,7 +54,7 @@ export interface LoadedRoleConfig {
     cleanroom: boolean;
     promptFile: string;
     temperature: number;
-    reasoningEffort?: 'low' | 'medium' | 'high' | undefined;
+    reasoningEffort?: 'off' | 'low' | 'medium' | 'high' | 'max' | undefined;
     maxSteps: number;
     maxReadCalls: number;
     tools: ControlledBookToolName[];

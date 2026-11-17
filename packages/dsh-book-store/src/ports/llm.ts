@@ -15,6 +15,9 @@ export interface TokenUsage {
     outputTokens: number;
 }
 
+/** 推理深度等级（兼容各模型槽位与历史 medium 别名） */
+export type ReasoningEffortLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
+
 /** 净室单轮请求结构（严禁携带工具声明或会话历史） */
 export interface CleanroomRequest {
     /** 仅供本地追踪关联角色，不发送给模型提供商。 */
@@ -24,7 +27,7 @@ export interface CleanroomRequest {
     dynamicTail: string;
     temperature?: number;
     maxTokens?: number;
-    reasoningEffort?: 'low' | 'medium' | 'high';
+    reasoningEffort?: ReasoningEffortLevel;
 }
 
 /** 净室响应结构 */

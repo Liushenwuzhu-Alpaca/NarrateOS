@@ -14,6 +14,7 @@ import {
     type CleanroomResponse,
     type LlmPool,
     type LlmPort,
+    type ReasoningEffortLevel,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
 import type { LlmPoolRouting, LlmRouteTarget } from '../schemas.js';
@@ -132,6 +133,67 @@ export function resolvePoolRoute(
     return { provider: base.provider, model: override };
 }
 
+const REASONING_FALLBACK_ORDER: Record<ReasoningEffortLevel, readonly string[]> = {
+    off: ['off'],
+    low: ['low', 'off'],
+    medium: ['medium', 'low', 'high', 'off'],
+    high: ['high', 'max', 'medium', 'low', 'off'],
+    max: ['max', 'high', 'medium', 'low', 'off']
+};
+
+/**
+ * 将角色配置的 reasoningEffort 适配为目标 provider/model 实际支持的值。
+ * 优先精确匹配；不兼容时按降级链匹配，避免 deepseek-flash（仅支持 off）或
+ * deepseek-v4-pro（不支持 medium）因 effort 枚举差异在发包前直接报错。
+ */
+export async function resolveCompatibleReasoningEffort(
+    llm:
+        | (Pick<LlmRuntime, 'stream'> & { resolveModelInfo?: LlmRuntime['resolveModelInfo'] })
+        | undefined,
+    provider: string,
+    model: string,
+    requestedEffort: ReasoningEffortLevel | undefined,
+    signal?: AbortSignal
+): Promise<ReasoningEffortId | undefined> {
+    if (requestedEffort === undefined) {
+        return undefined;
+    }
+    if (!llm || typeof llm.resolveModelInfo !== 'function') {
+        return ReasoningEffortId(requestedEffort);
+    }
+
+    let resolvedInfo: Awaited<ReturnType<LlmRuntime['resolveModelInfo']>>;
+    try {
+        resolvedInfo = await llm.resolveModelInfo(provider, model, signal);
+    } catch (err: unknown) {
+        if (signal?.aborted) {
+            throw err;
+        }
+        return ReasoningEffortId(requestedEffort);
+    }
+
+    const reasoning = resolvedInfo.reasoning;
+    if (!reasoning || reasoning.efforts.length === 0) {
+        return undefined;
+    }
+
+    const supportedIds = new Set(reasoning.efforts.map((effort) => effort.id));
+    const exactId = ReasoningEffortId(requestedEffort);
+    if (supportedIds.has(exactId)) {
+        return exactId;
+    }
+
+    const candidates = REASONING_FALLBACK_ORDER[requestedEffort] ?? [requestedEffort];
+    for (const candidate of candidates) {
+        const candidateId = ReasoningEffortId(candidate);
+        if (supportedIds.has(candidateId)) {
+            return candidateId;
+        }
+    }
+
+    return reasoning.defaultEffort ?? reasoning.efforts[0]?.id;
+}
+
 /**
  * 基于 @deepseek-ai/dsh-llm 的 LlmPort 适配器：
  * - 无 sessionId / 无 tools 净室单轮流式调用；
@@ -147,7 +209,9 @@ export class DshLlmAdapter implements LlmPort {
     private readonly resolveModelRouting: DshLlmAdapterOptions['resolveModelRouting'];
 
     constructor(
-        private readonly llm: Pick<LlmRuntime, 'stream'>,
+        private readonly llm: Pick<LlmRuntime, 'stream'> & {
+            resolveModelInfo?: LlmRuntime['resolveModelInfo'];
+        },
         options: DshLlmAdapterOptions
     ) {
         this.poolRouting = options.poolRouting;
@@ -190,7 +254,16 @@ export class DshLlmAdapter implements LlmPort {
             options.maxTokens = req.maxTokens;
         }
         if (req.reasoningEffort !== undefined) {
-            options.reasoningEffort = ReasoningEffortId(req.reasoningEffort);
+            const compatibleEffort = await resolveCompatibleReasoningEffort(
+                this.llm,
+                route.provider,
+                route.model,
+                req.reasoningEffort,
+                signal
+            );
+            if (compatibleEffort !== undefined) {
+                options.reasoningEffort = compatibleEffort;
+            }
         }
         if (signal !== undefined) {
             options.signal = signal;

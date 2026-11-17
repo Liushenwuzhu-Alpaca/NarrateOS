@@ -3,7 +3,7 @@ import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { AgentHandle } from '@deepseek-ai/dsh-agent';
-import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
@@ -30,7 +30,11 @@ import {
     type StageSessionEventItem,
     type StageStreamSseEvent
 } from '../schemas.js';
-import { DshLlmAdapter, resolvePoolRoute } from './dsh-llm-adapter.js';
+import {
+    DshLlmAdapter,
+    resolveCompatibleReasoningEffort,
+    resolvePoolRoute
+} from './dsh-llm-adapter.js';
 
 declare module '@deepseek-ai/dsh-llm' {
     interface MessageSourceMap {
@@ -248,6 +252,7 @@ export class RoleRunner {
         };
 
         let disposeSessionEventListener: (() => void) | undefined;
+        let lastAgentError: Error | undefined;
         const multiTurnUsage = createEmptyUsage();
 
         try {
@@ -330,6 +335,13 @@ export class RoleRunner {
             }
 
             const route = resolvePoolRoute(this.poolRouting, roleCfg.pool, options.bookConfig);
+            const compatibleEffort = await resolveCompatibleReasoningEffort(
+                this.execCtx.llm,
+                route.provider,
+                route.model,
+                roleCfg.reasoningEffort,
+                options.signal
+            );
             const builtToolset = toolset;
 
             handle = await this.execCtx.agents.create({
@@ -341,9 +353,7 @@ export class RoleRunner {
                 agentOptions: {
                     provider: route.provider,
                     model: route.model,
-                    ...(roleCfg.reasoningEffort !== undefined
-                        ? { reasoningEffort: ReasoningEffortId(roleCfg.reasoningEffort) }
-                        : {}),
+                    ...(compatibleEffort !== undefined ? { reasoningEffort: compatibleEffort } : {}),
                     ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {})
                 },
                 ...(options.signal !== undefined ? { signal: options.signal } : {}),
@@ -441,10 +451,13 @@ export class RoleRunner {
                         });
                     });
                     agentCtx.on('agent/error', ({ error }) => {
+                        const normalized =
+                            error instanceof Error ? error : new Error(String(error));
+                        lastAgentError = normalized;
                         recordSessionEvent({
                             timestamp: new Date().toISOString(),
                             kind: 'error',
-                            text: error instanceof Error ? error.message : String(error),
+                            text: normalized.message,
                             status: 'error'
                         });
                     });
@@ -492,6 +505,10 @@ export class RoleRunner {
                 throw options.signal.reason instanceof Error
                     ? options.signal.reason
                     : new Error('Aborted');
+            }
+
+            if (lastAgentError && (!roleCfg.yieldTool || !toolset.hasYielded())) {
+                throw lastAgentError;
             }
 
             if (roleCfg.yieldTool && !toolset.hasYielded()) {

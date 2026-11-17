@@ -3,7 +3,7 @@ pool: fast_retrieval
 cleanroom: false
 promptFile: ./prompts/librarian.md
 temperature: 0.2
-reasoningEffort: medium
+reasoningEffort: low
 maxSteps: 8
 maxReadCalls: 8
 tools:

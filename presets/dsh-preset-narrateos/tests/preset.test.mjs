@@ -330,7 +330,7 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         assert.equal(cfg.cleanroom, expected.cleanroom);
         assert.equal(typeof cfg.promptFile, 'string');
         assert.equal(typeof cfg.temperature, 'number');
-        assert.ok(['low', 'medium', 'high'].includes(cfg.reasoningEffort));
+        assert.ok(['off', 'low', 'high', 'max'].includes(cfg.reasoningEffort));
         assert.ok(Number.isInteger(cfg.maxSteps) && cfg.maxSteps >= 1);
         assert.ok(Number.isInteger(cfg.maxReadCalls) && cfg.maxReadCalls >= 0);
         assert.deepEqual(cfg.tools, expected.tools);

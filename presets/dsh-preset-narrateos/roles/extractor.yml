@@ -3,7 +3,7 @@ pool: fast_retrieval
 cleanroom: false
 promptFile: ./prompts/extractor.md
 temperature: 0.1
-reasoningEffort: medium
+reasoningEffort: low
 maxSteps: 6
 maxReadCalls: 4
 tools:
