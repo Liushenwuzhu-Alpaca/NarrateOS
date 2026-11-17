@@ -1,6 +1,6 @@
 # ADR-0001: 内核物理隔离与复用 dsh-llm 调度层
 
-- **状态**: 已采纳 (Accepted)
+- **状态**: 已取代 — 见 [ADR-0004](0004-dsh-native-plugins-and-scoped-role-agents.md) (Superseded by ADR-0004)
 - **日期**: 2026-11-16
 
 ## 背景与问题

@@ -1,6 +1,6 @@
 # ADR-0003: 结构化输出重试契约与单仓排他锁
 
-- **状态**: 已采纳 (Accepted)
+- **状态**: 部分取代 — 单仓排他锁保留，多轮工种终态交接见 [ADR-0004](0004-dsh-native-plugins-and-scoped-role-agents.md) (Partially superseded by ADR-0004)
 - **日期**: 2026-11-16
 
 ## 背景与问题

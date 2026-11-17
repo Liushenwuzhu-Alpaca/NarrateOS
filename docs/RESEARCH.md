@@ -61,17 +61,16 @@
 
 ## 4. 宿主底座源码核查：`@deepseek-ai/dsh` (Cordis 微内核)
 
-针对 `@deepseek-ai/dsh`（`0.1.1-rc.2` 本地源码及上游 `0.2.2-rc.x` 演进）的一手源码审计结论：
+针对本机 `@deepseek-ai/dsh@0.2.2-rc.1` 内部包的源码与类型契约核查结论：
 
-1. **官方交互面与 Cordis 可插拔架构**：
-   - 官方核心交互面为 **`dsh-web-app`（浏览器工作台）**、`headless` 与 `sdk-app / acp-app`（官方无内置终端 TUI；本机 `dsh-cc-tui` 系第三方社区包，其斜杠命令签名滞后与缺失审批弹窗等限制不属于 `dsh` 官方底座）。
-   - 基于 `@deepseek-ai/cordis`「万物皆插件」机制，可通过 Profile 级 `cordis.patch.yml` 将编码向冗余插件（`tool-subagent`、`tool-ralph`、`tool-workflow`、`compaction-basic`、`tool-result-pruner`、`agent-instructions` 等）全部显式设为 `disabled: true`（注意：按 `id` 覆写时整块替换 `config` 而非深度合并）。
-   - **`dsh-agent-presets` 原生模式集合机制**：每个模式仅需一个包含 `agent.cordis.yml` 与 `preset.yml` 的目录，配合 `@deepseek-ai/dsh-persona`（`complete: true, includeRuntimeContext: false`）可 100% 屏蔽宿主默认身份提示词与运行时动态快照，支持在 Web 端一键切换专属写作模式。
-2. **模型直连、缓存控制与 Web 扩展点**：
-   - 插件直调不带 `sessionId` 的 `ctx.llm.stream(options)` 时，可彻底绕过主会话循环、动态时钟与工具注入，实现多厂商异构双池路由并获取标准化无交集 `TokenUsage`（`inputTokens` + `cacheReadTokens` + `cacheWriteTokens`）。
-   - 内置 `dsh-llm-pi-ai` 在显式断点协议下会自动给最后一条动态 `user` 消息附加 `cache_control`；但 `ctx.llm.registerAdapter()` 本身开放了 `LlmAdapter` 插件扩展点，需要精细多断点控制时可挂载轻量自定义适配器，而自动前缀缓存路线则开箱零损耗。
-   - Web 端完整开放 `@deepseek-ai/dsh-client-ui-slots`（侧栏/浮层插槽）、`ctx.userQuestions`（交互式单选/多选问卷）与 `ctx.commands`（斜杠命令）。
-3. **工程解耦边界**：鉴于 `dsh` 尚处 `0.x-rc` 快速演进期（要求 `Node >= 24.9`），将纯 TypeScript 写作内核做零 `cordis` 依赖隔离，外包一层薄 `dsh` 插件与 `agent-preset` 胶水，可同时兼得开箱即用的 Web 工作台与零底座升级耦合风险。
+1. **模式预设（`dsh-agent-preset`）与工种作用域（`ctx.agents.create`）**：
+   - 官方核心交互面为 `dsh-web-app`、`dsh-headless` 与 `dsh-acp-app`。`PresetDefinition` 无隐藏字段，`remoteExportList()` 会将全部已注册预设展示在 Web 新建会话选择器中，且 `dsh-base` 默认不挂载 `agentPresets`；因此仅注册单一顶层「NarrateOS 创作模式」（通过 `@deepseek-ai/dsh-persona` 的 `complete: true, includeRuntimeContext: false` 屏蔽默认编码提示词并禁用编码冗余工具），后台工种不在顶层注册内部 Preset。
+   - `dsh-subagent` 强制校验活体 `parent: Agent`；无父会话的后台调度统一调用 `ctx.agents.create({ sessionId, meta: { origin: 'subagent' }, agentOptions, setup })` 在隔离 `agentCtx` 中按外部 YAML 配置装配工具与提示词（`origin: 'subagent'` 自动在普通左侧聊天列表隐藏工种会话，同时保留完整持久化 Session 供 Studio 节点按 `sessionId` 挂载 `dsh-client-ui-conversation` 与 `dsh-client-ui-trajectory` 实时/历史检查器）。
+   - `dsh-agent-preset` 标准环境默认启用 `tool-result-pruner`（裁剪超过 `8,192` 字符的单次工具返回），故内置 Skill 的主 `SKILL.md` 须控制在 `8,192` 字符以内，详规拆入 `references/`。
+2. **受控工具围栏、终态交接与按需注入**：
+   - `dsh-fs-sandbox` 对所有读取操作完全放行（`Reads pass through untouched`），且原生 `edit` 不感知业务结构锁与 Git 事务；因此作品访问须封装为锁死 `bookRoot` 白名单目录、支持 `StagingSession`（Read-Your-Own-Writes）与只读次数硬限流的领域工具。
+   - 工具执行上下文原生暴露 `exec.concludeTurn()`，配合 `dsh-agent` 的 `'agent/turn-stopping'` 钩子可实现严密的 `yield_*` 终态门禁（先完成确定性校验与原子落盘再调用 `concludeTurn()`，未调用 `yield_*` 试图纯文本结束时由钩子注入继续指令拦截逃逸）。
+   - Cordis 静态 `inject` 均为强依赖；`webServer`、`commands`（零模型开销异步斜杠命令）与 `skills` 须在插件 `apply(ctx)` 内通过 `ctx.inject([...], ...)` 动态挂接，确保无 HTTP 服务的测试与批处理环境零阻塞启动；直调无 `sessionId` 的 `ctx.llm.stream()` 可执行零工具净室单轮生成并获取标准化 `TokenUsage`。
 
 ---
 

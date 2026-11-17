@@ -1,6 +1,6 @@
 # ADR-0002: Operator Studio 非会话 UI 范式
 
-- **状态**: 已采纳 (Accepted)
+- **状态**: 部分取代 — Studio 工作台保留，双入口与斜杠命令协同见 [ADR-0004](0004-dsh-native-plugins-and-scoped-role-agents.md) (Partially superseded by ADR-0004)
 - **日期**: 2026-11-16
 
 ## 背景与问题
