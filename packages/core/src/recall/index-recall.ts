@@ -59,6 +59,8 @@ export interface EntityRecallQuery {
 
 /** 带时间差信封的原稿召回切片 */
 export interface RecallSlice {
+    /** 成对挂载的必需证据，不参与可选切片裁剪。 */
+    requiredEntityId?: string | undefined;
     file: string;
     chapterId: string;
     chapterNumber: number;

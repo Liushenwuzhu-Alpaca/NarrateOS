@@ -133,6 +133,8 @@ async function createEngineFixture(): Promise<{
     await writeFile(join(bookRoot, 'entities/char_001.md'), char001, 'utf8');
     await writeFile(join(bookRoot, 'entities/char_002.md'), char002, 'utf8');
     await writeFile(join(bookRoot, 'entities/item_001.md'), item001, 'utf8');
+    const chapterPath = join(bookRoot, 'manuscripts/ch_0001.md');
+    await writeFile(chapterPath, `${await readFile(chapterPath, 'utf8')}\n\n陆沉从门卫室领回黄铜钥匙，放进右裤袋。\n`, 'utf8');
 
     const voicePool = {
         samples: [
@@ -251,6 +253,14 @@ afterEach(async () => {
 });
 
 describe('NarrativeEngine', () => {
+    it('成对召回缺少原稿证据时在写手调用前停止', async () => {
+        const { bookRoot, store, system } = await createEngineFixture();
+        await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '一阵雨落在空街。', 'utf8');
+        const llm = new ScriptedLlmAdapter([jsonResponse(LIBRARIAN_OK)]);
+        await expect(makeEngine(store, llm, system).stepChapter({ chapterGoal: '重现唯一道具' })).rejects.toThrow('成对召回证据不足');
+        expect(llm.history).toHaveLength(1);
+    });
+
     it('模型调用期间其他作品实例不能开始写入或恢复在途章节', async () => {
         const { bookRoot, store, system } = await createEngineFixture();
         const competitor = new BookStore(bookRoot, system);
@@ -1045,7 +1055,7 @@ describe('NarrativeEngine', () => {
 
         // 预置 ch_0001 正文与 L2 章卡摘要，并调低 writer_token_budget 以触发前章摘要+尾窗渲染
         const ch1Tail = '上一章末尾关键动作：星野琉璃把一枚刻着编号 07 的铜铃放在窗台。';
-        const ch1Prose = `${'雨滴敲打着旧校舍的玻璃窗。'.repeat(80)}\n\n${ch1Tail}`;
+        const ch1Prose = `陆沉把黄铜钥匙放进右裤袋。\n\n${'雨滴敲打着旧校舍的玻璃窗。'.repeat(80)}\n\n${ch1Tail}`;
         await mkdir(join(bookRoot, 'manuscripts'), { recursive: true });
         await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), ch1Prose, 'utf8');
         await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });

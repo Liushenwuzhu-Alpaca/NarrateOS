@@ -237,11 +237,15 @@ function renderDynamicTail(draft: DynamicTailDraft, state: RenderState): string 
     }
 
     // 召回切片（受第 3 级预算裁剪控制）
-    const activeSlices = draft.recallSlices.slice(0, state.maxRecallCount);
+    const activeSlices = draft.recallSlices.filter((slice, index) => slice.requiredEntityId || index < state.maxRecallCount);
     if (activeSlices.length > 0) {
-        const renderedSlices = activeSlices
-            .map((s) => renderRecallSlice(s, draft.stripWarped))
-            .filter(Boolean);
+        const renderedSlices = activeSlices.map((slice) => {
+            const rendered = renderRecallSlice(slice, draft.stripWarped);
+            if (slice.requiredEntityId && !rendered.trim()) {
+                throw new Error(`写手成对召回证据不可挂载: ${slice.requiredEntityId}`);
+            }
+            return rendered;
+        }).filter(Boolean);
         if (renderedSlices.length > 0) {
             blocks.push(`## 跨章召回切片 (IndexRecall)\n${renderedSlices.join('\n')}`);
         }

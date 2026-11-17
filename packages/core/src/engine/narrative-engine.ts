@@ -591,28 +591,25 @@ export class NarrativeEngine {
         addUsage(totalUsage, res.totalUsage);
 
         const recallSlices: RecallSlice[] = [];
-        const queriedIds = new Set<string>();
 
         for (const q of res.data.recall_queries) {
             const profile = snapshot.entities[q.entity_id];
-            if (!profile) continue;
-            queriedIds.add(q.entity_id);
-            const slices = await this.recall.recallEntitySlices(this.store.bookRoot, {
-                profile,
-                targetChapter: chapterNumber,
-                targetDay,
-                extraKeywords: q.extra_keywords
-            });
-            recallSlices.push(...slices);
-
-            // 执行成对回表校验（触发确定性挂载核对）
-            await this.recall.verifyPairedRecall(this.store.bookRoot, {
+            if (!profile) throw new Error(`成对召回缺少实体档案: ${q.entity_id}`);
+            const paired = await this.recall.verifyPairedRecall(this.store.bookRoot, {
                 profile,
                 targetChapter: chapterNumber,
                 targetDay,
                 extraKeywords: q.extra_keywords,
                 focusChapters: q.focus_chapters
             });
+            if (!paired.paired || paired.slices.length === 0) {
+                throw new Error(`成对召回证据不足: ${q.entity_id} (${paired.unpairedIssues.map((issue) => issue.chapterId).join(', ')})`);
+            }
+            if (!res.data.selected_entity_ids.includes(q.entity_id)) res.data.selected_entity_ids.push(q.entity_id);
+            const required = new Set(paired.chapterVerifications.map((evidence) => evidence.manuscriptSlices[0]));
+            recallSlices.push(...paired.slices.map((slice) => required.has(slice)
+                ? { ...slice, requiredEntityId: q.entity_id }
+                : slice));
         }
 
         return {
@@ -733,6 +730,11 @@ export class NarrativeEngine {
             povCharId: povCharIds,
             entityIds: selectedEntityIds.length > 0 ? selectedEntityIds : undefined
         });
+        for (const slice of recallSlices) {
+            if (slice.requiredEntityId && !writerView.entities[slice.requiredEntityId]) {
+                throw new Error(`写手成对召回缺少可见实体档案: ${slice.requiredEntityId}`);
+            }
+        }
 
         // 物理丢弃 outline.director_rationale，严禁导演全知内参泄漏至写手信道
         const outlineText = [
