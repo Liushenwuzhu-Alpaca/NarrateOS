@@ -391,10 +391,7 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         const stepEntered = new Promise<void>((resolve) => {
             releaseStepGate = resolve;
         });
-        let finishStepGate: (() => void) | null = null;
-        const stepCanFinish = new Promise<void>((resolve) => {
-            finishStepGate = resolve;
-        });
+        const { promise: stepCanFinish, resolve: finishStepGate } = Promise.withResolvers<void>();
 
         let stepCalls = 0;
         let syncCalls = 0;
@@ -576,7 +573,7 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         await readSseUntil((text) => text.includes('event: halt:waiting'));
         expect(webServer.hasRoute('/api/narrate/status')).toBe(true);
         await expect(store.beginDraft(3)).rejects.toThrow(TxLockConflictError);
-        finishStepGate?.();
+        finishStepGate();
 
         const [stepHttpRes] = await Promise.all([stepPromise, shutdownPromise]);
         expect(stepHttpRes.status).toBe(200);
