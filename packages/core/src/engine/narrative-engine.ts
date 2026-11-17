@@ -1239,6 +1239,11 @@ export class NarrativeEngine {
         const chapterNumber =
             options.chapterNumber ??
             Math.max(snapshot.worldState.frontmatter.current_chapter, snapshot.txState.last_committed_ch) + 1;
+        if (parallel && (!Number.isSafeInteger(chapterNumber) || chapterNumber <= Math.max(
+            snapshot.worldState.frontmatter.current_chapter, snapshot.txState.last_committed_ch
+        ))) {
+            throw new Error('并行章号必须大于已提交章号，禁止覆盖主线或其他支线章节');
+        }
         const targetDay = options.targetDay ?? snapshot.worldState.frontmatter.story_day;
         const [staticBaseAndVoiceRaw, currentArcEnvelopeRaw] = await Promise.all([
             readOptionalText(join(this.store.bookRoot, 'world/static_base_and_voice.md')),

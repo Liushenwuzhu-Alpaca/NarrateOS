@@ -300,6 +300,15 @@ describe('NarrativeEngine', () => {
             expect(context).not.toContain(branch === 'a' ? '乙线独有暗号' : '甲线独有暗号');
             if (index >= 2) expect(context).toContain(marker);
             expect((await store.loadSnapshot()).entities).toEqual(original.entities);
+            if (index === 0) {
+                const before = await store.readTxState();
+                const calls = llm.history.length;
+                await expect(engine.stepChapter({ chapterGoal: '重复章号', chapterNumber: 2,
+                    timelineMode: 'PARALLEL', parallelWindowId: 'isolated', parallelBranchId: 'b'
+                })).rejects.toThrow('并行章号必须大于已提交章号');
+                expect(llm.history.length).toBe(calls);
+                expect(await store.readTxState()).toEqual(before);
+            }
         }
         const merged = await engine.mergeParallelWindow({ windowId: 'isolated' });
         expect(merged.totalChaptersUsed).toBe(4);

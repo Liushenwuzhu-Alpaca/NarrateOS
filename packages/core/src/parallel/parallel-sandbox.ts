@@ -538,8 +538,11 @@ export class ParallelSandbox {
         return await this.store.runWithTxLock(async () => {
             assertSafeId(input.windowId, 'windowId');
             assertSafeId(input.branchId, 'branchId');
-            const previous = (await this.readBranchDeltas(input.windowId)).find((item) => item.branchId === input.branchId);
-            if (previous?.chapterNumbers?.includes(input.chapterNumber)) throw new Error('并行章节已存在，拒绝重复暂存');
+            const deltas = await this.readBranchDeltas(input.windowId);
+            if (deltas.some((item) => item.chapterNumbers?.includes(input.chapterNumber))) {
+                throw new Error('并行章节已存在，拒绝跨支线覆盖或重复暂存');
+            }
+            const previous = deltas.find((item) => item.branchId === input.branchId);
             return await this.stageDelta({ ...input,
                 patches: [...(previous?.patches ?? []), ...input.patches],
                 chaptersUsed: (previous?.chaptersUsed ?? 0) + 1,
