@@ -1067,6 +1067,8 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
             },
             async syncManuscripts() {
                 syncCalls++;
+                const competitor = new BookStore(bookRoot, new NodeSystemAdapter());
+                await expect(competitor.beginDraft(2)).rejects.toThrow(TxLockConflictError);
                 return {
                     status: 'PROSE_POLISH_SYNCED' as const,
                     dirtyChapters: [],
@@ -1167,6 +1169,14 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         const diskContent = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
         expect(diskContent).toContain('钟楼敲响十二下');
         await readUntil((t) => t.includes('event: chapter_synced'));
+        const futureRes = await fetch(`${baseUrl}/api/narrate/chapter`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chapterNumber: 9999, content: '不能新建的未来章' })
+        });
+        expect(futureRes.status).toBe(404);
+        await expect(readFile(join(bookRoot, 'manuscripts/ch_9999.md'))).rejects.toThrow();
+        expect(syncCalls).toBe(1);
 
         // 读取修改后的 diffFromHead 应包含差异
         const chAfterRes = await fetch(`${baseUrl}/api/narrate/chapter?ch=1`);

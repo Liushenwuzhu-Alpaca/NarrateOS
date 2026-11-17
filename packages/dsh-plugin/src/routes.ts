@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { access, appendFile, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { access, appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -918,8 +918,8 @@ export class NarrateRuntimeController {
 
         const chNum = body['chapterNumber'];
         const content = body['content'];
-        if (typeof chNum !== 'number' || !Number.isInteger(chNum) || chNum <= 0) {
-            sendJson(res, 400, { error: 'chapterNumber 必须为正整数' });
+        if (typeof chNum !== 'number' || !Number.isInteger(chNum) || chNum <= 0 || chNum > 9999) {
+            sendJson(res, 400, { error: 'chapterNumber 必须为 1 到 9999 的整数' });
             return;
         }
         if (typeof content !== 'string') {
@@ -940,9 +940,16 @@ export class NarrateRuntimeController {
             }
             await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止在线编辑章节');
 
-            const syncRes = await this.runExclusiveTask('SYNCING', async (signal) => {
-                await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止写入章节');
-                await mkdir(join(this._bookRoot, 'manuscripts'), { recursive: true });
+            const syncRes = await this.runExclusiveTask('SYNCING', async (signal) => this.store.runWithTxLock(async () => {
+                const original = await readOptionalText(fullPath);
+                if (original === null) {
+                    sendJson(res, 404, { error: '只能编辑已有章节，不能通过保存接口创建新章' });
+                    return null;
+                }
+                const backupDir = join(this._bookRoot, '.ops/manual_edits');
+                await mkdir(backupDir, { recursive: true });
+                const backupPath = join(backupDir, `${randomUUID()}.json`);
+                await writeFile(backupPath, JSON.stringify({ chapterNumber: chNum, original, pending: content }), 'utf8');
                 await writeFile(fullPath, content, 'utf8');
 
                 this.emitEvent('sync:started', {
@@ -957,8 +964,10 @@ export class NarrateRuntimeController {
                     downstreamConflicts: result.downstreamConflicts.length,
                     timestamp: new Date().toISOString()
                 });
+                await rm(backupPath);
                 return result;
-            });
+            }));
+            if (syncRes === null) return;
 
             sendJson(res, 200, {
                 chapterNumber: chNum,

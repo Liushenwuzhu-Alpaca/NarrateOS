@@ -1548,7 +1548,7 @@ export class NarrativeEngine {
         dirty: DirtyChapter,
         commitMessage: string
     ): Promise<void> {
-        await this.store.withTxLock(async () => {
+        await this.store.runWithTxLock(async () => {
             const txPath = join(this.store.bookRoot, '.ops/tx_state.json');
             const current = await this.store.readTxState();
             const next = TxStateSchema.parse({
@@ -1626,6 +1626,10 @@ export class NarrativeEngine {
      * - 历史旧章手改：刷新该章指纹并对下游已归档章节执行只读连续性冲突扫描（严禁改写下游手稿）
      */
     async syncManuscripts(options: SyncManuscriptsOptions = {}): Promise<SyncManuscriptsResult> {
+        return await this.store.runWithTxLock(() => this.syncManuscriptsLocked(options));
+    }
+
+    private async syncManuscriptsLocked(options: SyncManuscriptsOptions): Promise<SyncManuscriptsResult> {
         const totalUsage = createEmptyUsage();
         const dirtyChapters = await this.store.detectDirtyChapters();
         if (dirtyChapters.length === 0) {

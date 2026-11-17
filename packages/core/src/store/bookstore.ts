@@ -206,7 +206,7 @@ export class BookStore {
     }
 
     /** 内部事务辅助：仅允许同一异步调用链重入已持有的事务锁，拦截跨异步任务并发 */
-    private async runWithTxLock<T>(fn: () => Promise<T>): Promise<T> {
+    async runWithTxLock<T>(fn: () => Promise<T>): Promise<T> {
         if (this.lockContext.getStore() === true) {
             return await fn();
         }
