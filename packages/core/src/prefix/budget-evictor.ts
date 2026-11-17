@@ -398,11 +398,5 @@ export function evictDynamicTailToBudget(
         }
     }
 
-    return {
-        dynamicTail,
-        estimatedTokens: totalTokens,
-        evictionLevel,
-        truncated: true,
-        appliedEvictions
-    };
+    throw new Error(`写手预算无法满足: 必需上下文估算 ${totalTokens} tokens，预算 ${budget} tokens`);
 }

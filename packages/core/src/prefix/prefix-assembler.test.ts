@@ -617,22 +617,11 @@ samples:
         expect(level3Res.request.dynamicTail).toContain('外围设定1');
         expect(level3Res.request.dynamicTail).toContain('外围设定2');
 
-        // 5. L4 降级：清空 recallSlices 后仍超限 -> 逐条缩减 loreEntries，且绝不触碰静态前缀、Innate Locks、焦点核心状态与 recentBuffer
-        const tightBudget = Math.ceil(
-            (noBudgetRes.request.staticPrefixBlocks.join('\n\n').length + 450) * 0.6
-        );
-        const level4Res = assembler.assembleWriterRequest({
+        // 必需上下文本身超预算时必须拒绝，不能返回仍然超限的请求。
+        expect(() => assembler.assembleWriterRequest({
             ...baseInput,
-            config: createBaseConfig({ writer_token_budget: tightBudget })
-        });
-        expect(level4Res.diagnostics.evictionLevel).toBe(4);
-        expect(level4Res.diagnostics.truncated).toBe(true);
-        expect(level4Res.request.staticPrefixBlocks).toEqual(noBudgetRes.request.staticPrefixBlocks);
-        expect(level4Res.request.dynamicTail).not.toContain('外围设定1');
-        expect(level4Res.request.dynamicTail).not.toContain('外围设定2');
-        expect(level4Res.request.dynamicTail).toContain('左眉骨有一道陈年旧疤'); // Innate Locks 保留
-        expect(level4Res.request.dynamicTail).toContain('持有半枚黄铜钥匙'); // 焦点角色核心状态保留
-        expect(level4Res.request.dynamicTail).toContain('顺手把值班日志压在了暖气管下方'); // recentBuffer 不再被裁剪
+            config: createBaseConfig({ writer_token_budget: 1 })
+        })).toThrow('写手预算无法满足');
     });
 
     it('recallSlices 为空时，L4 仍真实重新渲染并重算 totalTokens 直至达标', () => {

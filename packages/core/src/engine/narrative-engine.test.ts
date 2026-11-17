@@ -253,6 +253,14 @@ afterEach(async () => {
 });
 
 describe('NarrativeEngine', () => {
+    it('必需上下文超预算时不调用写手模型', async () => {
+        const { store, system } = await createEngineFixture();
+        await store.writeBookConfig({ ...await store.readBookConfig(), writer_token_budget: 1 });
+        const llm = new ScriptedLlmAdapter([jsonResponse(LIBRARIAN_OK), jsonResponse(PLANNER_OK)]);
+        await expect(makeEngine(store, llm, system).stepChapter({ chapterGoal: '预算门禁' })).rejects.toThrow('写手预算无法满足');
+        expect(llm.history).toHaveLength(2);
+    });
+
     it('成对召回缺少原稿证据时在写手调用前停止', async () => {
         const { bookRoot, store, system } = await createEngineFixture();
         await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '一阵雨落在空街。', 'utf8');
@@ -1066,7 +1074,7 @@ describe('NarrativeEngine', () => {
         );
         const cfgRaw = await readFile(join(bookRoot, 'world/book_config.yaml'), 'utf8');
         const cfgObj = parseYaml(cfgRaw) as Record<string, unknown>;
-        cfgObj['writer_token_budget'] = 1200;
+        cfgObj['writer_token_budget'] = 2100;
         await writeFile(join(bookRoot, 'world/book_config.yaml'), stringifyYaml(cfgObj), 'utf8');
         await system.commitPaths(bookRoot, ['.'], 'chore: seed ch_0001 and vol_01_cards');
 
