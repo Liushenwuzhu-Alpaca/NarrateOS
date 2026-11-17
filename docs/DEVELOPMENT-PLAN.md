@@ -98,6 +98,7 @@ narrateos/
   - 工程标签残留按全文扫描，跨行 HTML 注释仍报告起始物理行列并进入局部修补，不静默删除正文。
   - 开书编译 Schema 校验实体 entityId 与设定 id 各自唯一，重复资产进入既有结构化修复流程，禁止顺序写盘静默覆盖。
   - CLI 在执行前拒绝未知选项、缺值与非完整整数；章号为 1 到 9999，章数为正整数，故事日允许负数以支持开局前与插叙。
+  - 门禁与局部 Patch 共用空白行分段器：自然段内单换行保留同一段号，违规仍标注原始物理行号，末段规则按自然段而非行数取窗口。
 
 ### Phase 2：确定性裁剪、成对检索与静态门禁内核 (`ViewSlicer` + `IndexRecall` + `ProseGateAndTelemetry`)
 - **交付内容**：零 LLM 调用完整实现 `ViewSlicer`、`IndexRecall` 与 `ProseGateAndTelemetry` 三个纯确定性深模块。

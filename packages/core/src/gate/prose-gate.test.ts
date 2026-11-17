@@ -45,6 +45,12 @@ describe('stripBlockingTags', () => {
 });
 
 describe('StaticProseGate', () => {
+    it('自然段内多行违规共用段号，空白行才开始下一段', () => {
+        const result = new StaticProseGate().evaluate('雨落在窗沿。\n<!--内部说明-->\n\n门开了。', { enableAntiCliche: false });
+        expect(result.violatedParagraphIndices).toEqual([0]);
+        expect(result.violations[0]).toMatchObject({ line: 2, paragraphIndex: 0 });
+    });
+
     it('跨行 HTML 注释按全文检出并保留准确起始行列', () => {
         const gate = new StaticProseGate();
         const result = gate.evaluate('雨落在窗沿。\n\n<!--\n内部工程说明\n-->\n\n门开了。', { enableAntiCliche: false });
@@ -80,8 +86,8 @@ describe('StaticProseGate', () => {
         expect(result.violations.some((v) => v.ruleId === 'skeletal_quota' && v.line === 3)).toBe(true);
         expect(result.violations.some((v) => v.ruleId === 'filler_cliche' && v.line === 4)).toBe(true);
         expect(result.violations.some((v) => v.ruleId === 'ending_moralizing' && v.line === 5)).toBe(true);
-        expect(result.violatedParagraphCount).toBe(5);
-        expect(result.recommendedAction).toBe('REWRITE');
+        expect(result.violatedParagraphCount).toBe(1);
+        expect(result.recommendedAction).toBe('PATCH');
     });
 
     it('支持按规则开关关闭特定检查', () => {

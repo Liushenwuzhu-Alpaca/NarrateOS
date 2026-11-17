@@ -1,3 +1,4 @@
+import { analyzeParagraphs } from '../text/paragraphs.js';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -172,10 +173,7 @@ async function readOptionalText(filePath: string): Promise<string | null> {
 
 /** 将正文按非空段落切分 */
 function splitParagraphs(text: string): string[] {
-    return text
-        .split(/\r?\n\s*\r?\n/)
-        .map((p) => p.trim())
-        .filter((p) => p.length > 0);
+    return analyzeParagraphs(text).paragraphs;
 }
 
 /** 构造同卷零字节变动的静态前缀输入 */

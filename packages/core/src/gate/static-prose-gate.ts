@@ -1,3 +1,4 @@
+import { analyzeParagraphs } from '../text/paragraphs.js';
 import { stripBlockingTags } from './blocking.js';
 import {
     DEFAULT_CLICHE_TERMS,
@@ -40,22 +41,8 @@ export class StaticProseGate {
      * 对单章正文执行可开关静态规则扫描与跨章明喻复读检测
      */
     evaluate(text: string, options: ProseGateOptions = {}): ProseGateResult {
-        const lines = text.split(/\r?\n/);
-        const lineMetas: LineMeta[] = [];
-        let paragraphCounter = 0;
-
-        for (let i = 0; i < lines.length; i += 1) {
-            const lineText = lines[i] ?? '';
-            const isNonEmpty = lineText.trim().length > 0;
-            const paragraphIndex = isNonEmpty ? paragraphCounter++ : -1;
-            lineMetas.push({
-                lineNumber: i + 1,
-                text: lineText,
-                paragraphIndex
-            });
-        }
-
-        const nonEmptyLines = lineMetas.filter((item) => item.paragraphIndex >= 0);
+        const segmentation = analyzeParagraphs(text);
+        const lineMetas = segmentation.lines;
         const charCount = text.replace(/\s+/g, '').length;
         const maxPatchParagraphs = options.maxPatchParagraphs ?? 2;
 
@@ -96,7 +83,7 @@ export class StaticProseGate {
             const lastParagraphsOnly = overrideCfg?.lastParagraphsOnly ?? defaultDef?.lastParagraphsOnly;
             const targetLines =
                 lastParagraphsOnly !== undefined && lastParagraphsOnly > 0
-                    ? nonEmptyLines.slice(-lastParagraphsOnly)
+                    ? lineMetas.filter((line) => line.paragraphIndex >= segmentation.paragraphs.length - lastParagraphsOnly && line.paragraphIndex >= 0)
                     : lineMetas;
 
             const hits: GateViolation[] = [];
