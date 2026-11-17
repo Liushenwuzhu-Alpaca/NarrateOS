@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS Operator Studio",
+        "description": "Three-pane browser workbench for NarrateOS with draft guard, zero-loop micro-signal bar, and live/historical stage Session & Trajectory inspection."
+    }
+}
