@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { TokenUsage } from '../ports/llm.js';
 import type { GateViolation, TelemetryMetrics } from '../gate/types.js';
-import type { DirtyChapter, TimelineMode } from '../store/schemas.js';
+import type { DirtyChapter, PlannerOutline, TimelineMode } from '../store/schemas.js';
 
 /** 细纲级物理悖论异常（触发退回 Planner 改纲 v2） */
 export class PlanConflictError extends Error {
@@ -56,29 +56,6 @@ export const LibrarianOutputSchema = z.object({
 });
 
 export type LibrarianOutput = z.infer<typeof LibrarianOutputSchema>;
-
-/** Step 2: Planner 结构化细纲输出 Schema */
-export const PlannerSceneSchema = z.object({
-    scene_index: z.number().int().positive(),
-    location: z.string().min(1),
-    summary: z.string().min(1),
-    is_spotlight: z.boolean().default(false)
-});
-
-export const PlannerOutlineSchema = z.object({
-    chapter_title: z.string().min(1),
-    target_word_count: z.number().int().positive(),
-    focus_cast: z.array(z.string()).min(1),
-    background_cast: z.array(z.string()).default([]),
-    ending_beat: z.enum(['HOOK', 'AFTERGLOW', 'CLOSURE']).default('HOOK'),
-    director_rationale: z.string().default(''),
-    chapter_turn: z.string().min(1),
-    scene_plan: z.array(PlannerSceneSchema).min(1),
-    outline_text: z.string().min(1),
-    preferred_voice_tag: z.string().optional()
-});
-
-export type PlannerOutline = z.infer<typeof PlannerOutlineSchema>;
 
 /** Step 5: Fact Checker 审校输出 Schema */
 export const FactCheckIssueSchema = z.object({

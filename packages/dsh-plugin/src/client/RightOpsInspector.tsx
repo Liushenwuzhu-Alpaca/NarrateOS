@@ -86,10 +86,13 @@ export interface SpotlightQueueItem {
 }
 
 export interface DreamingTelemetry {
-    dirtyEntityCount: number;
-    dirtyThreshold: number;
+    /** 脏实体数；null 表示服务未提供水位数据，不得按 0 呈现 */
+    dirtyEntityCount: number | null;
+    /** 脏页触发阈值；null 表示服务未提供，不得按后端默认值猜测 */
+    dirtyThreshold: number | null;
     coldArchiveCount: number;
-    spotlightQueue: SpotlightQueueItem[];
+    /** 切镜信号队列；null 表示未提供数据，[] 表示真实无信号 */
+    spotlightQueue: SpotlightQueueItem[] | null;
     lastVacuumAt?: string | null;
 }
 
@@ -327,12 +330,12 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         });
     }, [proseGate.recentViolations]);
 
-    // 实体列表：优先使用 props.entities，若未传入则从 spotlightQueue 推导活跃实体
+    // 实体列表：优先使用 props.entities，若未传入则从已提供的 spotlightQueue 推导活跃实体
     const resolvedEntities = useMemo<InspectorEntityItem[]>(() => {
         if (entities && entities.length > 0) {
             return entities;
         }
-        return dreaming.spotlightQueue.map((item) => ({
+        return (dreaming.spotlightQueue ?? []).map((item) => ({
             id: item.entityId,
             name: item.label,
             role: item.triggered ? '已触发切镜' : `切镜蓄力 ${Math.round(item.progressPct)}%`,
@@ -343,6 +346,9 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         }));
     }, [entities, dreaming.spotlightQueue, walLock.lastCommittedChapter]);
 
+    // 实体数据来源：props.entities 已挂载或切镜队列已提供才算有真实实体口径
+    const hasEntitySource = entities !== undefined || dreaming.spotlightQueue !== null;
+
     // 伏笔列表：优先使用 props.openThreads
     const resolvedThreads = useMemo<OpenThreadItem[]>(() => {
         if (openThreads && openThreads.length > 0) {
@@ -351,30 +357,69 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         return [];
     }, [openThreads]);
 
-    const triggeredSpotlightCount = dreaming.spotlightQueue.filter((item) => item.triggered).length;
+    const triggeredSpotlightCount = (dreaming.spotlightQueue ?? []).filter(
+        (item) => item.triggered
+    ).length;
 
+    // Dreaming 水位：count 与 threshold 都有真实数据才计算比例；null=未提供，不按 0 呈现
+    const dirtyCount =
+        typeof dreaming.dirtyEntityCount === 'number' &&
+        Number.isFinite(dreaming.dirtyEntityCount)
+            ? dreaming.dirtyEntityCount
+            : null;
+    const dirtyThreshold =
+        typeof dreaming.dirtyThreshold === 'number' && Number.isFinite(dreaming.dirtyThreshold)
+            ? dreaming.dirtyThreshold
+            : null;
+    const hasDirtyWatermark = dirtyCount !== null && dirtyThreshold !== null;
     const dirtyRatioPct =
-        dreaming.dirtyThreshold > 0
-            ? Math.min(100, Math.round((dreaming.dirtyEntityCount / dreaming.dirtyThreshold) * 100))
+        dirtyCount !== null && dirtyThreshold !== null && dirtyThreshold > 0
+            ? Math.min(100, Math.round((dirtyCount / dirtyThreshold) * 100))
             : 0;
 
+    // 写手预算：仅在静态/动态 tokens 均有测量时汇总；0 是合法测量值，undefined 才是缺失
+    const hasAssemblyStats =
+        typeof stageArtifact.staticPrefixTokens === 'number' &&
+        Number.isFinite(stageArtifact.staticPrefixTokens) &&
+        typeof stageArtifact.dynamicTailTokens === 'number' &&
+        Number.isFinite(stageArtifact.dynamicTailTokens);
     const staticTokens = stageArtifact.staticPrefixTokens ?? 0;
     const dynamicTokens = stageArtifact.dynamicTailTokens ?? 0;
     const totalUsedTokens = staticTokens + dynamicTokens;
-    const budgetLimit = stageArtifact.budgetLimitTokens ?? 0;
-    const staticPct = budgetLimit > 0 ? Math.min(100, (staticTokens / budgetLimit) * 100) : 0;
-    const dynamicPct =
-        budgetLimit > 0 ? Math.min(100 - staticPct, (dynamicTokens / budgetLimit) * 100) : 0;
-    const degradationLevel = stageArtifact.degradationLevel ?? 0;
+    const budgetLimit =
+        typeof stageArtifact.budgetLimitTokens === 'number' &&
+        Number.isFinite(stageArtifact.budgetLimitTokens)
+            ? stageArtifact.budgetLimitTokens
+            : 0;
+    // 只有装配统计完整且预算为正时才画比例条；0 预算不除，缺测量不画固定条
+    const hasBudgetBar = hasAssemblyStats && budgetLimit > 0;
+    const staticPct = hasBudgetBar ? Math.min(100, (staticTokens / budgetLimit) * 100) : 0;
+    const dynamicPct = hasBudgetBar
+        ? Math.min(100 - staticPct, (dynamicTokens / budgetLimit) * 100)
+        : 0;
+    // 降级级数：undefined=未提供，不得按 0 级正常呈现
+    const degradationLevel =
+        typeof stageArtifact.degradationLevel === 'number' &&
+        Number.isFinite(stageArtifact.degradationLevel)
+            ? stageArtifact.degradationLevel
+            : null;
 
-    // 卷纲进度计算
-    const completedCh = volumeProgress?.completedChapters ?? walLock.lastCommittedChapter;
-    const totalVolCh =
-        volumeProgress?.totalChapters && volumeProgress.totalChapters > 0
+    // 卷纲进度：完成数与目标都来自真实卷快照才计算百分比；不用 wal 章号顶替、不假定 20 章
+    const volumeCompletedCh =
+        typeof volumeProgress?.completedChapters === 'number' &&
+        Number.isFinite(volumeProgress.completedChapters)
+            ? volumeProgress.completedChapters
+            : null;
+    const volumeTotalCh =
+        typeof volumeProgress?.totalChapters === 'number' &&
+        Number.isFinite(volumeProgress.totalChapters) &&
+        volumeProgress.totalChapters > 0
             ? volumeProgress.totalChapters
-            : Math.max(completedCh, 20);
+            : null;
     const volumePct =
-        totalVolCh > 0 ? Math.min(100, Math.round((completedCh / totalVolCh) * 100)) : 0;
+        volumeCompletedCh !== null && volumeTotalCh !== null
+            ? Math.min(100, Math.round((volumeCompletedCh / volumeTotalCh) * 100))
+            : null;
 
     // Token 占比条 (遥测分组)
     const uncachedInputTokens = Math.max(0, modelPool.inputTokens - modelPool.cacheReadTokens);
@@ -615,9 +660,11 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     'ctx',
                     '净室装配审计',
                     <span className="ns-i-sum ns-i-sum-quiet">
-                        {budgetLimit > 0
-                            ? `${formatTokenCount(totalUsedTokens)}/${formatTokenCount(budgetLimit)}`
-                            : `${formatTokenCount(totalUsedTokens)} tok`}
+                        {hasAssemblyStats
+                            ? budgetLimit > 0
+                                ? `${formatTokenCount(totalUsedTokens)}/${formatTokenCount(budgetLimit)}`
+                                : `${formatTokenCount(totalUsedTokens)} tok`
+                            : '装配统计未提供'}
                     </span>,
                     <>
                         {/* 三池模型路由 */}
@@ -659,43 +706,56 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             </div>
                         </div>
 
-                        {/* 静态前缀与 budget 降级状态 */}
+                        {/* 静态前缀与 budget 降级状态：仅有真实测量时才画比例与级别 */}
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
                                 <span>写手窗口与 budget 降级</span>
                                 <span
                                     className={
-                                        degradationLevel > 0
-                                            ? 'ns-pill ns-pill-amber'
-                                            : 'ns-pill ns-pill-green'
+                                        degradationLevel === null
+                                            ? 'ns-pill ns-pill-muted'
+                                            : degradationLevel > 0
+                                                ? 'ns-pill ns-pill-amber'
+                                                : 'ns-pill ns-pill-green'
                                     }
                                 >
-                                    {degradationLevel > 0 ? `降级 ${degradationLevel} 级` : '0 级正常'}
+                                    {degradationLevel === null
+                                        ? '降级级别未提供'
+                                        : degradationLevel > 0
+                                            ? `降级 ${degradationLevel} 级`
+                                            : '0 级正常'}
                                 </span>
                             </div>
-                            <div className="ns-mono ns-i-budget-total">
-                                {budgetLimit > 0
-                                    ? `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`
-                                    : `总装配 ${formatTokenCount(totalUsedTokens)} tokens`}
-                            </div>
-                            <div className="ns-i-bar">
-                                <div
-                                    className="ns-i-bar-seg ns-i-seg-brand"
-                                    style={{
-                                        width: `${budgetLimit > 0 ? staticPct : 50}%`
-                                    }}
-                                />
-                                <div
-                                    className="ns-i-bar-seg ns-i-seg-green"
-                                    style={{
-                                        width: `${budgetLimit > 0 ? dynamicPct : 30}%`
-                                    }}
-                                />
-                            </div>
-                            <div className="ns-i-budget-legend">
-                                <span>静态前缀 {formatTokenCount(staticTokens)}</span>
-                                <span>动态尾 {formatTokenCount(dynamicTokens)}</span>
-                            </div>
+                            {hasAssemblyStats ? (
+                                <>
+                                    <div className="ns-mono ns-i-budget-total">
+                                        {budgetLimit > 0
+                                            ? `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`
+                                            : `总装配 ${formatTokenCount(totalUsedTokens)} tokens`}
+                                    </div>
+                                    {hasBudgetBar && (
+                                        <div className="ns-i-bar">
+                                            <div
+                                                className="ns-i-bar-seg ns-i-seg-brand"
+                                                style={{ width: `${staticPct}%` }}
+                                            />
+                                            <div
+                                                className="ns-i-bar-seg ns-i-seg-green"
+                                                style={{ width: `${dynamicPct}%` }}
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="ns-i-budget-legend">
+                                        <span>静态前缀 {formatTokenCount(staticTokens)}</span>
+                                        <span>动态尾 {formatTokenCount(dynamicTokens)}</span>
+                                        {!hasBudgetBar && <span>预算上限未提供，不计算占比</span>}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="ns-i-empty">
+                                    未提供装配统计，无法呈现 token 用量与预算占比。
+                                </div>
+                            )}
                         </div>
 
                         {/* 当前阶段产物摘要 */}
@@ -729,16 +789,21 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     'ent',
                     '活跃实体',
                     <span className="ns-i-sum ns-i-sum-quiet">
-                        {resolvedEntities.length} 实体
+                        {hasEntitySource ? `${resolvedEntities.length} 实体` : '实体数未提供'}
                     </span>,
                     <div className="ns-i-card">
                         <div className="ns-i-card-head">
                             <span>活跃实体列表</span>
                             <span className="ns-mono ns-i-muted">
-                                {resolvedEntities.length} 活跃 - {dreaming.coldArchiveCount} 冷归档
+                                {hasEntitySource ? `${resolvedEntities.length} 活跃` : '活跃数未提供'} -{' '}
+                                {dreaming.coldArchiveCount} 冷归档
                             </span>
                         </div>
-                        {resolvedEntities.length === 0 ? (
+                        {!hasEntitySource ? (
+                            <div className="ns-i-empty">
+                                未提供活跃实体与切镜信号数据，无法呈现实体列表。
+                            </div>
+                        ) : resolvedEntities.length === 0 ? (
                             <div className="ns-i-empty">
                                 暂无活跃实体记录，可在运行写章或刷新工作区后查看。
                             </div>
@@ -811,15 +876,27 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             : `伏笔 ${resolvedThreads.length}`}
                     </span>,
                     <>
-                        {/* Spotlight Trigger 信号队列 */}
+                        {/* Spotlight Trigger 信号队列：null=未提供，[]=真实无信号 */}
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
                                 <span>Spotlight Trigger 信号</span>
-                                <span className="ns-mono ns-i-amber-ink">
-                                    {dreaming.spotlightQueue.length} 项
+                                <span
+                                    className={
+                                        dreaming.spotlightQueue === null
+                                            ? 'ns-mono ns-i-muted'
+                                            : 'ns-mono ns-i-amber-ink'
+                                    }
+                                >
+                                    {dreaming.spotlightQueue === null
+                                        ? '未提供'
+                                        : `${dreaming.spotlightQueue.length} 项`}
                                 </span>
                             </div>
-                            {dreaming.spotlightQueue.length === 0 ? (
+                            {dreaming.spotlightQueue === null ? (
+                                <div className="ns-i-empty">
+                                    未提供切镜信号数据，无法判断是否存在待切镜幕后角色。
+                                </div>
+                            ) : dreaming.spotlightQueue.length === 0 ? (
                                 <div className="ns-i-empty">暂无待切镜幕后角色信号</div>
                             ) : (
                                 dreaming.spotlightQueue.map((item) => {
@@ -893,21 +970,28 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             )}
                         </div>
 
-                        {/* Dreaming 脏页水位 */}
+                        {/* Dreaming 脏页水位：仅有真实 count/threshold 时画水位条 */}
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
                                 <span>Dreaming 脏页水位</span>
-                                <span className="ns-mono">
-                                    {dreaming.dirtyEntityCount} / {dreaming.dirtyThreshold} (
-                                    {dirtyRatioPct}%)
+                                <span className={hasDirtyWatermark ? 'ns-mono' : 'ns-mono ns-i-muted'}>
+                                    {hasDirtyWatermark
+                                        ? `${dirtyCount} / ${dirtyThreshold} (${dirtyRatioPct}%)`
+                                        : '未提供水位数据'}
                                 </span>
                             </div>
-                            <div className="ns-prog-bar ns-i-prog-flat">
-                                <div
-                                    className="ns-prog-fill ns-i-fill-violet"
-                                    style={{ width: `${dirtyRatioPct}%` }}
-                                />
-                            </div>
+                            {hasDirtyWatermark ? (
+                                <div className="ns-prog-bar ns-i-prog-flat">
+                                    <div
+                                        className="ns-prog-fill ns-i-fill-violet"
+                                        style={{ width: `${dirtyRatioPct}%` }}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="ns-i-empty">
+                                    服务未提供脏实体计数与触发阈值，暂无法呈现水位。
+                                </div>
+                            )}
                             {onTriggerDreaming && (
                                 <button
                                     type="button"
@@ -1041,11 +1125,13 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     </>
                 )}
 
-                {/* 6. 卷纲进度 */}
+                {/* 6. 卷纲进度：完成数与目标齐全才画百分比；全书提交数单独标注 */}
                 {renderGroup(
                     'vol',
                     '卷纲进度',
-                    <span className="ns-i-sum ns-i-sum-quiet">{volumePct}%</span>,
+                    <span className="ns-i-sum ns-i-sum-quiet">
+                        {volumePct !== null ? `${volumePct}%` : '目标未提供'}
+                    </span>,
                     <>
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
@@ -1055,22 +1141,33 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                         ? ` - ${volumeProgress.volumeTitle}`
                                         : ''}
                                 </span>
-                                <span className="ns-mono">
-                                    {completedCh} / {totalVolCh} ({volumePct}%)
+                                <span
+                                    className={volumePct !== null ? 'ns-mono' : 'ns-mono ns-i-muted'}
+                                >
+                                    {volumePct !== null
+                                        ? `${volumeCompletedCh} / ${volumeTotalCh} (${volumePct}%)`
+                                        : volumeCompletedCh !== null
+                                            ? `已完成 ${volumeCompletedCh} 章 - 目标未提供`
+                                            : '当前卷完成数未提供'}
                                 </span>
                             </div>
-                            <div className="ns-prog-bar ns-i-prog-flat">
-                                <div
-                                    className="ns-prog-fill"
-                                    style={{ width: `${volumePct}%` }}
-                                />
-                            </div>
+                            {volumePct !== null ? (
+                                <div className="ns-prog-bar ns-i-prog-flat">
+                                    <div
+                                        className="ns-prog-fill"
+                                        style={{ width: `${volumePct}%` }}
+                                    />
+                                </div>
+                            ) : (
+                                <div className="ns-i-empty">
+                                    {volumeCompletedCh === null
+                                        ? '未提供当前卷完成数与目标章数，不绘制进度比例。'
+                                        : '未提供当前卷目标章数，不绘制进度比例。'}
+                                </div>
+                            )}
                             <div className="ns-i-vol-meta">
                                 <span>timeline_mode: {walLock.timelineMode}</span>
-                                <span>
-                                    已提交 Ch.
-                                    {String(walLock.lastCommittedChapter).padStart(4, '0')}
-                                </span>
+                                <span>全书已提交 {walLock.lastCommittedChapter} 章</span>
                             </div>
                         </div>
 

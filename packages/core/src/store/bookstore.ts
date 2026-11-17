@@ -16,6 +16,7 @@ import {
     BookConfig,
     BookConfigSchema,
     BookSnapshot,
+    ChapterOutlineSnapshot,
     DirtyChapter,
     EntityEntry,
     EntityEntryInput,
@@ -24,6 +25,7 @@ import {
     EntityProfile,
     ForeignKeyError,
     InnateLockViolationError,
+    PlannerOutlineSchema,
     TxLockConflictError,
     TxLockPayloadSchema,
     TxState,
@@ -55,6 +57,12 @@ export interface ApplyStatePatchOptions {
     allowInnateMutation?: boolean | undefined;
     worldStateUpdate?: (Partial<WorldStateFrontmatter> & { summaryMarkdown?: string | undefined }) | undefined;
     extraCommitPaths?: string[] | undefined;
+}
+
+/** commitDraft 可选载荷：随正文 feat 原子提交的最终细纲快照 */
+export interface CommitDraftOptions {
+    /** 本章实际使用的 PlannerOutline（改纲后为最终 v2，接受可缺省字段的原始输入）；不传则保留既有快照不覆盖 */
+    outline?: z.input<typeof PlannerOutlineSchema> | undefined;
 }
 
 function formatChapterKey(chapterNumber: number): string {
@@ -148,6 +156,10 @@ export class BookStore {
 
     private get manuscriptsDir(): string {
         return join(this.bookRoot, 'manuscripts');
+    }
+
+    private get chapterOutlinesDir(): string {
+        return join(this.opsDir, 'chapter_outlines');
     }
 
     /** 在 .ops/tx.lock 排他文件锁保护下执行临界区操作（严格互斥） */
@@ -443,8 +455,8 @@ export class BookStore {
         });
     }
 
-    /** 原子提交第 1 粒度：正文真源 + SHA-256 指纹 -> feat(ch-XXXX) */
-    async commitDraft(chapterNumber: number, manuscriptText: string, context?: TxState['chapter_context']): Promise<{ sha: string; txState: TxState }> {
+    /** 原子提交第 1 粒度：正文真源 + SHA-256 指纹 + 可选细纲快照 -> feat(ch-XXXX) */
+    async commitDraft(chapterNumber: number, manuscriptText: string, context?: TxState['chapter_context'], options?: CommitDraftOptions): Promise<{ sha: string; txState: TxState }> {
         return await this.runWithTxLock(async () => {
             const current = await this.readTxState();
             if (!COMMIT_DRAFT_ALLOWED_PHASES.has(current.phase)) {
@@ -454,8 +466,22 @@ export class BookStore {
             await mkdir(this.manuscriptsDir, { recursive: true });
             const chKey = formatChapterKey(chapterNumber);
             const relChapterPath = `manuscripts/${chKey}.md`;
-            await this.recordPendingWrites([relChapterPath]);
+            const commitPaths = [relChapterPath];
+
+            // 细纲是规划快照而非剧情真源：仅在显式传入时随正文同笔 feat 落盘并纳入写集恢复；
+            // 手改 Sync 等不带细纲的重提交绝不覆盖既有快照
+            if (options?.outline !== undefined) {
+                const relOutlinePath = `.ops/chapter_outlines/${chKey}.json`;
+                await this.recordPendingWrites([relChapterPath, relOutlinePath]);
+                await mkdir(this.chapterOutlinesDir, { recursive: true });
+                const validated = PlannerOutlineSchema.parse(options.outline);
+                await writeFile(join(this.bookRoot, relOutlinePath), `${JSON.stringify(validated, null, 4)}\n`, 'utf8');
+                commitPaths.push(relOutlinePath);
+            } else {
+                await this.recordPendingWrites([relChapterPath]);
+            }
             await writeFile(join(this.bookRoot, relChapterPath), manuscriptText, 'utf8');
+            commitPaths.push('.ops/tx_state.json');
 
             const next: TxState = {
                 ...current,
@@ -472,12 +498,36 @@ export class BookStore {
 
             const commitRes = await this.system.commitPaths(
                 this.bookRoot,
-                [relChapterPath, '.ops/tx_state.json'],
+                commitPaths,
                 `feat(${formatChapterTag(chapterNumber)}): settle manuscript`
             );
             await rm(join(this.opsDir, 'pending_writes.json'), { force: true });
             return { sha: commitRes.sha, txState: next };
         });
+    }
+
+    /**
+     * 读取指定章节的持久化细纲快照（规划快照，非剧情真源）。
+     * missing=该章从未留存细纲（旧章诚实缺失，不捏造）；error=快照损坏或非法，正文不受影响。
+     * 返回原始 JSON 字符串交由展示层既有解析器复用，不在此处泄漏原始异常或路径。
+     */
+    async readChapterOutline(chapterNumber: number): Promise<ChapterOutlineSnapshot> {
+        const relPath = `.ops/chapter_outlines/${formatChapterKey(chapterNumber)}.json`;
+        let raw: string;
+        try {
+            raw = await readFile(join(this.bookRoot, relPath), 'utf8');
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code === 'ENOENT') {
+                return { outlineText: null, status: 'missing' };
+            }
+            return { outlineText: null, status: 'error' };
+        }
+        try {
+            PlannerOutlineSchema.parse(JSON.parse(raw));
+        } catch {
+            return { outlineText: null, status: 'error' };
+        }
+        return { outlineText: raw, status: 'available' };
     }
 
     /** 原子提交第 2 粒度：行级补丁合并 + 固有锁保护 + 1ms 外键可达性校验 -> state(ch-XXXX) */

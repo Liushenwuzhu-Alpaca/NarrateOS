@@ -706,4 +706,110 @@ describe('BookStore', () => {
             ])
         ).resolves.toBeDefined();
     });
+
+    it('细纲快照随正文 feat 原子提交，重启后按章读取且旧章保持 missing', async () => {
+        const { bookRoot, system, store } = await createTempBookRepo();
+        const outline = {
+            chapter_title: '第二章 门锁与票据',
+            target_word_count: 2200,
+            focus_cast: ['char_001'],
+            background_cast: [],
+            ending_beat: 'HOOK' as const,
+            director_rationale: '幕后内参',
+            chapter_turn: '核验期限被提前',
+            scene_plan: [
+                { scene_index: 1, location: '旧校舍三楼走廊', summary: '递交票据清单', is_spotlight: true }
+            ],
+            outline_text: '场景一：星野琉璃递交票据清单，陆沉开锁。'
+        };
+
+        await store.beginDraft(2);
+        const res = await store.commitDraft(2, '第二章正文真源', undefined, { outline });
+        expect(res.txState.phase).toBe('FEAT_COMMITTED');
+
+        // 细纲必须与正文在同一个 feat 提交内落盘，而不是游离 sidecar
+        const relOutlinePath = '.ops/chapter_outlines/ch_0002.json';
+        expect(await system.readFileAtRef(bookRoot, res.sha, relOutlinePath)).not.toBeNull();
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+
+        // 模拟重启：新建 BookStore 实例读取历史章细纲，不与旧章串纲
+        const restarted = new BookStore(bookRoot, new NodeSystemAdapter());
+        const ch2 = await restarted.readChapterOutline(2);
+        expect(ch2.status).toBe('available');
+        expect(ch2.outlineText).not.toBeNull();
+        expect(JSON.parse(ch2.outlineText!).chapter_title).toBe('第二章 门锁与票据');
+        const legacy = await restarted.readChapterOutline(1);
+        expect(legacy).toEqual({ outlineText: null, status: 'missing' });
+    });
+
+    it('细纲损坏或非法时返回 error，不影响正文读取', async () => {
+        const { bookRoot, store } = await createTempBookRepo();
+        await store.beginDraft(2);
+        await store.commitDraft(2, '第二章正文真源', undefined, {
+            outline: {
+                chapter_title: '第二章',
+                target_word_count: 2000,
+                focus_cast: ['char_001'],
+                chapter_turn: '门锁核验',
+                scene_plan: [{ scene_index: 1, location: '走廊', summary: '开锁' }],
+                outline_text: '开锁场景。'
+            }
+        });
+
+        const outlinePath = join(bookRoot, '.ops/chapter_outlines/ch_0002.json');
+        await writeFile(outlinePath, '{ 这不是 JSON', 'utf8');
+        const broken = await store.readChapterOutline(2);
+        expect(broken.status).toBe('error');
+        expect(broken.outlineText).toBeNull();
+        expect(await readFile(join(bookRoot, 'manuscripts/ch_0002.md'), 'utf8')).toBe('第二章正文真源');
+
+        // JSON 合法但不符合 PlannerOutline 契约同样按 error 处理
+        await writeFile(outlinePath, JSON.stringify({ chapter_title: '缺字段' }), 'utf8');
+        expect((await store.readChapterOutline(2)).status).toBe('error');
+    });
+
+    it('正文提交失败时细纲随写集一并回滚，不留下假可用纲', async () => {
+        const { bookRoot, system, store } = await createTempBookRepo();
+        await store.beginDraft(2);
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('提交中断'));
+        await expect(
+            store.commitDraft(2, '未提交正文', undefined, {
+                outline: {
+                    chapter_title: '第二章',
+                    target_word_count: 2000,
+                    focus_cast: ['char_001'],
+                    chapter_turn: '门锁核验',
+                    scene_plan: [{ scene_index: 1, location: '走廊', summary: '开锁' }],
+                    outline_text: '开锁场景。'
+                }
+            })
+        ).rejects.toThrow('提交中断');
+        const recovered = await store.recoverWal();
+        expect(recovered.action).toBe('ROLLED_BACK_DRAFT');
+        await expect(access(join(bookRoot, '.ops/chapter_outlines/ch_0002.json'))).rejects.toThrow();
+        expect((await store.readChapterOutline(2)).status).toBe('missing');
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+    });
+
+    it('不带细纲的手改重提交不得覆盖既有细纲快照', async () => {
+        const { bookRoot, store } = await createTempBookRepo();
+        const outline = {
+            chapter_title: '第二章 门锁与票据',
+            target_word_count: 2200,
+            focus_cast: ['char_001'],
+            chapter_turn: '核验期限被提前',
+            scene_plan: [{ scene_index: 1, location: '走廊', summary: '开锁' }],
+            outline_text: '开锁场景。'
+        };
+        await store.beginDraft(2);
+        await store.commitDraft(2, '原始正文', undefined, { outline });
+        const before = await readFile(join(bookRoot, '.ops/chapter_outlines/ch_0002.json'), 'utf8');
+
+        await store.applyStatePatch(2, []);
+        await store.commitDraft(2, '手改后的正文');
+        expect(await readFile(join(bookRoot, '.ops/chapter_outlines/ch_0002.json'), 'utf8')).toBe(before);
+        const kept = await store.readChapterOutline(2);
+        expect(kept.status).toBe('available');
+        expect(JSON.parse(kept.outlineText!).chapter_title).toBe('第二章 门锁与票据');
+    });
 });

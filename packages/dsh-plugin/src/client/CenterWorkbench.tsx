@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Modal } from '@deepseek-ai/dsh-client-ui-primitives';
 
 /** 6 节点流水线 ID：只画真正跑大模型的节点 + Dreaming（0-LLM 静态门禁不占节点） */
 export type PipelineStageId =
@@ -50,7 +51,9 @@ export interface ChapterDetailData {
     dirty?: boolean | undefined;
     sha256?: string | undefined;
     diffFromHead?: string | undefined;
-    outlineText?: string | undefined;
+    outlineText?: string | null | undefined;
+    /** 细纲读取状态：available 已持久化 / missing 历史未留存 / error 读取失败 */
+    outlineStatus?: 'available' | 'missing' | 'error' | undefined;
     volumeLabel?: string | undefined;
     featCommitSha?: string | undefined;
     stateCommitSha?: string | undefined;
@@ -159,6 +162,12 @@ export interface CenterTelemetrySummary {
     kontoyiannisHk?: number | undefined;
 }
 
+/** 中栏草稿命令式句柄（根组件守卫在保存成功/放弃修改后调用） */
+export interface CenterWorkbenchDraftHandle {
+    /** 结束编辑态并清空脏草稿标记；savedContent 传入时用已保存文本作为展示正文（PUT 已成功，不假装回滚） */
+    resetDraft: (savedContent?: string) => void;
+}
+
 /** CenterWorkbench 组件 Props */
 export interface CenterWorkbenchProps {
     bookTitle?: string | undefined;
@@ -187,6 +196,12 @@ export interface CenterWorkbenchProps {
     leftCollapsed?: boolean | undefined;
     rightOpen?: boolean | undefined;
     hasSafeHalt?: boolean | undefined;
+    /** 脏草稿快照上报（作品/章号/草稿文本；null=无未保存草稿），供根组件导航守卫与 beforeunload 使用 */
+    onDraftDirtyChange?:
+        | ((dirty: { bookRoot: string; chapterNumber: number; content: string } | null) => void)
+        | undefined;
+    /** 草稿控制句柄注册回调：守卫保存成功/放弃修改后由根组件强制结束编辑态；卸载时传 null */
+    onDraftControlReady?: ((handle: CenterWorkbenchDraftHandle | null) => void) | undefined;
     onSelectBook?: ((bookRoot: string) => void) | undefined;
     onNewBook?: (() => void) | undefined;
     onToggleLeft?: (() => void) | undefined;
@@ -199,9 +214,12 @@ export interface CenterWorkbenchProps {
     onStopYolo?: (() => Promise<void> | void) | undefined;
     onSync?: (() => Promise<void> | void) | undefined;
     onDream?: (() => Promise<void> | void) | undefined;
+    /** 保存草稿（失败必须抛错，根组件保存后继续导航时依赖真实结果） */
     onSaveChapter?: ((chapterNumber: number, content: string) => Promise<void> | void) | undefined;
     onSubmitSignal?: ((payload: SubmitSignalPayload) => Promise<void> | void) | undefined;
     onRefreshViews?: (() => Promise<void> | void) | undefined;
+    /** 只读重试读取当前章详情（细纲 error 态入口，不触发 Sync/生成） */
+    onRetryChapterDetail?: (() => void) | undefined;
 }
 
 interface StageDefinition {
@@ -414,8 +432,10 @@ interface ParsedBeatSegment {
 /** 结构化细纲解析结果 */
 interface ParsedStructuredPlan {
     chapterTitle: string;
-    timelineMode: string;
-    povCharacter: string;
+    /** 时间线模式：细纲未留存该字段时为 null（未提供），不从全局状态推断 */
+    timelineMode: string | null;
+    /** 视角角色：细纲未留存该字段时为 null（未提供），不从焦点角色顺序推断 */
+    povCharacter: string | null;
     targetWordCount: number | null;
     endingBeat: string;
     focusCast: string[];
@@ -526,8 +546,7 @@ function buildPlanBeats(
 /** 尝试将章节 outlineText 解析为结构化细纲对象（支持 JSON 与 Markdown/键值回退） */
 function parseStructuredPlan(
     rawText: string | undefined,
-    fallbackTitle: string,
-    fallbackTimelineMode: string
+    fallbackTitle: string
 ): ParsedStructuredPlan | null {
     const trimmed = rawText?.trim() ?? '';
     if (!trimmed) {
@@ -552,7 +571,7 @@ function parseStructuredPlan(
                     ? parsed['pov_character'].trim()
                     : typeof parsed['pov'] === 'string' && parsed['pov'].trim()
                       ? parsed['pov'].trim()
-                      : focusCast[0] ?? '未指定';
+                      : null;
 
             const rawScenes = Array.isArray(parsed['scene_plan'])
                 ? (parsed['scene_plan'] as Array<{
@@ -583,10 +602,11 @@ function parseStructuredPlan(
                 typeof parsed['chapter_title'] === 'string' && parsed['chapter_title'].trim()
                     ? parsed['chapter_title'].trim()
                     : fallbackTitle;
+            // 真实 PlannerOutline 不含 timeline_mode；缺失即未提供，不冒充当前全局模式
             const timelineModeVal =
                 typeof parsed['timeline_mode'] === 'string' && parsed['timeline_mode'].trim()
                     ? parsed['timeline_mode'].trim()
-                    : fallbackTimelineMode;
+                    : null;
 
             return {
                 chapterTitle,
@@ -594,7 +614,7 @@ function parseStructuredPlan(
                 povCharacter,
                 targetWordCount,
                 endingBeat,
-                focusCast: focusCast.length > 0 ? focusCast : povCharacter !== '未指定' ? [povCharacter] : [],
+                focusCast,
                 backgroundCast,
                 spotlight: spotlight || outlineBody.split(/[。\n]/)[0] || '待细化',
                 endingSummary:
@@ -611,7 +631,7 @@ function parseStructuredPlan(
 
     // 2. Markdown / 键值行文本解析回退
     let chapterTitle = fallbackTitle;
-    let timelineModeVal = fallbackTimelineMode;
+    let timelineModeVal: string | null = null;
     let povCharacter = '';
     let targetWordCount: number | null = null;
     let endingBeat = 'HOOK';
@@ -682,9 +702,9 @@ function parseStructuredPlan(
     }
 
     const outlineBody = bodyLines.join('\n').trim() || trimmed;
-    const resolvedPov = povCharacter || focusCast[0] || '未指定';
-    const resolvedFocus =
-        focusCast.length > 0 ? focusCast : resolvedPov !== '未指定' ? [resolvedPov] : [];
+    // 视角/焦点只认细纲真实字段；缺失即未提供，不从焦点顺序或全局状态推断
+    const resolvedPov = povCharacter || null;
+    const resolvedFocus = focusCast;
     const resolvedSpotlight =
         spotlight ||
         parsedScenes.find((s) => s.is_spotlight)?.summary ||
@@ -1046,9 +1066,13 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     onDream,
     onSaveChapter,
     onSubmitSignal,
-    onRefreshViews
+    onRefreshViews,
+    onDraftDirtyChange,
+    onRetryChapterDetail,
+    onDraftControlReady
 }) => {
-    const activeChapterNumber = selectedChapter ?? chapterDetail?.chapterNumber ?? currentChapter;
+    // 显示与保存均以已采纳的详情章身份为准；详情未加载时才回退到导航意图/当前章
+    const activeChapterNumber = chapterDetail?.chapterNumber ?? selectedChapter ?? currentChapter;
     const isYoloRunning = Boolean(yolo?.running);
     const isBusy = activeTask !== 'IDLE' || isYoloRunning;
 
@@ -1081,7 +1105,13 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [isEditing, setIsEditing] = useState(false);
     const [draftContent, setDraftContent] = useState('');
     const [savingEdit, setSavingEdit] = useState(false);
+    // 保存在途同步标记：state 更新前的连续点击不得重入，守卫清稿与在途 PUT 互斥
+    const savingRef = useRef(false);
     const [syncingFromDiff, setSyncingFromDiff] = useState(false);
+    // 编辑器打开时的基线正文（用于判断草稿是否真的偏离服务器内容）
+    const [draftBaseline, setDraftBaseline] = useState<string | null>(null);
+    // 取消编辑时若会丢脏草稿，先经宿主 Modal 确认
+    const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
 
     // 底部导演一次性干涉栏输入态
     const [signalKind, setSignalKind] = useState<DirectorSignalKind>('导演指令');
@@ -1095,21 +1125,72 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [actionMessage, setActionMessage] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
-    // 切换章节时重置编辑态；同章内容刷新（SSE/轮询）不得覆盖用户正在编辑的草稿
+    // 切换章节/作品时重置编辑态；同章内容刷新（SSE/轮询）与页签切换不得覆盖用户正在编辑的草稿
     const draftChapterRef = useRef<number | null>(null);
+    const draftBookRef = useRef<string | null>(null);
     useEffect(() => {
         const nextChapter = chapterDetail?.chapterNumber ?? null;
-        const chapterChanged = draftChapterRef.current !== nextChapter;
+        const nextBook = currentBookRoot ?? null;
+        const contextChanged =
+            draftChapterRef.current !== nextChapter || draftBookRef.current !== nextBook;
         draftChapterRef.current = nextChapter;
-        if (chapterChanged) {
-            setDraftContent(chapterDetail?.content ?? '');
-            setIsEditing(false);
+        draftBookRef.current = nextBook;
+        if (contextChanged) {
+            // 详情缺失/读取失败时不清空编辑中的草稿，避免空响应吞掉未保存文本
+            if (chapterDetail) {
+                setDraftContent(chapterDetail.content);
+                setDraftBaseline(null);
+                setIsEditing(false);
+            }
             return;
         }
-        if (!isEditing) {
-            setDraftContent(chapterDetail?.content ?? '');
+        if (!isEditing && chapterDetail) {
+            setDraftContent(chapterDetail.content);
         }
-    }, [chapterDetail?.chapterNumber, chapterDetail?.content, isEditing]);
+    }, [chapterDetail?.chapterNumber, chapterDetail?.content, currentBookRoot, isEditing]);
+
+    // 脏草稿 = 编辑器打开且文本偏离基线；上报给根组件做导航守卫与 beforeunload
+    const isDraftDirty =
+        isEditing && draftBaseline !== null && draftContent !== draftBaseline;
+    const draftDirtyLocation =
+        isDraftDirty && chapterDetail
+            ? {
+                  bookRoot: currentBookRoot ?? '',
+                  chapterNumber: chapterDetail.chapterNumber,
+                  content: draftContent
+              }
+            : null;
+    useEffect(() => {
+        onDraftDirtyChange?.(draftDirtyLocation);
+    }, [
+        onDraftDirtyChange,
+        draftDirtyLocation?.bookRoot,
+        draftDirtyLocation?.chapterNumber,
+        draftDirtyLocation?.content
+    ]);
+    useEffect(
+        () => () => {
+            onDraftDirtyChange?.(null);
+        },
+        [onDraftDirtyChange]
+    );
+
+    // 守卫保存成功/放弃修改后强制结束编辑：即使随后详情 GET 失败也不残留脏草稿
+    const serverContentRef = useRef<string>('');
+    serverContentRef.current = chapterDetail?.content ?? '';
+    useEffect(() => {
+        if (!onDraftControlReady) return;
+        onDraftControlReady({
+            resetDraft: (savedContent?: string) => {
+                // 普通保存尚在途时不接受守卫清稿：PUT 未决期间草稿必须保留
+                if (savingRef.current) return;
+                setDraftBaseline(null);
+                setIsEditing(false);
+                setDraftContent(savedContent ?? serverContentRef.current);
+            }
+        });
+        return () => onDraftControlReady(null);
+    }, [onDraftControlReady]);
 
     // YOLO 浮层：点击外部或 Escape 关闭（焦点回到触发按钮）
     const yoloWrapRef = useRef<HTMLDivElement | null>(null);
@@ -1248,6 +1329,30 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         }
     };
 
+    /** 放弃编辑：脏草稿需要宿主 Modal 确认，干净草稿直接退出编辑 */
+    const handleCancelEditing = () => {
+        if (isDraftDirty) {
+            setDiscardConfirmOpen(true);
+            return;
+        }
+        setDraftBaseline(null);
+        setIsEditing(false);
+        setDraftContent(chapterDetail?.content ?? '');
+    };
+
+    /** 打开编辑器：以当前服务器正文为基线；已打开时保留草稿不重置 */
+    const handleStartEditing = () => {
+        if (!chapterDetail) {
+            showError('章节详情尚未加载，暂不能编辑');
+            return;
+        }
+        if (!isEditing) {
+            setDraftContent(chapterDetail.content);
+            setDraftBaseline(chapterDetail.content);
+        }
+        setIsEditing(true);
+    };
+
     /** 触发手动 Dreaming */
     const handleDream = async () => {
         try {
@@ -1272,21 +1377,34 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
     /** 保存直接编辑的正文并自动 Sync */
     const handleSaveEditedChapter = async () => {
-        if (!activeChapterNumber || activeChapterNumber <= 0) {
+        // 同步 ref 防重入：savingEdit 渲染生效前的重复点击不得发出第二次 PUT
+        if (savingRef.current) {
+            return;
+        }
+        // 保存目标取正在显示/编辑的详情章身份，不随导航意图 selectedChapter 漂移
+        const targetChapterNumber = chapterDetail?.chapterNumber ?? activeChapterNumber;
+        if (!targetChapterNumber || targetChapterNumber <= 0) {
             showError('当前没有可保存的有效章节号');
             return;
         }
+        // busy 时后端会拒绝 PUT，不能假装保存成功；保留草稿等待空闲
+        if (isBusy) {
+            showError('引擎正在执行任务，暂时无法保存；草稿已保留，请待任务结束后重试');
+            return;
+        }
+        const contentToSave = draftContent;
+        savingRef.current = true;
         setSavingEdit(true);
         try {
             if (onSaveChapter) {
-                await onSaveChapter(activeChapterNumber, draftContent);
+                await onSaveChapter(targetChapterNumber, contentToSave);
             } else {
                 const resp = await fetch('/api/narrate/chapter', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        chapterNumber: activeChapterNumber,
-                        content: draftContent
+                        chapterNumber: targetChapterNumber,
+                        content: contentToSave
                     })
                 });
                 if (!resp.ok) {
@@ -1294,11 +1412,14 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     throw new Error(errBody.error ?? `保存并 Sync 失败 (${resp.status})`);
                 }
             }
+            // 保存成功后以已保存文本为新基线；同章详情刷新不会覆盖草稿
+            setDraftBaseline(contentToSave);
             setIsEditing(false);
-            showFeedback(`已保存 ${formatChapterLabel(activeChapterNumber)} 并自动完成 Sync`);
+            showFeedback(`已保存 ${formatChapterLabel(targetChapterNumber)} 并自动完成 Sync`);
         } catch (err) {
             showError(err);
         } finally {
+            savingRef.current = false;
             setSavingEdit(false);
         }
     };
@@ -1585,14 +1706,14 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         activeChapterSummary?.commitSha?.slice(0, 7) ??
         undefined;
     const stateHash = chapterDetail?.stateCommitSha?.slice(0, 7) ?? undefined;
+    // 细纲呈现状态：契约缺失时按历史未留存诚实呈现，不用生成动作冒充读取
+    const outlineStatus = chapterDetail?.outlineStatus ?? 'missing';
     const parsedPlan = useMemo(
         () =>
-            parseStructuredPlan(
-                chapterDetail?.outlineText,
-                activeChapterTitle,
-                timelineMode
-            ),
-        [chapterDetail?.outlineText, activeChapterTitle, timelineMode]
+            outlineStatus === 'available'
+                ? parseStructuredPlan(chapterDetail?.outlineText ?? undefined, activeChapterTitle)
+                : null,
+        [outlineStatus, chapterDetail?.outlineText, activeChapterTitle]
     );
     const currentFontSize = PROSE_FONT_SIZES[fontStep] ?? 17;
 
@@ -1697,30 +1818,33 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 <div className="ns-top-right">
                     <button
                         type="button"
-                        className={`ns-icon-btn ${dirtyChaptersCount > 0 ? 'ns-btn-dirty' : ''}`}
+                        className="ns-icon-btn"
                         disabled={isBusy}
                         onClick={() => {
-                            if (dirtyChaptersCount > 0) {
-                                void handleSync();
-                            } else if (onRefreshViews) {
+                            if (onRefreshViews) {
                                 void onRefreshViews();
                             }
                         }}
-                        title={
-                            dirtyChaptersCount > 0
-                                ? `检测到 ${dirtyChaptersCount} 章手改，点击立即 Sync`
-                                : '刷新工作区视图'
-                        }
-                        aria-label="刷新或同步"
+                        title="只读刷新工作区视图（不触发 Sync）"
+                        aria-label="刷新工作区视图"
                     >
                         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                             <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7" />
                             <path d="M13.5 2.5v2.8h-2.8" />
                         </svg>
-                        {dirtyChaptersCount > 0 ? (
-                            <span className="ns-badge-dot">{dirtyChaptersCount}</span>
-                        ) : null}
                     </button>
+
+                    {dirtyChaptersCount > 0 ? (
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-ghost ns-btn-sm ns-btn-dirty"
+                            disabled={isBusy || syncingFromDiff}
+                            onClick={() => void handleSync()}
+                            title={`检测到 ${dirtyChaptersCount} 章手稿改动，执行 Sync 对账（会调用模型分析差异）`}
+                        >
+                            {activeTask === 'SYNCING' ? 'Sync 对账中…' : `Sync 手改 (${dirtyChaptersCount})`}
+                        </button>
+                    ) : null}
 
                     {isYoloRunning ? (
                         <div className="ns-yolo-running-bar">
@@ -1901,9 +2025,13 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             <button
                                 type="button"
                                 className={`ns-btn ns-btn-ghost ns-btn-sm ${isEditing ? 'ns-btn-active' : ''}`}
+                                disabled={savingEdit}
                                 onClick={() => {
-                                    setIsEditing((prev) => !prev);
-                                    setDraftContent(chapterDetail?.content ?? '');
+                                    if (isEditing) {
+                                        handleCancelEditing();
+                                    } else {
+                                        handleStartEditing();
+                                    }
                                 }}
                             >
                                 {isEditing ? '取消' : '✎ 编辑'}
@@ -2151,7 +2279,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                             type="button"
                                             className="ns-v-opt ns-go"
                                             onClick={() => {
-                                                setIsEditing(false);
+                                                if (isEditing) {
+                                                    handleCancelEditing();
+                                                }
                                                 setSignalKind('Retcon');
                                                 if (!signalInput.trim() && safeHalt?.reason) {
                                                     setSignalInput(`纠偏：${safeHalt.reason}`);
@@ -2200,10 +2330,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     <button
                                         type="button"
                                         className="ns-v-opt"
-                                        onClick={() => {
-                                            setDraftContent(chapterDetail?.content ?? '');
-                                            setIsEditing(true);
-                                        }}
+                                        onClick={handleStartEditing}
                                     >
                                         <span className="ns-v-opt-ico" aria-hidden="true">
                                             ✎
@@ -2281,12 +2408,15 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 />
                                 <div className="ns-editor-footer">
                                     <span className="ns-muted">
-                                        保存后将写入原稿真源并自动调用 PUT /api/narrate/chapter 触发 Sync
+                                        {isDraftDirty
+                                            ? '有未保存修改 · 保存后写入原稿真源并自动 Sync；离开本章前会先确认'
+                                            : '保存后将写入原稿真源并自动调用 PUT /api/narrate/chapter 触发 Sync'}
                                     </span>
                                     <button
                                         type="button"
                                         className="ns-btn ns-btn-primary"
-                                        disabled={savingEdit}
+                                        disabled={savingEdit || isBusy}
+                                        title={isBusy ? '引擎任务运行中，暂不能保存；草稿已保留' : undefined}
                                         onClick={handleSaveEditedChapter}
                                     >
                                         {savingEdit ? '正在保存并 Sync…' : '保存并自动 Sync'}
@@ -2382,10 +2512,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     </h2>
                                     <div className="ns-plan-meta">
                                         <span className="ns-plan-pill">
-                                            timeline_mode <b>{parsedPlan.timelineMode}</b>
+                                            timeline_mode <b>{parsedPlan.timelineMode ?? '未提供'}</b>
                                         </span>
                                         <span className="ns-plan-pill">
-                                            pov <b>{parsedPlan.povCharacter}</b>
+                                            pov <b>{parsedPlan.povCharacter ?? '未提供'}</b>
                                         </span>
                                         <span className="ns-plan-pill">
                                             target{' '}
@@ -2438,15 +2568,19 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         <small>pov_character</small>
                                     </dt>
                                     <dd>
-                                        <span className="ns-actor-pill">
-                                            <i
-                                                className="ns-actor-avatar"
-                                                style={{ background: getAvatarColor(parsedPlan.povCharacter) }}
-                                            >
-                                                {parsedPlan.povCharacter.slice(0, 1)}
-                                            </i>
-                                            {parsedPlan.povCharacter}
-                                        </span>
+                                        {parsedPlan.povCharacter ? (
+                                            <span className="ns-actor-pill">
+                                                <i
+                                                    className="ns-actor-avatar"
+                                                    style={{ background: getAvatarColor(parsedPlan.povCharacter) }}
+                                                >
+                                                    {parsedPlan.povCharacter.slice(0, 1)}
+                                                </i>
+                                                {parsedPlan.povCharacter}
+                                            </span>
+                                        ) : (
+                                            <span className="ns-muted">未提供</span>
+                                        )}
                                     </dd>
 
                                     <dt>
@@ -2523,19 +2657,30 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             <div className="ns-plan-empty">
                                 <div className="ns-plan-kicker">PLANNER · 结构化细纲</div>
                                 <h2 className="ns-plan-title ns-plan-title-sm">
-                                    第 {activeChapterNumber} 章 · 尚未生成细纲
+                                    第 {activeChapterNumber} 章 ·{' '}
+                                    {outlineStatus === 'error'
+                                        ? '细纲读取失败'
+                                        : chapterDetail
+                                          ? '历史章节未留存细纲'
+                                          : '细纲暂不可用'}
                                 </h2>
                                 <p className="ns-plan-empty-hint">
-                                    当前章节暂无已落盘的 Planner 结构化细纲，可点击「推进 1 章」由 Planner 节点生成节拍与戏眼规划。
+                                    {outlineStatus === 'error'
+                                        ? '本章已保存的细纲文件损坏或读取失败，正文仍可正常审阅；可重试只读读取，不会触发生成或 Sync。'
+                                        : chapterDetail
+                                          ? '本章生成时未持久化 Planner 细纲，历史细纲无法回看。后续新生成的章节会随正文一并留存细纲。'
+                                          : '当前章节详情尚未加载，加载后可查看已留存的细纲。'}
                                 </p>
-                                <button
-                                    type="button"
-                                    className="ns-btn ns-btn-primary ns-btn-sm"
-                                    disabled={isBusy}
-                                    onClick={() => void handleStepOne()}
-                                >
-                                    {activeTask === 'STEPPING' ? '正在推进…' : '推进 1 章'}
-                                </button>
+                                {outlineStatus === 'error' && onRetryChapterDetail ? (
+                                    <button
+                                        type="button"
+                                        className="ns-btn ns-btn-ghost ns-btn-sm"
+                                        disabled={chapterLoading}
+                                        onClick={onRetryChapterDetail}
+                                    >
+                                        {chapterLoading ? '正在重试…' : '重试读取细纲'}
+                                    </button>
+                                ) : null}
                             </div>
                         )}
                     </section>
@@ -2902,6 +3047,40 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     </div>
                 </div>
             </footer>
+
+            {/* 取消编辑确认：复用宿主 Modal（body portal / Escape / 焦点恢复） */}
+            <Modal
+                open={discardConfirmOpen}
+                onClose={() => setDiscardConfirmOpen(false)}
+                title="放弃未保存的修改？"
+                description={`第 ${activeChapterNumber} 章的编辑尚未保存，取消编辑将丢弃这些修改；已提交的手稿不受影响。`}
+                closeLabel="继续编辑"
+                className="ns-b-modal-shell ns-guard-modal-shell"
+                contentClassName="ns-b-modal-content ns-guard-modal-content"
+            >
+                <div className="ns-guard-actions">
+                    <button
+                        type="button"
+                        className="ns-btn ns-btn-ghost"
+                        data-modal-autofocus=""
+                        onClick={() => setDiscardConfirmOpen(false)}
+                    >
+                        继续编辑
+                    </button>
+                    <button
+                        type="button"
+                        className="ns-btn ns-btn-stop"
+                        onClick={() => {
+                            setDiscardConfirmOpen(false);
+                            setDraftBaseline(null);
+                            setIsEditing(false);
+                            setDraftContent(chapterDetail?.content ?? '');
+                        }}
+                    >
+                        放弃修改
+                    </button>
+                </div>
+            </Modal>
         </main>
     );
 };

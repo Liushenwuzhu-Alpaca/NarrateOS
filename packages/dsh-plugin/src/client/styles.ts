@@ -3233,6 +3233,55 @@ details.ns-acc[open] summary {
     max-height: 480px;
     overflow-y: auto;
 }
+
+/* 未保存草稿确认弹窗（宿主 Modal 内部内容，不自绘遮罩）
+   令牌自足复用 BOOT_CSS 的 .ns-b-modal-shell/.ns-b-modal-content 容器（暗色默认 + 宿主亮色）。
+   STUDIO_CSS 先于 BOOT_CSS 注入，同特异性会被后者覆盖，
+   故用双类选择器提升特异性，只覆盖窄宽度与内容留白，不复制色值 */
+.ns-b-modal-shell.ns-guard-modal-shell {
+    width: min(480px, calc(100vw - 32px));
+    max-width: 480px;
+}
+
+.ns-b-modal-content.ns-guard-modal-content {
+    padding: 4px 20px 18px;
+}
+
+.ns-guard-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ns-guard-hint {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--ns-text-3);
+    overflow-wrap: break-word;
+}
+
+.ns-guard-error {
+    margin: 0;
+    padding: 6px 10px;
+    border-radius: var(--ns-r-sm);
+    font-size: 12px;
+    line-height: 1.6;
+    background: var(--ns-red-soft);
+    color: var(--ns-red-ink);
+    border: 1px solid var(--ns-red-line);
+    overflow-wrap: break-word;
+}
+
+.ns-guard-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+}
 `;
 
 /**
