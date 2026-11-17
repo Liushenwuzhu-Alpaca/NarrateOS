@@ -556,7 +556,26 @@ export class BookStore {
     /** 崩溃恢复：检查 WAL 相位并清理未提交脏文件 */
     async recoverWal(): Promise<WalRecoveryResult> {
         const result = await this.runWithTxLock(async (): Promise<Omit<WalRecoveryResult, 'clean'>> => {
-            const txState = await this.readTxState();
+            let txState = await this.readTxState();
+            const committedRaw = await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json');
+            if (committedRaw === null) {
+                throw new Error('无法恢复 WAL：Git 中缺少已提交事务状态');
+            }
+            const committed = TxStateSchema.parse(JSON.parse(committedRaw));
+            if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) !== JSON.stringify(committed)) {
+                const pendingChapter = txState.active_chapter;
+                const pendingDraft = txState.phase === 'FEAT_COMMITTED' && committed.phase !== 'FEAT_COMMITTED';
+                await this.system.resetHard(this.bookRoot, 'HEAD');
+                await this.system.cleanUntracked(this.bookRoot, ['.ops/']);
+                txState = committed;
+                if (pendingDraft) {
+                    return {
+                        action: 'ROLLED_BACK_DRAFT',
+                        phase: committed.phase,
+                        activeChapter: pendingChapter
+                    };
+                }
+            }
 
             if (txState.phase === 'DRAFTING') {
                 await this.system.resetHard(this.bookRoot, 'HEAD');

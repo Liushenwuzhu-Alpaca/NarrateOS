@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NodeSystemAdapter } from '../ports/index.js';
 import {
     BookStore,
@@ -176,6 +176,41 @@ describe('BookStore', () => {
             await writeFile(lockPath, oldLiveLock, 'utf8');
         });
         expect(await readFile(lockPath, 'utf8')).toBe(oldLiveLock);
+    });
+
+    it('正文提交失败后从 Git 已提交相位恢复，不继续抽取未提交正文', async () => {
+        const { bookRoot, system, store } = await createTempBookRepo();
+        await store.beginDraft(2);
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('提交中断'));
+        await expect(store.commitDraft(2, '未提交正文')).rejects.toThrow('提交中断');
+        const recovered = await store.recoverWal();
+        expect(recovered.action).toBe('ROLLED_BACK_DRAFT');
+        expect(recovered.phase).toBe('IDLE');
+        expect((await store.readTxState()).last_committed_ch).toBe(1);
+        await expect(access(join(bookRoot, 'manuscripts/ch_0002.md'))).rejects.toThrow();
+    });
+
+    it('状态提交失败后恢复到已提交正文并要求重新抽取', async () => {
+        const { system, store } = await createTempBookRepo();
+        await store.commitDraft(2, '已经提交的正文');
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('提交中断'));
+        await expect(store.applyStatePatch(2, [])).rejects.toThrow('提交中断');
+        const recovered = await store.recoverWal();
+        expect(recovered.action).toBe('NEEDS_STATE_EXTRACTION');
+        expect(recovered.phase).toBe('FEAT_COMMITTED');
+        expect((await store.readTxState()).last_committed_ch).toBe(1);
+    });
+
+    it('睡眠提交失败后恢复已提交状态相位', async () => {
+        const { system, store } = await createTempBookRepo();
+        await store.commitDraft(2, '已经提交的正文');
+        await store.applyStatePatch(2, []);
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('提交中断'));
+        await expect(store.markDreamCommitted(2)).rejects.toThrow('提交中断');
+        const recovered = await store.recoverWal();
+        expect(recovered.action).toBe('READY');
+        expect(recovered.phase).toBe('STATE_COMMITTED');
+        expect((await store.readTxState()).phase).toBe('STATE_COMMITTED');
     });
 
     it('能够读取并 Zod 校验 book_config.yaml 与 world/world_state.md', async () => {
