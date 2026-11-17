@@ -79,7 +79,8 @@ export async function harvestVoiceFromChapter(
         if (text.length === 0) continue;
         const gateRes = gate.evaluate(text, {
             enableAntiCliche: config.prose_gate.enable_anti_cliche,
-            enableCrossChapterSimile: false
+            enableCrossChapterSimile: false,
+            narrationSubjectivity: config.narration_subjectivity
         });
         if (!gateRes.passed) {
             continue;

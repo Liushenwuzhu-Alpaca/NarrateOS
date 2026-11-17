@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
-import { rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { Context } from '@deepseek-ai/cordis';
@@ -17,7 +18,7 @@ import { BookSwitchConflictError } from '@narrateos/dsh-book-store';
 import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from './index.js';
-import { AdmissionClosedError } from './index.js';
+import { AdmissionClosedError, registerPresetBootSkill } from './index.js';
 import {
     createGitBookWorkspace,
     createHeadlessMockServices,
@@ -25,8 +26,33 @@ import {
 } from './test-harness.js';
 
 const tempDirs: string[] = [];
+const cleanupCallbacks: Array<() => Promise<void> | void> = [];
+
+function registerCleanup(fn: () => Promise<void> | void): void {
+    cleanupCallbacks.push(fn);
+}
+
+function createDeferred<T = void>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+}
 
 afterEach(async () => {
+    while (cleanupCallbacks.length > 0) {
+        const fn = cleanupCallbacks.pop();
+        if (fn) {
+            try {
+                await fn();
+            } catch {
+                // 清理期容错
+            }
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -109,7 +135,11 @@ function createMockWebServer(ctx: Context) {
     }
 
     async function openSse(): Promise<{
+        statusCode: number;
         events: Array<{ event: string; data: Record<string, unknown> }>;
+        waitForEvent: (
+            predicate: (evt: { event: string; data: Record<string, unknown> }) => boolean
+        ) => Promise<{ event: string; data: Record<string, unknown> }>;
         close: () => void;
     }> {
         const handler = routes.get('exact:/api/narrate/events');
@@ -121,6 +151,10 @@ function createMockWebServer(ctx: Context) {
         req.url = '/api/narrate/events';
 
         const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+        const waiters: Array<{
+            predicate: (evt: { event: string; data: Record<string, unknown> }) => boolean;
+            resolve: (evt: { event: string; data: Record<string, unknown> }) => void;
+        }> = [];
         let buffer = '';
 
         const res = Object.assign(new EventEmitter(), {
@@ -138,22 +172,43 @@ function createMockWebServer(ctx: Context) {
                     const eventMatch = /^event:\s*(.+)$/m.exec(frame);
                     const dataMatch = /^data:\s*(.+)$/m.exec(frame);
                     if (eventMatch?.[1] && dataMatch?.[1]) {
-                        events.push({
+                        const evt = {
                             event: eventMatch[1].trim(),
                             data: JSON.parse(dataMatch[1]) as Record<string, unknown>
-                        });
+                        };
+                        events.push(evt);
+                        for (let i = waiters.length - 1; i >= 0; i -= 1) {
+                            const waiter = waiters[i]!;
+                            if (waiter.predicate(evt)) {
+                                waiters.splice(i, 1);
+                                waiter.resolve(evt);
+                            }
+                        }
                     }
                 }
                 return true;
             },
-            end() {
+            end(chunk?: string | Buffer) {
+                if (chunk) {
+                    this.write(chunk);
+                }
                 (res as { writableEnded: boolean }).writableEnded = true;
             }
         }) as unknown as ServerResponse;
 
         await handler(req, res);
         return {
+            statusCode: res.statusCode,
             events,
+            waitForEvent(predicate) {
+                const existing = events.find(predicate);
+                if (existing) {
+                    return Promise.resolve(existing);
+                }
+                return new Promise((resolve) => {
+                    waiters.push({ predicate, resolve });
+                });
+            },
             close: () => {
                 (req as unknown as EventEmitter).emit('close');
             }
@@ -208,13 +263,18 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA, booksRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
 
         const web = createMockWebServer(ctx);
 
         let releaseLibrarian: (() => void) | undefined;
+        registerCleanup(() => releaseLibrarian?.());
         let resolveEntered!: () => void;
         const librarianEntered = new Promise<void>((r) => {
             resolveEntered = r;
@@ -302,8 +362,10 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             booksRoot,
             heartbeatIntervalMs: 0
         });
+        registerCleanup(() => pipeFiber.dispose());
 
         const sse = await web.openSse();
+        registerCleanup(() => sse.close());
 
         // 启动在途步进，并在 Librarian 阶段卡住以测试 409 冲突
         const stepPromise = ctx.narratePipeline.stepChapter({
@@ -359,12 +421,18 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         expect(detailHttp.statusCode).toBe(200);
         const detailEvents = detailHttp.json['events'] as Array<{ kind: string; toolName?: string; text?: string }>;
         expect(detailEvents.some((ev) => ev.kind === 'thinking' && ev.text?.includes('核查码头'))).toBe(true);
-        expect(detailEvents.some((ev) => ev.kind === 'tool-call' && ev.toolName === 'yield_context_pack')).toBe(true);
-        expect(detailEvents.some((ev) => ev.kind === 'tool-result' && ev.toolName === 'yield_context_pack')).toBe(true);
+        const toolCallEvents = detailEvents.filter(
+            (ev) => ev.kind === 'tool-call' && ev.toolName === 'yield_context_pack'
+        );
+        const toolResultEvents = detailEvents.filter(
+            (ev) => ev.kind === 'tool-result' && ev.toolName === 'yield_context_pack'
+        );
+        expect(toolCallEvents.length).toBe(1);
+        expect(toolResultEvents.length).toBe(1);
 
         const stageStreamEvents = sse.events.filter((e) => e.event === 'stage:event');
         expect(stageStreamEvents.some((e) => e.data['kind'] === 'thinking')).toBe(true);
-        expect(stageStreamEvents.some((e) => e.data['kind'] === 'tool-call' && e.data['toolName'] === 'yield_context_pack')).toBe(true);
+        expect(stageStreamEvents.filter((e) => e.data['kind'] === 'tool-call' && e.data['toolName'] === 'yield_context_pack').length).toBe(1);
 
         // 5. 触发 Dreaming 并验证 dream:started SSE 同样携带 activeSessionId
         await ctx.narratePipeline.runDreaming({ currentChapter: 1, force: true });
@@ -379,31 +447,30 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         });
         expect(okSwitch.statusCode).toBe(200);
         expect(ctx.narrateStore.bookRoot).toBe(bookB);
-
-        sse.close();
-        await pipeFiber.dispose();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
     });
 
-    it('斜杠命令 (/narrate-step, /narrate-yolo, /narrate-halt, /narrate-signal) 0 Token 异步触发并立即返回回执，且挂载 narrate-boot Skill', async () => {
+    it('斜杠命令 (/narrate-status, /narrate-step, /narrate-yolo, /narrate-halt, /narrate-signal) 0 Token 异步触发并立即返回回执，且挂载 narrate-boot Skill', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'slash-commands');
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const skillFiber = await ctx.plugin(SkillRegistry);
+        registerCleanup(() => skillFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
 
+        const web = createMockWebServer(ctx);
         const cmdRuntime = createMockCommandsRuntime(ctx);
 
         let resolveStepGate: (() => void) | undefined;
-        const stepEntered = new Promise<void>((r) => {
-            resolveStepGate = r;
-        });
+        const stepEntered = createDeferred<void>();
+        resolveStepGate = () => stepEntered.resolve();
         let releaseStep: (() => void) | undefined;
+        registerCleanup(() => releaseStep?.());
 
         const { llmCalls } = await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool }) => {
@@ -452,13 +519,35 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
                 textToStreamChunks('<blocking>货栈</blocking>\n\n沈默核对完箱板暗记。')
         });
 
-        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        // 先挂好 skills/change 监听器，避免遗漏同步或微任务内的注册事件
+        const skillRegistered = createDeferred<void>();
+        const disposeSkillWatch = ctx.on('skills/change', () => {
+            skillRegistered.resolve();
+        });
+        registerCleanup(() => {
+            disposeSkillWatch();
+        });
 
-        // 等待异步 Skill 注册完成
-        await new Promise((r) => setTimeout(r, 30));
-        const bootSkill = await ctx.skills.get('narrate-boot');
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+
+        // 确定性等待异步 Skill 注册完成（无需 fixed sleep）
+        let bootSkill = await ctx.skills.get('narrate-boot');
+        while (!bootSkill) {
+            await skillRegistered.promise;
+            bootSkill = await ctx.skills.get('narrate-boot');
+        }
         expect(bootSkill).toBeDefined();
         expect(bootSkill?.content).toContain('lock_charter_and_boot');
+
+        // 0. /narrate-status 0 LLM 调用只读状态查询
+        const statusReceipt = await cmdRuntime.invokeCommand('narrate-status');
+        expect(statusReceipt.kind).toBe('success');
+        expect(statusReceipt.text).toContain('slash-commands');
+        expect(llmCalls.length).toBe(0);
 
         // 1. /narrate-signal 0 LLM 调用投递信号
         const sigReceipt = await cmdRuntime.invokeCommand(
@@ -475,45 +564,44 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         expect(llmCalls.length).toBe(0);
 
         // 3. 在途期间 /narrate-yolo 被互斥拦截，/narrate-halt 发出安全停机请求
-        await stepEntered;
+        await stepEntered.promise;
         const yoloConflictReceipt = await cmdRuntime.invokeCommand('narrate-yolo', '2');
         expect(yoloConflictReceipt.kind).toBe('error');
 
         const haltReceipt = await cmdRuntime.invokeCommand('narrate-halt');
         expect(haltReceipt.kind).toBe('success');
 
+        const stepSettled = sse.waitForEvent(
+            (e) =>
+                e.event === 'chapter:phase' &&
+                (e.data['phase'] === 'FAILED' || e.data['phase'] === 'COMMITTED')
+        );
         releaseStep?.();
-        // 等待后台任务收敛
-        await new Promise((r) => setTimeout(r, 50));
-
-        await pipeFiber.dispose();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await skillFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
+        await stepSettled;
     });
 
     it('在途运行期间卸载插件：立即关闭准入、超时广播 halt:waiting 而不提前注销路由/锁、等待排空且零残留 .ops/tx.lock', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'teardown-drain');
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
         const web = createMockWebServer(ctx);
 
         let releaseInFlight: (() => void) | undefined;
-        let agentEnteredResolve: (() => void) | undefined;
-        const agentEntered = new Promise<void>((r) => {
-            agentEnteredResolve = r;
-        });
+        registerCleanup(() => releaseInFlight?.());
+        const agentEntered = createDeferred<void>();
 
         await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool }) => {
                 if (tools.has('yield_context_pack')) {
-                    agentEnteredResolve?.();
-                    // 故意延迟一小段时间再结束，模拟 WAL/Agent 在途排空与超时告警
+                    agentEntered.resolve();
+                    // 挂起直到测试确定性地放行，模拟 WAL/Agent 在途排空与超时告警
                     await new Promise<void>((r) => {
                         releaseInFlight = r;
                     });
@@ -531,15 +619,17 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             heartbeatIntervalMs: 0,
             shutdownTimeoutMs: 40
         });
+        registerCleanup(() => pipeFiber.dispose());
 
         const sse = await web.openSse();
+        registerCleanup(() => sse.close());
         const controller = ctx.narratePipeline;
 
         const inFlightPromise = controller.stepChapter({
             chapterNumber: 1,
             chapterGoal: '测试停机排空'
         });
-        await agentEntered;
+        await agentEntered.promise;
 
         // 发起插件卸载（此时在途任务尚未结束）
         let disposeSettled = false;
@@ -552,10 +642,9 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             controller.stepChapter({ chapterGoal: '不应被接收' })
         ).rejects.toBeInstanceOf(AdmissionClosedError);
 
-        // 2. 超过 shutdownTimeoutMs=40ms 后，应发出 halt:waiting 但尚未释放路由与服务
-        await new Promise((r) => setTimeout(r, 80));
+        // 2. 确定性等待 halt:waiting SSE 事件到达，验证尚未释放路由与服务
+        await sse.waitForEvent((e) => e.event === 'halt:waiting');
         expect(disposeSettled).toBe(false);
-        expect(sse.events.some((e) => e.event === 'halt:waiting')).toBe(true);
         expect(web.routes.has('exact:/api/narrate/status')).toBe(true);
         expect(ctx.reflect.get('narratePipeline', false) === controller).toBe(true);
 
@@ -567,10 +656,375 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         expect(ctx.reflect.get('narratePipeline', false)).toBeUndefined();
         expect(web.routes.size).toBe(0);
         await expect(stat(join(bookRoot, '.ops/tx.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
 
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
+    it('P0-2 & P1-4: 异步卸载期间安全取消 Skill 注册且先排空运行再释放 RoleRunner 作用域，零 CordisError 或 UnhandledRejection', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'async-skill-dispose-race');
+        const unhandledErrors: unknown[] = [];
+        const onUnhandled = (reason: unknown) => {
+            unhandledErrors.push(reason);
+        };
+        process.on('unhandledRejection', onUnhandled);
+        registerCleanup(() => {
+            process.off('unhandledRejection', onUnhandled);
+        });
+
+        // 1. 使用 Deferred 挂起 registerPresetBootSkill 的 skills.get，并在异步间隙置位 disposed
+        const getGate = createDeferred<undefined>();
+        const getEntered = createDeferred<void>();
+        let registerCalls = 0;
+        const mockSkills = {
+            async get() {
+                getEntered.resolve();
+                return await getGate.promise;
+            },
+            register() {
+                registerCalls += 1;
+                return () => {};
+            }
+        };
+
+        let disposedFlag = false;
+        const regPromise = registerPresetBootSkill(
+            mockSkills,
+            new URL('../../../presets/dsh-preset-narrateos', import.meta.url).pathname,
+            { isDisposed: () => disposedFlag }
+        );
+        await getEntered.promise;
+        disposedFlag = true;
+        getGate.resolve(undefined);
+        const disposer = await regPromise;
+        expect(typeof disposer).toBe('function');
+        expect(registerCalls).toBe(0);
+
+        // 2. 在真实 Cordis 中挂起 skills.get 并在期间执行 pipeFiber.dispose()，同时检验 RoleRunner 卸载顺序
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const cordisSkillGetEntered = createDeferred<void>();
+        const cordisSkillGetGate = createDeferred<undefined>();
+        let cordisSkillRegisterCount = 0;
+        ctx.provide('skills', {
+            async get() {
+                cordisSkillGetEntered.resolve();
+                return await cordisSkillGetGate.promise;
+            },
+            register() {
+                cordisSkillRegisterCount += 1;
+                return () => {};
+            }
+        } as never);
+
+        const runnerEntered = createDeferred<void>();
+        const runnerRelease = createDeferred<void>();
+        let sessionEventSeenBeforeTeardown = false;
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ sessionId, tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    runnerEntered.resolve();
+                    await runnerRelease.promise;
+                    // 在 shutdown 排空期间发送 assistant/message 验证 runnerFiber 的 session/event 监听尚未被提前摘除
+                    ctx.emit('session/event' as never, { id: sessionId } as never, {
+                        type: 'assistant/message',
+                        data: { usage: { inputTokens: 15, outputTokens: 5 } }
+                    } as never);
+                    sessionEventSeenBeforeTeardown = true;
+                }
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await cordisSkillGetEntered.promise;
+        const runPromise = ctx.narratePipeline.roleRunner.runMultiTurn({
+            roleId: 'librarian',
+            stage: 'LIBRARIAN',
+            bookRoot,
+            taskPrompt: '排空顺序测试'
+        });
+        await runnerEntered.promise;
+
+        // 卸载过程中挂起的 skills.get 仍未完成，且 RoleRunner 仍处于活跃态
+        const disposePromise = pipeFiber.dispose();
+        cordisSkillGetGate.resolve(undefined);
+        runnerRelease.resolve();
+
+        const [runResult] = await Promise.all([runPromise, disposePromise]);
+        expect(sessionEventSeenBeforeTeardown).toBe(true);
+        expect(runResult.usage.inputTokens).toBe(15);
+        expect(cordisSkillRegisterCount).toBe(0);
+        expect(unhandledErrors).toEqual([]);
+    });
+
+    it('P1-5 & P1-8 & P2-2: 磁盘 tool/call+tool/result 回放、信号消费水位持久化防撤回 409、bootBook 切书互斥与路由校验', async () => {
+        const bookA = await createGitBookWorkspace(tempDirs, 'runtime-hardening-a');
+        const bookB = await createGitBookWorkspace(tempDirs, 'runtime-hardening-b');
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-runtime-books-'));
+        tempDirs.push(booksRoot);
+
+        // 预先写入真实 DSH tool/call + tool/result 落盘格式到 .ops/session_logs/
+        const rawSessionId = 'narrate-librarian-replay-1';
+        await mkdir(join(bookA, '.ops/session_logs'), { recursive: true });
+        await writeFile(
+            join(bookA, '.ops/runs.jsonl'),
+            `${JSON.stringify({
+                runId: 'run-replay-1',
+                chapter: 1,
+                stage: 'LIBRARIAN',
+                role: 'librarian',
+                sessionId: rawSessionId,
+                status: 'completed',
+                startedAt: '2026-11-17T00:00:00.000Z',
+                finishedAt: '2026-11-17T00:00:01.000Z'
+            })}\n`,
+            'utf8'
+        );
+        await writeFile(
+            join(bookA, '.ops/session_logs', `${rawSessionId}.json`),
+            JSON.stringify([
+                {
+                    seq: 0,
+                    type: 'tool/call',
+                    data: {
+                        turn: 1,
+                        step: 1,
+                        callId: 'call-99',
+                        name: 'book_read',
+                        arguments: '{"path":"world/world_state.md"}'
+                    }
+                },
+                {
+                    seq: 1,
+                    type: 'tool/result',
+                    data: {
+                        turn: 1,
+                        step: 1,
+                        message: {
+                            id: 'msg-tool-1',
+                            role: 'tool',
+                            toolCallId: 'call-99',
+                            isError: true,
+                            source: { kind: 'tool', callId: 'call-99' },
+                            content: [{ type: 'text', text: 'PathFence blocked' }]
+                        }
+                    }
+                }
+            ]),
+            'utf8'
+        );
+
+        const ctx1 = new Context();
+        const promptFiber1 = await ctx1.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber1.dispose());
+        const toolsFiber1 = await ctx1.plugin(ToolsService);
+        registerCleanup(() => toolsFiber1.dispose());
+        const storeFiber1 = await ctx1.plugin(bookStorePlugin, { bookRoot: bookA, booksRoot });
+        registerCleanup(() => storeFiber1.dispose());
+        const bookToolsFiber1 = await ctx1.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber1.dispose());
+        const web1 = createMockWebServer(ctx1);
+
+        await createHeadlessMockServices(ctx1, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '水位测试',
+                        target_word_count: 1600,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '账目对不上',
+                        scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                        outline_text: '沈默核对码头账簿。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成核对。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('<blocking>码头</blocking>\n\n沈默合上账册。')
+        });
+
+        const pipeFiber1 = await ctx1.plugin(pipelinePlugin, { booksRoot, heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber1.dispose());
+
+        // 1. 验证 P1-5 磁盘 tool/call + tool/result 回放
+        const replayHttp = await web1.invoke(
+            'GET',
+            `/api/narrate/runs/detail?sessionId=${encodeURIComponent(rawSessionId)}`
+        );
+        expect(replayHttp.statusCode).toBe(200);
+        const replayEvents = replayHttp.json['events'] as Array<{
+            kind: string;
+            toolName?: string;
+            callId?: string;
+            status?: string;
+            text?: string;
+        }>;
+        expect(replayEvents).toHaveLength(2);
+        expect(replayEvents[1]).toMatchObject({
+            kind: 'tool-result',
+            toolName: 'book_read',
+            callId: 'call-99',
+            status: 'error',
+            text: 'PathFence blocked'
+        });
+
+        // 2. 验证 P2-2 routes.ts 参数校验与 halt 损坏 JSON 容错
+        await writeFile(join(bookA, '.ops/safe_halt.json'), '{broken-json', 'utf8');
+        const haltViewRes = await web1.invoke('GET', '/api/narrate/views?kind=halt');
+        expect(haltViewRes.statusCode).toBe(200);
+        expect((haltViewRes.json['safeHalt'] as { malformed?: boolean }).malformed).toBe(true);
+
+        const badParallelJson = await web1.invoke('POST', '/api/narrate/parallel/fork', 'not-json');
+        expect(badParallelJson.statusCode).toBe(400);
+        await web1.invoke('POST', '/api/narrate/parallel/fork', { windowId: 'win-conflict' });
+        const conflictParallel = await web1.invoke('POST', '/api/narrate/parallel/fork', {
+            windowId: 'win-conflict-2'
+        });
+        expect(conflictParallel.statusCode).toBe(409);
+        await web1.invoke('POST', '/api/narrate/parallel/merge', { windowId: 'win-conflict' });
+
+        const badModeStep = await web1.invoke('POST', '/api/narrate/step', {
+            chapterGoal: '测试',
+            timelineMode: 'INVALID_MODE'
+        });
+        expect(badModeStep.statusCode).toBe(400);
+        const badChapterStep = await web1.invoke('POST', '/api/narrate/step', {
+            chapterGoal: '测试',
+            chapterNumber: -1
+        });
+        expect(badChapterStep.statusCode).toBe(400);
+
+        // 3. 验证 P1-8 单步消费信号 + 控制器重启水位保持 + 拒绝撤回已消费信号 (409)
+        const sigRes = await web1.invoke('POST', '/api/narrate/signals', {
+            type: 'DIRECTOR_NOTE',
+            reason: '首章加重雾夜细节'
+        });
+        expect(sigRes.statusCode).toBe(201);
+        const sigCreatedAt = (sigRes.json['signal'] as { created_at: string }).created_at;
+
+        const stepRes = await web1.invoke('POST', '/api/narrate/step', {
+            chapterGoal: '推进第一章'
+        });
+        expect(stepRes.statusCode).toBe(200);
+        expect(await ctx1.narratePipeline.countPendingSignals()).toBe(0);
+
+        // 停机后（webFiber 仍在挂载期间）SSE /api/narrate/events 应拒绝连接并返回 503
+        await ctx1.narratePipeline.shutdown();
+        const closedSse = await web1.openSse();
+        registerCleanup(() => closedSse.close());
+        expect(closedSse.statusCode).toBe(503);
+        await pipeFiber1.dispose();
+        await bookToolsFiber1.dispose();
+        await storeFiber1.dispose();
+        await toolsFiber1.dispose();
+        await promptFiber1.dispose();
+
+        // 重启新控制器实例，验证信号消费水位从 .ops/signals_cursor.json 恢复且拒绝撤回
+        const ctx2 = new Context();
+        const promptFiber2 = await ctx2.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber2.dispose());
+        const toolsFiber2 = await ctx2.plugin(ToolsService);
+        registerCleanup(() => toolsFiber2.dispose());
+        const storeFiber2 = await ctx2.plugin(bookStorePlugin, { bookRoot: bookA, booksRoot });
+        registerCleanup(() => storeFiber2.dispose());
+        const bookToolsFiber2 = await ctx2.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber2.dispose());
+        const web2 = createMockWebServer(ctx2);
+
+        const bootEntered = createDeferred<void>();
+        const bootRelease = createDeferred<void>();
+        await createHeadlessMockServices(ctx2, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_boot_bundle')) {
+                    bootEntered.resolve();
+                    await bootRelease.promise;
+                    await execTool('yield_boot_bundle', {
+                        world_summary: '冬夜港口货栈查账。',
+                        static_base_and_voice: '第三人称客观视角，短句白描。',
+                        current_arc_envelope: '三号码头夜班清点提货单。',
+                        stage_ceiling: '第一卷暂不揭露幕后总签批人。',
+                        opening_sequence_beats: [
+                            { craft_focus: '风灯与旧箱', clue_budget: '三号仓编号', completion_sign: '发现缺页' },
+                            { craft_focus: '交接对白', clue_budget: '夜班印章', completion_sign: '确认改签' },
+                            { craft_focus: '拖轮离港', clue_budget: '船号尾数', completion_sign: '锁定去向' }
+                        ],
+                        l1_volumes_markdown: '# L1\n\n- vol_01: 潮汐旧账',
+                        entities: [
+                            {
+                                entityId: 'char_shen',
+                                canonicalName: '沈默',
+                                innateLocks: [{ visibility: 'PUBLIC', text: '左手旧疤' }],
+                                acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '三号仓' }],
+                                irreversibleTrajectory: [{ storyDay: 0, text: '赴码头查账' }],
+                                recentBuffer: []
+                            }
+                        ]
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const pipeFiber2 = await ctx2.plugin(pipelinePlugin, { booksRoot, heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber2.dispose());
+
+        expect(await ctx2.narratePipeline.countPendingSignals()).toBe(0);
+        const delRes = await web2.invoke('DELETE', '/api/narrate/signals/delete', {
+            created_at: sigCreatedAt,
+            reason: '首章加重雾夜细节'
+        });
+        expect(delRes.statusCode).toBe(409);
+
+        // 4. 验证 P2-2 bootBook 全程处于 BOOTING 排他保护下，并发 switchBook 返回 409
+        const bootPromise = ctx2.narratePipeline.bootBook({
+            slug: 'boot-mutex-book',
+            title: '并发互斥测试',
+            povCharacter: 'char_shen',
+            mode: 'original',
+            premiseOrSeed: '港口夜查旧账'
+        });
+        await bootEntered.promise;
+        await expect(ctx2.narratePipeline.switchBook(bookB)).rejects.toBeInstanceOf(
+            BookSwitchConflictError
+        );
+        bootRelease.resolve();
+        const booted = await bootPromise;
+        expect(ctx2.narrateStore.bookRoot).toBe(booted.bookRoot);
     });
 });

@@ -83,6 +83,15 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
     return parsed as Record<string, unknown>;
 }
 
+function safeParseJson(raw: string | null): unknown {
+    if (raw === null || raw.trim().length === 0) return null;
+    try {
+        return JSON.parse(raw) as unknown;
+    } catch {
+        return { malformed: true, raw };
+    }
+}
+
 function parseJsonLines(raw: string | null): unknown[] {
     if (raw === null) return [];
     const results: unknown[] = [];
@@ -538,10 +547,8 @@ export function registerNarrateRoutes(
                     );
                     sendJson(res, 200, {
                         kind: 'halt',
-                        safeHalt: safeHaltRaw ? (JSON.parse(safeHaltRaw) as unknown) : null,
-                        quarantineReport: quarantineRaw
-                            ? (JSON.parse(quarantineRaw) as unknown)
-                            : null
+                        safeHalt: safeParseJson(safeHaltRaw),
+                        quarantineReport: safeParseJson(quarantineRaw)
                     });
                     return;
                 }
@@ -565,20 +572,32 @@ export function registerNarrateRoutes(
         action: 'fork' | 'merge'
     ) => {
         if (!assertMethod(req, res, 'POST')) return;
+        let body: Record<string, unknown>;
         try {
-            const body = await readJsonBody(req);
-            const windowId = body['windowId'];
-            if (typeof windowId !== 'string' || !SLUG_RE.test(windowId)) {
-                sendJson(res, 400, { error: '需要合法 windowId' });
-                return;
-            }
+            body = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        const windowId = body['windowId'];
+        if (typeof windowId !== 'string' || !SLUG_RE.test(windowId)) {
+            sendJson(res, 400, { error: '需要合法 windowId' });
+            return;
+        }
+
+        try {
             const result =
                 action === 'fork'
                     ? await controller.forkParallelWindow({ windowId })
                     : await controller.mergeParallelWindow({ windowId });
             sendJson(res, 200, result);
         } catch (err) {
-            if (err instanceof AdmissionClosedError) {
+            if (
+                err instanceof AdmissionClosedError ||
+                err instanceof PathValidationError ||
+                err instanceof NotFoundError
+            ) {
                 sendErrorResponse(res, err);
                 return;
             }
@@ -606,15 +625,28 @@ export function registerNarrateRoutes(
         const stepOptions: StepChapterOptions = {
             chapterGoal: body['chapterGoal']
         };
-        if (typeof body['chapterNumber'] === 'number') {
-            stepOptions.chapterNumber = body['chapterNumber'];
+        if (body['chapterNumber'] !== undefined) {
+            const chNum = body['chapterNumber'];
+            if (
+                typeof chNum !== 'number' ||
+                !Number.isInteger(chNum) ||
+                chNum <= 0 ||
+                chNum > 9999
+            ) {
+                sendJson(res, 400, { error: 'chapterNumber 必须为 1 到 9999 的正整数' });
+                return;
+            }
+            stepOptions.chapterNumber = chNum;
         }
-        if (
-            body['timelineMode'] === 'MAINLINE' ||
-            body['timelineMode'] === 'PARALLEL' ||
-            body['timelineMode'] === 'FLASHBACK'
-        ) {
-            stepOptions.timelineMode = body['timelineMode'];
+        if (body['timelineMode'] !== undefined) {
+            const mode = body['timelineMode'];
+            if (mode !== 'MAINLINE' && mode !== 'PARALLEL' && mode !== 'FLASHBACK') {
+                sendJson(res, 400, {
+                    error: 'timelineMode 必须为 MAINLINE | PARALLEL | FLASHBACK'
+                });
+                return;
+            }
+            stepOptions.timelineMode = mode;
         }
         if (typeof body['parallelWindowId'] === 'string') {
             stepOptions.parallelWindowId = body['parallelWindowId'];
@@ -622,8 +654,13 @@ export function registerNarrateRoutes(
         if (typeof body['parallelBranchId'] === 'string') {
             stepOptions.parallelBranchId = body['parallelBranchId'];
         }
-        if (typeof body['targetDay'] === 'number') {
-            stepOptions.targetDay = body['targetDay'];
+        if (body['targetDay'] !== undefined) {
+            const targetDay = body['targetDay'];
+            if (typeof targetDay !== 'number' || !Number.isInteger(targetDay)) {
+                sendJson(res, 400, { error: 'targetDay 必须为整数' });
+                return;
+            }
+            stepOptions.targetDay = targetDay;
         }
         if (Array.isArray(body['povCharIds'])) {
             stepOptions.povCharIds = body['povCharIds'].filter(
@@ -797,6 +834,10 @@ export function registerNarrateRoutes(
 
     const handleEvents = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'GET')) return;
+        if (controller.isAdmissionClosed) {
+            sendErrorResponse(res, new AdmissionClosedError());
+            return;
+        }
         res.statusCode = 200;
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
         res.setHeader('Cache-Control', 'no-cache, no-transform');

@@ -3,7 +3,7 @@ import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { AgentHandle } from '@deepseek-ai/dsh-agent';
-import { ReasoningEffortId, type UserMessage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
@@ -12,11 +12,14 @@ import {
     type BookConfig,
     type CleanroomRequest,
     type CleanroomResponse,
+    type EntityProfile,
     type NarrationSubjectivity,
     type NarrateStoreService,
-    type TimelineMode
+    type TimelineMode,
+    type TokenUsage
 } from '@narrateos/dsh-book-store';
 import type { BuiltRoleToolSet, NarrateToolsService } from '@narrateos/dsh-book-tools';
+import { addUsage, createEmptyUsage } from '../pipeline/helpers.js';
 import { type LoadedRoleConfig, type RoleLoader } from '../roles/role-loader.js';
 import {
     ExtendedRunRecordSchema,
@@ -36,16 +39,6 @@ declare module '@deepseek-ai/dsh-llm' {
         };
     }
 }
-
-const DREAMER_ALLOWED_OPS_READ = [
-    '.ops/voice_samples.yaml',
-    '.ops/signals.jsonl',
-    '.ops/telemetry.jsonl'
-];
-const DREAMER_ALLOWED_OPS_WRITE = [
-    '.ops/voice_samples.yaml',
-    '.ops/signals.jsonl'
-];
 
 /** 多轮受控工种调用选项 */
 export interface RunMultiTurnOptions {
@@ -67,10 +60,13 @@ export interface RunMultiTurnOptions {
     chapterGoal?: string | undefined;
     draftText?: string | undefined;
     draftPath?: string | undefined;
+    chapterNumberForTools?: number | undefined;
     timelineMode?: TimelineMode | undefined;
     allowInnateMutation?: boolean | undefined;
     deferCommit?: boolean | undefined;
     applyOptions?: ApplyStatePatchOptions | undefined;
+    visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
+    reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
     narrationSubjectivity?: NarrationSubjectivity | undefined;
     signal?: AbortSignal | undefined;
     onStageSession?: ((event: StageSessionEvent) => void) | undefined;
@@ -83,6 +79,7 @@ export interface RunMultiTurnResult<TYield = unknown> {
     sessionId: string;
     roleConfig: LoadedRoleConfig;
     yieldResult: TYield;
+    usage: TokenUsage;
 }
 
 /** 净室单轮执行选项 */
@@ -124,7 +121,7 @@ async function appendExtendedRunRecord(
  * - 净室单轮工种 (`cleanroom: true`)：零工具、零 sessionId 直调 DshLlmAdapter (ctx.llm.stream)。
  */
 export class RoleRunner {
-    private readonly ctx: Context;
+    private execCtx: Context;
     private readonly storeService: NarrateStoreService;
     private readonly toolsService: NarrateToolsService;
     private readonly roleLoader: RoleLoader;
@@ -136,13 +133,18 @@ export class RoleRunner {
     private readonly liveSessionDetails = new Map<string, StageSessionDetail>();
 
     constructor(deps: RoleRunnerDeps) {
-        this.ctx = deps.ctx;
+        this.execCtx = deps.ctx;
         this.storeService = deps.storeService;
         this.toolsService = deps.toolsService;
         this.roleLoader = deps.roleLoader;
         this.llmAdapter = deps.llmAdapter;
         this.poolRouting = deps.poolRouting;
         this.defaultOnStageEvent = deps.onStageEvent;
+    }
+
+    /** 绑定独立的 Cordis 子执行上下文（隔离 session/event 监听与 agents.create 作用域） */
+    setExecutionContext(execCtx: Context): void {
+        this.execCtx = execCtx;
     }
 
     /** 活跃受控 Agent 数量 */
@@ -246,14 +248,15 @@ export class RoleRunner {
         };
 
         let disposeSessionEventListener: (() => void) | undefined;
+        const multiTurnUsage = createEmptyUsage();
 
         try {
             const allowedOpsPaths =
                 options.allowedOpsPaths ??
-                (options.roleId === 'dreamer' ? DREAMER_ALLOWED_OPS_READ : undefined);
+                (roleCfg.allowedOpsRead.length > 0 ? roleCfg.allowedOpsRead : undefined);
             const allowedOpsWritePaths =
                 options.allowedOpsWritePaths ??
-                (options.roleId === 'dreamer' ? DREAMER_ALLOWED_OPS_WRITE : undefined);
+                (roleCfg.allowedOpsWrite.length > 0 ? roleCfg.allowedOpsWrite : undefined);
 
             toolset = this.toolsService.buildRoleTools({
                 runId,
@@ -273,6 +276,8 @@ export class RoleRunner {
                 allowInnateMutation: options.allowInnateMutation,
                 deferCommit: options.deferCommit,
                 applyOptions: options.applyOptions,
+                visibleEntities: options.visibleEntities,
+                reachableIds: options.reachableIds,
                 narrationSubjectivity: options.narrationSubjectivity
             });
 
@@ -304,30 +309,22 @@ export class RoleRunner {
                 // 避免 SSE 回调异常中断执行
             }
 
-            // 若宿主挂载了 DSH session 事件总线，则订阅本 sessionId 的持久化事件
-            if (typeof this.ctx.on === 'function') {
-                disposeSessionEventListener = this.ctx.on('session/event', (session, ev) => {
+            // 监听本 sessionId 的 assistant/message 汇总多轮 Token 用量；
+            // 工具调用真相源统一由下方的 observedTool 捕获，避免与 tool-call-delta / session/event 三重重复。
+            if (typeof this.execCtx.on === 'function') {
+                disposeSessionEventListener = this.execCtx.on('session/event', (session, ev) => {
                     if (String(session.id) !== sessionIdStr) return;
-                    const ts = new Date().toISOString();
-                    if (ev.type === 'tool/call') {
-                        const data = ev.data as { callId?: unknown; name?: unknown; arguments?: unknown };
-                        recordSessionEvent({
-                            timestamp: ts,
-                            kind: 'tool-call',
-                            toolName: String(data.name ?? ''),
-                            callId: String(data.callId ?? ''),
-                            text: typeof data.arguments === 'string' ? data.arguments : '',
-                            status: 'calling'
-                        });
-                    } else if (ev.type === 'tool/result') {
-                        const data = ev.data as { callId?: unknown; name?: unknown; isError?: unknown };
-                        recordSessionEvent({
-                            timestamp: ts,
-                            kind: 'tool-result',
-                            toolName: String(data.name ?? ''),
-                            callId: String(data.callId ?? ''),
-                            status: data.isError ? 'error' : 'completed'
-                        });
+                    if (ev.type === 'assistant/message') {
+                        const msgUsage = (ev.data as { usage?: Partial<TokenUsage> } | undefined)
+                            ?.usage;
+                        if (msgUsage) {
+                            addUsage(multiTurnUsage, {
+                                inputTokens: msgUsage.inputTokens ?? 0,
+                                cacheReadTokens: msgUsage.cacheReadTokens ?? 0,
+                                cacheWriteTokens: msgUsage.cacheWriteTokens ?? 0,
+                                outputTokens: msgUsage.outputTokens ?? 0
+                            });
+                        }
                     }
                 });
             }
@@ -335,7 +332,7 @@ export class RoleRunner {
             const route = resolvePoolRoute(this.poolRouting, roleCfg.pool, options.bookConfig);
             const builtToolset = toolset;
 
-            handle = await this.ctx.agents.create({
+            handle = await this.execCtx.agents.create({
                 sessionId,
                 meta: {
                     origin: 'subagent',
@@ -398,17 +395,27 @@ export class RoleRunner {
                         }
                     }
 
-                    // 挂载外部化角色系统提示词（complete: true 独立隔离）
+                    // 挂载外部化角色系统提示词（complete: true 独立隔离，interpolate: false 保留原文花括号）
                     if (agentCtx.systemPrompt) {
                         agentCtx.systemPrompt.section({
                             name: 'narrateos-role',
                             order: 0,
                             text: roleCfg.promptText,
+                            interpolate: false,
                             complete: true
                         });
                     }
 
-                    // 订阅实时思考/文本流与状态变更，透传给 SSE stage:event
+                    // 透传外部化角色配置的采样温度
+                    agentCtx.on('agent/request', async (_payload, next) => {
+                        const base = await next();
+                        return {
+                            ...base,
+                            temperature: roleCfg.temperature
+                        };
+                    });
+
+                    // 订阅实时思考/文本流与状态变更，透传给 SSE stage:event（工具调用统一由 observedTool 记录）
                     agentCtx.on('agent/assistant-stream', ({ frame }) => {
                         if (frame.type !== 'chunk') return;
                         const ts = new Date().toISOString();
@@ -423,14 +430,6 @@ export class RoleRunner {
                                 timestamp: ts,
                                 kind: 'text',
                                 text: frame.chunk.text
-                            });
-                        } else if (frame.chunk.type === 'tool-call-delta' && frame.chunk.name) {
-                            recordSessionEvent({
-                                timestamp: ts,
-                                kind: 'tool-call',
-                                toolName: frame.chunk.name,
-                                callId: String(frame.chunk.id),
-                                status: 'calling'
                             });
                         }
                     });
@@ -481,10 +480,10 @@ export class RoleRunner {
                 }
             }
 
-            const promptMsg = {
+            const promptMsg = createUserMessage({
                 content: [{ type: 'text', text: options.taskPrompt }],
                 source: { kind: 'narrateos-pipeline' }
-            } as unknown as UserMessage;
+            });
             handle.agent.followup(promptMsg);
 
             await handle.agent.whenIdle();
@@ -526,7 +525,8 @@ export class RoleRunner {
                 runId,
                 sessionId: sessionIdStr,
                 roleConfig: roleCfg,
-                yieldResult: yieldResult as TYield
+                yieldResult: yieldResult as TYield,
+                usage: multiTurnUsage
             };
         } catch (err: unknown) {
             sessionDetail.status = 'failed';
@@ -588,6 +588,9 @@ export class RoleRunner {
     }> {
         const roleId = options.roleId ?? 'writer';
         const roleCfg = await this.roleLoader.loadRoleConfig(roleId, options.bookRoot);
+        if (!roleCfg.cleanroom) {
+            throw new Error(`工种 ${roleId} 配置为 cleanroom=false，禁止走净室单轮路径`);
+        }
 
         const req: CleanroomRequest = {
             pool: options.request.pool ?? roleCfg.pool,

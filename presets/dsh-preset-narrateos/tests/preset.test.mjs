@@ -307,13 +307,14 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
     }
 });
 
-test('全部 7 个外部化角色 YAML 与正向/受控系统提示词校验通过', () => {
+test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通过', () => {
     const rolesDir = path.join(PRESET_ROOT, 'roles');
     const expectedRoles = {
         'boot-compiler': { pool: 'strong_creative', cleanroom: false, yieldTool: 'yield_boot_bundle', tools: [] },
         librarian: { pool: 'fast_retrieval', cleanroom: false, yieldTool: 'yield_context_pack', tools: ['book_glob', 'book_grep', 'book_read'] },
         planner: { pool: 'strong_creative', cleanroom: false, yieldTool: 'yield_outline', tools: ['book_read', 'book_grep'] },
         writer: { pool: 'strong_creative', cleanroom: true, yieldTool: null, tools: [] },
+        patch: { pool: 'strong_creative', cleanroom: true, yieldTool: null, tools: [] },
         'fact-checker': { pool: 'audit', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
         extractor: { pool: 'fast_retrieval', cleanroom: false, yieldTool: 'yield_state_patch', tools: ['book_read', 'book_grep'] },
         dreamer: { pool: 'strong_creative', cleanroom: false, yieldTool: 'yield_dream_commit', tools: ['book_read', 'book_grep', 'book_glob', 'book_edit'] }
@@ -341,11 +342,13 @@ test('全部 7 个外部化角色 YAML 与正向/受控系统提示词校验通�
         assert.ok(promptText.length > 100, `角色 ${roleId} 提示词过短或为空`);
     }
 
-    // 额外校验写手净室正向表达约束（零否定禁令词、零粉红大象反噬样例）
-    const writerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/writer.md'), 'utf8');
-    const forbiddenWriterTokens = ['禁止', '严禁', '不要', '不得', '切忌', '指节', '喉结', '瞳孔', '睫毛', '一丝', '一抹'];
-    for (const token of forbiddenWriterTokens) {
-        assert.ok(!writerPrompt.includes(token), `写手提示词不应包含否定禁令或反噬套词 "${token}"`);
+    // 额外校验写手与局部修补净室正向表达约束（零否定禁令词、零粉红大象反噬样例）
+    for (const promptRel of ['prompts/writer.md', 'prompts/patch.md']) {
+        const cleanroomPrompt = fs.readFileSync(path.join(rolesDir, promptRel), 'utf8');
+        const forbiddenWriterTokens = ['禁止', '严禁', '不要', '不得', '切忌', '指节', '喉结', '瞳孔', '睫毛', '一丝', '一抹'];
+        for (const token of forbiddenWriterTokens) {
+            assert.ok(!cleanroomPrompt.includes(token), `${promptRel} 提示词不应包含否定禁令或反噬套词 "${token}"`);
+        }
     }
 });
 

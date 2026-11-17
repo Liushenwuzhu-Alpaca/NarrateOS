@@ -11,4 +11,11 @@ tools:
     - book_grep
     - book_glob
     - book_edit
+allowedOpsRead:
+    - .ops/voice_samples.yaml
+    - .ops/signals.jsonl
+    - .ops/telemetry.jsonl
+allowedOpsWrite:
+    - .ops/voice_samples.yaml
+    - .ops/signals.jsonl
 yieldTool: yield_dream_commit

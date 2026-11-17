@@ -31,14 +31,40 @@ export interface YieldStatePatchOptions {
     allowInnateMutation?: boolean | undefined;
     deferCommit?: boolean | undefined;
     applyOptions?: ApplyStatePatchOptions | undefined;
+    /** 可选内存可见实体快照视图（如 PARALLEL 分支已暂存但未落盘的实体） */
+    visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
+    /** 可选额外可达外键集合（如 PARALLEL 分支新增实体或章节键） */
+    reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
     onYield?: ((result: YieldStatePatchResult) => void) | undefined;
+}
+
+function toVisibleEntityMap(
+    input: YieldStatePatchOptions['visibleEntities']
+): ReadonlyMap<string, EntityProfile> {
+    if (!input) {
+        return new Map();
+    }
+    if (input instanceof Map) {
+        return input;
+    }
+    return new Map(Object.entries(input as Record<string, EntityProfile>));
 }
 
 async function buildReachableSetForValidation(
     bookRoot: string,
-    newEntityIds: Set<string>
+    newEntityIds: Set<string>,
+    visibleEntityMap: ReadonlyMap<string, EntityProfile>,
+    extraReachableIds?: ReadonlySet<string> | readonly string[]
 ): Promise<Set<string>> {
     const keys = new Set<string>(newEntityIds);
+    for (const id of visibleEntityMap.keys()) {
+        keys.add(id);
+    }
+    if (extraReachableIds) {
+        for (const id of extraReachableIds) {
+            keys.add(id);
+        }
+    }
     const collect = async (dirPath: string) => {
         try {
             const files = await readdir(dirPath);
@@ -88,8 +114,11 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
         allowInnateMutation = false,
         deferCommit = false,
         applyOptions,
+        visibleEntities,
+        reachableIds,
         onYield
     } = options;
+    const visibleEntityMap = toVisibleEntityMap(visibleEntities);
 
     return defineTool({
         name: 'yield_state_patch',
@@ -157,19 +186,29 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             const newEntityIds = new Set<string>();
             const existingProfiles = new Map<string, EntityProfile>();
 
-            // 预检新建实体中文 canonical_name 与既有实体 Innate Locks
+            // 预检新建实体中文 canonical_name 与既有实体 Innate Locks（优先结合内存分支可见快照）
             for (const patch of parsed.entity_patches) {
-                const entityPath = join(bookRoot, 'entities', `${patch.entity_id}.md`);
-                let diskRaw: string | null = null;
-                try {
-                    diskRaw = await readFile(entityPath, 'utf8');
-                } catch (err: unknown) {
-                    if ((err as { code?: string }).code !== 'ENOENT') {
-                        throw err;
+                let existing: EntityProfile | null =
+                    existingProfiles.get(patch.entity_id) ??
+                    visibleEntityMap.get(patch.entity_id) ??
+                    null;
+
+                if (!existing) {
+                    const entityPath = join(bookRoot, 'entities', `${patch.entity_id}.md`);
+                    let diskRaw: string | null = null;
+                    try {
+                        diskRaw = await readFile(entityPath, 'utf8');
+                    } catch (err: unknown) {
+                        if ((err as { code?: string }).code !== 'ENOENT') {
+                            throw err;
+                        }
+                    }
+                    if (diskRaw !== null) {
+                        existing = parseEntityMarkdown(diskRaw);
                     }
                 }
 
-                if (diskRaw === null) {
+                if (existing === null) {
                     newEntityIds.add(patch.entity_id);
                     if (!patch.canonical_name || !hasChineseCharacter(patch.canonical_name)) {
                         throw new GateValidationError(
@@ -178,7 +217,6 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                         );
                     }
                 } else {
-                    const existing = parseEntityMarkdown(diskRaw);
                     existingProfiles.set(patch.entity_id, existing);
                     if (
                         !allowInnateMutation &&
@@ -203,7 +241,12 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
 
             if (deferCommit) {
                 // 延迟提交模式：仍须执行 1ms 外键可达性校验以确保零脏数据入库
-                const reachable = await buildReachableSetForValidation(bookRoot, newEntityIds);
+                const reachable = await buildReachableSetForValidation(
+                    bookRoot,
+                    newEntityIds,
+                    visibleEntityMap,
+                    reachableIds
+                );
                 for (const patch of patches) {
                     const serializedPatch = JSON.stringify(patch);
                     assertTextForeignKeys(patch.entity_id, serializedPatch, reachable);

@@ -100,6 +100,22 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
     ctx.effect(function* () {
         yield ctx.provide('narratePipeline', controller);
 
+        // 独立子插件隔离 RoleRunner 动态挂载点（session/event 监听与 agents.create 作用域），
+        // 确保卸载时先由 controller.shutdown() 排空活跃运行，再释放 runnerFiber。
+        const runnerFiber = ctx.plugin({
+            name: 'narrateos-pipeline:runner',
+            apply(runnerCtx) {
+                controller.roleRunner.setExecutionContext(runnerCtx);
+                runnerCtx.effect(
+                    () => () => {
+                        controller.roleRunner.setExecutionContext(ctx);
+                    },
+                    'narrateos-pipeline:runner-scope'
+                );
+            }
+        });
+        yield runnerFiber.dispose;
+
         const webFiber = ctx.inject(['webServer'], (webCtx) => {
             webCtx.effect(
                 () => registerNarrateRoutes(webCtx.webServer, controller),
@@ -119,26 +135,38 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
         const skillFiber = ctx.inject(['skills'], (skillCtx) => {
             let disposed = false;
             let disposeSkill: (() => void) | undefined;
-            void registerPresetBootSkill(skillCtx.skills, controller.roleLoader.presetRoot).then(
-                (fn) => {
-                    if (disposed) {
-                        fn();
-                    } else {
-                        disposeSkill = fn;
-                    }
-                }
-            );
+            const isDisposed = () => disposed || controller.isAdmissionClosed;
+
             skillCtx.effect(
                 () => () => {
                     disposed = true;
                     disposeSkill?.();
+                    disposeSkill = undefined;
                 },
                 'narrateos-pipeline:skills'
             );
+
+            void registerPresetBootSkill(skillCtx.skills, controller.roleLoader.presetRoot, {
+                isDisposed
+            })
+                .then((fn) => {
+                    if (isDisposed()) {
+                        fn();
+                    } else {
+                        disposeSkill = fn;
+                    }
+                })
+                .catch((err: unknown) => {
+                    const logger = (skillCtx as { logger?: { warn?: (msg: string) => void } })
+                        .logger;
+                    logger?.warn?.(
+                        `narrate-boot Skill 异步注册失败（非致命）: ${err instanceof Error ? err.message : String(err)}`
+                    );
+                });
         });
         yield skillFiber.dispose;
 
-        // 最后一个 yield 在 Cordis 反转卸载时最先执行：关闭准入、安全点收束并等待排空后再释放路由与服务
+        // 最后一个 yield 在 Cordis 反转卸载时最先执行：关闭准入、安全点收束并等待排空后再释放各子作用域
         yield () => controller.shutdown();
     }, 'narrateos-pipeline');
 }

@@ -1,11 +1,13 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Context } from '@deepseek-ai/cordis';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import { ToolsService } from '@deepseek-ai/dsh-tools';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
+import { TxLockConflictError } from '@narrateos/dsh-book-store';
 import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from './index.js';
@@ -17,8 +19,23 @@ import {
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
+const cleanupCallbacks: Array<() => Promise<void> | void> = [];
+
+function registerCleanup(fn: () => Promise<void> | void): void {
+    cleanupCallbacks.push(fn);
+}
 
 afterEach(async () => {
+    while (cleanupCallbacks.length > 0) {
+        const fn = cleanupCallbacks.pop();
+        if (fn) {
+            try {
+                await fn();
+            } catch {
+                // 清理期容错
+            }
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -57,9 +74,13 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
 
         let plannerQuotaExceededError: unknown = null;
         const { agentRuns } = await createHeadlessMockServices(ctx, {
@@ -120,7 +141,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         });
 
         // 无 webServer / commands / skills 的无头宿主直接加载 pipeline 插件
-        const pipeFiber = await ctx.plugin(pipelinePlugin);
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
 
         const res = await ctx.narratePipeline.stepChapter({
             chapterGoal: '查验三号码头夜间货单'
@@ -133,13 +155,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const plannerRun = agentRuns.find((r) => r.toolNames.includes('yield_outline'));
         expect(plannerRun).toBeDefined();
         expect(plannerRun?.systemPromptText).toContain('BOOK_OVERRIDE_PROMPT_MARKER');
+        expect(plannerRun?.temperature).toBe(0.4);
         expect(plannerRun?.toolNames).toEqual(['book_read', 'yield_outline']);
-
-        await pipeFiber.dispose();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
     });
 
     it('无头宿主完整跑通 6 阶段 stepChapter（含 Gate Patch、PLAN_CONFLICT 重排 v2、写手净室隔离、.ops/runs.jsonl 与 Voice Harvest）', async () => {
@@ -172,9 +189,13 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
 
         let plannerCallCount = 0;
         let writerCallCount = 0;
@@ -327,7 +348,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             }
         });
 
-        const pipeFiber = await ctx.plugin(pipelinePlugin);
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
 
         const result = await ctx.narratePipeline.stepChapter({
             chapterNumber: 1,
@@ -382,12 +404,6 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         // 5. 验证无残留事务锁
         await expect(stat(join(bookRoot, '.ops/tx.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
-
-        await pipeFiber.dispose();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
     });
 
     it('多轮 Dreaming 启动 Dreamer 多轮读写并在隔离暂存区联动更新脏实体与计划，干净实体 mtime 零变化', async () => {
@@ -471,17 +487,19 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         await execFileAsync('git', ['-C', bookRoot, 'add', '.']);
         await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'chore: add chapters for dreaming']);
 
-        // 将干净实体 mtime 固定为过去时间，验证 Dreaming 全程零读取零修改
+        // 读取干净实体初始 stat（验证 Dreaming 全程零读取零修改且 mtime 不变）
         const cleanPath = join(bookRoot, 'entities/char_clean.md');
-        const fixedPast = new Date('2023-05-01T00:00:00.000Z');
-        await utimes(cleanPath, fixedPast, fixedPast);
         const beforeStat = await stat(cleanPath);
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
 
         let ryowReadResult = '';
         await createHeadlessMockServices(ctx, {
@@ -537,7 +555,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             onLlmStream: () => textToStreamChunks('ok')
         });
 
-        const pipeFiber = await ctx.plugin(pipelinePlugin);
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
 
         const dreamRes = await ctx.narratePipeline.runDreaming({
             currentChapter: 2,
@@ -562,12 +581,6 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         // 验证 runs.jsonl 记录了 Dreamer 会话
         const runs = await ctx.narrateStore.openStore().listRunRecords({ chapter: 2 });
         expect(runs.some((r) => r.role === 'dreamer' && r.status === 'completed')).toBe(true);
-
-        await pipeFiber.dispose();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
     });
 
     it('支持 Sync 手改同步、PARALLEL 分叉合并、advanceVolume 五步换卷与三级跨章自愈', async () => {
@@ -582,9 +595,13 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
 
         await createHeadlessMockServices(ctx, {
             onAgent: async () => {},
@@ -631,7 +648,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             }
         });
 
-        const pipeFiber = await ctx.plugin(pipelinePlugin);
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
 
         // 1. Sync 最新章纯润色
         await writeFile(
@@ -683,11 +701,529 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(volRes.tagName).toBe('arc-seal-vol-01');
         const wsAfter = await ctx.narrateStore.openStore().readWorldState();
         expect(wsAfter.frontmatter.current_volume).toBe(2);
+    });
 
-        await pipeFiber.dispose();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsFiber.dispose();
-        await promptFiber.dispose();
+    it('仅覆写 world/roles/prompts/planner.md（无 planner.yml）时生效，且含 {{mustache}} 文本不抛错并透传 temperature', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'prompt-only-override');
+        await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
+        await writeFile(
+            join(bookRoot, 'world/roles/prompts/planner.md'),
+            '# Prompt-only 覆写\n\nPROMPT_ONLY_MARKER\n保留字面量变量语法：{{unknown_mustache_var}}。\n',
+            'utf8'
+        );
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const { agentRuns } = await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, agentCtx, agent }) => {
+                if (tools.has('yield_context_pack')) {
+                    agentCtx.emit('session/event' as never, agent as never, {} as never);
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '测试覆写',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛留白',
+                        chapter_turn: '账页异常',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }
+                        ],
+                        outline_text: '沈默翻开潮汐账簿。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '测试覆写完成',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks('<blocking>码头</blocking>\n\n沈默合上账册，转身离开。')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const res = await ctx.narratePipeline.stepChapter({ chapterGoal: '检验 prompt-only 覆写' });
+        expect(res.status).toBe('COMMITTED');
+
+        const plannerRun = agentRuns.find((r) => r.toolNames.includes('yield_outline'));
+        expect(plannerRun?.systemPromptText).toContain('PROMPT_ONLY_MARKER');
+        expect(plannerRun?.systemPromptText).toContain('{{unknown_mustache_var}}');
+        expect(plannerRun?.temperature).toBe(0.5);
+    });
+
+    it('非相邻多段局部 Patch 按连续区间分组改写（零重写中间合规段落），并走外部 patch.yml 配置', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'grouped-local-patch');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let writerCount = 0;
+        const patchPrompts: string[] = [];
+        const patchTemperatures: Array<number | undefined> = [];
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '分组修补',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'CLOSURE',
+                        director_rationale: '秘辛',
+                        chapter_turn: '查验货箱',
+                        scene_plan: [
+                            { scene_index: 1, location: '货栈', summary: '清点', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对货箱与账目。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '核对货箱完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                if (opts.system?.includes('局部修补')) {
+                    const userBlock = JSON.stringify(opts.messages);
+                    patchPrompts.push(userBlock);
+                    patchTemperatures.push(opts.temperature);
+                    if (userBlock.includes('第一违规段')) {
+                        return textToStreamChunks('沈默低头核对箱号，在簿子上划了一道斜杠。');
+                    }
+                    return textToStreamChunks('「班次单和船期对不上。」沈默把纸折好塞进口袋。');
+                }
+                writerCount += 1;
+                if (writerCount === 1) {
+                    return textToStreamChunks(
+                        [
+                            '<blocking>货栈</blocking>',
+                            '',
+                            '第一违规段：他心中涌起一股莫名的情绪，指节泛白。',
+                            '',
+                            'MIDDLE_CLEAN_PARAGRAPH: 货栈角落的煤油灯晃了两下，灯油快见底了。',
+                            '',
+                            '第三违规段：他喉结滚动，不由得退后半步。'
+                        ].join('\n')
+                    );
+                }
+                return textToStreamChunks('沈默核对完箱号离开了货栈。');
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const res = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '测试非相邻分组 Patch'
+        });
+
+        expect(res.status).toBe('COMMITTED');
+        expect(res.patchRounds).toBe(1);
+        expect(res.rewriteCount).toBe(0);
+        // 两个不相邻违规段落应触发两次独立局部 Patch，且每次传给 patch 的目标段落都不包含中间合规段落
+        expect(patchPrompts.length).toBe(2);
+        expect(patchTemperatures).toEqual([0.4, 0.4]);
+        for (const p of patchPrompts) {
+            expect(p).not.toContain('第一违规段：他心中涌起一股莫名的情绪，指节泛白。\n\nMIDDLE_CLEAN_PARAGRAPH');
+        }
+        const saved = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(saved).toContain('MIDDLE_CLEAN_PARAGRAPH: 货栈角落的煤油灯晃了两下，灯油快见底了。');
+    });
+
+    it('narration_subjectivity=subjective_first 透传 StaticProseGate 并豁免 subjective_judgment 与 negation_contrast', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'subjective-first');
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const oldCfg = await readFile(cfgPath, 'utf8');
+        await writeFile(
+            cfgPath,
+            oldCfg.replace('narration_subjectivity: objective_third', 'narration_subjectivity: subjective_first'),
+            'utf8'
+        );
+        await execFileAsync('git', ['-C', bookRoot, 'add', 'world/book_config.yaml']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'chore: set subjective_first']);
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '主观叙事测试',
+                        target_word_count: 1600,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'AFTERGLOW',
+                        director_rationale: '秘辛',
+                        chapter_turn: '独白推理',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '盘查', is_spotlight: true }
+                        ],
+                        outline_text: '我站在三号码头看着货栈铁门。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '第一人称独白过审。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks(
+                    [
+                        '<blocking>码头</blocking>',
+                        '',
+                        '在我看来，这批货不是人手不够，而是有人故意压着单子。',
+                        '',
+                        '老实说，港口并非真的封锁，而是风声紧了些。'
+                    ].join('\n')
+                )
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const res = await ctx.narratePipeline.stepChapter({ chapterGoal: '第一人称强主观试写' });
+        expect(res.status).toBe('COMMITTED');
+        expect(res.patchRounds).toBe(0);
+        expect(res.rewriteCount).toBe(0);
+    });
+
+    it('PARALLEL 模式同支线连续两章新建并二次更新同一实体且可合并（deferCommit 快照透传）', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'parallel-branch-entities');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let extractorChapter = 0;
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '支线推进',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '支线线人',
+                        chapter_turn: '陈九在支线露面',
+                        scene_plan: [
+                            { scene_index: 1, location: '外港', summary: '接头', is_spotlight: true }
+                        ],
+                        outline_text: '陈九在支线与沈默接头。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    extractorChapter += 1;
+                    if (extractorChapter === 1) {
+                        await execTool('yield_state_patch', {
+                            entity_patches: [
+                                {
+                                    entity_id: 'char_branch_01',
+                                    canonical_name: '陈九',
+                                    last_seen_ch: 1,
+                                    acquired_state_ops: [
+                                        {
+                                            op: 'upsert_slot',
+                                            slot_key: 'location',
+                                            entry: {
+                                                storyDay: 0,
+                                                chapter: 1,
+                                                visibility: 'PUBLIC',
+                                                text: '外港锚地'
+                                            }
+                                        }
+                                    ]
+                                }
+                            ],
+                            story_day_delta: 0,
+                            chapter_summary: '支线第1章新建实体陈九。',
+                            next_chapter_options: ['继续']
+                        });
+                    } else {
+                        // 第 2 章不再传入 canonical_name，应通过 visibleEntities 识别为已有支线实体
+                        await execTool('yield_state_patch', {
+                            entity_patches: [
+                                {
+                                    entity_id: 'char_branch_01',
+                                    last_seen_ch: 2,
+                                    acquired_state_ops: [
+                                        {
+                                            op: 'upsert_slot',
+                                            slot_key: 'location',
+                                            entry: {
+                                                storyDay: 0,
+                                                chapter: 2,
+                                                visibility: 'PUBLIC',
+                                                text: '转赴二号泊位接应 char_001'
+                                            }
+                                        }
+                                    ]
+                                }
+                            ],
+                            story_day_delta: 0,
+                            chapter_summary: '支线第2章二次更新陈九位置。',
+                            next_chapter_options: ['合并窗口']
+                        });
+                    }
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks('<blocking>外港</blocking>\n\n陈九提灯走过泊位木桥。')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await ctx.narratePipeline.forkParallelWindow({ windowId: 'win-branch' });
+
+        const step1 = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '支线1章新建陈九',
+            timelineMode: 'PARALLEL',
+            parallelWindowId: 'win-branch',
+            parallelBranchId: 'branch-a'
+        });
+        expect(step1.status).toBe('COMMITTED');
+        expect(existsSync(join(bookRoot, 'entities/char_branch_01.md'))).toBe(false);
+
+        const step2 = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 2,
+            chapterGoal: '支线2章更新陈九',
+            timelineMode: 'PARALLEL',
+            parallelWindowId: 'win-branch',
+            parallelBranchId: 'branch-a'
+        });
+        expect(step2.status).toBe('COMMITTED');
+
+        const mergeRes = await ctx.narratePipeline.mergeParallelWindow({ windowId: 'win-branch' });
+        expect(mergeRes.updatedEntities).toContain('char_branch_01');
+        const mergedEntity = await readFile(join(bookRoot, 'entities/char_branch_01.md'), 'utf8');
+        expect(mergedEntity).toContain('陈九');
+        expect(mergedEntity).toContain('转赴二号泊位接应 char_001');
+    });
+
+    it('3 级跨章自愈按 commit log 精准回滚多提交历史并清理未跟踪垃圾文件（保留 .ops 与持锁互斥）', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'heal-multicommit-rollback');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async () => {},
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const store = ctx.narrateStore.openStore();
+        // 构建 ch1 (feat+state), ch2 (feat+state), ch3 (feat+state) 共 6 个事务提交
+        for (const [ch, text] of [
+            [1, '# 第一章\n\n沈默右手戴着铁表。\n'],
+            [2, '# 第二章\n\n沈默左手戴着金表，从此换了习惯。\n'],
+            [3, '# 第三章\n\n众人盯着沈默的金表看。\n']
+        ] as const) {
+            await store.beginDraft(ch);
+            await store.commitDraft(ch, text);
+            await store.applyStatePatch(ch, []);
+        }
+
+        // 制造未跟踪垃圾文件与 .ops/runs.jsonl 保护文件
+        await writeFile(join(bookRoot, 'manuscripts/ch_9999_orphan.md'), 'orphan', 'utf8');
+        await writeFile(join(bookRoot, '.ops/runs.jsonl'), '{"runId":"keep"}\n', 'utf8');
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        let lockHeldInsideRerun = false;
+        const healRes = await ctx.narratePipeline.healCrossChapterConflicts(
+            [
+                {
+                    conflictId: 'c-cascade',
+                    chapterA: 1,
+                    quoteA: '沈默右手戴着铁表。',
+                    chapterB: 2,
+                    quoteB: '沈默左手戴着金表，从此换了习惯。',
+                    description: '手表材质与左右手连环冲突',
+                    severityHint: 'CASCADING_HARD'
+                }
+            ],
+            {
+                onAutoRerun: async ({ rollbackToChapter }) => {
+                    expect(rollbackToChapter).toBe(1);
+                    // 验证 healCrossChapterConflicts 全程持有 withTxLock
+                    try {
+                        await store.withTxLock(async () => {});
+                    } catch (err) {
+                        if (err instanceof TxLockConflictError) {
+                            lockHeldInsideRerun = true;
+                        }
+                    }
+                    return { success: true, stillConflicting: false };
+                }
+            }
+        );
+
+        expect(healRes.results[0]?.action).toBe('AUTO_ROLLED_BACK_AND_RERUN');
+        expect(lockHeldInsideRerun).toBe(true);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_0001.md'))).toBe(true);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_0002.md'))).toBe(false);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_0003.md'))).toBe(false);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_9999_orphan.md'))).toBe(false);
+        expect(existsSync(join(bookRoot, '.ops/runs.jsonl'))).toBe(true);
+        expect((await store.readTxState()).last_committed_ch).toBe(1);
+    });
+
+    it('RoleRunner 汇总多轮 assistant/message usage 到 RunDreamingResult.usage 与 StepChapterResult.totalUsage', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'usage-aggregation', {
+            storyDay: 1,
+            currentChapter: 1,
+            extraChapters: {
+                'ch_0001.md': '# 第一章\n\n沈默站在码头边。\n'
+            }
+        });
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ sessionId, execTool }) => {
+                ctx.emit('session/event' as never, { id: sessionId } as never, {
+                    type: 'assistant/message',
+                    data: {
+                        usage: {
+                            inputTokens: 100,
+                            cacheReadTokens: 20,
+                            cacheWriteTokens: 5,
+                            outputTokens: 40
+                        }
+                    }
+                } as never);
+                await execTool('yield_dream_commit', {
+                    summary: '汇总用量测试',
+                    chapter_number: 1,
+                    accumulated_words: 100
+                });
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const dreamRes = await ctx.narratePipeline.runDreaming({
+            currentChapter: 1,
+            force: true
+        });
+        expect(dreamRes.usage).toEqual({
+            inputTokens: 100,
+            cacheReadTokens: 20,
+            cacheWriteTokens: 5,
+            outputTokens: 40
+        });
     });
 });

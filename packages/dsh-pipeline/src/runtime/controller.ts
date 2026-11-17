@@ -30,7 +30,12 @@ import {
 } from '../errors.js';
 import { ChapterPipeline } from '../pipeline/chapter-pipeline.js';
 import { DreamingPipeline } from '../pipeline/dreaming-pipeline.js';
-import { CHAPTER_FILE_RE, readOptionalText } from '../pipeline/helpers.js';
+import {
+    CHAPTER_FILE_RE,
+    readOptionalText,
+    readSignalsCursor,
+    writeSignalsCursor
+} from '../pipeline/helpers.js';
 import { SyncPipeline } from '../pipeline/sync-pipeline.js';
 import { harvestVoiceFromChapter } from '../pipeline/voice-harvest.js';
 import { VolumePipeline } from '../pipeline/volume-pipeline.js';
@@ -100,6 +105,83 @@ function parseJsonLines(raw: string | null): unknown[] {
         }
     }
     return results;
+}
+
+function extractToolResultTextPreview(content: unknown): string | undefined {
+    if (!Array.isArray(content)) return undefined;
+    const parts: string[] = [];
+    for (const block of content) {
+        if (
+            block &&
+            typeof block === 'object' &&
+            (block as { type?: unknown }).type === 'text' &&
+            typeof (block as { text?: unknown }).text === 'string'
+        ) {
+            parts.push((block as { text: string }).text);
+        }
+    }
+    if (parts.length === 0) return undefined;
+    return parts.join('\n').slice(0, 800);
+}
+
+/** 将 DSH SessionEvent[] (tool/call, tool/result 等) 映射为 StageSessionEventItem[] */
+export function mapRawSessionEventsToItems(
+    rawEvents: readonly unknown[],
+    fallbackTimestamp: string
+): StageSessionEventItem[] {
+    const items: StageSessionEventItem[] = [];
+    const callNameById = new Map<string, string>();
+
+    rawEvents.forEach((ev, idx) => {
+        if (!ev || typeof ev !== 'object') return;
+        const rec = ev as {
+            seq?: unknown;
+            type?: unknown;
+            timestamp?: unknown;
+            data?: Record<string, unknown>;
+        };
+        const seq = typeof rec.seq === 'number' ? rec.seq : idx;
+        const ts =
+            typeof rec.timestamp === 'string' && rec.timestamp.length > 0
+                ? rec.timestamp
+                : fallbackTimestamp;
+
+        if (rec.type === 'tool/call') {
+            const callId = String(rec.data?.['callId'] ?? '');
+            const toolName = String(rec.data?.['name'] ?? '');
+            if (callId && toolName) {
+                callNameById.set(callId, toolName);
+            }
+            items.push({
+                seq,
+                timestamp: ts,
+                kind: 'tool-call',
+                toolName,
+                callId,
+                text:
+                    typeof rec.data?.['arguments'] === 'string'
+                        ? rec.data['arguments']
+                        : ''
+            });
+        } else if (rec.type === 'tool/result') {
+            const msg = rec.data?.['message'] as Record<string, unknown> | undefined;
+            const callId = String(msg?.['toolCallId'] ?? rec.data?.['callId'] ?? '');
+            const isError = Boolean(msg?.['isError'] ?? rec.data?.['isError']);
+            const toolName = callNameById.get(callId) ?? String(rec.data?.['name'] ?? '');
+            const preview = extractToolResultTextPreview(msg?.['content']);
+            items.push({
+                seq,
+                timestamp: ts,
+                kind: 'tool-result',
+                toolName,
+                callId,
+                ...(preview !== undefined ? { text: preview } : {}),
+                status: isError ? 'error' : 'completed'
+            });
+        }
+    });
+
+    return items;
 }
 
 export function isSubPath(parentDir: string, candidatePath: string): boolean {
@@ -372,10 +454,13 @@ export class NarrateRuntimeController {
         if (!bookRoot) return 0;
         const raw = await readOptionalText(join(bookRoot, '.ops/signals.jsonl'));
         const all = parseJsonLines(raw);
-        if (all.length < this.signalsConsumedLines) {
-            this.signalsConsumedLines = 0;
+        let cursor = await readSignalsCursor(bookRoot);
+        if (all.length < cursor) {
+            cursor = 0;
+            await writeSignalsCursor(bookRoot, 0);
         }
-        return all.length - this.signalsConsumedLines;
+        this.signalsConsumedLines = cursor;
+        return all.length - cursor;
     }
 
     private async consumePendingSignals(): Promise<unknown[]> {
@@ -383,12 +468,27 @@ export class NarrateRuntimeController {
         if (!bookRoot) return [];
         const raw = await readOptionalText(join(bookRoot, '.ops/signals.jsonl'));
         const all = parseJsonLines(raw);
-        if (all.length < this.signalsConsumedLines) {
-            this.signalsConsumedLines = 0;
+        let cursor = await readSignalsCursor(bookRoot);
+        if (all.length < cursor) {
+            cursor = 0;
         }
-        const pending = all.slice(this.signalsConsumedLines);
+        const pending = all.slice(cursor);
         this.signalsConsumedLines = all.length;
+        await writeSignalsCursor(bookRoot, all.length);
         return pending;
+    }
+
+    private async switchBookInternal(nextBookRoot: string): Promise<BookStore> {
+        const switched = await this.storeService.switchBook(nextBookRoot);
+        this.telemetryOffsetLines = 0;
+        this.signalsConsumedLines = await readSignalsCursor(switched.bookRoot);
+        this.activeStageSessions.clear();
+
+        this.emitEvent('book_switched', {
+            bookRoot: switched.bookRoot,
+            timestamp: new Date().toISOString()
+        });
+        return switched;
     }
 
     /** 安全切换当前激活作品（在途任务或事务锁未排空时返回 409 BookSwitchConflictError） */
@@ -399,17 +499,7 @@ export class NarrateRuntimeController {
                 `当前正在执行任务 (${this.activeTask})，拒绝切换作品`
             );
         }
-
-        const switched = await this.storeService.switchBook(nextBookRoot);
-        this.telemetryOffsetLines = 0;
-        this.signalsConsumedLines = 0;
-        this.activeStageSessions.clear();
-
-        this.emitEvent('book_switched', {
-            bookRoot: switched.bookRoot,
-            timestamp: new Date().toISOString()
-        });
-        return switched;
+        return await this.runExclusiveTask('SYNCING', () => this.switchBookInternal(nextBookRoot));
     }
 
     /** 读取工种运行会话索引 (.ops/runs.jsonl，保留扩展字段 parentSessionId 与 mode) */
@@ -457,7 +547,50 @@ export class NarrateRuntimeController {
             );
             if (logRaw !== null) {
                 try {
-                    return JSON.parse(logRaw) as StageSessionDetail;
+                    const parsed: unknown = JSON.parse(logRaw);
+                    if (Array.isArray(parsed)) {
+                        const runs = await this.listRunRecords();
+                        const matchedRun = [...runs]
+                            .reverse()
+                            .find((r) => r.sessionId === sessionId);
+                        return {
+                            sessionId,
+                            ...(matchedRun?.runId ? { runId: matchedRun.runId } : {}),
+                            ...(matchedRun?.stage ? { stage: matchedRun.stage } : {}),
+                            ...(matchedRun?.role ? { role: matchedRun.role } : {}),
+                            ...(matchedRun?.chapter !== undefined
+                                ? { chapter: matchedRun.chapter }
+                                : {}),
+                            status: matchedRun?.status ?? 'completed',
+                            live: false,
+                            events: mapRawSessionEventsToItems(
+                                parsed,
+                                matchedRun?.startedAt ?? new Date(0).toISOString()
+                            )
+                        };
+                    }
+                    if (parsed && typeof parsed === 'object') {
+                        const obj = parsed as StageSessionDetail & { events?: unknown[] };
+                        if (
+                            Array.isArray(obj.events) &&
+                            obj.events.some(
+                                (ev) =>
+                                    ev &&
+                                    typeof ev === 'object' &&
+                                    !('kind' in ev) &&
+                                    'type' in ev
+                            )
+                        ) {
+                            return {
+                                ...obj,
+                                events: mapRawSessionEventsToItems(
+                                    obj.events,
+                                    new Date(0).toISOString()
+                                )
+                            };
+                        }
+                        return obj;
+                    }
                 } catch {
                     // 损坏日志回退检查其他来源
                 }
@@ -466,7 +599,7 @@ export class NarrateRuntimeController {
             const runs = await this.listRunRecords();
             const matched = [...runs].reverse().find((r) => r.sessionId === sessionId);
             if (matched) {
-                const events: StageSessionEventItem[] = [];
+                let events: StageSessionEventItem[] = [];
                 // 若宿主仍保有实时/历史 session，尝试从 ctx.agents 读取事件快照
                 try {
                     const liveAgent = (
@@ -476,31 +609,7 @@ export class NarrateRuntimeController {
                     ).agents?.get?.(sessionId);
                     const snap = liveAgent?.session?.snapshotEvents?.();
                     if (Array.isArray(snap)) {
-                        snap.forEach((ev, idx) => {
-                            const rec = ev as { type?: string; data?: Record<string, unknown> };
-                            if (rec.type === 'tool/call') {
-                                events.push({
-                                    seq: idx,
-                                    timestamp: matched.startedAt,
-                                    kind: 'tool-call',
-                                    toolName: String(rec.data?.['name'] ?? ''),
-                                    callId: String(rec.data?.['callId'] ?? ''),
-                                    text:
-                                        typeof rec.data?.['arguments'] === 'string'
-                                            ? rec.data['arguments']
-                                            : ''
-                                });
-                            } else if (rec.type === 'tool/result') {
-                                events.push({
-                                    seq: idx,
-                                    timestamp: matched.startedAt,
-                                    kind: 'tool-result',
-                                    toolName: String(rec.data?.['name'] ?? ''),
-                                    callId: String(rec.data?.['callId'] ?? ''),
-                                    status: rec.data?.['isError'] ? 'error' : 'completed'
-                                });
-                            }
-                        });
+                        events = mapRawSessionEventsToItems(snap, matched.startedAt);
                     }
                 } catch {
                     // 忽略无实时句柄
@@ -655,6 +764,7 @@ export class NarrateRuntimeController {
                         stateCommitSha: resData.stateCommitSha
                     });
                     await this.flushTelemetryEvents();
+                    this.signalsConsumedLines = await readSignalsCursor(store.bookRoot);
                     return resData;
                 } catch (err) {
                     this.emitEvent('chapter:phase', {
@@ -1027,88 +1137,89 @@ export class NarrateRuntimeController {
             await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止开新书');
         }
 
-        const bootRes = await this.runExclusiveTask('BOOTING', async (signal) => {
+        return await this.runExclusiveTask('BOOTING', async (signal) => {
+            let bootRes: LockCharterAndBootResult;
             if ('commitments' in input) {
-                return await this.toolsService.lockCharterAndBoot(input, {
+                bootRes = await this.toolsService.lockCharterAndBoot(input, {
                     booksRoot: this.booksRoot,
                     system: this.system
                 });
-            }
-
-            const targetRoot = resolve(this.booksRoot, input.slug);
-            if (!isSubPath(this.booksRoot, targetRoot)) {
-                throw new PathValidationError('禁止路径穿越');
-            }
-
-            const roleCfg = await this.roleLoader.loadRoleConfig('boot-compiler');
-            const taskPrompt = [
-                `## 开书编译任务 (${input.mode})`,
-                `- 作品标识: ${input.slug}`,
-                `- 书名: ${input.title}`,
-                `- 初始主视角实体 ID: ${input.povCharacter}`,
-                input.t0Anchor ? `- T0 原话现场锚点: ${input.t0Anchor}` : '',
-                input.premiseOrSeed ? `- 核心创意与设定:\n${input.premiseOrSeed}` : '',
-                input.sourceMaterial ? `- 外部参考设定:\n${input.sourceMaterial}` : '',
-                '',
-                '请严格按三把手术刀原则编译完整作品资产包，并调用 `yield_boot_bundle` 提交。'
-            ]
-                .filter(Boolean)
-                .join('\n');
-
-            // boot-compiler 在建库目录尚未存在时执行，暂存与运行索引在临时/booksRoot 上隔离运行
-            const bootStagingRoot = resolve(this.booksRoot, `.boot-staging-${randomUUID()}`);
-            await mkdir(bootStagingRoot, { recursive: true });
-            try {
-                const runRes = await this.roleRunner.runMultiTurn<BootBundleOutput>({
-                    roleId: roleCfg.id,
-                    stage: 'BOOT_COMPILER',
-                    chapterNumber: 0,
-                    bookRoot: bootStagingRoot,
-                    taskPrompt,
-                    signal,
-                    onStageSession: this.handleStageSession
-                });
-
-                const bundle = runRes.yieldResult;
-                if (bundle.contract_conflicts.length > 0) {
-                    throw new Error(
-                        `开书契约存在矛盾需作者裁决: ${bundle.contract_conflicts.join('; ')}`
-                    );
+            } else {
+                const targetRoot = resolve(this.booksRoot, input.slug);
+                if (!isSubPath(this.booksRoot, targetRoot)) {
+                    throw new PathValidationError('禁止路径穿越');
                 }
 
-                return await this.toolsService.lockCharterAndBoot(
-                    {
-                        book_slug: input.slug,
-                        title: input.title,
-                        pov_character: input.povCharacter,
-                        t0_anchor: input.t0Anchor ?? bundle.world_summary,
-                        commitments: [`核心叙事承诺：${bundle.world_summary}`],
-                        stage_ceiling: bundle.stage_ceiling,
-                        opening_sequence_beats: bundle.opening_sequence_beats,
-                        unrevealed_pivots: bundle.unrevealed_pivots,
-                        current_arc_envelope: bundle.current_arc_envelope,
-                        static_base_and_voice: bundle.static_base_and_voice,
-                        world_summary: bundle.world_summary,
-                        l0_sagas_markdown: bundle.l0_sagas_markdown,
-                        l1_volumes_markdown: bundle.l1_volumes_markdown,
-                        entities: bundle.entities,
-                        lore_entries: bundle.lore_entries,
-                        open_threads: bundle.open_threads,
-                        future_horizon_events: bundle.future_horizon_events,
-                        voice_samples: bundle.voice_samples
-                    },
-                    {
-                        booksRoot: this.booksRoot,
-                        system: this.system
-                    }
-                );
-            } finally {
-                await rm(bootStagingRoot, { recursive: true, force: true }).catch(() => {});
-            }
-        });
+                const roleCfg = await this.roleLoader.loadRoleConfig('boot-compiler');
+                const taskPrompt = [
+                    `## 开书编译任务 (${input.mode})`,
+                    `- 作品标识: ${input.slug}`,
+                    `- 书名: ${input.title}`,
+                    `- 初始主视角实体 ID: ${input.povCharacter}`,
+                    input.t0Anchor ? `- T0 原话现场锚点: ${input.t0Anchor}` : '',
+                    input.premiseOrSeed ? `- 核心创意与设定:\n${input.premiseOrSeed}` : '',
+                    input.sourceMaterial ? `- 外部参考设定:\n${input.sourceMaterial}` : '',
+                    '',
+                    '请严格按三把手术刀原则编译完整作品资产包，并调用 `yield_boot_bundle` 提交。'
+                ]
+                    .filter(Boolean)
+                    .join('\n');
 
-        await this.switchBook(bootRes.bookRoot);
-        return bootRes;
+                // boot-compiler 在建库目录尚未存在时执行，暂存与运行索引在临时/booksRoot 上隔离运行
+                const bootStagingRoot = resolve(this.booksRoot, `.boot-staging-${randomUUID()}`);
+                await mkdir(bootStagingRoot, { recursive: true });
+                try {
+                    const runRes = await this.roleRunner.runMultiTurn<BootBundleOutput>({
+                        roleId: roleCfg.id,
+                        stage: 'BOOT_COMPILER',
+                        chapterNumber: 0,
+                        bookRoot: bootStagingRoot,
+                        taskPrompt,
+                        signal,
+                        onStageSession: this.handleStageSession
+                    });
+
+                    const bundle = runRes.yieldResult;
+                    if (bundle.contract_conflicts.length > 0) {
+                        throw new Error(
+                            `开书契约存在矛盾需作者裁决: ${bundle.contract_conflicts.join('; ')}`
+                        );
+                    }
+
+                    bootRes = await this.toolsService.lockCharterAndBoot(
+                        {
+                            book_slug: input.slug,
+                            title: input.title,
+                            pov_character: input.povCharacter,
+                            t0_anchor: input.t0Anchor ?? bundle.world_summary,
+                            commitments: [`核心叙事承诺：${bundle.world_summary}`],
+                            stage_ceiling: bundle.stage_ceiling,
+                            opening_sequence_beats: bundle.opening_sequence_beats,
+                            unrevealed_pivots: bundle.unrevealed_pivots,
+                            current_arc_envelope: bundle.current_arc_envelope,
+                            static_base_and_voice: bundle.static_base_and_voice,
+                            world_summary: bundle.world_summary,
+                            l0_sagas_markdown: bundle.l0_sagas_markdown,
+                            l1_volumes_markdown: bundle.l1_volumes_markdown,
+                            entities: bundle.entities,
+                            lore_entries: bundle.lore_entries,
+                            open_threads: bundle.open_threads,
+                            future_horizon_events: bundle.future_horizon_events,
+                            voice_samples: bundle.voice_samples
+                        },
+                        {
+                            booksRoot: this.booksRoot,
+                            system: this.system
+                        }
+                    );
+                } finally {
+                    await rm(bootStagingRoot, { recursive: true, force: true }).catch(() => {});
+                }
+            }
+
+            await this.switchBookInternal(bootRes.bookRoot);
+            return bootRes;
+        });
     }
 
     /** 投递微调信号到 .ops/signals.jsonl */
@@ -1227,10 +1338,15 @@ export class NarrateRuntimeController {
             return null;
         }
 
-        await writeFile(filePath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8');
-        if (removedIdx < this.signalsConsumedLines) {
-            this.signalsConsumedLines -= 1;
+        const persistedCursor = await readSignalsCursor(bookRoot);
+        const totalLines = kept.length + 1;
+        const effectiveCursor =
+            persistedCursor <= totalLines ? persistedCursor : this.signalsConsumedLines;
+        if (removedIdx < effectiveCursor) {
+            throw new TaskConflictError('目标信号已被流水线消费，禁止撤回');
         }
+
+        await writeFile(filePath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8');
         this.emitEvent('signal:withdrawn', { created_at: createdAt, reason });
         return { status: 'WITHDRAWN', remaining: kept.length };
     }
@@ -1522,6 +1638,7 @@ export class NarrateRuntimeController {
                 this.activeTask = 'IDLE';
                 this.activeAbortController = null;
                 this.activePromise = null;
+                this.emitEvent('task:idle', { task: kind });
             }
         })();
 

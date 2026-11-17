@@ -24,27 +24,44 @@ function splitSkillMarkdown(raw: string): {
     };
 }
 
+export interface RegisterPresetBootSkillOptions {
+    isDisposed?: (() => boolean) | undefined;
+    readFileFn?: ((filePath: string, encoding: BufferEncoding) => Promise<string>) | undefined;
+}
+
 /**
  * 动态向 @deepseek-ai/dsh-skill 注册预设包中的 narrate-boot Skill：
  * - 若注册表中已存在同名更高优先级 Skill，仅返回幂等清理函数（不覆盖）；
+ * - 在异步 readFile / skills.get 后二次校验 !isDisposed()，避免卸载期间触发 CordisError('INACTIVE_EFFECT')；
  * - 否则以 resourceBase 指向 <presetRoot>/skills/narrate-boot 注册，保留 references/ 可读能力。
  */
 export async function registerPresetBootSkill(
     skills: Pick<SkillRegistry, 'get' | 'register'>,
-    presetRoot: string
+    presetRoot: string,
+    options?: RegisterPresetBootSkillOptions
 ): Promise<() => void> {
+    const isDisposed = options?.isDisposed;
+    if (isDisposed?.()) {
+        return () => {};
+    }
+
     const skillDir = join(presetRoot, 'skills/narrate-boot');
     const skillMdPath = join(skillDir, 'SKILL.md');
+    const readText = options?.readFileFn ?? ((filePath: string, encoding: BufferEncoding) => readFile(filePath, encoding));
 
     let raw: string;
     try {
-        raw = await readFile(skillMdPath, 'utf8');
+        raw = await readText(skillMdPath, 'utf8');
     } catch {
         return () => {};
     }
 
+    if (isDisposed?.()) {
+        return () => {};
+    }
+
     const existing = await skills.get('narrate-boot');
-    if (existing) {
+    if (existing || isDisposed?.()) {
         return () => {};
     }
 
@@ -62,7 +79,11 @@ export async function registerPresetBootSkill(
             ? frontmatter.whenToUse.trim()
             : undefined;
 
-    return skills.register({
+    if (isDisposed?.()) {
+        return () => {};
+    }
+
+    const dispose = skills.register({
         path: skillMdPath,
         name,
         description,
@@ -79,4 +100,10 @@ export async function registerPresetBootSkill(
             path: skillDir
         }
     });
+
+    if (isDisposed?.()) {
+        dispose();
+        return () => {};
+    }
+    return dispose;
 }
