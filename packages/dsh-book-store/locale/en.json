@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS Book Store",
+        "description": "Deterministic plain-text book repository, transaction locks, view slicer, prose gate, and isolated staging overlays."
+    }
+}
