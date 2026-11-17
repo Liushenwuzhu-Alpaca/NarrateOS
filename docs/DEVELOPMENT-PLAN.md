@@ -2,6 +2,7 @@
 
 > **定位**：将 [`ARCHITECTURE.md`](ARCHITECTURE.md) 与 [`WRITING-CRAFT.md`](WRITING-CRAFT.md) 的纯业务规范落地为可测试、零宿主锁死的深模块代码与 `@deepseek-ai/dsh` 插件生态的工程施工蓝图。
 > **核心原则**：业务规范与工程实现解耦；核心包零宿主框架依赖；每个模块通过窄接口隐藏内部复杂度（Deep Module），每个施工阶段以可自动执行的完备测试作为唯一放行判据。
+> **状态口径**：下文列出工程目标与验收判据。作者对齐、首章校准和 Dreaming 卷纲维护的本轮设计进入 [待实现增量](#作者对齐与自动运行增量待实现)，交付状态由源码和对应验证结果确认。
 
 ---
 
@@ -53,9 +54,9 @@ narrateos/
 | **`1. BookStore`** | `loadSnapshot()` / `commitDraft(ch, text)` / `applyStatePatch(ch, patch)` / `recoverWal()` / `detectDirtyChapters()` | 解析 `book_config.yaml` 与四段式实体 Markdown；执行行级槽位增量合并（禁整文件覆写）；拦截固有属性篡改 Diff；执行 1ms 跨文件外键（`char_*`/`item_*`/`ch_*`/`cold_archive`）可达性校验；驱动 `.ops/tx_state.json` 双粒度提交恢复与 `SHA-256` 比对。 |
 | **`2. ViewSlicer`** | `sliceForPlanner(snap, req)` / `sliceForWriter(snap, plan)` | 执行 `MAINLINE / PARALLEL / FLASHBACK` 三态 `story_day` 偏序过滤（插叙保留 `Innate Locks`、屏蔽 `Acquired`）；对非 `pov_character` 物理剥离 `SELF_ONLY` 与 `OMNISCIENT_SECRET`；转化 `READER_KNOWN` 戏剧反讽块；对写手物理剥离 `WARPED` 废止条目（灰象双视图隔离）；计算 `>30` 章未出场感官唤醒提示。 |
 | **`3. IndexRecall`** | `buildLibrarianCatalog(snap)` / `executePairedRecall(snap, query)` | 按「已封旧卷静态区 + 当前活跃卷动态尾」组装 `<100K` 目录；展开实名、唯一别名与职务称谓（限定出场章白名单）执行 `rg -C 2`；硬编码注入时间差信封；强制校验伏笔回收与证物重现场景的「档案视图 + 原稿切片」成对挂载。 |
-| **`4. PrefixAssembler`** | `assemblePlannerRequest(ctx)` / `assembleWriterRequest(ctx)` | 保证同卷内 `Planner` 与 `Writer` 前段静态前缀（含 `static_base_and_voice.md` 与 `current_arc_envelope.md`）字节 100% 一致；提取 `voice_samples.yaml` 可用标签枚举供 `Planner` 选择，并在匹配标签内按 `LRU` 轮换抽样；对 `Writer` 物理丢弃 `PlannerOutline.director_rationale` 防细纲信道泄底；当配置了 `writer_token_budget` 且超限时，按四级顺序自动压缩（第 1 级自动组合 `L2` 上章摘要与 600 字尾窗）。 |
+| **`4. PrefixAssembler`** | `assemblePlannerRequest(ctx)` / `assembleWriterRequest(ctx)` | 在同一有效规划版本中保持 Planner 与 Writer 静态前缀一致；版本修订后共同切换并刷新缓存。负责声纹标签选择与 LRU、写手视角裁剪和预算分级压缩；具体规则见 [前缀装配](ARCHITECTURE.md#41-强弱双独立前缀池灰象双视图与按需降级链)。 |
 | **`5. ProseGateAndTelemetry`** | `scanDraft(draft, recentChs, rulesCfg)` / `verifyDualQuotes(claims, store)` / `collectTelemetry(ch, usage)` | 提取并剥离头部 `<blocking>` 标签；运行可独立开关的 `Static Prose Gate` 正则配额表与跨章具象喻体复读检测，输出精确违规行号与上下窗口；执行双侧原句去标点子串验真；零模型计算 `MATTR-500`、Kontoyiannis 熵率 $\hat{H}_K$ 与句段长变异系数 CV。 |
-| **`6. NarrativeEngine`** | `bootBook()` / `stepChapter()` / `syncManuscripts()` / `runDreaming()` / `advanceVolume()` | 串联四阶段开书（三维正交坐标纯文本深推演 -> 三把手术刀编译 -> 三重门禁 -> 落盘）；驱动单章 6 步闭环（挂载选中 `lore_library` 词条与 `open_threads.md`、消费 `.ops/signals.jsonl`、`Stage Ceiling` 违规抛 `PlanConflictError`、落盘 `L2` 章卡并产出 `next_chapter_options`）；处理 `PARALLEL` 分支主时钟锁定与 3-Way Merge；执行人工手改 `Sync`；运行 `Dreaming`（脏页清洗、`open_threads` 周期立项/销账、`future_horizon` 多轨补货、`Spotlight Trigger` 派发与跨章三级自动自愈）及五步原子换卷 `advanceVolume()`。 |
+| **`6. NarrativeEngine`** | `bootBook()` / `stepChapter()` / `syncManuscripts()` / `runDreaming()` / `advanceVolume()` | 编排 [开书与首章校准](ARCHITECTURE.md#3-作者对齐开书编译与首章校准)、单章生产、Sync、并行时间线、Dreaming 与换卷；共用作者决定和安全点调度，待实现增量见文末验收表。 |
 
 ---
 
@@ -117,16 +118,16 @@ narrateos/
 - **交付内容**：实现 `LlmPort`（含 `ScriptedLlmAdapter`、`LoggingLlmAdapter` 与结构化 JSON 校验/5 次指数退避修复重试）、`PrefixAssembler`（双池拼装、声纹标本多标签 `LRU` 轮换、`director_rationale` 物理剥离、`writer_token_budget` 可配四级降级与无预算直通、`craft_plugins` 动态加载）、`NarrativeEngine.stepChapter()` 全链路审校自愈闭环（含 `.ops/signals.jsonl` 消费、`lore_library` 读盘挂载、`L2` 章卡更新、新建实体 `canonical_name` 强校验与 `next_chapter_options` 产出）、`NarrativeEngine.syncManuscripts()` 手改同步及 `@narrateos/cli` 基础命令。
 - **完工判据（Exit Criteria）**：
   - 基于 `ScriptedLlmAdapter` 跑通全部状态机分支单测（退出码 `0`）：
-    1. **前缀零分叉与防泄底断言**：同一卷内 `Planner` 与 `Prose Writer` 请求的静态前缀区（含 `static_base_and_voice.md` 与 `current_arc_envelope.md`）字节序列 `SHA-256` 100% 相等；`PlannerOutline.director_rationale` 在 `Writer` 请求中出现次数为 `0`；同场景标签连续抽样 `voice_samples` 按 `LRU` 轮换不发生相邻重复；设 `writer_token_budget = null` 时零裁剪直通，设紧预算时严格按四级顺序压入阈值内；
+    1. **前缀版本与视角隔离断言**：同一有效规划版本下 Planner 与 Writer 静态前缀字节序列一致；卷纲维护提交后，两者后续调用共同切换新版本；写手上下文只含可见事实与表面镜头指令；同场景声纹按 LRU 轮换，预算配置决定直通或四级裁剪；
     2. **分级返工与落盘断言**：注入 `<=2` 段八股/小穿帮仅触发局部 `Patch`（不重跑整章），注入细纲级悖论或违反 `Stage Ceiling` 触发 `PlanConflictError` 改纲 v2，连续失败准确落入 `SAFE_HALT`；新建实体缺省中文 `canonical_name` 时触发结构化重试；定稿后 `index/L2_cards/vol_XX_cards.md` 准确写入本章摘要；
     3. **手改 `Sync` 断言**：修改最新章纯修辞零模型调用更新 `sha256`；修改最新章钥匙归属自动增量刷新实体卡；修改旧章自动输出下游冲突章号与行号且下游 `manuscripts/` 文件字节零变动。
 
 ### Phase 4：四阶段开书编译器、多时间线合并、周期睡眠与换卷交接 (`bootBook` + `PARALLEL` + `runDreaming` + `advanceVolume`)
-- **交付内容**：实现四阶段 `bootBook`（分词率标定 -> 三维正交坐标纯文本深推演与 `interactive / auto_best` 拍板 -> 三把手术刀结构化编译 -> 确定性配额/`T0` 扫描、声纹 `Static Prose Gate` 过滤与异构剧透盲审）、`PARALLEL` 分叉快照与 3-Way Merge（主时钟冻结与唯一物双线冲突拦截）、按脏页增量 `Dreaming`（含 `open_threads.md` 周期立项/销账与 `ACTIVE <= 15` 配额硬锁、`future_horizon.md` 多轨补货、`Spotlight Trigger` 派发及跨章穿帮三级自动自愈）、以及五步原子换卷 `advanceVolume()`。
-- 开书只接受空目录，在调用模型前排他创建 `.boot-incomplete`；失败保留标记与已写资产，后续开书拒绝复用该目录，成功提交前移除标记。重复开书不是作品重建入口。
+- **交付内容**：实现 [开书编译与初始化验收](ARCHITECTURE.md#3-作者对齐开书编译与首章校准)、PARALLEL 快照与合并、[周期维护](ARCHITECTURE.md#6-周期睡眠整理-dreaming伏笔销账换卷交接-advancevolume-与跨章自愈)及换卷。作者对齐、校准放行与卷纲维护的新增验收集中在文末增量表。
+- 初次建库在模型调用前校验目标空目录并创建 `.boot-incomplete` 排他标记；失败保留恢复依据，成功提交前移除标记。开书讨论及首章校准的多轮修订复用作品的既有资产更新流程，已初始化作品继续沿原作品身份修订。
 - **完工判据（Exit Criteria）**：
   - 自动化集成测试全部通过（退出码 `0`）：
-    1. 开书编译后，`T0` 后事件在初始 `entities/*.md` 中残留数为 `0`；`L0_sagas.md`、`L1_volumes.md` 与含 `Stage Ceiling` 的 `current_arc_envelope.md` 非空落盘；声纹池含八股词的示范句被 `Static Prose Gate` 100% 剔除；同人设定包专有名词守恒率 `>=98%`；
+    1. 开书产物按 T0 归类背景与未来动态，卷纲等关键资产完整；声纹同时通过可配置文风门禁及 [标本事实边界](WRITING-CRAFT.md#31-默认内聚的无感环境补集对写手零填表负担) 检查；外部设定的核心事实和专名守恒率达到 `>=98%`；
     2. `PARALLEL` 双线各写 2 章期间互不可见对方增量且主线 `story_day` 不重复累加，汇合时成功合并非冲突状态，双线同时消耗同一 `item_001` 时被确定性拦截；
     3. `Dreaming` 执行期间未出场干净实体文件 `mtime` 保持不变；`open_threads.md` 超配额或已兑现条目准确归档；离场角色达临界点产出 `Spotlight Trigger` 信号并在下一章 `stepChapter` 被自动挂载消费；`advanceVolume()` 准确封存旧卷章卡、将非随行旧角色移入 `cold_archive/`、提炼压缩 `style_amendments.md` 并递增 `current_volume`。
 
@@ -142,3 +143,19 @@ narrateos/
 - **完工判据（Exit Criteria）**：
   - 跑完完整 40 章闭环零未捕获崩溃，所有 Git 提交树与外键完整性 100% 合法；
   - Ch.36-40 定向诱发测试中：负向红线与死亡/唯一物硬穿帮率 `= 0%`，跨 35 章伏笔「档案 + 原稿切片」成对召回率 `= 100%`，同卷内静态前缀缓存命中率稳定达标，首尾 5 章 `MATTR-500` 与 $\hat{H}_K$ 无统计显著坍缩。
+
+### 作者对齐与自动运行增量（待实现）
+
+业务规则集中于 [共用作者对齐](ARCHITECTURE.md#共用作者对齐与授权)、[开篇校准](ARCHITECTURE.md#35-开篇校准)及 [卷纲维护](ARCHITECTURE.md#611-卷纲维护)。工程上复用现有内核、作品存储和宿主入口，按以下场景实现与验收：
+
+| 切面 | 完成判据 |
+| :--- | :--- |
+| 决定的持续使用 | 作者修改一项上游决定后，系统列出受影响产物并只修订这些内容；切换阶段与重启后仍能读取承诺、方案、授权和待裁决项；短期信号消费完成后，长期决定继续有效。 |
+| 分轮对齐与授权 | 原创与外部设定均能使用同一对齐机制；本轮问题的前置条件已经确定，已有答案直接复用。授权内的多种合理路径可自动择优，改变核心承诺的提案进入作者裁决。 |
+| 初始化验收 | 用“已确认 T0 与生成状态偏移”“核心转折条件缺失”“声纹引入案件结论”的夹具验证原因归类：编译修订回编译，构思修订回构思；最终资产满足确认输入、可执行因果和知情范围。 |
+| 校准与连跑 | 首章按正式流程生成并归档，后续连跑以作者确认或明确跳过授权为前提；反馈按原因修订相关资产，首章改动经 Sync 平账；恢复后继续使用有效校准结果。 |
+| Dreaming 最小维护 | 阶段完成时凭正文更新进度，前提失效时调整后续路径，有效部分保持原样；卷纲与未来动态同次提交，正文保持原样；卷末完成仍以已确认兑现条件为准。 |
+| 版本与恢复 | 卷纲修订失败时沿既有写集恢复一致版本；成功后 Planner 与 Writer 读取同一新版本；章节生成中的维护请求在安全点生效。PARALLEL 开放窗口继续沿用既有主线维护隔离。 |
+| 作者入口与运维 | CLI 与 Studio 共享决定与放行语义；Studio 能在开书、首章校准和运行中复用同一协作入口。作者看得到调整依据、影响范围和待裁决取舍，日常授权内维护自动继续。 |
+
+决策持久化格式、操作接口与界面呈现由实现设计确定，验收覆盖从作者输入到后续生成的完整路径。内核只接收已整理的决定和请求，宿主负责交互呈现；Writer 继续通过 `LlmPort` 获得净室输入。
