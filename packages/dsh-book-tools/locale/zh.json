@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS 受控作品工具集",
+        "description": "受控目录只读与 Read-Your-Own-Writes 暂存编辑工具、yield_* 终态门禁、开书建库工具及防逃逸 Hook。"
+    }
+}

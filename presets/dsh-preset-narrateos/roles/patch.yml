@@ -1,0 +1,10 @@
+id: patch
+pool: strong_creative
+cleanroom: true
+promptFile: ./prompts/patch.md
+temperature: 0.4
+reasoningEffort: high
+maxSteps: 1
+maxReadCalls: 0
+tools: []
+yieldTool: null

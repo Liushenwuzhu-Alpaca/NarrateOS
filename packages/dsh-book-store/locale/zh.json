@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS 作品存储服务",
+        "description": "确定性纯文本作品仓库、事务锁与 WAL 恢复、视角禁区裁剪、静态门禁及按 runId 隔离的内存暂存层。"
+    }
+}

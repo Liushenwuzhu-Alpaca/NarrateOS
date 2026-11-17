@@ -1,0 +1,13 @@
+id: librarian
+pool: fast_retrieval
+cleanroom: false
+promptFile: ./prompts/librarian.md
+temperature: 0.2
+reasoningEffort: medium
+maxSteps: 8
+maxReadCalls: 8
+tools:
+    - book_glob
+    - book_grep
+    - book_read
+yieldTool: yield_context_pack

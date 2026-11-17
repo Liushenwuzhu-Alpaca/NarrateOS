@@ -1,0 +1,110 @@
+# NarrateOS 顶层创作模式预设（遵循 @deepseek-ai/dsh@0.2.2-rc.1 Bundle Patch 规范）
+# - 宿主平面（顶层 - insert:）挂载共享服务插件、浏览器 UI 插件与单一「NarrateOS 创作模式」预设；
+# - 预设作用域（preset-narrateos.config.plugins）仅保留会话/智能体级插件，不向根作用域泄露服务。
+- insert:
+    - id: narrateos-book-store
+      name: '@narrateos/dsh-book-store'
+      config:
+        booksRoot: ./books
+
+    - id: narrateos-book-tools
+      name: '@narrateos/dsh-book-tools'
+      config:
+        booksRoot: ./books
+
+    - id: narrateos-pipeline
+      name: '@narrateos/dsh-pipeline'
+      config:
+        booksRoot: ./books
+        poolRouting:
+          strong_creative:
+            provider: deepseek-official
+            model: deepseek-v4-pro
+          fast_retrieval:
+            provider: deepseek-official
+            model: deepseek-flash
+          audit:
+            provider: deepseek-official
+            model: deepseek-flash
+
+    - id: narrateos-client-ui-studio
+      name: '@narrateos/dsh-client-ui-studio'
+
+    - id: preset-narrateos
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: narrateos
+        name: NarrateOS 创作模式
+        description: 面向长篇小说创作的多智能体导演与协作模式（支持开书取证构思、建库停机、受控工种管线、Studio 工作台与多轮睡眠整理）
+        order: 90
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: true
+              includeRuntimeContext: false
+              prefix: |
+                你是 NarrateOS 长篇小说创作引擎的主会话总导演兼开书协作者，由 {{model}} 驱动。
+
+                你的核心职责：
+                1. 开书构思与建库：当用户希望开新书、整理创意种子、导入外部设定或进行卷中重大改纲时，优先调用 `narrate-boot` Skill 严格执行「取证考据 -> 按依赖对齐（3 必选底座 + 2 按需模块）-> 常识因果自检 -> 调用 `lock_charter_and_boot` 锁定契约并建库停机」流程。
+                2. 联网考据与问答对齐：需要核实时代、行业、制度或物理运作细节时，主动使用 `web_search` / `web_fetch`；需要由作者拍板核心取舍时，使用 `ask_user_question` 给出前置条件明确的选项与推荐方案。
+                3. 分权协作与目录边界：建库完成后立即停机交由作者检阅资产并手动启动第一章；日常推章、YOLO 连跑、手改同步（Sync）、睡眠整理（Dreaming）与微调信号投递，均引导作者使用右侧 Operator Studio 工作台按钮或聊天栏 `/narrate-step`、`/narrate-yolo`、`/narrate-halt`、`/narrate-dream`、`/narrate-sync`、`/narrate-signal` 命令完成，不在主对话中越权代写正文或直接修改 `books/<slug>/` 正式资产。
+
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+# 显式禁用 dsh-base 宿主层编码向工具行（兼容直接基于 dsh-base 与 dsh-web-app 的双场景）
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
+
+- id: tool-fs
+  disabled: true
+
+- id: tool-fs-search
+  disabled: true
+
+- id: tool-jobs
+  disabled: true
+
+- id: tool-todo
+  disabled: true
+
+- id: tool-goal
+  disabled: true
+
+- id: plan-mode
+  disabled: true

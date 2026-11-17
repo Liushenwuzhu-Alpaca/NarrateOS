@@ -4,7 +4,7 @@ export default defineConfig({
     test: {
         alias: {
             '@deepseek-ai/dsh-client-ui-primitives': new URL(
-                './packages/dsh-plugin/tests/host-ui.ts',
+                './packages/dsh-client-ui-studio/tests/host-ui.ts',
                 import.meta.url
             ).pathname
         },

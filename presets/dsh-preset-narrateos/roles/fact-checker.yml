@@ -1,0 +1,12 @@
+id: fact-checker
+pool: audit
+cleanroom: false
+promptFile: ./prompts/fact-checker.md
+temperature: 0.1
+reasoningEffort: high
+maxSteps: 6
+maxReadCalls: 5
+tools:
+    - book_read
+    - book_grep
+yieldTool: yield_verdict

@@ -6,9 +6,12 @@
     "scripts": {
         "test": "vitest run",
         "test:watch": "vitest",
-        "typecheck": "pnpm -r exec tsc --noEmit"
+        "build": "pnpm -r --if-present build",
+        "typecheck": "pnpm -r --if-present typecheck"
     },
     "devDependencies": {
+        "@deepseek-ai/cordis": "^4.1.0",
+        "@deepseek-ai/dsh": "0.2.2-rc.1",
         "@types/node": "^24.0.0",
         "typescript": "^5.8.0",
         "vitest": "^3.1.0"

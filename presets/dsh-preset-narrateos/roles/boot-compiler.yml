@@ -1,0 +1,10 @@
+id: boot-compiler
+pool: strong_creative
+cleanroom: false
+promptFile: ./prompts/boot-compiler.md
+temperature: 0.4
+reasoningEffort: high
+maxSteps: 6
+maxReadCalls: 0
+tools: []
+yieldTool: yield_boot_bundle

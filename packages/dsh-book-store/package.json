@@ -1,0 +1,35 @@
+{
+    "name": "@narrateos/dsh-book-store",
+    "version": "0.1.0",
+    "private": true,
+    "description": "NarrateOS 确定性作品存储、锁、多时间线裁剪、静态门禁与暂存服务 (ctx.narrateStore)",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./locale/*.json": "./locale/*.json",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist",
+        "locale/*.json",
+        "package.json"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "vitest run --root ../.. packages/dsh-book-store"
+    },
+    "dependencies": {
+        "yaml": "^2.7.0",
+        "zod": "^3.24.0"
+    },
+    "peerDependencies": {
+        "@deepseek-ai/cordis": "~4.1.0",
+        "@deepseek-ai/schemastery": "~3.19.0"
+    }
+}

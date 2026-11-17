@@ -1,0 +1,6 @@
+{
+    "meta": {
+        "title": "NarrateOS 创作管线与控制面服务",
+        "description": "基于外部角色配置的通用长篇多智能体调度引擎，编排单章 6 阶段、YOLO 连跑、Sync 对账、多轮 Dreaming、三级自愈、换卷交接、REST/SSE 与零开销斜杠命令。"
+    }
+}
