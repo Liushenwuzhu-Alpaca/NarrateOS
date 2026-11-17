@@ -194,17 +194,13 @@ describe('DreamingRunner', () => {
         const runner = new DreamingRunner(store, llm, system);
         const result = await runner.runDreaming({
             currentChapter: 4,
-            currentStoryDay: 4,
-            recentWordDelta: 3500,
-            dreamWordThreshold: 2000,
-            dreamBufferLimit: 4,
-            activeEntityIds: ['char_001'],
             retryOptions: { sleepFn: async () => {} }
         });
 
         expect(result.skipped).toBe(false);
         expect(result.vacuumedEntities).toEqual(['char_001']);
         expect(result.committedTxState?.phase).toBe('DREAM_COMMITTED');
+        expect(JSON.parse(await readFile(join(bookRoot, '.ops/dream_watermark.json'), 'utf8'))).toEqual({ chapter: 4 });
 
         // 验证未出场干净实体 mtime 完全不变
         const afterCleanStat = await stat(cleanPath);
@@ -672,6 +668,7 @@ describe('DreamingRunner', () => {
             currentChapter: 6,
             currentStoryDay: 6,
             force: true,
+            activeEntityIds: [],
             offscreenCharacters: [
                 {
                     entityId: 'char_002',
@@ -771,6 +768,7 @@ describe('DreamingRunner', () => {
             currentChapter: 7,
             currentStoryDay: 7,
             force: true,
+            activeEntityIds: [],
             retryOptions: { sleepFn: async () => {} }
         });
 
@@ -792,6 +790,7 @@ describe('DreamingRunner', () => {
             currentChapter: 8,
             currentStoryDay: 8,
             force: true,
+            activeEntityIds: [],
             retryOptions: { sleepFn: async () => {} }
         });
 

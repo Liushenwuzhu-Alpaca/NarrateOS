@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { z } from 'zod';
 import { verifyDualQuotes } from '../gate/quote-verifier.js';
 import { generateStructuredJson, type LlmPort, type TokenUsage } from '../ports/llm.js';
 import type { SystemPort } from '../ports/system.js';
@@ -132,9 +133,24 @@ export class DreamingRunner {
         const wordThreshold = options.dreamWordThreshold ?? DEFAULT_DREAM_WORD_THRESHOLD;
         const bufferLimit = options.dreamBufferLimit ?? DEFAULT_DREAM_BUFFER_LIMIT;
         const warpedExpireDays = options.warpedExpireDays ?? DEFAULT_WARPED_EXPIRE_DAYS;
-        const currentStoryDay = options.currentStoryDay ?? options.currentChapter;
+        const snapshot = await this.store.loadSnapshot();
+        const watermarkRaw = await readOptionalText(join(this.store.bookRoot, '.ops/dream_watermark.json'));
+        const watermark = watermarkRaw === null ? 0 : z.object({ chapter: z.number().int().nonnegative() }).parse(JSON.parse(watermarkRaw)).chapter;
+        const currentStoryDay = options.currentStoryDay ?? snapshot.worldState.frontmatter.story_day;
 
-        const candidateIds = options.activeEntityIds ?? [];
+        const candidateIds = options.activeEntityIds ?? Object.values(snapshot.entities)
+            .filter((profile) => profile.metadata.last_seen_ch > watermark && profile.metadata.last_seen_ch <= options.currentChapter)
+            .map((profile) => profile.metadata.entity_id);
+        let recentWordDelta = options.recentWordDelta;
+        if (recentWordDelta === undefined) {
+            recentWordDelta = 0;
+            for (const file of snapshot.chapterFiles) {
+                const chapter = Number(file.slice(3, -3));
+                if (chapter > watermark && chapter <= options.currentChapter) {
+                    recentWordDelta += countNonSpaceChars(await readFile(join(this.store.bookRoot, 'manuscripts', file), 'utf8'));
+                }
+            }
+        }
         const loadedActives = new Map<string, EntityProfile>();
         const dirtyProfiles: EntityProfile[] = [];
 
@@ -150,7 +166,7 @@ export class DreamingRunner {
             }
         }
 
-        const wordTriggered = (options.recentWordDelta ?? 0) >= wordThreshold;
+        const wordTriggered = recentWordDelta >= wordThreshold;
         const bufferTriggered = dirtyProfiles.length > 0;
         const hasHorizonWork =
             (options.offscreenCharacters?.length ?? 0) > 0 ||
@@ -392,6 +408,9 @@ export class DreamingRunner {
             }
         }
 
+        const watermarkPath = '.ops/dream_watermark.json';
+        await writeFile(join(this.store.bookRoot, watermarkPath), JSON.stringify({ chapter: options.currentChapter }), 'utf8');
+        committedPaths.add(watermarkPath);
         const committedTxState = await this.store.markDreamCommitted(
             options.currentChapter,
             Array.from(committedPaths)
