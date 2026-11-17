@@ -93,12 +93,8 @@ describe('StagingSessionManager', () => {
         expect(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8')).toBe(beforeChar);
     });
 
-    it('严禁越界路径、.git/、.ops/tx.lock、符号链接逃逸与写入 manuscripts/', async () => {
+    it('严禁越界路径、.git/、.ops/tx.lock 与写入 manuscripts/', async () => {
         const bookRoot = await createBookDir();
-        const outsideDir = await mkdtemp(join(tmpdir(), 'narrateos-outside-'));
-        tempDirs.push(outsideDir);
-        await writeFile(join(outsideDir, 'secret.txt'), '机密文件', 'utf8');
-        await symlink(join(outsideDir, 'secret.txt'), join(bookRoot, 'world/escape.txt'));
 
         const staging = new StagingSessionManager();
         staging.begin('run-sec', bookRoot);
@@ -109,23 +105,22 @@ describe('StagingSessionManager', () => {
         ).rejects.toThrow('manuscripts/');
         expect(() => staging.stageWrite('run-sec', 'manuscripts/ch_0002.md', '私自写章')).toThrow('manuscripts/');
 
-        // 禁止路径穿越、.git/、.ops/tx.lock 及符号链接逃逸
+        // 禁止路径穿越、.git/ 与 .ops/tx.lock
         await expect(staging.read('run-sec', '../outside.txt')).rejects.toThrow();
         await expect(staging.read('run-sec', 'world/../world/open_threads.md')).rejects.toThrow();
         await expect(staging.read('run-sec', '.git/HEAD')).rejects.toThrow();
         await expect(staging.read('run-sec', '.ops/tx.lock')).rejects.toThrow();
         await expect(staging.read('run-sec', '/etc/passwd')).rejects.toThrow();
-        await expect(staging.read('run-sec', 'world/escape.txt')).rejects.toThrow();
         expect(() => staging.stageWrite('run-sec', '.ops/tx.lock', 'fake')).toThrow();
         expect(() => staging.stageWrite('run-sec', '.git/config', 'fake')).toThrow();
 
         // manuscripts 原文件绝对未动
         expect(await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8')).toBe('第一章正文真源。\n');
+        staging.discard('run-sec');
     });
 
     it('全面屏蔽引擎内部 .ops/ 路径，同时放行 Dreamer 所需的 voice_samples/signals 与只读 telemetry.jsonl', async () => {
         const bookRoot = await createBookDir();
-        await symlink(join(bookRoot, '.ops/tx_state.json'), join(bookRoot, 'world/tx_link.json'));
 
         const staging = new StagingSessionManager();
         staging.begin('run-ops', bookRoot);
@@ -147,8 +142,6 @@ describe('StagingSessionManager', () => {
             expect(() => staging.stageWrite('run-ops', target, 'overwrite')).toThrow();
             await expect(staging.edit('run-ops', target, 'a', 'b')).rejects.toThrow();
         }
-        // 符号链接指向受限 .ops/ 路径同样在 read 时拦截
-        await expect(staging.read('run-ops', 'world/tx_link.json')).rejects.toThrow();
 
         // Dreamer 可读写 .ops/voice_samples.yaml 与 .ops/signals.jsonl
         expect(await staging.read('run-ops', '.ops/voice_samples.yaml')).toBe('samples: []\n');
@@ -165,5 +158,23 @@ describe('StagingSessionManager', () => {
         await expect(staging.edit('run-ops', '.ops/telemetry.jsonl', '0.8', '0.9')).rejects.toThrow();
 
         staging.discard('run-ops');
+    });
+
+    // Windows 非特权账号默认无权创建文件符号链接，跳过该平台独占校验
+    it.skipIf(process.platform === 'win32')('严禁通过符号链接逃逸到书库外或读取受限 .ops/ 路径', async () => {
+        const bookRoot = await createBookDir();
+        const outsideDir = await mkdtemp(join(tmpdir(), 'narrateos-outside-'));
+        tempDirs.push(outsideDir);
+        await writeFile(join(outsideDir, 'secret.txt'), '机密文件', 'utf8');
+        await symlink(join(outsideDir, 'secret.txt'), join(bookRoot, 'world/escape.txt'));
+        await symlink(join(bookRoot, '.ops/tx_state.json'), join(bookRoot, 'world/tx_link.json'));
+
+        const staging = new StagingSessionManager();
+        staging.begin('run-symlink', bookRoot);
+
+        await expect(staging.read('run-symlink', 'world/escape.txt')).rejects.toThrow();
+        await expect(staging.read('run-symlink', 'world/tx_link.json')).rejects.toThrow();
+
+        staging.discard('run-symlink');
     });
 });

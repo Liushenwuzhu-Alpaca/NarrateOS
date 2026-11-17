@@ -7,6 +7,11 @@ import * as bookStorePlugin from './index.js';
 import { BookSwitchConflictError, NarrateStoreService } from './index.js';
 
 const tempDirs: string[] = [];
+const cleanups: Array<() => void | Promise<void>> = [];
+
+function registerCleanup(fn: () => void | Promise<void>): void {
+    cleanups.push(fn);
+}
 
 async function createBookWorkspace(name: string): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), `narrateos-svc-${name}-`));
@@ -22,6 +27,13 @@ async function createBookWorkspace(name: string): Promise<string> {
 }
 
 afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanups.length > 0) {
+        const fn = cleanups.pop();
+        if (fn) {
+            await fn();
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -36,6 +48,7 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         const ctx = new Context();
 
         const fiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA });
+        registerCleanup(() => fiber.dispose());
         expect(ctx.narrateStore).toBeDefined();
         expect(ctx.narrateStore.bookRoot).toBe(resolve(bookA));
 
@@ -58,6 +71,7 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
 
         const ctx = new Context();
         const fiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA });
+        registerCleanup(() => fiber.dispose());
         const service = ctx.narrateStore;
 
         // 场景 1：存在活跃 runId 时拒绝切书并返回 409
@@ -94,8 +108,6 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         const storeB = await service.switchBook(bookB);
         expect(service.bookRoot).toBe(resolve(bookB));
         expect((await storeB.readBookConfig()).book_slug).toBe('book-b');
-
-        await fiber.dispose();
     });
 
     it('多 Cordis Context 实例之间完全隔离，无模块级可变单例串扰', async () => {
@@ -105,7 +117,9 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         const ctx1 = new Context();
         const ctx2 = new Context();
         const fiber1 = await ctx1.plugin(bookStorePlugin, { bookRoot: bookA });
+        registerCleanup(() => fiber1.dispose());
         const fiber2 = await ctx2.plugin(bookStorePlugin, { bookRoot: bookB });
+        registerCleanup(() => fiber2.dispose());
 
         expect(ctx1.narrateStore.bookRoot).toBe(resolve(bookA));
         expect(ctx2.narrateStore.bookRoot).toBe(resolve(bookB));
@@ -113,9 +127,6 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         ctx1.narrateStore.beginRun('ctx1-only-run');
         expect(ctx1.narrateStore.hasActiveRuns()).toBe(true);
         expect(ctx2.narrateStore.hasActiveRuns()).toBe(false);
-
-        await fiber1.dispose();
-        await fiber2.dispose();
     });
 
     it('支持 booksRoot 与可选 bookRoot，且 Config 符合 Schemastery 原生协议', async () => {
@@ -130,11 +141,10 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
 
         const ctx = new Context();
         const fiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+        registerCleanup(() => fiber.dispose());
         expect(ctx.narrateStore.booksRoot).toBe(resolve(booksRoot));
         expect(ctx.narrateStore.getBooksRoot()).toBe(resolve(booksRoot));
         expect(ctx.narrateStore.bookRoot).toBeNull();
-
-        await fiber.dispose();
     });
 
     it('目标作品 .ops/tx.lock 正被其他进程持有时拒绝切书并返回 409', async () => {
@@ -150,13 +160,12 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
 
         const ctx = new Context();
         const fiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA });
+        registerCleanup(() => fiber.dispose());
         await expect(ctx.narrateStore.switchBook(bookB)).rejects.toMatchObject({
             name: 'BookSwitchConflictError',
             statusCode: 409
         });
         expect(ctx.narrateStore.bookRoot).toBe(resolve(bookA));
-
-        await fiber.dispose();
     });
 
     it('switchBook 在异步持锁检测期间若并发开启 runId 则拒绝切换，且并发 switchBook 串行化执行', async () => {
@@ -165,6 +174,7 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         const bookC = await createBookWorkspace('book-c');
 
         const service = new NarrateStoreService({ bookRoot: bookA });
+        registerCleanup(() => service.dispose());
         let releaseLockProbe!: () => void;
         const lockProbeGate = new Promise<void>((resolveGate) => {
             releaseLockProbe = resolveGate;
@@ -206,8 +216,6 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         expect(storeB.bookRoot).toBe(resolve(bookB));
         expect(storeC.bookRoot).toBe(resolve(bookC));
         expect(service.bookRoot).toBe(resolve(bookC));
-
-        service.dispose();
     });
 
     it('ctx.effect 卸载时先排空依赖消费者，最后才调用 service.dispose()', async () => {
@@ -216,6 +224,7 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         const events: string[] = [];
 
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA });
+        registerCleanup(() => storeFiber.dispose());
         const disposeSpy = vi.spyOn(ctx.narrateStore, 'dispose').mockImplementation(function (
             this: NarrateStoreService
         ) {
