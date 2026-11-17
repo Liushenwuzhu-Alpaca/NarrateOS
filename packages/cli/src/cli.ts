@@ -74,6 +74,10 @@ const HELP_TEXT = [
     '  -h, --help      显示帮助信息'
 ].join('\n');
 
+const BOOLEAN_FLAGS: Record<string, true> = { json: true, force: true, complete: true };
+const VALUE_FLAGS: Record<string, true> = { book: true, 'book-root': true, slug: true, title: true, pov: true, mode: true, 'seed-file': true, seed: true, t0: true, goal: true, chapter: true, 'target-day': true, 'story-day': true, entities: true, companions: true, chapters: true };
+const INTEGER_FLAGS: Record<string, true> = { chapter: true, chapters: true, 'target-day': true, 'story-day': true };
+
 /** 解析命令行参数 */
 export function parseCliArgs(argv: string[], cwd = process.cwd()): ParsedCliCommand {
     const flags: Record<string, string | boolean> = {};
@@ -91,22 +95,22 @@ export function parseCliArgs(argv: string[], cwd = process.cwd()): ParsedCliComm
         }
         if (token.startsWith('--')) {
             const eqIdx = token.indexOf('=');
-            if (eqIdx !== -1) {
-                const key = token.slice(2, eqIdx);
-                const val = token.slice(eqIdx + 1);
-                flags[key] = val;
+            const key = token.slice(2, eqIdx === -1 ? undefined : eqIdx);
+            if (Object.hasOwn(BOOLEAN_FLAGS, key)) {
+                if (eqIdx !== -1) throw new Error(`参数 --${key} 不接受值`);
+                flags[key] = true;
             } else {
-                const key = token.slice(2);
-                const next = argv[i + 1];
-                if (next !== undefined && !next.startsWith('-')) {
-                    flags[key] = next;
-                    i += 1;
-                } else {
-                    flags[key] = true;
+                if (!Object.hasOwn(VALUE_FLAGS, key)) throw new Error(`未知参数 --${key}`);
+                const value = eqIdx === -1 ? argv[++i] : token.slice(eqIdx + 1);
+                if (value === undefined || value.length === 0 || value.startsWith('--') || value === '-h') {
+                    throw new Error(`参数 --${key} 缺少值`);
                 }
+                flags[key] = value;
+                if (Object.hasOwn(INTEGER_FLAGS, key)) getIntFlag(flags, key);
             }
             continue;
         }
+        if (token.startsWith('-')) throw new Error(`未知参数 ${token}`);
         positionals.push(token);
     }
 
@@ -139,10 +143,14 @@ function getIntFlag(flags: Record<string, string | boolean>, key: string): numbe
     if (raw === undefined) {
         return undefined;
     }
-    const num = Number.parseInt(raw, 10);
-    if (!Number.isFinite(num)) {
+    const num = Number(raw);
+    if (!/^-?\d+$/.test(raw) || !Number.isSafeInteger(num)) {
         throw new Error(`参数 --${key} 需要整数，收到: ${raw}`);
     }
+    if ((key === 'chapter' || key === 'chapters') && num <= 0) {
+        throw new Error(`参数 --${key} 需要正整数`);
+    }
+    if (key === 'chapter' && num > 9999) throw new Error('参数 --chapter 不能超过 9999');
     return num;
 }
 

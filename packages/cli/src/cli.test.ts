@@ -439,6 +439,23 @@ afterEach(async () => {
 });
 
 describe('@narrateos/cli', () => {
+    it('拒绝缺值、未知参数和不完整整数，同时保留负故事日', async () => {
+        for (const args of [
+            ['status', '--book', '--json'],
+            ['step', '--chapter', '3abc'],
+            ['step', '--chapter', '3.7'],
+            ['step', '--chapter', '-1'],
+            ['status', '--unknown'],
+            ['status', '--json=false']
+        ]) {
+            expect(() => parseCliArgs(args)).toThrow();
+            const errors: string[] = [];
+            expect(await runCli(args, { stderr: (text) => errors.push(text) })).toBe(1);
+            expect(errors.join('')).toContain('参数');
+        }
+        expect(parseCliArgs(['step', '--target-day', '-1']).flags['target-day']).toBe('-1');
+    });
+
     it('应该正确解析 CLI 子命令与参数', () => {
         const stepParsed = parseCliArgs([
             'step',
