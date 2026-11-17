@@ -1,0 +1,10 @@
+id: writer
+pool: strong_creative
+cleanroom: true
+promptFile: ./prompts/writer.md
+temperature: 0.75
+reasoningEffort: high
+maxSteps: 1
+maxReadCalls: 0
+tools: []
+yieldTool: null

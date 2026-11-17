@@ -1,0 +1,12 @@
+id: extractor
+pool: fast_retrieval
+cleanroom: false
+promptFile: ./prompts/extractor.md
+temperature: 0.1
+reasoningEffort: medium
+maxSteps: 6
+maxReadCalls: 4
+tools:
+    - book_read
+    - book_grep
+yieldTool: yield_state_patch
