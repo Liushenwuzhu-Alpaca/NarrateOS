@@ -1355,4 +1355,46 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             })
         ).rejects.toThrow(/does not support reasoning effort "medium"/);
     });
+
+    it('DshLlmAdapter 遇到 MALFORMED_RESPONSE 时自动退避重试并返回后续成功响应', async () => {
+        let attempts = 0;
+        const mockLlm = {
+            async *stream() {
+                attempts += 1;
+                if (attempts === 1) {
+                    yield {
+                        type: 'finish',
+                        reason: {
+                            kind: 'error',
+                            failure: {
+                                code: 'MALFORMED_RESPONSE',
+                                message: 'DeepSeek Messages stream: duplicate message_start'
+                            }
+                        }
+                    };
+                    return;
+                }
+                yield* textToStreamChunks('陈砚合上账册，海风从门缝吹进来。');
+            }
+        };
+
+        const adapter = new DshLlmAdapter(mockLlm as never, {
+            poolRouting: {
+                strong_creative: { provider: 'deepseek-official', model: 'mock-strong' },
+                fast_retrieval: { provider: 'deepseek-official', model: 'mock-fast' },
+                audit: { provider: 'deepseek-official', model: 'mock-audit' }
+            },
+            backoffMs: [1],
+            sleepFn: async () => {}
+        });
+
+        const res = await adapter.generate({
+            pool: 'strong_creative',
+            staticPrefixBlocks: ['正文写手'],
+            dynamicTail: '写一章'
+        });
+
+        expect(attempts).toBe(2);
+        expect(res.text).toContain('陈砚合上账册');
+    });
 });

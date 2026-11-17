@@ -26,7 +26,8 @@ const DEFAULT_RETRYABLE_CODES = new Set<string>([
     'SERVER',
     'TIMEOUT',
     'TRANSPORT',
-    'EMPTY_RESPONSE'
+    'EMPTY_RESPONSE',
+    'MALFORMED_RESPONSE'
 ]);
 const RETRYABLE_HTTP_STATUSES = new Set<number>([429, 500, 502, 503, 504]);
 const RETRYABLE_NODE_CODES = new Set<string>([
