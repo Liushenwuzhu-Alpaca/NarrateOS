@@ -5,7 +5,7 @@ import {
     NodeSystemAdapter
 } from '@narrateos/core';
 import { DshLlmAdapter } from './dsh-llm-adapter.js';
-import { NarrateRuntimeController, registerNarrateRoutes } from './routes.js';
+import { NarrateRuntimeController, registerNarrateRoutes, resolveStatusModelRouting } from './routes.js';
 import type { DshCordisContext, DshLlmAdapterOptions, NarratePluginConfig } from './types.js';
 
 export const name = 'narrateos-dsh-plugin';
@@ -29,8 +29,22 @@ export function apply(ctx: DshCordisContext, config?: NarratePluginConfig): void
             throw new Error(`NarrateOS 插件缺少有效的 poolRouting.${pool} 配置`);
         }
     }
+    const system = config.system ?? new NodeSystemAdapter();
+    const modelRoutingDefaults = Object.fromEntries(Object.entries(config.poolRouting).map(([pool, route]) => [pool, route.model]));
+    let controller: NarrateRuntimeController;
     const adapterOptions: DshLlmAdapterOptions = {
-        poolRouting: config.poolRouting
+        poolRouting: config.poolRouting,
+        resolveModelRouting: async () => {
+            try {
+                const currentStore = new BookStore(controller.bookRoot, system);
+                return resolveStatusModelRouting((await currentStore.readBookConfig()).model_routing, modelRoutingDefaults);
+            } catch (error: unknown) {
+                if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+                    return resolveStatusModelRouting(undefined, modelRoutingDefaults);
+                }
+                throw error;
+            }
+        }
     };
     if (config.llmRetry?.maxRetries !== undefined) {
         adapterOptions.maxRetries = config.llmRetry.maxRetries;
@@ -43,12 +57,11 @@ export function apply(ctx: DshCordisContext, config?: NarratePluginConfig): void
     }
 
     const llm = new DshLlmAdapter(ctx.llm, adapterOptions);
-    const system = config.system ?? new NodeSystemAdapter();
     const store = config.store ?? new BookStore(config.bookRoot, system);
     const engine = config.engine ?? new NarrativeEngine({ store, llm, system });
     const dreamingRunner = config.dreamingRunner ?? new DreamingRunner(store, llm, system);
 
-    const controller = new NarrateRuntimeController({
+    controller = new NarrateRuntimeController({
         bookRoot: config.bookRoot,
         ...(config.booksRoot !== undefined ? { booksRoot: config.booksRoot } : {}),
         store,
@@ -56,6 +69,7 @@ export function apply(ctx: DshCordisContext, config?: NarratePluginConfig): void
         dreamingRunner,
         llm,
         system,
+        modelRoutingDefaults,
         ...(config.heartbeatIntervalMs !== undefined
             ? { heartbeatIntervalMs: config.heartbeatIntervalMs }
             : {}),

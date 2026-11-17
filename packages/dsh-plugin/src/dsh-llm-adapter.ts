@@ -108,12 +108,14 @@ export class DshLlmAdapter implements LlmPort {
     private readonly backoffMs: readonly number[];
     private readonly retryableCodes: Set<string>;
     private readonly sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>;
+    private readonly resolveModelRouting: DshLlmAdapterOptions['resolveModelRouting'];
 
     constructor(
         private readonly llm: DshLlmService,
         options: DshLlmAdapterOptions
     ) {
         this.poolRouting = options.poolRouting;
+        this.resolveModelRouting = options.resolveModelRouting;
         this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
         this.backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;
         this.retryableCodes = options.retryableCodes
@@ -131,10 +133,11 @@ export class DshLlmAdapter implements LlmPort {
         if (!route) {
             throw new Error(`未配置模型池路由: ${req.pool}`);
         }
+        const modelRouting = await this.resolveModelRouting?.();
 
         const options: DshGenerateOptions = {
             provider: route.provider,
-            model: route.model,
+            model: modelRouting?.[req.pool]?.trim() || route.model,
             messages: [
                 {
                     role: 'user',

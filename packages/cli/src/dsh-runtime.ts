@@ -43,6 +43,7 @@ export interface DshRuntimeClientOptions {
     loader?: ((specifier: string) => Promise<DshLlmModuleLike>) | undefined;
     /** 按模型池路由的模型名称映射 */
     modelRouting?: Partial<Record<LlmPool, string>> | undefined;
+    resolveModelRouting?: () => Promise<Record<string, string> | undefined>;
     /** 兜底模型名称 */
     defaultModel?: string | undefined;
     /** 自定义 DeepSeek API Base URL（默认 https://api.deepseek.com） */
@@ -123,12 +124,14 @@ export class DshRuntimeClient implements LlmPort {
     private readonly hasCustomModuleOrLoader: boolean;
     private readonly loader: (specifier: string) => Promise<DshLlmModuleLike>;
     private readonly modelRouting: Partial<Record<LlmPool, string>>;
+    private readonly resolveModelRouting: DshRuntimeClientOptions['resolveModelRouting'];
     private readonly baseUrl: string;
     private readonly requestTimeoutMs: number;
     private readonly streamIdleTimeoutMs: number;
     private cachedModule: DshLlmModuleLike | null = null;
 
     constructor(options: DshRuntimeClientOptions = {}) {
+        this.resolveModelRouting = options.resolveModelRouting;
         this.hasCustomModuleOrLoader =
             options.loader !== undefined ||
             options.moduleSpecifier !== undefined ||
@@ -382,7 +385,9 @@ export class DshRuntimeClient implements LlmPort {
             throw signal.reason instanceof Error ? signal.reason : new Error('Aborted');
         }
 
+        const bookRouting = await this.resolveModelRouting?.();
         const configuredModel =
+            bookRouting?.[req.pool] ??
             this.modelRouting[req.pool] ??
             (req.pool === 'strong_creative'
                 ? process.env['NARRATEOS_MODEL_STRONG']

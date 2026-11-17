@@ -116,6 +116,7 @@ export type LlmPoolRouting = Record<LlmPool, LlmRouteTarget>;
 /** DshLlmAdapter 配置选项 */
 export interface DshLlmAdapterOptions {
     poolRouting: LlmPoolRouting;
+    resolveModelRouting?: () => Promise<Record<string, string>>;
     maxRetries?: number;
     backoffMs?: readonly number[];
     retryableCodes?: readonly string[];

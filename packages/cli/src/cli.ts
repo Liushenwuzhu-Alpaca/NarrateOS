@@ -181,7 +181,16 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
             if (deps.llm) {
                 return deps.llm;
             }
-            return new LoggingLlmAdapter(new DshRuntimeClient(), {
+            return new LoggingLlmAdapter(new DshRuntimeClient({
+                resolveModelRouting: async () => {
+                    try {
+                        return (await new BookStore(parsed.bookRoot, system).readBookConfig()).model_routing;
+                    } catch (error: unknown) {
+                        if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return undefined;
+                        throw error;
+                    }
+                }
+            }), {
                 logPath: join(parsed.bookRoot, '.ops/llm_calls.jsonl'),
                 onCallFinish: (entry) => {
                     const modelLabel = entry.modelId ?? entry.pool;

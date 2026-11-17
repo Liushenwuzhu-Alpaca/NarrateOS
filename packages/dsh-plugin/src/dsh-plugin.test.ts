@@ -143,6 +143,29 @@ class MockWebServer implements DshWebServerService {
 }
 
 describe('DshLlmAdapter', () => {
+    it('每次调用解析当前作品路由并保留宿主 provider', async () => {
+        const captured: DshGenerateOptions[] = [];
+        let routing: Record<string, string> = { strong_creative: 'book-alpha' };
+        const adapter = new DshLlmAdapter({
+            async *stream(options) {
+                captured.push(options);
+                yield { type: 'text-delta', index: 0, text: '完成' };
+                yield { type: 'finish', reason: { kind: 'stop' } };
+            }
+        }, { poolRouting: DEFAULT_ROUTING, resolveModelRouting: async () => routing });
+        const request = { pool: 'strong_creative' as const, staticPrefixBlocks: [], dynamicTail: '继续' };
+        await adapter.generate(request);
+        routing = { strong_creative: 'book-beta' };
+        await adapter.generate(request);
+        routing = {};
+        await adapter.generate(request);
+        expect(captured.map(({ provider, model }) => ({ provider, model }))).toEqual([
+            { provider: 'deepseek-official', model: 'book-alpha' },
+            { provider: 'deepseek-official', model: 'book-beta' },
+            DEFAULT_ROUTING.strong_creative
+        ]);
+    });
+
     it('应按 LlmPool 映射路由、无 sessionId 流式调用并拼装正文与标准化 TokenUsage', async () => {
         const captured: DshGenerateOptions[] = [];
         const mockLlm: DshLlmService = {

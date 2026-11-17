@@ -15,6 +15,9 @@ NarrateOS 基础模式预设包，遵循 `@deepseek-ai/dsh@0.2.2-rc.1` Bundle Pa
 
 默认路由使用宿主注册的 `deepseek-official` provider，创作与审计使用 `deepseek-v4`，检索使用 `deepseek-v4-flash`。部署时将 `cordis.patch.yml` 中的 provider/model 改为宿主实际可用的标识；认证信息只由宿主配置提供，预设不保存密钥。插件在注册路由前检查作品路径和三池配置，缺项会给出明确配置错误。
 
+作品 `world/book_config.yaml` 的 `model_routing` 以池名映射模型名称，每次实际调用重新读取当前作品，切书无需重启适配器。优先级为作品配置、`NARRATEOS_MODEL_STRONG/FAST/AUDIT`、宿主 `poolRouting` 默认模型；provider 仍由宿主对应池配置决定，状态接口使用相同优先级。CLI 同样优先使用作品模型映射。
+
+
 
 ## 前端 `'main'` 槽位状态说明
 

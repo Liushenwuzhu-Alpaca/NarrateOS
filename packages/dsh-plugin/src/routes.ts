@@ -48,6 +48,7 @@ export interface NarrateControllerDeps {
     system?: SystemPort;
     heartbeatIntervalMs?: number;
     shutdownTimeoutMs?: number;
+    modelRoutingDefaults?: Record<string, string>;
 }
 
 export interface YoloRuntimeState {
@@ -149,7 +150,7 @@ function parseJsonLines(raw: string | null): unknown[] {
     return results;
 }
 
-function resolveStatusModelRouting(configured?: Record<string, string>): Record<string, string> {
+export function resolveStatusModelRouting(configured?: Record<string, string>, defaults: Record<string, string> = {}): Record<string, string> {
     const routing: Record<string, string> = {};
     if (configured) {
         for (const [key, value] of Object.entries(configured)) {
@@ -172,6 +173,9 @@ function resolveStatusModelRouting(configured?: Record<string, string>): Record<
                 routing[pool] = trimmed;
             }
         }
+    }
+    for (const [pool, model] of Object.entries(defaults)) {
+        if (!routing[pool]) routing[pool] = model;
     }
 
     return routing;
@@ -251,6 +255,7 @@ export class NarrateRuntimeController {
     private telemetryOffsetLines = 0;
     private signalsConsumedLines = 0;
     private readonly shutdownTimeoutMs: number;
+    private readonly modelRoutingDefaults: Record<string, string>;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     constructor(deps: NarrateControllerDeps) {
@@ -262,6 +267,7 @@ export class NarrateRuntimeController {
         this.llm = deps.llm;
         this.system = deps.system ?? new NodeSystemAdapter();
         this.shutdownTimeoutMs = deps.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+        this.modelRoutingDefaults = deps.modelRoutingDefaults ?? {};
 
         const heartbeatMs = deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
         if (heartbeatMs > 0) {
@@ -778,7 +784,7 @@ export class NarrateRuntimeController {
                 entityCount: Object.keys(snapshot.entities).length,
                 coldArchiveCount: snapshot.coldArchiveIds.length,
                 worldState: snapshot.worldState.frontmatter,
-                modelRouting: resolveStatusModelRouting(snapshot.config.model_routing),
+                modelRouting: resolveStatusModelRouting(snapshot.config.model_routing, this.modelRoutingDefaults),
                 pendingSignalsCount,
                 yolo: {
                     running: this.yoloState.running,
