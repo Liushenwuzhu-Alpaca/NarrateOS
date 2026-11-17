@@ -120,6 +120,10 @@ export class DreamingRunner {
      * 执行按脏页增量 VACUUM、future_horizon 翻转与冷归档，并检查前台镜头原则 Spotlight Trigger
      */
     async runDreaming(options: RunDreamingOptions): Promise<RunDreamingResult> {
+        return await this.store.withTxLock(() => this.runDreamingLocked(options));
+    }
+
+    private async runDreamingLocked(options: RunDreamingOptions): Promise<RunDreamingResult> {
         const txState = await this.store.readTxState();
         if (txState.phase === 'DRAFTING' || txState.phase === 'FEAT_COMMITTED') {
             throw new Error(`Dreaming 需要先完成章节恢复，当前相位: ${txState.phase}`);

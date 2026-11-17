@@ -11,7 +11,7 @@ import {
     ScriptedLlmAdapter,
     type TokenUsage
 } from '../ports/index.js';
-import { BookStore } from '../store/index.js';
+import { BookStore, TxLockConflictError } from '../store/index.js';
 import {
     NarrativeEngine,
     SafeHaltError,
@@ -251,6 +251,25 @@ afterEach(async () => {
 });
 
 describe('NarrativeEngine', () => {
+    it('模型调用期间其他作品实例不能开始写入或恢复在途章节', async () => {
+        const { bookRoot, store, system } = await createEngineFixture();
+        const competitor = new BookStore(bookRoot, system);
+        const assertExclusive = async (): Promise<void> => {
+            await expect(competitor.beginDraft(2)).rejects.toThrow(TxLockConflictError);
+            await expect(competitor.recoverWal()).rejects.toThrow(TxLockConflictError);
+        };
+        const llm = new ScriptedLlmAdapter([
+            async () => { await assertExclusive(); return jsonResponse(LIBRARIAN_OK); },
+            jsonResponse(PLANNER_OK),
+            textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }),
+            async () => { await assertExclusive(); return jsonResponse(EXTRACTOR_OK); }
+        ]);
+        const result = await makeEngine(store, llm, system).stepChapter({ chapterGoal: '推进社团审查' });
+        expect(result.status).toBe('COMMITTED');
+        expect((await competitor.recoverWal()).action).toBe('READY');
+    });
+
     it('应完整跑通单章 6 步闭环、隔离隐私/WARPED、过滤幻觉误报并落盘 WAL 与遥测', async () => {
         const { bookRoot, system, store } = await createEngineFixture();
 

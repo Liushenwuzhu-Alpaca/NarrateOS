@@ -1120,6 +1120,10 @@ export class NarrativeEngine {
      * Librarian -> Planner -> Writer -> Static Prose Gate -> Fact Checker -> Extractor + 双粒度 WAL 提交
      */
     async stepChapter(options: StepChapterOptions): Promise<StepChapterResult> {
+        return await this.store.withTxLock(() => this.stepChapterLocked(options));
+    }
+
+    private async stepChapterLocked(options: StepChapterOptions): Promise<StepChapterResult> {
         const emit = (stage: EngineStageName, chapterNum: number, message: string): void => {
             if (!options.onProgress) return;
             try {

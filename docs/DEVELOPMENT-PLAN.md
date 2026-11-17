@@ -89,6 +89,7 @@ narrateos/
   - WAL 恢复以 Git 已提交的事务状态为相位依据；工作区中提前写入的 FEAT/STATE/DREAM 不构成提交成功证据。正文提交失败返回起草恢复，状态提交失败继续从已提交正文抽取。
   - 恢复仅回退持久化写集内的文件，先将这些文件备份到 `.ops/recovery/`；历史章手改、未登记实体及未跟踪笔记原地保留并继续报告脏状态，不执行整仓 reset/clean。恢复备份不参与工作区干净度判断。
   - Dreaming 在调用模型或写入任何整理结果之前拒绝 DRAFTING/FEAT_COMMITTED；强制整理不能跳过章节恢复，最终提交再次校验相位。
+  - 单章推进与 Dreaming 从读取快照到最终提交始终持有同一作品事务锁，模型等待期间也不释放；不同 CLI/Web 实例不能交错生成、恢复或整理同一作品。
 
 ### Phase 2：确定性裁剪、成对检索与静态门禁内核 (`ViewSlicer` + `IndexRecall` + `ProseGateAndTelemetry`)
 - **交付内容**：零 LLM 调用完整实现 `ViewSlicer`、`IndexRecall` 与 `ProseGateAndTelemetry` 三个纯确定性深模块。
