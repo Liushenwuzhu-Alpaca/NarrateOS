@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
+import { Toast } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
     bootBook,
+    deleteSignal,
     fetchBooks,
     fetchChapter,
     fetchChapters,
@@ -26,6 +28,7 @@ import {
 import { BootBookModal } from './BootBookModal';
 import {
     CenterWorkbench,
+    resolveStageId,
     type CenterWorkbenchProps,
     type DirectorSignalKind,
     type ExternalViewCommand,
@@ -75,23 +78,19 @@ const PIPELINE_STAGE_META: ReadonlyArray<{ id: PipelineStageId; label: string }>
     { id: 'LIBRARIAN', label: 'Librarian' },
     { id: 'PLANNER', label: 'Planner' },
     { id: 'WRITER', label: 'Writer' },
-    { id: 'PROSE_GATE', label: 'Static Gate' },
-    { id: 'FACT_CHECKER', label: 'Fact Checker' },
-    { id: 'EXTRACTOR', label: 'Extractor & WAL' }
+    { id: 'FACT_CHECKER', label: 'Fact Check' },
+    { id: 'EXTRACTOR', label: 'Extractor' },
+    { id: 'DREAMING', label: 'Dreaming' }
 ];
 
 const DEFAULT_STAGE_SUMMARIES: Record<PipelineStageId, string> = {
     LIBRARIAN: '检索本场焦点实体卡与声纹样本',
     PLANNER: '生成结构化章节细纲与节拍',
     WRITER: '净室单轮流式直出正文草稿',
-    PROSE_GATE: '确定性文风门禁扫描与局部 Patch',
     FACT_CHECKER: '异构模型核查与双侧原句验真',
-    EXTRACTOR: '提取实体增量并原子提交 Git WAL'
+    EXTRACTOR: '提取实体增量并原子提交 Git WAL',
+    DREAMING: '条件睡眠 VACUUM 与跨章连续性自愈'
 };
-
-function isPipelineStageId(value: string): value is PipelineStageId {
-    return PIPELINE_STAGE_META.some((item) => item.id === value);
-}
 
 function asNumber(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -185,7 +184,11 @@ function mapHaltDiagnostic(haltView: HaltViewPayload | null): HaltDiagnosticInfo
 
 function mapPendingSignals(signalsView: SignalsViewPayload | null): PendingSignalItem[] {
     if (!signalsView) return [];
-    return signalsView.signals.map((item) => ({
+    // 队列只展示未消费切片;已消费历史行不得混入(撤回按内容匹配,与全量下标无关)
+    const items =
+        signalsView.pending ??
+        signalsView.signals.slice(Math.max(0, signalsView.signals.length - signalsView.pendingCount));
+    return items.map((item) => ({
         type: asString(item.type),
         reason: asString(item['reason']) ?? asString(item.content) ?? asString(item.instruction),
         chapter: asNumber(item['chapter']) ?? asNumber(item.target_chapter),
@@ -238,13 +241,25 @@ function deriveStageArtifact(latestSseStage: string | null): StageArtifactTeleme
     }
     if (latestSseStage === 'COMMITTED') {
         return {
-            selectedStageIndex: 5,
-            stageName: 'Extractor & WAL',
+            selectedStageIndex: 4,
+            stageName: 'Extractor',
             stageStatus: '已提交',
             stageSummary: '本章正文与状态补丁已双提交至 Git WAL'
         };
     }
-    const idx = PIPELINE_STAGE_META.findIndex((item) => item.id === latestSseStage);
+    if (latestSseStage === 'PROSE_GATE' || latestSseStage === 'LOCAL_PATCH') {
+        const isPatch = latestSseStage === 'LOCAL_PATCH';
+        return {
+            selectedStageIndex: 2,
+            stageName: 'Writer · 静态门禁',
+            stageStatus: isPatch ? '门禁 Patch' : '门禁扫描',
+            stageSummary: isPatch
+                ? '静态门禁拦截，局部 Patch 自愈中（明细见右栏门禁组）'
+                : '0-LLM 确定性文风门禁校验中'
+        };
+    }
+    const resolved = resolveStageId(latestSseStage);
+    const idx = resolved ? PIPELINE_STAGE_META.findIndex((item) => item.id === resolved) : -1;
     if (idx >= 0) {
         const meta = PIPELINE_STAGE_META[idx]!;
         return {
@@ -295,13 +310,12 @@ export function NarrateStudioRoot(): React.ReactElement {
         filteredOutCount: 0,
         blockedCount: 0
     });
-    const [lastConsumedSignal, setLastConsumedSignal] = useState<string | undefined>(undefined);
 
     const [loading, setLoading] = useState<boolean>(true);
     const [bootModalOpen, setBootModalOpen] = useState<boolean>(false);
     const [activeViewKind, setActiveViewKind] = useState<MaterializedViewKind | null>(null);
     const [externalViewCommand, setExternalViewCommand] = useState<ExternalViewCommand | undefined>(undefined);
-    const [toast, setToast] = useState<ToastState | null>(null);
+    const [toasts, setToasts] = useState<ToastState[]>([]);
 
     const [containerWidth, setContainerWidth] = useState<number>(() =>
         typeof window !== 'undefined' ? window.innerWidth : 1280
@@ -310,33 +324,23 @@ export function NarrateStudioRoot(): React.ReactElement {
         typeof window !== 'undefined' ? window.innerWidth >= 1060 : true
     );
     const [rightTab, setRightTab] = useState<'toc' | 'insp' | 'tools'>('toc');
-    const [dismissedSignalIndices, setDismissedSignalIndices] = useState<number[]>([]);
 
     const shellRef = useRef<HTMLDivElement | null>(null);
     const prevWidthRef = useRef<number>(containerWidth);
     const viewCommandNonceRef = useRef<number>(0);
-    const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const selectedChapterRef = useRef<number | null>(null);
     selectedChapterRef.current = selectedChapter;
 
+    // 宿主 Toast 原语自管生命周期(onDone 卸载),这里只维护消息队列;错误延长驻留
+    const toastSeqRef = useRef(0);
     const showToast = useCallback((message: string, kind: 'info' | 'error' = 'info') => {
-        if (toastTimerRef.current) {
-            clearTimeout(toastTimerRef.current);
-        }
-        const nextToast: ToastState = { id: Date.now(), message, kind };
-        setToast(nextToast);
-        toastTimerRef.current = setTimeout(() => {
-            setToast((curr) => (curr && curr.id === nextToast.id ? null : curr));
-        }, 3600);
+        toastSeqRef.current += 1;
+        const nextToast: ToastState = { id: toastSeqRef.current, message, kind };
+        setToasts((prev) => [...prev.slice(-2), nextToast]);
     }, []);
 
     useEffect(() => {
         ensureStudioStyles();
-        return () => {
-            if (toastTimerRef.current) {
-                clearTimeout(toastTimerRef.current);
-            }
-        };
     }, []);
 
     useEffect(() => {
@@ -387,16 +391,20 @@ export function NarrateStudioRoot(): React.ReactElement {
         if (halt) setHaltView(halt);
     }, []);
 
+    const [chapterLoading, setChapterLoading] = useState<boolean>(false);
     const loadChapterByNumber = useCallback(async (chapterNumber: number) => {
         if (!Number.isFinite(chapterNumber) || chapterNumber <= 0) {
             setChapterDetail(null);
             return;
         }
+        setChapterLoading(true);
         try {
             const detail = await fetchChapter(chapterNumber);
             setChapterDetail(detail);
         } catch (err) {
             showToast(err instanceof Error ? err.message : String(err), 'error');
+        } finally {
+            setChapterLoading(false);
         }
     }, [showToast]);
 
@@ -492,13 +500,17 @@ export function NarrateStudioRoot(): React.ReactElement {
                 setLatestSseStage(stageName);
                 const message = asString(data['message']);
                 const timestamp = asString(data['timestamp']);
-                if (isPipelineStageId(stageName) && message) {
+                const resolvedStage = resolveStageId(stageName);
+                if (resolvedStage && message) {
+                    // PROSE_GATE 每章例行校验,只是 Writer 运行中;LOCAL_PATCH 才是拦截返修
+                    const isPatch = stageName === 'LOCAL_PATCH';
                     setStageOverrides((prev) => ({
                         ...prev,
-                        [stageName]: {
-                            status: 'active',
+                        [resolvedStage]: {
+                            status: isPatch ? 'healing' : 'active',
                             summary: message,
-                            updatedAt: timestamp
+                            updatedAt: timestamp,
+                            ...(isPatch ? { badge: '门禁 Patch' } : {})
                         }
                     }));
                 }
@@ -578,11 +590,14 @@ export function NarrateStudioRoot(): React.ReactElement {
             }
 
             if (event === 'signal:received') {
-                const reason = asString(data['reason']) ?? asString(data['content']);
-                if (reason) setLastConsumedSignal(reason);
                 void fetchViewSignals().then(setSignalsView).catch(() => undefined);
                 void fetchStatus().then(setStatus).catch(() => undefined);
                 showToast('导演信号已入队');
+                return;
+            }
+
+            if (event === 'signal:withdrawn') {
+                void fetchViewSignals().then(setSignalsView).catch(() => undefined);
                 return;
             }
 
@@ -611,6 +626,7 @@ export function NarrateStudioRoot(): React.ReactElement {
             }
 
             if (event === 'dream:started') {
+                setLatestSseStage('DREAMING');
                 setStatus((prev) =>
                     prev ? { ...prev, runtime: { ...prev.runtime, activeTask: 'DREAMING' } } : prev
                 );
@@ -805,7 +821,6 @@ export function NarrateStudioRoot(): React.ReactElement {
             const currentCh = status?.worldState.current_chapter ?? status?.latestChapter ?? 0;
             const req = buildSignalPayload(payload.kind, payload.content, currentCh);
             await postSignal(req);
-            setDismissedSignalIndices([]);
             await Promise.all([
                 fetchViewSignals().then(setSignalsView),
                 fetchStatus().then(setStatus)
@@ -816,6 +831,23 @@ export function NarrateStudioRoot(): React.ReactElement {
         },
         [handleStepOne, status]
     );
+
+    // 撤回纸条:后端按内容匹配真删,失败时保留队列并就地报错
+    const handleDismissSignal = useCallback(async (idx: number) => {
+        const item = mapPendingSignals(signalsView)[idx];
+        const reason = item?.reason ?? item?.raw;
+        if (!item?.created_at || !reason) {
+            showToast('该纸条缺少撤回所需的元数据', 'error');
+            return;
+        }
+        try {
+            await deleteSignal({ created_at: item.created_at, reason });
+            setSignalsView(await fetchViewSignals());
+            showToast('纸条已撤回');
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : '撤回纸条失败', 'error');
+        }
+    }, [signalsView, showToast]);
 
     // 派生右侧与中间栏视图模型
     const activeBookSummary = useMemo(
@@ -920,10 +952,7 @@ export function NarrateStudioRoot(): React.ReactElement {
 
     const safeHaltInfo = useMemo(() => mapSafeHaltInfo(haltView?.safeHalt), [haltView]);
     const haltDiagnostic = useMemo(() => mapHaltDiagnostic(haltView), [haltView]);
-    const pendingSignals = useMemo(
-        () => mapPendingSignals(signalsView).filter((_, idx) => !dismissedSignalIndices.includes(idx)),
-        [dismissedSignalIndices, signalsView]
-    );
+    const pendingSignals = useMemo(() => mapPendingSignals(signalsView), [signalsView]);
     const stageArtifact = useMemo(() => deriveStageArtifact(latestSseStage), [latestSseStage]);
 
     const warpedHorizonCount = useMemo(() => {
@@ -987,6 +1016,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                 yolo={status?.yolo}
                 chapters={chapters}
                 chapterDetail={centerChapterDetail}
+                chapterLoading={chapterLoading}
                 stages={stageOverrides}
                 latestSseStage={latestSseStage}
                 safeHalt={safeHaltInfo}
@@ -999,7 +1029,6 @@ export function NarrateStudioRoot(): React.ReactElement {
                     threadsMarkdown: threadsView?.content
                 }}
                 dirtyChaptersCount={dirtyChaptersCount}
-                lastConsumedSignal={lastConsumedSignal}
                 externalViewCommand={externalViewCommand}
                 telemetrySummary={{
                     cacheHitRate: aggregateTokens.cacheHitRate,
@@ -1020,7 +1049,7 @@ export function NarrateStudioRoot(): React.ReactElement {
                     setRightTab('insp');
                 }}
                 onDismissSignal={(idx) => {
-                    setDismissedSignalIndices((prev) => [...prev, idx]);
+                    void handleDismissSignal(idx);
                 }}
                 onSelectChapter={handleSelectChapter}
                 onStepOne={handleStepOne}
@@ -1281,20 +1310,15 @@ export function NarrateStudioRoot(): React.ReactElement {
                 }}
             />
 
-            {toast ? (
-                <div
-                    className="ns-toast"
-                    role="status"
-                    aria-live="polite"
-                    style={
-                        toast.kind === 'error'
-                            ? { borderColor: 'var(--ns-red-line)', color: 'var(--ns-red-ink)' }
-                            : undefined
-                    }
-                >
-                    {toast.message}
-                </div>
-            ) : null}
+            {/* 宿主 Toast 原语:body portal,自动跟随宿主主题与层级 */}
+            {toasts.map((item) => (
+                <Toast
+                    key={item.id}
+                    text={item.message}
+                    holdMs={item.kind === 'error' ? 6000 : 3000}
+                    onDone={() => setToasts((prev) => prev.filter((t) => t.id !== item.id))}
+                />
+            ))}
         </div>
     );
 }

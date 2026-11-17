@@ -1,16 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-/** 6 阶段流水线节点 ID */
+/** 6 节点流水线 ID：只画真正跑大模型的节点 + Dreaming（0-LLM 静态门禁不占节点） */
 export type PipelineStageId =
     | 'LIBRARIAN'
     | 'PLANNER'
     | 'WRITER'
-    | 'PROSE_GATE'
     | 'FACT_CHECKER'
-    | 'EXTRACTOR';
+    | 'EXTRACTOR'
+    | 'DREAMING';
 
-/** 单个流水线节点状态 */
-export type StageNodeStatus = 'idle' | 'active' | 'done' | 'healing' | 'halt';
+/** 单个流水线节点状态（dormant = Dreaming 条件未达的虚线弱态） */
+export type StageNodeStatus = 'idle' | 'active' | 'done' | 'healing' | 'halt' | 'dormant';
 
 /** 流水线节点运行态信息 */
 export interface StageNodeState {
@@ -19,6 +19,8 @@ export interface StageNodeState {
     inputSummary?: string | undefined;
     outputSummary?: string | undefined;
     updatedAt?: string | undefined;
+    /** 挂在节点上的局部返修徽标（如「门禁 Patch ×1」「Replan v2」） */
+    badge?: string | undefined;
 }
 
 /** 主内容区视图页签 */
@@ -52,7 +54,6 @@ export interface ChapterDetailData {
     volumeLabel?: string | undefined;
     featCommitSha?: string | undefined;
     stateCommitSha?: string | undefined;
-    consumedSignal?: string | undefined;
 }
 
 /** SAFE_HALT 单条冲突/违规证据 */
@@ -172,6 +173,7 @@ export interface CenterWorkbenchProps {
     yolo?: YoloStatusData | undefined;
     chapters?: ChapterSummaryItem[] | undefined;
     chapterDetail?: ChapterDetailData | null | undefined;
+    chapterLoading?: boolean | undefined;
     stages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
     latestSseStage?: string | null | undefined;
     safeHalt?: SafeHaltInfo | null | undefined;
@@ -180,7 +182,6 @@ export interface CenterWorkbenchProps {
     pendingSignalsCount?: number | undefined;
     materializedViews?: MaterializedViewsData | undefined;
     dirtyChaptersCount?: number | undefined;
-    lastConsumedSignal?: string | undefined;
     externalViewCommand?: ExternalViewCommand | undefined;
     telemetrySummary?: CenterTelemetrySummary | undefined;
     leftCollapsed?: boolean | undefined;
@@ -234,25 +235,25 @@ const PIPELINE_STAGES: readonly StageDefinition[] = [
         defaultOutput: '单轮流式直出本章正文草稿（无历史会话污染）。'
     },
     {
-        id: 'PROSE_GATE',
-        label: '4. Static Gate',
-        shortDesc: '静态门禁',
-        defaultInput: '正文草稿 + 可配文风门禁规则（微距/八股/跨章喻体复读）。',
-        defaultOutput: '通过校验或触发局部 Patch 返修，输出清洁正文。'
-    },
-    {
         id: 'FACT_CHECKER',
-        label: '5. Fact Checker',
+        label: '4. Fact Check',
         shortDesc: '异构核查',
         defaultInput: '最新单章正文 + 实体固有属性锁 + 物理/时间线红线。',
         defaultOutput: '双侧原句去标点验真，通过或触发 Rewrite / Replan 自愈。'
     },
     {
         id: 'EXTRACTOR',
-        label: '6. Extractor & WAL',
+        label: '5. Extractor',
         shortDesc: '提态入库',
         defaultInput: '已核查定稿正文 + 当前世界状态快照。',
         defaultOutput: '提取实体行级补丁、L2 章卡并原子提交 Git WAL (feat -> state)。'
+    },
+    {
+        id: 'DREAMING',
+        label: '6. Dreaming',
+        shortDesc: '条件睡眠自愈',
+        defaultInput: '脏实体页水位、open_threads 台账与 future_horizon 多轨触发条件。',
+        defaultOutput: '条件达标时离线 VACUUM：清洗脏页、伏笔立项/销账、补货远景与派发 Spotlight。'
     }
 ];
 
@@ -423,7 +424,6 @@ interface ParsedStructuredPlan {
     endingSummary: string;
     outlineText: string;
     beats: ParsedBeatSegment[];
-    consumedSignal?: string | undefined;
 }
 
 /** 从字符串或数组字段归一化角色列表 */
@@ -527,8 +527,7 @@ function buildPlanBeats(
 function parseStructuredPlan(
     rawText: string | undefined,
     fallbackTitle: string,
-    fallbackTimelineMode: string,
-    consumedSignal?: string
+    fallbackTimelineMode: string
 ): ParsedStructuredPlan | null {
     const trimmed = rawText?.trim() ?? '';
     if (!trimmed) {
@@ -604,7 +603,6 @@ function parseStructuredPlan(
                         : `以 ${endingBeat} 节拍收束本章`,
                 outlineText: outlineBody,
                 beats: buildPlanBeats(rawScenes, spotlight, outlineBody),
-                consumedSignal
             };
         } catch {
             // JSON 解析失败则回退到 Markdown / 键值文本解析
@@ -708,7 +706,6 @@ function parseStructuredPlan(
         endingSummary: endingSummary || `以 ${endingBeat} 节拍收束本章`,
         outlineText: outlineBody,
         beats: buildPlanBeats(parsedScenes.length > 0 ? parsedScenes : null, resolvedSpotlight, outlineBody),
-        consumedSignal
     };
 }
 
@@ -854,7 +851,25 @@ function parseUnifiedDiff(rawDiff: string, defaultFileName: string): ParsedDiffH
 }
 
 /**
- * 根据 SSE 推送的 EngineStageName 字符串推导 6 个节点的默认状态
+ * 后端 SSE 阶段名 -> 展示节点映射。
+ * PROSE_GATE 是 0-LLM 确定性步骤，不占节点：其事件折叠为 Writer 节点上的门禁徽标。
+ */
+const SSE_STAGE_ALIAS: Readonly<Record<string, PipelineStageId>> = {
+    PROSE_GATE: 'WRITER',
+    STATIC_GATE: 'WRITER'
+};
+
+/** 将后端阶段名归一化为展示节点 ID（未知阶段返回 null） */
+export function resolveStageId(stageName: string): PipelineStageId | null {
+    const aliased = SSE_STAGE_ALIAS[stageName] ?? stageName;
+    return (STAGE_ORDER as readonly string[]).includes(aliased)
+        ? (aliased as PipelineStageId)
+        : null;
+}
+
+/**
+ * 根据 SSE 推送的 EngineStageName 字符串推导 6 个节点的默认状态。
+ * Dreaming 为条件节点：单章链路中保持 dormant 虚线弱态，仅 DREAMING 事件点亮。
  */
 function deriveStagesFromSse(
     sseStage: string | null | undefined,
@@ -864,39 +879,56 @@ function deriveStagesFromSse(
         LIBRARIAN: { status: 'idle' },
         PLANNER: { status: 'idle' },
         WRITER: { status: 'idle' },
-        PROSE_GATE: { status: 'idle' },
         FACT_CHECKER: { status: 'idle' },
-        EXTRACTOR: { status: 'idle' }
+        EXTRACTOR: { status: 'idle' },
+        DREAMING: { status: 'dormant', summary: '条件未达：脏页水位或字数阈值触发后离线执行' }
     };
 
     if (sseStage) {
         if (sseStage === 'COMMITTED') {
             for (const id of STAGE_ORDER) {
+                if (id === 'DREAMING') continue;
                 base[id] = { status: 'done', summary: '已完成并提交 WAL' };
             }
         } else if (sseStage === 'SAFE_HALT') {
             base.FACT_CHECKER = { status: 'halt', summary: '触发 SAFE_HALT 停机保护' };
+        } else if (sseStage === 'PROSE_GATE') {
+            base.LIBRARIAN = { status: 'done' };
+            base.PLANNER = { status: 'done' };
+            base.WRITER = {
+                status: 'active',
+                summary: '静态门禁校验中（0-LLM 确定性步骤）'
+            };
         } else if (sseStage === 'LOCAL_PATCH') {
             base.LIBRARIAN = { status: 'done' };
             base.PLANNER = { status: 'done' };
-            base.WRITER = { status: 'done' };
-            base.PROSE_GATE = { status: 'healing', summary: '门禁拦截，正在局部 Patch 自愈' };
+            base.WRITER = {
+                status: 'healing',
+                summary: '静态门禁拦截，正在局部 Patch 自愈（0-LLM 确定性步骤）',
+                badge: '门禁 Patch'
+            };
         } else if (sseStage === 'REWRITE') {
             base.LIBRARIAN = { status: 'done' };
             base.PLANNER = { status: 'done' };
-            base.WRITER = { status: 'healing', summary: '核查打回，正在局部重写自愈' };
-            base.PROSE_GATE = { status: 'done' };
+            base.WRITER = { status: 'healing', summary: '核查打回，正在局部重写自愈', badge: 'Rewrite' };
             base.FACT_CHECKER = { status: 'healing', summary: '发现穿帮，触发 Rewrite' };
         } else if (sseStage === 'REPLAN') {
             base.LIBRARIAN = { status: 'done' };
-            base.PLANNER = { status: 'healing', summary: '触发 Replan 重排细纲' };
+            base.PLANNER = { status: 'healing', summary: '触发 Replan 重排细纲', badge: 'Replan v2' };
             base.FACT_CHECKER = { status: 'healing', summary: '要求重规划细纲' };
+        } else if (sseStage === 'DREAMING') {
+            for (const id of STAGE_ORDER) {
+                if (id === 'DREAMING') continue;
+                base[id] = { status: 'done' };
+            }
+            base.DREAMING = { status: 'active', summary: '睡眠 VACUUM 与跨章连续性整理运行中' };
         } else {
-            const activeIndex = STAGE_ORDER.indexOf(sseStage as PipelineStageId);
+            const resolved = resolveStageId(sseStage);
+            const activeIndex = resolved ? STAGE_ORDER.indexOf(resolved) : -1;
             if (activeIndex >= 0) {
                 for (let i = 0; i < STAGE_ORDER.length; i++) {
                     const id = STAGE_ORDER[i];
-                    if (!id) continue;
+                    if (!id || id === 'DREAMING') continue;
                     if (i < activeIndex) {
                         base[id] = { status: 'done', summary: '已完成' };
                     } else if (i === activeIndex) {
@@ -927,9 +959,11 @@ function getStageStatusMeta(status: StageNodeStatus): { text: string; badgeClass
         case 'done':
             return { text: '通过', badgeClass: 'ns-badge-green' };
         case 'healing':
-            return { text: '告警', badgeClass: 'ns-badge-amber' };
+            return { text: '返修', badgeClass: 'ns-badge-amber' };
         case 'halt':
-            return { text: '告警', badgeClass: 'ns-badge-red' };
+            return { text: '拦截', badgeClass: 'ns-badge-red' };
+        case 'dormant':
+            return { text: '条件未达', badgeClass: 'ns-badge-muted' };
         case 'idle':
         default:
             return { text: '待命', badgeClass: 'ns-badge-muted' };
@@ -986,6 +1020,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     yolo,
     chapters = [],
     chapterDetail,
+    chapterLoading = false,
     stages,
     latestSseStage,
     safeHalt,
@@ -994,7 +1029,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     pendingSignalsCount,
     materializedViews,
     dirtyChaptersCount = 0,
-    lastConsumedSignal,
     externalViewCommand,
     telemetrySummary,
     rightOpen = true,
@@ -1053,7 +1087,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [signalKind, setSignalKind] = useState<DirectorSignalKind>('导演指令');
     const [signalInput, setSignalInput] = useState('');
     const [submittingSignal, setSubmittingSignal] = useState(false);
-    const [dismissedIndices, setDismissedIndices] = useState<number[]>([]);
     const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
     const [activeSlashIndex, setActiveSlashIndex] = useState(0);
     const signalInputRef = useRef<HTMLInputElement | null>(null);
@@ -1062,11 +1095,48 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     const [actionMessage, setActionMessage] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
-    // 切换章节或章节内容刷新时同步编辑区草稿
+    // 切换章节时重置编辑态；同章内容刷新（SSE/轮询）不得覆盖用户正在编辑的草稿
+    const draftChapterRef = useRef<number | null>(null);
     useEffect(() => {
-        setDraftContent(chapterDetail?.content ?? '');
-        setIsEditing(false);
-    }, [chapterDetail?.chapterNumber, chapterDetail?.content]);
+        const nextChapter = chapterDetail?.chapterNumber ?? null;
+        const chapterChanged = draftChapterRef.current !== nextChapter;
+        draftChapterRef.current = nextChapter;
+        if (chapterChanged) {
+            setDraftContent(chapterDetail?.content ?? '');
+            setIsEditing(false);
+            return;
+        }
+        if (!isEditing) {
+            setDraftContent(chapterDetail?.content ?? '');
+        }
+    }, [chapterDetail?.chapterNumber, chapterDetail?.content, isEditing]);
+
+    // YOLO 浮层：点击外部或 Escape 关闭（焦点回到触发按钮）
+    const yoloWrapRef = useRef<HTMLDivElement | null>(null);
+    const yoloTriggerRef = useRef<HTMLButtonElement | null>(null);
+    useEffect(() => {
+        if (!yoloMenuOpen) return;
+        const onPointerDown = (ev: MouseEvent | TouchEvent) => {
+            const target = ev.target as Node | null;
+            if (target && yoloWrapRef.current && !yoloWrapRef.current.contains(target)) {
+                setYoloMenuOpen(false);
+            }
+        };
+        const onKeyDown = (ev: KeyboardEvent) => {
+            if (ev.key === 'Escape') {
+                setYoloMenuOpen(false);
+                yoloTriggerRef.current?.focus();
+            }
+        };
+        document.addEventListener('mousedown', onPointerDown);
+        document.addEventListener('touchstart', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', onPointerDown);
+            document.removeEventListener('touchstart', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [yoloMenuOpen]);
 
     const stageMap = useMemo(
         () => deriveStagesFromSse(latestSseStage, stages),
@@ -1515,16 +1585,14 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         activeChapterSummary?.commitSha?.slice(0, 7) ??
         undefined;
     const stateHash = chapterDetail?.stateCommitSha?.slice(0, 7) ?? undefined;
-    const consumedSignalText = chapterDetail?.consumedSignal ?? lastConsumedSignal;
     const parsedPlan = useMemo(
         () =>
             parseStructuredPlan(
                 chapterDetail?.outlineText,
                 activeChapterTitle,
-                timelineMode,
-                consumedSignalText
+                timelineMode
             ),
-        [chapterDetail?.outlineText, activeChapterTitle, timelineMode, consumedSignalText]
+        [chapterDetail?.outlineText, activeChapterTitle, timelineMode]
     );
     const currentFontSize = PROSE_FONT_SIZES[fontStep] ?? 17;
 
@@ -1543,13 +1611,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         return '链路就绪';
     }, [latestSseStage, safeHalt, stageMap]);
 
-    // 可见待消费纸条列表
+    // 可见待消费纸条列表（撤回由根组件统一调用后端 DELETE 真删，不再本地隐藏）
     const visibleSignals = useMemo(
-        () =>
-            pendingSignals
-                .map((sig, idx) => ({ sig, idx }))
-                .filter(({ idx }) => !dismissedIndices.includes(idx)),
-        [dismissedIndices, pendingSignals]
+        () => pendingSignals.map((sig, idx) => ({ sig, idx })),
+        [pendingSignals]
     );
 
     // 底部遥测尾注格式化
@@ -1672,7 +1737,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             </button>
                         </div>
                     ) : (
-                        <div className="ns-split-btn-wrap">
+                        <div className="ns-split-btn-wrap" ref={yoloWrapRef}>
                             <div className="ns-split-btn">
                                 <button
                                     type="button"
@@ -1683,10 +1748,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     ▶ 推进 1 章
                                 </button>
                                 <button
+                                    ref={yoloTriggerRef}
                                     type="button"
                                     className="ns-btn ns-btn-yolo ns-btn-sm"
                                     disabled={isBusy}
                                     aria-expanded={yoloMenuOpen}
+                                    aria-haspopup="menu"
                                     onClick={() => setYoloMenuOpen((prev) => !prev)}
                                 >
                                     YOLO ▾
@@ -1890,6 +1957,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         <span className={`ns-stage-status ${statusMeta.badgeClass}`}>
                                             {statusMeta.text}
                                         </span>
+                                        {nodeState.badge ? (
+                                            <span className="ns-stage-repair ns-mono">{nodeState.badge}</span>
+                                        ) : null}
                                     </button>
                                     {idx < PIPELINE_STAGES.length - 1 ? (
                                         <span className="ns-stage-arrow" aria-hidden="true">
@@ -2200,30 +2270,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             </div>
                         </header>
 
-                        {/* 已消费导演纸条提示条 */}
-                        {!isEditing && consumedSignalText ? (
-                            <div
-                                className="ns-consumed"
-                                style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '8px',
-                                    margin: '-12px 0 24px',
-                                    padding: '6px 12px 6px 10px',
-                                    borderRadius: 'var(--ns-r-sm, 6px)',
-                                    fontSize: '12px',
-                                    color: 'var(--ns-text-3)',
-                                    background: 'var(--ns-bg-hover)',
-                                    borderLeft: '2px dashed var(--ns-border-2)'
-                                }}
-                            >
-                                <span>已消费导演纸条</span>
-                                <s style={{ textDecorationColor: 'var(--ns-text-4, var(--ns-text-3))' }}>
-                                    {consumedSignalText}
-                                </s>
-                            </div>
-                        ) : null}
-
                         {isEditing ? (
                             <div className="ns-editor-wrap">
                                 <textarea
@@ -2246,6 +2292,15 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         {savingEdit ? '正在保存并 Sync…' : '保存并自动 Sync'}
                                     </button>
                                 </div>
+                            </div>
+                        ) : chapterLoading && proseParagraphs.length === 0 ? (
+                            <div className="ns-prose-skel" role="status" aria-label="正文加载中">
+                                {Array.from({ length: 8 }, (_, idx) => (
+                                    <span
+                                        key={idx}
+                                        className={`ns-skel ns-skel-line${idx % 3 === 2 ? ' ns-skel-line-short' : ''}`}
+                                    />
+                                ))}
                             </div>
                         ) : proseParagraphs.length > 0 ? (
                             <>
@@ -2283,18 +2338,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
                         {/* 章节上下章快捷导航 */}
                         {!isEditing && (prevChapterSummary || nextChapterSummary) ? (
-                            <nav
-                                className="ns-chap-nav"
-                                style={{
-                                    marginTop: '36px',
-                                    paddingTop: '18px',
-                                    borderTop: '1px solid var(--ns-border-1)',
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'center',
-                                    gap: '12px'
-                                }}
-                            >
+                            <nav className="ns-chap-nav" aria-label="上下章快捷导航">
                                 {prevChapterSummary ? (
                                     <button
                                         type="button"
@@ -2331,108 +2375,28 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         {parsedPlan ? (
                             <>
                                 {/* 原型同款头部：PLANNER · 结构化细纲 + 第 N 章 · 标题 + 4 枚胶囊 */}
-                                <header style={{ marginBottom: '22px' }}>
-                                    <div
-                                        style={{
-                                            fontSize: '11px',
-                                            fontWeight: 600,
-                                            letterSpacing: '0.08em',
-                                            textTransform: 'uppercase',
-                                            color: 'var(--ns-text-4)'
-                                        }}
-                                    >
-                                        PLANNER · 结构化细纲
-                                    </div>
-                                    <h2
-                                        style={{
-                                            margin: '6px 0 0',
-                                            font: '700 24px/1.35 var(--ns-font-serif)',
-                                            color: 'var(--ns-text-1)'
-                                        }}
-                                    >
+                                <header className="ns-plan-head">
+                                    <div className="ns-plan-kicker">PLANNER · 结构化细纲</div>
+                                    <h2 className="ns-plan-title">
                                         第 {activeChapterNumber} 章 · {parsedPlan.chapterTitle}
                                     </h2>
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            flexWrap: 'wrap',
-                                            gap: '6px',
-                                            marginTop: '12px'
-                                        }}
-                                    >
-                                        <span
-                                            style={{
-                                                height: '24px',
-                                                padding: '0 10px',
-                                                borderRadius: '999px',
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '6px',
-                                                font: '11px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-3)',
-                                                background: 'var(--ns-bg-hover)'
-                                            }}
-                                        >
-                                            timeline_mode{' '}
-                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
-                                                {parsedPlan.timelineMode}
-                                            </b>
+                                    <div className="ns-plan-meta">
+                                        <span className="ns-plan-pill">
+                                            timeline_mode <b>{parsedPlan.timelineMode}</b>
                                         </span>
-                                        <span
-                                            style={{
-                                                height: '24px',
-                                                padding: '0 10px',
-                                                borderRadius: '999px',
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '6px',
-                                                font: '11px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-3)',
-                                                background: 'var(--ns-bg-hover)'
-                                            }}
-                                        >
-                                            pov{' '}
-                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
-                                                {parsedPlan.povCharacter}
-                                            </b>
+                                        <span className="ns-plan-pill">
+                                            pov <b>{parsedPlan.povCharacter}</b>
                                         </span>
-                                        <span
-                                            style={{
-                                                height: '24px',
-                                                padding: '0 10px',
-                                                borderRadius: '999px',
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '6px',
-                                                font: '11px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-3)',
-                                                background: 'var(--ns-bg-hover)'
-                                            }}
-                                        >
+                                        <span className="ns-plan-pill">
                                             target{' '}
-                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
+                                            <b>
                                                 {parsedPlan.targetWordCount
                                                     ? `${parsedPlan.targetWordCount.toLocaleString('zh-CN')} 字`
                                                     : '自适应'}
                                             </b>
                                         </span>
-                                        <span
-                                            style={{
-                                                height: '24px',
-                                                padding: '0 10px',
-                                                borderRadius: '999px',
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '6px',
-                                                font: '11px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-3)',
-                                                background: 'var(--ns-bg-hover)'
-                                            }}
-                                        >
-                                            ending{' '}
-                                            <b style={{ color: 'var(--ns-text-1)', fontWeight: 500 }}>
-                                                {parsedPlan.endingBeat}
-                                            </b>
+                                        <span className="ns-plan-pill">
+                                            ending <b>{parsedPlan.endingBeat}</b>
                                         </span>
                                     </div>
                                 </header>
@@ -2468,69 +2432,16 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 </div>
 
                                 {/* 结构化键值对表 */}
-                                <dl
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: '132px minmax(0, 1fr)',
-                                        margin: 0
-                                    }}
-                                >
-                                    <dt
-                                        style={{
-                                            padding: '14px 12px 14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            fontSize: '12.5px',
-                                            color: 'var(--ns-text-3)'
-                                        }}
-                                    >
+                                <dl className="ns-plan-kv">
+                                    <dt>
                                         视角
-                                        <small
-                                            style={{
-                                                display: 'block',
-                                                marginTop: '2px',
-                                                font: '10.5px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-4)'
-                                            }}
-                                        >
-                                            pov_character
-                                        </small>
+                                        <small>pov_character</small>
                                     </dt>
-                                    <dd
-                                        style={{
-                                            margin: 0,
-                                            padding: '14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            display: 'flex',
-                                            flexWrap: 'wrap',
-                                            gap: '6px',
-                                            alignItems: 'center'
-                                        }}
-                                    >
-                                        <span
-                                            style={{
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: '7px',
-                                                height: '28px',
-                                                padding: '0 11px 0 4px',
-                                                borderRadius: '999px',
-                                                background: 'var(--ns-bg-hover)',
-                                                font: '13px var(--ns-font-sans)',
-                                                color: 'var(--ns-text-1)'
-                                            }}
-                                        >
+                                    <dd>
+                                        <span className="ns-actor-pill">
                                             <i
-                                                style={{
-                                                    width: '20px',
-                                                    height: '20px',
-                                                    borderRadius: '50%',
-                                                    display: 'grid',
-                                                    placeItems: 'center',
-                                                    font: '700 10.5px var(--ns-font-serif)',
-                                                    fontStyle: 'normal',
-                                                    color: '#fff',
-                                                    background: getAvatarColor(parsedPlan.povCharacter)
-                                                }}
+                                                className="ns-actor-avatar"
+                                                style={{ background: getAvatarColor(parsedPlan.povCharacter) }}
                                             >
                                                 {parsedPlan.povCharacter.slice(0, 1)}
                                             </i>
@@ -2538,65 +2449,17 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         </span>
                                     </dd>
 
-                                    <dt
-                                        style={{
-                                            padding: '14px 12px 14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            fontSize: '12.5px',
-                                            color: 'var(--ns-text-3)'
-                                        }}
-                                    >
+                                    <dt>
                                         焦点角色
-                                        <small
-                                            style={{
-                                                display: 'block',
-                                                marginTop: '2px',
-                                                font: '10.5px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-4)'
-                                            }}
-                                        >
-                                            focus_cast
-                                        </small>
+                                        <small>focus_cast</small>
                                     </dt>
-                                    <dd
-                                        style={{
-                                            margin: 0,
-                                            padding: '14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            display: 'flex',
-                                            flexWrap: 'wrap',
-                                            gap: '6px',
-                                            alignItems: 'center'
-                                        }}
-                                    >
+                                    <dd>
                                         {parsedPlan.focusCast.length > 0 ? (
                                             parsedPlan.focusCast.map((actor) => (
-                                                <span
-                                                    key={actor}
-                                                    style={{
-                                                        display: 'inline-flex',
-                                                        alignItems: 'center',
-                                                        gap: '7px',
-                                                        height: '28px',
-                                                        padding: '0 11px 0 4px',
-                                                        borderRadius: '999px',
-                                                        background: 'var(--ns-bg-hover)',
-                                                        font: '13px var(--ns-font-sans)',
-                                                        color: 'var(--ns-text-1)'
-                                                    }}
-                                                >
+                                                <span key={actor} className="ns-actor-pill">
                                                     <i
-                                                        style={{
-                                                            width: '20px',
-                                                            height: '20px',
-                                                            borderRadius: '50%',
-                                                            display: 'grid',
-                                                            placeItems: 'center',
-                                                            font: '700 10.5px var(--ns-font-serif)',
-                                                            fontStyle: 'normal',
-                                                            color: '#fff',
-                                                            background: getAvatarColor(actor)
-                                                        }}
+                                                        className="ns-actor-avatar"
+                                                        style={{ background: getAvatarColor(actor) }}
                                                     >
                                                         {actor.slice(0, 1)}
                                                     </i>
@@ -2608,65 +2471,17 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         )}
                                     </dd>
 
-                                    <dt
-                                        style={{
-                                            padding: '14px 12px 14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            fontSize: '12.5px',
-                                            color: 'var(--ns-text-3)'
-                                        }}
-                                    >
+                                    <dt>
                                         背景角色
-                                        <small
-                                            style={{
-                                                display: 'block',
-                                                marginTop: '2px',
-                                                font: '10.5px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-4)'
-                                            }}
-                                        >
-                                            background_cast
-                                        </small>
+                                        <small>background_cast</small>
                                     </dt>
-                                    <dd
-                                        style={{
-                                            margin: 0,
-                                            padding: '14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            display: 'flex',
-                                            flexWrap: 'wrap',
-                                            gap: '6px',
-                                            alignItems: 'center'
-                                        }}
-                                    >
+                                    <dd>
                                         {parsedPlan.backgroundCast.length > 0 ? (
                                             parsedPlan.backgroundCast.map((actor) => (
-                                                <span
-                                                    key={actor}
-                                                    style={{
-                                                        display: 'inline-flex',
-                                                        alignItems: 'center',
-                                                        gap: '7px',
-                                                        height: '28px',
-                                                        padding: '0 11px 0 4px',
-                                                        borderRadius: '999px',
-                                                        background: 'var(--ns-bg-hover)',
-                                                        font: '13px var(--ns-font-sans)',
-                                                        color: 'var(--ns-text-1)'
-                                                    }}
-                                                >
+                                                <span key={actor} className="ns-actor-pill">
                                                     <i
-                                                        style={{
-                                                            width: '20px',
-                                                            height: '20px',
-                                                            borderRadius: '50%',
-                                                            display: 'grid',
-                                                            placeItems: 'center',
-                                                            font: '700 10.5px var(--ns-font-serif)',
-                                                            fontStyle: 'normal',
-                                                            color: '#fff',
-                                                            background: getAvatarColor(actor)
-                                                        }}
+                                                        className="ns-actor-avatar"
+                                                        style={{ background: getAvatarColor(actor) }}
                                                     >
                                                         {actor.slice(0, 1)}
                                                     </i>
@@ -2678,146 +2493,39 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         )}
                                     </dd>
 
-                                    <dt
-                                        style={{
-                                            padding: '14px 12px 14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            fontSize: '12.5px',
-                                            color: 'var(--ns-text-3)'
-                                        }}
-                                    >
+                                    <dt>
                                         戏眼
-                                        <small
-                                            style={{
-                                                display: 'block',
-                                                marginTop: '2px',
-                                                font: '10.5px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-4)'
-                                            }}
-                                        >
-                                            spotlight
-                                        </small>
+                                        <small>spotlight</small>
                                     </dt>
-                                    <dd
-                                        style={{
-                                            margin: 0,
-                                            padding: '14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            font: '15px/1.8 var(--ns-font-serif)',
-                                            color: 'var(--ns-prose)'
-                                        }}
-                                    >
-                                        {parsedPlan.spotlight}
-                                    </dd>
+                                    <dd className="ns-plan-prose">{parsedPlan.spotlight}</dd>
 
-                                    <dt
-                                        style={{
-                                            padding: '14px 12px 14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            fontSize: '12.5px',
-                                            color: 'var(--ns-text-3)'
-                                        }}
-                                    >
+                                    <dt>
                                         收尾节拍
-                                        <small
-                                            style={{
-                                                display: 'block',
-                                                marginTop: '2px',
-                                                font: '10.5px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-4)'
-                                            }}
-                                        >
-                                            ending_beat
-                                        </small>
+                                        <small>ending_beat</small>
                                     </dt>
-                                    <dd
-                                        style={{
-                                            margin: 0,
-                                            padding: '14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            display: 'flex',
-                                            flexWrap: 'wrap',
-                                            gap: '8px',
-                                            alignItems: 'center',
-                                            font: '15px/1.8 var(--ns-font-serif)',
-                                            color: 'var(--ns-prose)'
-                                        }}
-                                    >
+                                    <dd className="ns-plan-prose ns-plan-ending">
                                         <span className="ns-pill ns-pill-brand ns-mono">
                                             {parsedPlan.endingBeat}
                                         </span>
                                         <span>{parsedPlan.endingSummary}</span>
                                     </dd>
 
-                                    <dt
-                                        style={{
-                                            padding: '14px 12px 14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            fontSize: '12.5px',
-                                            color: 'var(--ns-text-3)'
-                                        }}
-                                    >
+                                    <dt>
                                         细纲正文
-                                        <small
-                                            style={{
-                                                display: 'block',
-                                                marginTop: '2px',
-                                                font: '10.5px var(--ns-font-mono)',
-                                                color: 'var(--ns-text-4)'
-                                            }}
-                                        >
-                                            outline_text
-                                        </small>
+                                        <small>outline_text</small>
                                     </dt>
-                                    <dd
-                                        style={{
-                                            margin: 0,
-                                            padding: '14px 0',
-                                            borderTop: '1px solid var(--ns-border-1)',
-                                            font: '15px/1.85 var(--ns-font-serif)',
-                                            color: 'var(--ns-prose)',
-                                            whiteSpace: 'pre-wrap',
-                                            wordBreak: 'break-word'
-                                        }}
-                                    >
+                                    <dd className="ns-plan-prose ns-plan-outline">
                                         {parsedPlan.outlineText}
                                     </dd>
                                 </dl>
                             </>
                         ) : (
-                            <div
-                                style={{
-                                    borderRadius: 'var(--ns-r-lg)',
-                                    border: '1px solid var(--ns-border-1)',
-                                    background: 'var(--ns-bg-card)',
-                                    padding: '28px 24px',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    alignItems: 'flex-start',
-                                    gap: '12px'
-                                }}
-                            >
-                                <div
-                                    style={{
-                                        fontSize: '11px',
-                                        fontWeight: 600,
-                                        letterSpacing: '0.08em',
-                                        textTransform: 'uppercase',
-                                        color: 'var(--ns-text-4)'
-                                    }}
-                                >
-                                    PLANNER · 结构化细纲
-                                </div>
-                                <h2
-                                    style={{
-                                        margin: 0,
-                                        font: '700 20px/1.35 var(--ns-font-serif)',
-                                        color: 'var(--ns-text-1)'
-                                    }}
-                                >
+                            <div className="ns-plan-empty">
+                                <div className="ns-plan-kicker">PLANNER · 结构化细纲</div>
+                                <h2 className="ns-plan-title ns-plan-title-sm">
                                     第 {activeChapterNumber} 章 · 尚未生成细纲
                                 </h2>
-                                <p style={{ margin: 0, fontSize: '13px', color: 'var(--ns-text-3)' }}>
+                                <p className="ns-plan-empty-hint">
                                     当前章节暂无已落盘的 Planner 结构化细纲，可点击「推进 1 章」由 Planner 节点生成节拍与戏眼规划。
                                 </p>
                                 <button
@@ -2835,27 +2543,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
                 {viewTab === 'diff' ? (
                     <section className="ns-paper">
-                        <header style={{ marginBottom: '22px' }}>
-                            <div
-                                style={{
-                                    fontSize: '11px',
-                                    fontWeight: 600,
-                                    letterSpacing: '0.08em',
-                                    textTransform: 'uppercase',
-                                    color: 'var(--ns-text-4)'
-                                }}
-                            >
-                                修改 DIFF
-                            </div>
-                            <h2
-                                style={{
-                                    margin: '6px 0 0',
-                                    font: '700 24px/1.35 var(--ns-font-serif)',
-                                    color: 'var(--ns-text-1)'
-                                }}
-                            >
-                                门禁 Patch 与人工手改
-                            </h2>
+                        <header className="ns-plan-head">
+                            <div className="ns-plan-kicker">修改 DIFF</div>
+                            <h2 className="ns-plan-title">门禁 Patch 与人工手改</h2>
                         </header>
 
                         {diffHunks.length > 0 ? (
@@ -2863,33 +2553,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 <div
                                     key={`${hunk.fileName}-${hunk.header}-${hunkIdx}`}
                                     className="ns-hunk"
-                                    style={{
-                                        marginBottom: '20px',
-                                        borderRadius: 'var(--ns-r-lg)',
-                                        border: '1px solid var(--ns-border-1)',
-                                        overflow: 'hidden',
-                                        background: 'var(--ns-bg-base)'
-                                    }}
                                 >
                                     {/* Hunk 顶部信息栏 */}
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '10px',
-                                            padding: '9px 14px',
-                                            fontSize: '12px',
-                                            background: 'var(--ns-bg-hover)',
-                                            borderBottom: '1px solid var(--ns-border-1)'
-                                        }}
-                                    >
-                                        <span className="ns-mono" style={{ color: 'var(--ns-text-1)' }}>
-                                            {hunk.fileName}
-                                        </span>
-                                        <span className="ns-mono" style={{ color: 'var(--ns-text-4)' }}>
-                                            {hunk.header}
-                                        </span>
-                                        <span style={{ flex: 1 }} />
+                                    <div className="ns-hunk-head">
+                                        <span className="ns-mono ns-hunk-file">{hunk.fileName}</span>
+                                        <span className="ns-mono ns-hunk-range">{hunk.header}</span>
+                                        <span className="ns-hunk-spacer" />
                                         <span
                                             className={`ns-pill ${isChapterDirty ? 'ns-pill-amber' : 'ns-pill-green'}`}
                                         >
@@ -2905,75 +2574,18 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                             return (
                                                 <div
                                                     key={rowIdx}
-                                                    style={{
-                                                        display: 'grid',
-                                                        gridTemplateColumns: '48px 22px minmax(0, 1fr)',
-                                                        font: '14px/1.9 var(--ns-font-serif)',
-                                                        background: isDel
-                                                            ? 'var(--ns-red-soft)'
-                                                            : isAdd
-                                                              ? 'var(--ns-green-soft)'
-                                                              : 'transparent'
-                                                    }}
+                                                    className={`ns-diff-row${isDel ? ' ns-diff-row-del' : isAdd ? ' ns-diff-row-add' : ''}`}
                                                 >
-                                                    <span
-                                                        style={{
-                                                            font: '11px/2.45 var(--ns-font-mono)',
-                                                            color: 'var(--ns-text-4)',
-                                                            textAlign: 'left',
-                                                            paddingLeft: '14px',
-                                                            userSelect: 'none'
-                                                        }}
-                                                    >
-                                                        {row.lineNumber ?? ''}
-                                                    </span>
-                                                    <span
-                                                        style={{
-                                                            font: '12px/2.25 var(--ns-font-mono)',
-                                                            textAlign: 'center',
-                                                            color: isDel
-                                                                ? 'var(--ns-red-ink)'
-                                                                : isAdd
-                                                                  ? 'var(--ns-green-ink)'
-                                                                  : 'var(--ns-text-4)',
-                                                            userSelect: 'none'
-                                                        }}
-                                                    >
-                                                        {row.glyph}
-                                                    </span>
-                                                    <span
-                                                        style={{
-                                                            padding: '3px 14px 3px 2px',
-                                                            color: isDel
-                                                                ? 'var(--ns-red-ink)'
-                                                                : isAdd
-                                                                  ? 'var(--ns-green-ink)'
-                                                                  : 'var(--ns-text-3)',
-                                                            textDecoration: isDel ? 'line-through' : 'none',
-                                                            whiteSpace: 'pre-wrap',
-                                                            wordBreak: 'break-word'
-                                                        }}
-                                                    >
-                                                        {row.text || ' '}
-                                                    </span>
+                                                    <span className="ns-diff-ln">{row.lineNumber ?? ''}</span>
+                                                    <span className="ns-diff-glyph">{row.glyph}</span>
+                                                    <span className="ns-diff-text">{row.text || ' '}</span>
                                                 </div>
                                             );
                                         })}
                                     </div>
 
                                     {/* Hunk 底部提示与快捷 Sync 对账按钮 */}
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'space-between',
-                                            gap: '12px',
-                                            padding: '9px 14px',
-                                            fontSize: '11.5px',
-                                            color: 'var(--ns-text-4)',
-                                            borderTop: '1px solid var(--ns-border-1)'
-                                        }}
-                                    >
+                                    <div className="ns-hunk-foot">
                                         <span>
                                             SHA-256 指纹变化 · 新增 +{hunk.addCount} / 删除 -{hunk.delCount} 行 · Sync 后自动对齐 WAL 状态
                                         </span>
@@ -2996,38 +2608,15 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 </div>
                             ))
                         ) : (
-                            <div
-                                style={{
-                                    borderRadius: 'var(--ns-r-lg)',
-                                    border: '1px solid var(--ns-border-1)',
-                                    background: 'var(--ns-bg-card)',
-                                    padding: '24px',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    gap: '12px'
-                                }}
-                            >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div className="ns-diff-clean">
+                                <div className="ns-diff-clean-head">
                                     <span className="ns-pill ns-pill-green">WAL 已对齐 · 无未同步差异</span>
-                                    <span className="ns-mono" style={{ fontSize: '12px', color: 'var(--ns-text-4)' }}>
-                                        {chapterFileName}
-                                    </span>
+                                    <span className="ns-mono ns-diff-clean-file">{chapterFileName}</span>
                                 </div>
-                                <div style={{ fontSize: '13px', color: 'var(--ns-text-2)' }}>
+                                <div className="ns-diff-clean-text">
                                     当前章节正文与 Git HEAD 一致，无待对账的人工手改或门禁 Patch 残留。
                                 </div>
-                                <div
-                                    className="ns-mono"
-                                    style={{
-                                        display: 'flex',
-                                        flexWrap: 'wrap',
-                                        gap: '10px',
-                                        fontSize: '11.5px',
-                                        color: 'var(--ns-text-4)',
-                                        paddingTop: '10px',
-                                        borderTop: '1px solid var(--ns-border-1)'
-                                    }}
-                                >
+                                <div className="ns-mono ns-diff-clean-meta">
                                     <span>WAL: {walPhase}</span>
                                     {featHash ? <span>· feat {featHash}</span> : null}
                                     {stateHash ? <span>· state {stateHash}</span> : null}
@@ -3133,13 +2722,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     <button
                                         type="button"
                                         className="ns-qslip-del"
-                                        title="从队列视图移除"
-                                        aria-label="移除纸条"
+                                        title="撤回纸条（从 .ops/signals.jsonl 删除）"
+                                        aria-label="撤回纸条"
+                                        disabled={!onDismissSignal || isBusy}
                                         onClick={() => {
                                             if (onDismissSignal) {
                                                 onDismissSignal(idx);
-                                            } else {
-                                                setDismissedIndices((prev) => [...prev, idx]);
                                             }
                                         }}
                                     >

@@ -195,6 +195,8 @@ export interface TelemetryViewPayload {
 export interface SignalsViewPayload {
     kind: 'signals';
     signals: OpsSignalItem[];
+    /** 未消费信号切片(signals 尾部 pendingCount 条);旧后端无此字段时前端按 pendingCount 兜底 */
+    pending?: OpsSignalItem[] | undefined;
     pendingCount: number;
 }
 
