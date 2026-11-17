@@ -1,3 +1,4 @@
+import { ParallelSandbox, type ForkParallelWindowOptions, type MergeParallelWindowOptions } from '../parallel/parallel-sandbox.js';
 import { analyzeParagraphs } from '../text/paragraphs.js';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -427,11 +428,13 @@ export class NarrativeEngine {
     /** 读取历史章原文用于跨章明喻复读检测 */
     private async loadHistoricalChapters(
         currentCh: number,
-        windowSize: number
+        windowSize: number,
+        chapterFiles?: string[]
     ): Promise<HistoricalChapterInput[]> {
         const result: HistoricalChapterInput[] = [];
         const startCh = Math.max(1, currentCh - windowSize);
         for (let ch = startCh; ch < currentCh; ch += 1) {
+            if (chapterFiles && !chapterFiles.includes(`${formatChapterKey(ch)}.md`)) continue;
             const path = join(this.store.bookRoot, 'manuscripts', `${formatChapterKey(ch)}.md`);
             const text = await readOptionalText(path);
             if (text !== null) {
@@ -474,10 +477,14 @@ export class NarrativeEngine {
     /** 读取上一章上下文（含 L2 章卡摘要） */
     private async loadPreviousChapter(
         currentCh: number,
-        currentVolume: number
+        currentVolume: number,
+        chapterFiles?: string[]
     ): Promise<PreviousChapterContext | undefined> {
         if (currentCh <= 1) return undefined;
-        const prevCh = currentCh - 1;
+        const prevCh = chapterFiles
+            ? Math.max(0, ...chapterFiles.map((file) => Number(file.slice(3, -3))).filter((chapter) => chapter < currentCh))
+            : currentCh - 1;
+        if (prevCh === 0) return undefined;
         const prevText = await readOptionalText(
             join(this.store.bookRoot, 'manuscripts', `${formatChapterKey(prevCh)}.md`)
         );
@@ -537,7 +544,8 @@ export class NarrativeEngine {
         signal?: AbortSignal
     ): Promise<{ librarianOut: LibrarianOutput; recallSlices: RecallSlice[] }> {
         const catalog = await this.recall.buildLibrarianCatalog(this.store.bookRoot, {
-            currentVolume: snapshot.worldState.frontmatter.current_volume
+            currentVolume: snapshot.worldState.frontmatter.current_volume,
+            chapterFiles: snapshot.chapterFiles
         });
 
         const entityList = Object.values(snapshot.entities)
@@ -599,7 +607,8 @@ export class NarrativeEngine {
                 targetChapter: chapterNumber,
                 targetDay,
                 extraKeywords: q.extra_keywords,
-                focusChapters: q.focus_chapters
+                focusChapters: q.focus_chapters,
+                chapterFiles: snapshot.chapterFiles.map((file) => `manuscripts/${file}`)
             });
             if (!paired.paired || paired.slices.length === 0) {
                 throw new Error(`成对召回证据不足: ${q.entity_id} (${paired.unpairedIssues.map((issue) => issue.chapterId).join(', ')})`);
@@ -953,7 +962,8 @@ export class NarrativeEngine {
         updatedVoicePool: VoiceSamplePool | undefined,
         retryOptions: StructuredRetryOptions,
         totalUsage: TokenUsage,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        parallel?: { windowId: string; branchId: string }
     ): Promise<{
         stateCommitSha: string;
         updatedEntities: string[];
@@ -1032,6 +1042,13 @@ export class NarrativeEngine {
             extracted.entity_patches as EntityPatch[]
         );
         const telemetry = computeTelemetry(prose);
+        const branchPath = parallel ? `.ops/parallel_deltas/${parallel.windowId}/${parallel.branchId}.json` : undefined;
+        const plannedPaths = ['.ops/telemetry.jsonl', '.ops/next_chapter_options.json',
+            `index/L2_cards/vol_${String(snapshot.worldState.frontmatter.current_volume).padStart(2, '0')}_cards.md`,
+            ...(updatedVoicePool ? ['.ops/voice_samples.yaml'] : []),
+            ...(branchPath ? [branchPath] : sanitizedPatches.map((patch) => `entities/${patch.entity_id}.md`)),
+            ...(parallel ? [] : ['world/world_state.md'])];
+        await this.store.recordPendingWrites(plannedPaths);
 
         await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
         const telemetryRecord = {
@@ -1088,7 +1105,7 @@ export class NarrativeEngine {
 
         // FLASHBACK 模式严禁推进 story_day 或覆写当前阶段游标；PARALLEL 模式不累加主线 story_day
         const worldStateUpdate =
-            timelineMode === 'FLASHBACK'
+            timelineMode === 'FLASHBACK' || timelineMode === 'PARALLEL'
                 ? undefined
                 : {
                       current_chapter: Math.max(snapshot.worldState.frontmatter.current_chapter, chapterNumber),
@@ -1100,9 +1117,17 @@ export class NarrativeEngine {
                       summaryMarkdown: extracted.world_summary_markdown
                   };
 
+        if (parallel && branchPath) {
+            await new ParallelSandbox(this.store, this.system).appendChapter({
+                windowId: parallel.windowId, branchId: parallel.branchId,
+                chapterNumber, patches: sanitizedPatches, daySpan: extracted.story_day_delta,
+                povCharacter: povCharIds[0]
+            });
+            extraCommitPaths.push(branchPath);
+        }
         const patchRes = await this.store.applyStatePatch(
             chapterNumber,
-            sanitizedPatches,
+            parallel ? [] : sanitizedPatches,
             {
                 worldStateUpdate,
                 extraCommitPaths
@@ -1111,10 +1136,18 @@ export class NarrativeEngine {
 
         return {
             stateCommitSha: patchRes.sha,
-            updatedEntities: patchRes.updatedEntities,
+            updatedEntities: parallel ? sanitizedPatches.map((patch) => patch.entity_id) : patchRes.updatedEntities,
             telemetry,
             nextChapterOptions
         };
+    }
+
+    async forkParallelWindow(options: ForkParallelWindowOptions) {
+        return await new ParallelSandbox(this.store, this.system).forkWindow(options);
+    }
+
+    async mergeParallelWindow(options: MergeParallelWindowOptions) {
+        return await new ParallelSandbox(this.store, this.system).mergeWindow(options);
     }
 
     /**
@@ -1143,11 +1176,21 @@ export class NarrativeEngine {
 
         const totalUsage = createEmptyUsage();
         const recovery = await this.store.recoverWal();
-        const snapshot = await this.store.loadSnapshot();
+        let snapshot = await this.store.loadSnapshot();
         const retryOptions = this.resolveRetryOptions(snapshot.config);
 
-        const timelineMode = options.timelineMode ?? snapshot.worldState.frontmatter.timeline_mode;
-        const povCharIds = options.povCharIds ?? [snapshot.worldState.frontmatter.pov_character];
+        const recoveredContext = recovery.action === 'NEEDS_STATE_EXTRACTION' ? snapshot.txState.chapter_context : undefined;
+        const timelineMode = recoveredContext?.timelineMode ?? options.timelineMode ?? snapshot.worldState.frontmatter.timeline_mode;
+        const povCharIds = recoveredContext?.povCharIds ?? options.povCharIds ?? [snapshot.worldState.frontmatter.pov_character];
+        const windowId = recoveredContext?.parallelWindowId ?? options.parallelWindowId;
+        const branchId = recoveredContext?.parallelBranchId ?? options.parallelBranchId;
+        const parallel = timelineMode === 'PARALLEL' && windowId && branchId ? { windowId, branchId } : undefined;
+        if (timelineMode === 'PARALLEL') {
+            if (!parallel) throw new Error('PARALLEL 需要 parallelWindowId 与 parallelBranchId');
+            snapshot = await new ParallelSandbox(this.store, this.system).loadBranchSnapshot(snapshot, parallel.windowId, parallel.branchId);
+        } else if (snapshot.worldState.frontmatter.timeline_mode === 'PARALLEL') {
+            throw new Error('并行窗口必须先显式合并，才能恢复主线推进');
+        }
 
         // 分支 A：从 FEAT_COMMITTED 崩溃恢复，直接接续 Step 6 抽取与状态提交
         if (recovery.action === 'NEEDS_STATE_EXTRACTION' && recovery.activeChapter !== null) {
@@ -1155,7 +1198,7 @@ export class NarrativeEngine {
             emit('WAL_RECOVERY', activeCh, `从 FEAT_COMMITTED 恢复第 ${activeCh} 章状态抽取`);
             const relPath = `manuscripts/${formatChapterKey(activeCh)}.md`;
             const prose = await readFile(join(this.store.bookRoot, relPath), 'utf8');
-            const targetDay = options.targetDay ?? snapshot.worldState.frontmatter.story_day;
+            const targetDay = recoveredContext?.targetDay ?? options.targetDay ?? snapshot.worldState.frontmatter.story_day;
 
             emit('EXTRACTOR', activeCh, '增量抽取实体状态与四联遥测');
             const stateRes = await this.runExtractorAndCommitState(
@@ -1171,7 +1214,8 @@ export class NarrativeEngine {
                 undefined,
                 retryOptions,
                 totalUsage,
-                options.signal
+                options.signal,
+                parallel
             );
 
             return {
@@ -1210,7 +1254,8 @@ export class NarrativeEngine {
         const { gateRules, plannerInjection, writerInjection } = await this.loadActivePlugins(snapshot.config);
         const previousChapter = await this.loadPreviousChapter(
             chapterNumber,
-            snapshot.worldState.frontmatter.current_volume
+            snapshot.worldState.frontmatter.current_volume,
+            snapshot.chapterFiles
         );
         const futureHorizon = (await readOptionalText(join(this.store.bookRoot, 'world/future_horizon.md'))) ?? undefined;
         const openThreads = normalizeOpenThreads(
@@ -1219,7 +1264,8 @@ export class NarrativeEngine {
         const opsStyleAmendments = await this.readOpsStyleAmendments();
         const historicalChapters = await this.loadHistoricalChapters(
             chapterNumber,
-            snapshot.config.prose_gate.cross_chapter_simile_window
+            snapshot.config.prose_gate.cross_chapter_simile_window,
+            snapshot.chapterFiles
         );
         const voicePool = await this.readVoicePool();
         const activeSignals = await this.loadActiveSignals(chapterNumber);
@@ -1508,7 +1554,10 @@ export class NarrativeEngine {
 
         // Step 6: WAL 第 1 粒度提交 (feat 正文真源) -> Extractor -> WAL 第 2 粒度提交 (state 视图)
         await this.store.beginDraft(chapterNumber);
-        const featRes = await this.store.commitDraft(chapterNumber, activeProse);
+        const featRes = await this.store.commitDraft(chapterNumber, activeProse, {
+            timelineMode, targetDay, povCharIds,
+            ...(parallel ? { parallelWindowId: parallel.windowId, parallelBranchId: parallel.branchId } : {})
+        });
 
         emit('EXTRACTOR', chapterNumber, '增量抽取实体状态与四联遥测');
         const stateRes = await this.runExtractorAndCommitState(
@@ -1524,7 +1573,8 @@ export class NarrativeEngine {
             updatedVoicePool,
             retryOptions,
             totalUsage,
-            options.signal
+            options.signal,
+            parallel
         );
 
         emit('COMMITTED', chapterNumber, `第 ${chapterNumber} 章双粒度提交完成`);
@@ -1632,6 +1682,9 @@ export class NarrativeEngine {
     }
 
     private async syncManuscriptsLocked(options: SyncManuscriptsOptions): Promise<SyncManuscriptsResult> {
+        if ((await this.store.readWorldState()).frontmatter.timeline_mode === 'PARALLEL') {
+            throw new Error('并行窗口合并前不能执行主线 Sync');
+        }
         const totalUsage = createEmptyUsage();
         const dirtyChapters = await this.store.detectDirtyChapters();
         if (dirtyChapters.length === 0) {
@@ -1852,6 +1905,7 @@ export class NarrativeEngine {
             const config = await this.store.readBookConfig();
             const retryOptions = this.resolveRetryOptions(config);
             const worldState = await this.store.readWorldState();
+            if (worldState.frontmatter.timeline_mode === 'PARALLEL') throw new Error('换卷前必须合并并行窗口');
             const sealedVolume = worldState.frontmatter.current_volume;
             const nextVolume = completeBook ? sealedVolume : sealedVolume + 1;
             const sealedVolPad = String(sealedVolume).padStart(2, '0');

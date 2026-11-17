@@ -1,8 +1,9 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SystemPort } from '../ports/system.js';
 import {
     BookStore,
+    BookSnapshot,
     DEFAULT_SECTION_HEADINGS,
     EntityEntry,
     EntityEntryInput,
@@ -62,6 +63,8 @@ export interface ParallelWindowMetadata {
     baseDay: number;
     maxChapters: number;
     globalBroadcast: Record<string, unknown>;
+    baseChapter: number;
+    baseEntityIds: string[];
     status: 'OPEN' | 'MERGED' | 'ABORTED';
     createdAt: string;
     mergedAt?: string | undefined;
@@ -76,6 +79,7 @@ export interface ParallelBranchDelta {
     daySpan: number;
     patches: EntityPatch[];
     stagedAt: string;
+    chapterNumbers?: number[];
 }
 
 export interface ForkParallelWindowOptions {
@@ -91,6 +95,7 @@ export interface StageParallelDeltaInput {
     chaptersUsed?: number | undefined;
     daySpan?: number | undefined;
     patches: EntityPatch[];
+    chapterNumbers?: number[];
 }
 
 export interface MergeParallelWindowOptions {
@@ -422,8 +427,14 @@ export class ParallelSandbox {
         assertSafeId(options.windowId, 'windowId');
         const baseTag = `parallel-fork-${options.windowId}`;
 
-        return await this.store.withTxLock(async () => {
+        return await this.store.runWithTxLock(async () => {
+            await this.store.recoverWal();
             const metaPath = this.windowMetaPath(options.windowId);
+            const snapshot = await this.store.loadSnapshot();
+            if (snapshot.txState.phase === 'DRAFTING' || snapshot.txState.phase === 'FEAT_COMMITTED') {
+                throw new Error('开启并行窗口前必须完成章节恢复');
+            }
+            if (snapshot.worldState.frontmatter.timeline_mode === 'PARALLEL') throw new Error('已有并行窗口尚未合并');
             try {
                 const existingRaw = await readFile(metaPath, 'utf8');
                 const existing = JSON.parse(existingRaw) as ParallelWindowMetadata;
@@ -442,7 +453,10 @@ export class ParallelSandbox {
             const maxChapters =
                 options.maxChapters ?? config.parallel_max_chapters ?? DEFAULT_PARALLEL_MAX_CHAPTERS;
 
-            // 先将 world_state.md 切换为 PARALLEL 并提交，确保 baseTag 指向干净的 PARALLEL 分叉基线
+            // 标签固定分叉前快照，窗口元数据与模式切换在同一提交中生效。
+            await this.system.createTag(this.store.bookRoot, baseTag, `PARALLEL fork window ${options.windowId}`);
+            const forkPaths = ['world/world_state.md', `.ops/parallel_deltas/${options.windowId}/window.json`];
+            await this.store.recordPendingWrites(forkPaths);
             if (worldState.frontmatter.timeline_mode !== 'PARALLEL') {
                 await this.store.writeWorldState({
                     frontmatter: {
@@ -451,18 +465,8 @@ export class ParallelSandbox {
                     },
                     summaryMarkdown: worldState.summaryMarkdown
                 });
-                await this.system.commitPaths(
-                    this.store.bookRoot,
-                    ['world/world_state.md'],
-                    `parallel(${options.windowId}): enter PARALLEL timeline window`
-                );
             }
 
-            await this.system.createTag(
-                this.store.bookRoot,
-                baseTag,
-                `PARALLEL fork window ${options.windowId} at story_day=${worldState.frontmatter.story_day}`
-            );
 
             const metadata: ParallelWindowMetadata = {
                 windowId: options.windowId,
@@ -470,12 +474,21 @@ export class ParallelSandbox {
                 baseDay: worldState.frontmatter.story_day,
                 maxChapters,
                 globalBroadcast: options.globalBroadcast ?? {},
+                baseChapter: snapshot.txState.last_committed_ch,
+                baseEntityIds: Object.keys(snapshot.entities),
                 status: 'OPEN',
                 createdAt: new Date().toISOString()
             };
 
             await mkdir(this.windowDir(options.windowId), { recursive: true });
             await writeFile(metaPath, JSON.stringify(metadata, null, 2), 'utf8');
+            try {
+                await this.system.commitPaths(this.store.bookRoot, forkPaths, `parallel(${options.windowId}): persist window`);
+            } catch (error) {
+                await this.system.restorePaths(this.store.bookRoot, forkPaths);
+                throw error;
+            }
+            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
             return metadata;
         });
     }
@@ -487,10 +500,56 @@ export class ParallelSandbox {
         return JSON.parse(raw) as ParallelWindowMetadata;
     }
 
+    /** 分叉基线加本支线增量，其他支线实体与章节不进入生成上下文。 */
+    async loadBranchSnapshot(snapshot: BookSnapshot, windowId: string, branchId: string): Promise<BookSnapshot> {
+        assertSafeId(branchId, 'branchId');
+        if (branchId === 'window') throw new Error('支线 ID 不能使用保留名 window');
+        const metadata = await this.getWindow(windowId);
+        if (metadata.status !== 'OPEN') throw new Error('并行窗口未开放');
+        const entities: Record<string, EntityProfile> = {};
+        for (const id of metadata.baseEntityIds) {
+            const profile = await this.loadBaseProfile(metadata.baseTag, id);
+            if (profile) entities[id] = profile;
+        }
+        const delta = (await this.readBranchDeltas(windowId)).find((item) => item.branchId === branchId);
+        for (const patch of delta?.patches ?? []) {
+            entities[patch.entity_id] = applySingleEntityPatch(entities[patch.entity_id] ?? null, patch, false);
+        }
+        const chapterFiles = snapshot.chapterFiles.filter((file) => {
+            const chapter = Number(file.slice(3, -3));
+            return chapter <= metadata.baseChapter || delta?.chapterNumbers?.includes(chapter);
+        });
+        return { ...snapshot, entities, chapterFiles, worldState: {
+            ...snapshot.worldState,
+            summaryMarkdown: `${snapshot.worldState.summaryMarkdown}\n\n全局环境广播：${JSON.stringify(metadata.globalBroadcast)}`,
+            frontmatter: { ...snapshot.worldState.frontmatter, story_day: metadata.baseDay + (delta?.daySpan ?? 0) }
+        } };
+    }
+
+    async appendChapter(input: StageParallelDeltaInput & { chapterNumber: number }): Promise<ParallelBranchDelta> {
+        return await this.store.runWithTxLock(async () => {
+            assertSafeId(input.windowId, 'windowId');
+            assertSafeId(input.branchId, 'branchId');
+            const previous = (await this.readBranchDeltas(input.windowId)).find((item) => item.branchId === input.branchId);
+            if (previous?.chapterNumbers?.includes(input.chapterNumber)) throw new Error('并行章节已存在，拒绝重复暂存');
+            return await this.stageDelta({ ...input,
+                patches: [...(previous?.patches ?? []), ...input.patches],
+                chaptersUsed: (previous?.chaptersUsed ?? 0) + 1,
+                chapterNumbers: [...(previous?.chapterNumbers ?? []), input.chapterNumber],
+                daySpan: (previous?.daySpan ?? 0) + (input.daySpan ?? 0)
+            });
+        });
+    }
+
     /** 暂存支线状态增量至 .ops/parallel_deltas/{windowId}/{branchId}.json（主时钟不累加） */
     async stageDelta(input: StageParallelDeltaInput): Promise<ParallelBranchDelta> {
+        return await this.store.runWithTxLock(() => this.stageDeltaLocked(input));
+    }
+
+    private async stageDeltaLocked(input: StageParallelDeltaInput): Promise<ParallelBranchDelta> {
         assertSafeId(input.windowId, 'windowId');
         assertSafeId(input.branchId, 'branchId');
+        if (input.branchId === 'window') throw new Error('支线 ID 不能使用保留名 window');
 
         const windowMeta = await this.getWindow(input.windowId);
         if (windowMeta.status !== 'OPEN') {
@@ -512,6 +571,15 @@ export class ParallelSandbox {
         if (totalChapters > windowMeta.maxChapters) {
             throw new ParallelWindowExceededError(input.windowId, totalChapters, windowMeta.maxChapters);
         }
+        const profiles = new Map<string, EntityProfile>();
+        const reachable = await this.buildReachableKeySet(new Set(input.patches.map((patch) => patch.entity_id)));
+        for (const patch of input.patches) {
+            if (!ENTITY_ID_RE.test(patch.entity_id)) throw new Error(`非法 entity_id: ${patch.entity_id}`);
+            const base = profiles.get(patch.entity_id) ?? await this.loadBaseProfile(windowMeta.baseTag, patch.entity_id);
+            const profile = applySingleEntityPatch(base, patch, false);
+            profiles.set(patch.entity_id, profile);
+            this.assertForeignKeysReachable(patch.entity_id, serializeEntityMarkdown(profile), reachable);
+        }
 
         const delta: ParallelBranchDelta = {
             windowId: input.windowId,
@@ -520,7 +588,8 @@ export class ParallelSandbox {
             chaptersUsed,
             daySpan,
             patches: input.patches,
-            stagedAt: new Date().toISOString()
+            stagedAt: new Date().toISOString(),
+            ...(input.chapterNumbers ? { chapterNumbers: input.chapterNumbers } : {}),
         };
 
         await writeFile(this.branchDeltaPath(input.windowId, input.branchId), JSON.stringify(delta, null, 2), 'utf8');
@@ -531,7 +600,7 @@ export class ParallelSandbox {
     async mergeWindow(options: MergeParallelWindowOptions): Promise<MergeParallelWindowResult> {
         assertSafeId(options.windowId, 'windowId');
 
-        return await this.store.withTxLock(async () => {
+        return await this.store.runWithTxLock(async () => {
             const windowMeta = await this.getWindow(options.windowId);
             if (windowMeta.status !== 'OPEN') {
                 throw new Error(`PARALLEL 时间窗 ${options.windowId} 当前状态为 ${windowMeta.status}，无法重复合并`);
@@ -579,6 +648,12 @@ export class ParallelSandbox {
             }
 
             // 第四阶段：全部无冲突且校验通过后，落盘实体、统一推进主时钟 story_day 并提交 Git
+            const tx = await this.store.readTxState();
+            if (tx.phase === 'DRAFTING' || tx.phase === 'FEAT_COMMITTED') throw new Error('合并前必须完成章节恢复');
+            await this.store.recordPendingWrites([
+                ...[...mergedProfiles.keys()].map((id) => `entities/${id}.md`),
+                'world/world_state.md', `.ops/parallel_deltas/${options.windowId}/window.json`
+            ]);
             const commitPaths: string[] = [];
             const updatedEntities: string[] = [];
             for (const [entityId, profile] of mergedProfiles.entries()) {
@@ -597,7 +672,8 @@ export class ParallelSandbox {
                 frontmatter: {
                     ...worldState.frontmatter,
                     story_day: newStoryDay,
-                    timeline_mode: options.restoreTimelineMode ?? 'MAINLINE'
+                    timeline_mode: options.restoreTimelineMode ?? 'MAINLINE',
+                    current_chapter: tx.last_committed_ch,
                 },
                 summaryMarkdown: worldState.summaryMarkdown
             });
@@ -609,12 +685,19 @@ export class ParallelSandbox {
                 mergedAt: new Date().toISOString()
             };
             await writeFile(this.windowMetaPath(options.windowId), JSON.stringify(updatedMeta, null, 2), 'utf8');
+            commitPaths.push(`.ops/parallel_deltas/${options.windowId}/window.json`);
 
-            const commitRes = await this.system.commitPaths(
-                this.store.bookRoot,
-                commitPaths,
-                `merge(parallel-${options.windowId}): 3-way merge ${deltas.length} branches`
-            );
+            let commitRes;
+            try {
+                commitRes = await this.system.commitPaths(
+                    this.store.bookRoot, commitPaths,
+                    `merge(parallel-${options.windowId}): 3-way merge ${deltas.length} branches`
+                );
+            } catch (error) {
+                await this.system.restorePaths(this.store.bookRoot, commitPaths);
+                throw error;
+            }
+            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
 
             return {
                 windowId: options.windowId,
@@ -829,13 +912,7 @@ export class ParallelSandbox {
         if (atTag !== null) {
             return parseEntityMarkdown(atTag);
         }
-        try {
-            const onDisk = await readFile(join(this.store.bookRoot, relPath), 'utf8');
-            return parseEntityMarkdown(onDisk);
-        } catch (err: unknown) {
-            if ((err as { code?: string }).code === 'ENOENT') return null;
-            throw err;
-        }
+        return null;
     }
 
     private async buildReachableKeySet(pendingNewEntityIds: Set<string>): Promise<Set<string>> {

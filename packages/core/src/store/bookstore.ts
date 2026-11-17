@@ -42,6 +42,7 @@ const BEGIN_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'STATE_COMMITTED',
 const COMMIT_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'DRAFTING', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
 const PendingWritesSchema = z.object({
     baseWal: z.string().nullable(),
+    baseRevision: z.string(),
     paths: z.array(z.string().min(1).refine((path) =>
         !isAbsolute(path) && !path.split(/[\\/]/).some((part) => part === '..' || part === '.git')))
 });
@@ -388,9 +389,10 @@ export class BookStore {
         };
     }
 
-    private async recordPendingWrites(paths: string[]): Promise<void> {
+    async recordPendingWrites(paths: string[]): Promise<void> {
         const record = PendingWritesSchema.parse({
             baseWal: await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json'),
+            baseRevision: await this.system.currentRevision(this.bookRoot),
             paths: [...new Set([...paths, '.ops/tx_state.json'])]
         });
         await mkdir(this.opsDir, { recursive: true });
@@ -404,7 +406,7 @@ export class BookStore {
         let paths = fallbackPaths;
         try {
             const record = PendingWritesSchema.parse(JSON.parse(await readFile(pendingPath, 'utf8')));
-            paths = record.baseWal === committedRaw ? record.paths : fallbackPaths;
+            paths = record.baseRevision === await this.system.currentRevision(this.bookRoot) && record.baseWal === committedRaw ? record.paths : fallbackPaths;
         } catch (error: unknown) {
             if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
         }
@@ -442,7 +444,7 @@ export class BookStore {
     }
 
     /** 原子提交第 1 粒度：正文真源 + SHA-256 指纹 -> feat(ch-XXXX) */
-    async commitDraft(chapterNumber: number, manuscriptText: string): Promise<{ sha: string; txState: TxState }> {
+    async commitDraft(chapterNumber: number, manuscriptText: string, context?: TxState['chapter_context']): Promise<{ sha: string; txState: TxState }> {
         return await this.runWithTxLock(async () => {
             const current = await this.readTxState();
             if (!COMMIT_DRAFT_ALLOWED_PHASES.has(current.phase)) {
@@ -458,6 +460,7 @@ export class BookStore {
             const next: TxState = {
                 ...current,
                 phase: 'FEAT_COMMITTED',
+                chapter_context: context,
                 active_chapter: chapterNumber,
                 chapter_hashes: {
                     ...current.chapter_hashes,
@@ -616,6 +619,14 @@ export class BookStore {
                 throw new Error('无法恢复 WAL：Git 中缺少已提交事务状态');
             }
             const committed = TxStateSchema.parse(JSON.parse(committedRaw));
+            if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) === JSON.stringify(committed)) {
+                try {
+                    await stat(join(this.opsDir, 'pending_writes.json'));
+                    await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
+                } catch (error: unknown) {
+                    if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+                }
+            }
             if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) !== JSON.stringify(committed)) {
                 const pendingChapter = txState.active_chapter;
                 const pendingDraft = txState.phase === 'FEAT_COMMITTED' && committed.phase !== 'FEAT_COMMITTED';

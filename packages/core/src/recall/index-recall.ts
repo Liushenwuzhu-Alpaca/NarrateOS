@@ -22,6 +22,7 @@ export interface ChapterIndexEntry {
 /** 构建双层目录的可选参数 */
 export interface BuildCatalogOptions {
     currentVolume?: number | undefined;
+    chapterFiles?: string[];
 }
 
 /** Librarian 双层章节目录 */
@@ -388,7 +389,12 @@ export class IndexRecall {
             const match = VOLUME_CARD_FILE_RE.exec(fileName);
             if (!match?.[1]) continue;
             const volumeNumber = Number(match[1]);
-            const content = await readOptionalUtf8(join(bookRoot, 'index/L2_cards', fileName));
+            let content = await readOptionalUtf8(join(bookRoot, 'index/L2_cards', fileName));
+            if (content !== null && options.chapterFiles) {
+                const allowed = new Set(options.chapterFiles.map((file) => Number(file.slice(3, -3))));
+                content = content.replace(/^##\s+ch_(\d+)[^\n]*\n[\s\S]*?(?=^##\s+ch_\d+\b|(?![\s\S]))/gm,
+                    (section: string, chapter: string) => allowed.has(Number(chapter)) ? section : '');
+            }
             if (content !== null) {
                 parsedVolumeCards.push({ volumeNumber, fileName, content });
             }
@@ -449,7 +455,7 @@ export class IndexRecall {
         const staticPrefix = staticParts.join('\n\n');
 
         // 2. 扫描手稿章节并构建动态尾目录（仅含当前活跃卷章节 + 活跃卷章卡 + open_threads）
-        const manuscriptFiles = (await listOptionalDir(join(bookRoot, 'manuscripts')))
+        const manuscriptFiles = (options.chapterFiles ?? await listOptionalDir(join(bookRoot, 'manuscripts')))
             .filter((name) => CHAPTER_FILE_RE.test(name))
             .sort((a, b) => a.localeCompare(b));
 
@@ -727,7 +733,7 @@ export class IndexRecall {
         query: EntityRecallQuery
     ): Promise<string[]> {
         let files: string[];
-        if (query.chapterFiles && query.chapterFiles.length > 0) {
+        if (query.chapterFiles !== undefined) {
             files = query.chapterFiles.map((f) => f.replace(/\\/g, '/'));
         } else {
             const entries = await listOptionalDir(join(bookRoot, 'manuscripts'));

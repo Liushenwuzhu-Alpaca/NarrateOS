@@ -222,6 +222,8 @@ export interface StepChapterOptions {
     chapterGoal: string;
     timelineMode?: TimelineMode | undefined;
     targetDay?: number | undefined;
+    parallelWindowId?: string | undefined;
+    parallelBranchId?: string | undefined;
     povCharIds?: string[] | undefined;
     signal?: AbortSignal | undefined;
     onProgress?: ((event: EngineProgressEvent) => void) | undefined;

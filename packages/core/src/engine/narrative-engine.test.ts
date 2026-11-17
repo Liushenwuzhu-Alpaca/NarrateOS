@@ -3,7 +3,7 @@ import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
     type CleanroomResponse,
@@ -253,6 +253,62 @@ afterEach(async () => {
 });
 
 describe('NarrativeEngine', () => {
+    it('并行状态提交失败后按正文 WAL 中的支线恢复，不污染主线或重复增量', async () => {
+        const { store, system } = await createEngineFixture();
+        const original = await store.loadSnapshot();
+        const llm = new ScriptedLlmAdapter([
+            jsonResponse(LIBRARIAN_OK), jsonResponse(PLANNER_OK), textResponse(CLEAN_CHAPTER_PROSE),
+            jsonResponse({ passed: true, issues: [] }), jsonResponse(EXTRACTOR_OK)
+        ]);
+        const engine = makeEngine(store, llm, system);
+        await engine.forkParallelWindow({ windowId: 'recover' });
+        const commitPaths = system.commitPaths.bind(system);
+        let failed = false;
+        vi.spyOn(system, 'commitPaths').mockImplementation(async (root, paths, message) => {
+            if (!failed && message.startsWith('state(')) { failed = true; throw new Error('并行状态提交中断'); }
+            return await commitPaths(root, paths, message);
+        });
+        await expect(engine.stepChapter({ chapterGoal: '支线推进', timelineMode: 'PARALLEL', parallelWindowId: 'recover', parallelBranchId: 'a' })).rejects.toThrow('并行状态提交中断');
+        llm.enqueue(jsonResponse(EXTRACTOR_OK));
+        const result = await engine.stepChapter({ chapterGoal: '恢复', timelineMode: 'MAINLINE' });
+        expect(result.recoveredFromPhase).toBe('FEAT_COMMITTED');
+        expect((await store.loadSnapshot()).entities).toEqual(original.entities);
+        expect((await engine.mergeParallelWindow({ windowId: 'recover' })).totalChaptersUsed).toBe(1);
+    });
+
+    it('并行两支线各写两章时只继承本线增量，汇合后再更新主线', async () => {
+        const { store, system } = await createEngineFixture();
+        const original = await store.loadSnapshot();
+        const llm = new ScriptedLlmAdapter([]);
+        const engine = makeEngine(store, llm, system);
+        await engine.forkParallelWindow({ windowId: 'isolated', maxChapters: 4 });
+        for (const [index, branch] of ['a', 'b', 'a', 'b'].entries()) {
+            const marker = branch === 'a' ? '甲线独有暗号' : '乙线独有暗号';
+            llm.enqueue(
+                jsonResponse({ ...LIBRARIAN_OK, recall_queries: [] }),
+                jsonResponse(PLANNER_OK), textResponse(CLEAN_CHAPTER_PROSE),
+                jsonResponse({ passed: true, issues: [] }),
+                jsonResponse({ ...EXTRACTOR_OK, story_day_delta: 1,
+                    chapter_summary: marker,
+                    entity_patches: [{ entity_id: branch === 'a' ? 'char_001' : 'char_002',
+                        buffer_ops: [{ op: 'append', entry: { storyDay: 1, chapter: index + 2, text: marker } }] }]
+                })
+            );
+            const offset = llm.history.length;
+            await engine.stepChapter({ chapterGoal: '并行推进', timelineMode: 'PARALLEL', parallelWindowId: 'isolated', parallelBranchId: branch });
+            const context = llm.history.slice(offset).map((call) => call.request.dynamicTail).join('\n');
+            expect(context).not.toContain(branch === 'a' ? '乙线独有暗号' : '甲线独有暗号');
+            if (index >= 2) expect(context).toContain(marker);
+            expect((await store.loadSnapshot()).entities).toEqual(original.entities);
+        }
+        const merged = await engine.mergeParallelWindow({ windowId: 'isolated' });
+        expect(merged.totalChaptersUsed).toBe(4);
+        expect(merged.newStoryDay).toBe(original.worldState.frontmatter.story_day + 2);
+        const final = await store.loadSnapshot();
+        expect(final.entities['char_001']?.recentBuffer.some((entry) => entry.text === '甲线独有暗号')).toBe(true);
+        expect(final.entities['char_002']?.recentBuffer.some((entry) => entry.text === '乙线独有暗号')).toBe(true);
+    });
+
     it('必需上下文超预算时不调用写手模型', async () => {
         const { store, system } = await createEngineFixture();
         await store.writeBookConfig({ ...await store.readBookConfig(), writer_token_budget: 1 });
@@ -1093,9 +1149,10 @@ describe('NarrativeEngine', () => {
         ]);
 
         const engine = makeEngine(store, llm, system);
+        await engine.forkParallelWindow({ windowId: 'window-test' });
         const result = await engine.stepChapter({
             chapterGoal: '并行视角推进支线',
-            timelineMode: 'PARALLEL'
+            timelineMode: 'PARALLEL', parallelWindowId: 'window-test', parallelBranchId: 'a'
         });
 
         expect(result.status).toBe('COMMITTED');
@@ -1103,6 +1160,9 @@ describe('NarrativeEngine', () => {
         // 1. PARALLEL 模式下主线 story_day 不累加
         const afterSnapshot = await store.loadSnapshot();
         expect(afterSnapshot.worldState.frontmatter.story_day).toBe(beforeStoryDay);
+        expect(afterSnapshot.entities).toEqual(beforeSnapshot.entities);
+        await engine.mergeParallelWindow({ windowId: 'window-test' });
+        expect((await store.readWorldState()).frontmatter.story_day).toBe(beforeStoryDay + 3);
 
         // 2. Librarian 收到上一章末尾 600 字切片
         const librarianCall = llm.history[0];

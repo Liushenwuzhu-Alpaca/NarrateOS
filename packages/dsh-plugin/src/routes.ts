@@ -1065,6 +1065,25 @@ export class NarrateRuntimeController {
         }
     }
 
+    /** 并行窗口生命周期由后端任务锁保护。 */
+    async handleParallel(req: IncomingMessage, res: ServerResponse, action: 'fork' | 'merge'): Promise<void> {
+        if (!assertMethod(req, res, 'POST')) return;
+        try {
+            const body = await readJsonBody(req);
+            const windowId = body['windowId'];
+            if (typeof windowId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(windowId)) {
+                sendJson(res, 400, { error: '需要合法 windowId' });
+                return;
+            }
+            const result = await this.runExclusiveTask('SYNCING', async () => action === 'fork'
+                ? await this.engine.forkParallelWindow({ windowId })
+                : await this.engine.mergeParallelWindow({ windowId }));
+            sendJson(res, 200, result);
+        } catch (error) {
+            sendJson(res, 409, { error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+
     /** POST /api/narrate/step */
     async handleStep(req: IncomingMessage, res: ServerResponse): Promise<void> {
         if (!assertMethod(req, res, 'POST')) return;
@@ -1095,6 +1114,8 @@ export class NarrateRuntimeController {
         ) {
             stepOptions.timelineMode = body['timelineMode'];
         }
+        if (typeof body['parallelWindowId'] === 'string') stepOptions.parallelWindowId = body['parallelWindowId'];
+        if (typeof body['parallelBranchId'] === 'string') stepOptions.parallelBranchId = body['parallelBranchId'];
         if (typeof body['targetDay'] === 'number') {
             stepOptions.targetDay = body['targetDay'];
         }
@@ -1658,6 +1679,8 @@ export function registerNarrateRoutes(
     controller: NarrateRuntimeController
 ): () => void {
     const disposers = [
+        webServer.register({ kind: 'exact', path: '/api/narrate/parallel/fork', handler: (req, res) => controller.handleParallel(req, res, 'fork') }),
+        webServer.register({ kind: 'exact', path: '/api/narrate/parallel/merge', handler: (req, res) => controller.handleParallel(req, res, 'merge') }),
         webServer.register({
             kind: 'exact',
             path: '/api/narrate/books',

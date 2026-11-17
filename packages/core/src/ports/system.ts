@@ -29,6 +29,7 @@ export interface SystemPort {
     resetHard(bookRoot: string, ref: string): Promise<void>;
     cleanUntracked(bookRoot: string, excludePaths?: string[]): Promise<void>;
     restorePaths(bookRoot: string, paths: string[]): Promise<void>;
+    currentRevision(bookRoot: string): Promise<string>;
     isWorkingTreeClean(bookRoot: string): Promise<boolean>;
     ripgrepSearch(
         bookRoot: string,
@@ -45,6 +46,10 @@ export class NodeSystemAdapter implements SystemPort {
             encoding: 'utf8',
             maxBuffer: 16 * 1024 * 1024
         });
+    }
+
+    async currentRevision(bookRoot: string): Promise<string> {
+        return (await this.runGit(bookRoot, ['rev-parse', 'HEAD'])).stdout.trim();
     }
 
     async initRepo(bookRoot: string): Promise<void> {

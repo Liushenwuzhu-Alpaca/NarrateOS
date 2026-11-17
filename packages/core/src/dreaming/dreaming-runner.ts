@@ -134,6 +134,9 @@ export class DreamingRunner {
         const bufferLimit = options.dreamBufferLimit ?? DEFAULT_DREAM_BUFFER_LIMIT;
         const warpedExpireDays = options.warpedExpireDays ?? DEFAULT_WARPED_EXPIRE_DAYS;
         const snapshot = await this.store.loadSnapshot();
+        if (snapshot.worldState.frontmatter.timeline_mode === 'PARALLEL') {
+            throw new Error('并行窗口合并前不能整理主线实体');
+        }
         const watermarkRaw = await readOptionalText(join(this.store.bookRoot, '.ops/dream_watermark.json'));
         const watermark = watermarkRaw === null ? 0 : z.object({ chapter: z.number().int().nonnegative() }).parse(JSON.parse(watermarkRaw)).chapter;
         const currentStoryDay = options.currentStoryDay ?? snapshot.worldState.frontmatter.story_day;

@@ -23,6 +23,8 @@ export type CliCommandName =
     | 'advance-volume'
     | 'status'
     | 'plot-haystack'
+    | 'parallel-fork'
+    | 'parallel-merge'
     | 'help';
 
 export interface ParsedCliCommand {
@@ -50,6 +52,8 @@ const VALID_COMMANDS = new Set<string>([
     'advance-volume',
     'status',
     'plot-haystack',
+    'parallel-fork',
+    'parallel-merge',
     'help'
 ]);
 
@@ -67,6 +71,8 @@ const HELP_TEXT = [
     '  advance-volume  执行五步原子换卷或全书完结封笔',
     '  status          查看当前作品世界状态、事务相位与实体统计',
     '  plot-haystack   运行 40 章 Plot-Haystack 盲测基准并输出 10 枚探针核验报告',
+    '  parallel-fork  开启并行窗口 (--window <id>)',
+    '  parallel-merge 合并并行窗口 (--window <id>)',
     '',
     '通用选项:',
     '  --book <dir>    作品目录路径 (默认: 当前工作目录)',
@@ -75,7 +81,7 @@ const HELP_TEXT = [
 ].join('\n');
 
 const BOOLEAN_FLAGS: Record<string, true> = { json: true, force: true, complete: true };
-const VALUE_FLAGS: Record<string, true> = { book: true, 'book-root': true, slug: true, title: true, pov: true, mode: true, 'seed-file': true, seed: true, t0: true, goal: true, chapter: true, 'target-day': true, 'story-day': true, entities: true, companions: true, chapters: true };
+const VALUE_FLAGS: Record<string, true> = { book: true, 'book-root': true, slug: true, title: true, pov: true, mode: true, 'seed-file': true, seed: true, t0: true, goal: true, chapter: true, 'target-day': true, 'story-day': true, entities: true, companions: true, chapters: true, window: true, branch: true };
 const INTEGER_FLAGS: Record<string, true> = { chapter: true, chapters: true, 'target-day': true, 'story-day': true };
 
 /** 解析命令行参数 */
@@ -221,6 +227,17 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
         }
 
         switch (parsed.command) {
+            case 'parallel-fork':
+            case 'parallel-merge': {
+                const windowId = getStringFlag(parsed.flags, 'window');
+                if (!windowId) throw new Error('并行操作需要 --window <id>');
+                const engine = new NarrativeEngine({ store: new BookStore(parsed.bookRoot, system), system, llm: resolveLlm() });
+                const result = parsed.command === 'parallel-fork'
+                    ? await engine.forkParallelWindow({ windowId })
+                    : await engine.mergeParallelWindow({ windowId });
+                printOutput(stdout, parsed.json, result, `[${parsed.command}] ${windowId}`);
+                return 0;
+            }
             case 'boot': {
                 const slug = getStringFlag(parsed.flags, 'slug') ?? basename(parsed.bookRoot);
                 const title = getStringFlag(parsed.flags, 'title') ?? slug;
@@ -295,6 +312,8 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
                 const result = await engine.stepChapter({
                     chapterGoal: goal,
                     ...(chapterNumber !== undefined ? { chapterNumber } : {}),
+                    ...(getStringFlag(parsed.flags, 'window') ? { parallelWindowId: getStringFlag(parsed.flags, 'window') } : {}),
+                    ...(getStringFlag(parsed.flags, 'branch') ? { parallelBranchId: getStringFlag(parsed.flags, 'branch') } : {}),
                     ...(timelineMode !== undefined ? { timelineMode } : {}),
                     ...(targetDay !== undefined ? { targetDay } : {}),
                     ...(povCharIds !== undefined ? { povCharIds } : {}),

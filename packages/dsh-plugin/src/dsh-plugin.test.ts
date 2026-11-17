@@ -336,6 +336,29 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         }
     });
 
+    it('REST 可开启并行窗口并显式汇合恢复主线', async () => {
+        const bookRoot = await setupTempBookRepo();
+        cleanups.push(async () => { await rm(bookRoot, { recursive: true, force: true }); });
+        const webServer = new MockWebServer();
+        cleanups.push(() => webServer.close());
+        const disposers: Array<() => void | Promise<void>> = [];
+        apply({
+            llm: { async *stream() { throw new Error('窗口管理不调用模型'); } },
+            webServer,
+            effect(factory) { const dispose = factory(); if (dispose) disposers.push(dispose); return () => {}; }
+        }, { bookRoot, poolRouting: DEFAULT_ROUTING });
+        cleanups.push(async () => { for (const dispose of disposers) await dispose(); });
+        const baseUrl = await webServer.listen();
+        for (const action of ['fork', 'merge']) {
+            const response = await fetch(`${baseUrl}/api/narrate/parallel/${action}`, {
+                method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ windowId: 'rest-window' })
+            });
+            expect(response.status).toBe(200);
+            const state = await new BookStore(bookRoot, new NodeSystemAdapter()).readWorldState();
+            expect(state.frontmatter.timeline_mode).toBe(action === 'fork' ? 'PARALLEL' : 'MAINLINE');
+        }
+    });
+
     it('配置缺失时在注册路由前给出明确错误', () => {
         const webServer = new MockWebServer();
         const ctx: DshCordisContext = {

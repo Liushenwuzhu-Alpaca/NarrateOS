@@ -157,6 +157,13 @@ export const TxStateSchema = z.object({
     active_chapter: z.number().int().positive().nullable(),
     last_committed_ch: z.number().int().nonnegative(),
     chapter_hashes: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)),
+    chapter_context: z.object({
+        timelineMode: TimelineModeSchema,
+        targetDay: z.number().int(),
+        povCharIds: z.array(z.string()),
+        parallelWindowId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
+        parallelBranchId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional()
+    }).optional(),
     updated_at: z.string()
 });
 export type TxState = z.infer<typeof TxStateSchema>;
