@@ -65,7 +65,7 @@ narrateos/
 
 1. **后端宿主胶水与 LLM 调度复用（`packages/dsh-plugin`）**：
    - 注册 `DshLlmAdapter` 复用宿主 `ctx.llm.stream()`（及 `dsh-llm-retry` 限流重试）与本机模型/Key 配置；
-   - 绑定引擎生命周期与 Cordis Fiber 卸载钩子 `ctx.effect(() => () => engine.requestSafePointHalt())`，确保 5 秒停机窗口内完成 `.ops/tx_state.json` 与 `.ops/tx.lock` 安全落盘；
+   - 绑定引擎生命周期与 Cordis Fiber 卸载钩子，先请求安全停机并等待已接收任务结束；超过停机提示窗口时发出 `halt:waiting` 并继续等待，不删除在途事务锁或提前卸载 REST/SSE，任务完成后再释放资源；
    - 通过 `ctx.webServer` 注册 REST 控制接口与 SSE 状态流，将 `.ops/signals.jsonl` 运维事件、6 节点运行阶段、正文/细纲/Diff 与遥测数据推送给前端。
 2. **非会话 `'main'` 槽位前端（设计完成后接续施工）**：
    - 通过 `@deepseek-ai/dsh-client-ui-layout` 注册独立 `'main'` keyed 槽位（`narrate-studio`），绕开 `conversation` 累进上下文会话循环；

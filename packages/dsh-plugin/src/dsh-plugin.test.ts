@@ -448,6 +448,7 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         apply(ctx, {
             bookRoot,
             poolRouting: DEFAULT_ROUTING,
+            shutdownTimeoutMs: 1,
             store,
             engine: fakeEngine as never,
             dreamingRunner: fakeDreaming as never
@@ -549,9 +550,10 @@ describe('NarrateOS DSH Plugin 控制面、SSE 与停机钩子', () => {
         // 触发 Cordis ctx.effect 停机钩子，并在短暂延迟后允许 step 完成（模拟 Safe-Point 收尾）
         expect(disposers.length).toBeGreaterThan(0);
         const shutdownPromise = Promise.all(disposers.map((d) => Promise.resolve(d())));
-        setTimeout(() => {
-            finishStepGate?.();
-        }, 30);
+        await readSseUntil((text) => text.includes('event: halt:waiting'));
+        expect(webServer.hasRoute('/api/narrate/status')).toBe(true);
+        await expect(store.beginDraft(3)).rejects.toThrow(TxLockConflictError);
+        finishStepGate?.();
 
         const [stepHttpRes] = await Promise.all([stepPromise, shutdownPromise]);
         expect(stepHttpRes.status).toBe(200);

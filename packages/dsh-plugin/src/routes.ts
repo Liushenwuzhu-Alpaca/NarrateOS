@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, appendFile, mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -409,7 +409,7 @@ export class NarrateRuntimeController {
         };
     }
 
-    /** Cordis 停机钩子调用：等待进行中任务在 Safe-Point 收尾并确保释放本进程持有的 tx.lock */
+    /** 停机先停止接单并等待任务结束；超时只告警，不提前释放锁或消费资源。 */
     async shutdown(): Promise<void> {
         this.shuttingDown = true;
         if (this.heartbeatTimer !== null) {
@@ -429,13 +429,17 @@ export class NarrateRuntimeController {
         if (pendingPromises.length > 0) {
             let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
             try {
-                await Promise.race([
-                    Promise.all(pendingPromises),
-                    new Promise<void>((resolveTimer) => {
-                        timeoutTimer = setTimeout(resolveTimer, this.shutdownTimeoutMs);
-                        timeoutTimer.unref?.();
-                    })
+                const timeout = Promise.withResolvers<boolean>();
+                timeoutTimer = setTimeout(() => timeout.resolve(false), this.shutdownTimeoutMs);
+                timeoutTimer.unref?.();
+                const settled = await Promise.race([
+                    Promise.all(pendingPromises).then(() => true),
+                    timeout.promise
                 ]);
+                if (!settled) {
+                    this.emitEvent('halt:waiting', { activeTask: this.activeTask, timestamp: new Date().toISOString() });
+                    await Promise.all(pendingPromises);
+                }
             } finally {
                 if (timeoutTimer !== undefined) {
                     clearTimeout(timeoutTimer);
@@ -443,7 +447,6 @@ export class NarrateRuntimeController {
             }
         }
 
-        await this.ensureOwnTxLockReleased();
         this.emitEvent('halt:completed', {
             timestamp: new Date().toISOString()
         });
@@ -456,20 +459,6 @@ export class NarrateRuntimeController {
         this.sseClients.clear();
     }
 
-    private async ensureOwnTxLockReleased(): Promise<void> {
-        const lockPath = join(this._bookRoot, '.ops/tx.lock');
-        const raw = await readOptionalText(lockPath);
-        if (raw === null) return;
-
-        try {
-            const parsed = TxLockPayloadSchema.safeParse(JSON.parse(raw));
-            if (parsed.success && parsed.data.pid === process.pid) {
-                await unlink(lockPath);
-            }
-        } catch {
-            // 若锁文件损坏或已被清理则忽略
-        }
-    }
 
     private async assertNoActiveTxLock(message: string): Promise<void> {
         const lockPath = join(this._bookRoot, '.ops/tx.lock');
