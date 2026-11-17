@@ -120,7 +120,7 @@ async function appendExtendedRunRecord(
 
 /**
  * 通用双路径角色执行器：
- * - 多轮探查工种 (`cleanroom: false`)：通过 ctx.agents.create({ meta: { origin: 'subagent' } }) 启动受控 Agent，
+ * - 多轮探查工种 (`cleanroom: false`)：通过 ctx.agents.create({ meta: { cwd } }) 启动受控独立 Agent，
  *   挂载单书/预设角色提示词、受控工具白名单与 yield_* 防逃逸 Hook，记录 .ops/runs.jsonl 会话索引与 .ops/session_logs/；
  * - 净室单轮工种 (`cleanroom: true`)：零工具、零 sessionId 直调 DshLlmAdapter (ctx.llm.stream)。
  */
@@ -347,7 +347,6 @@ export class RoleRunner {
             handle = await this.execCtx.agents.create({
                 sessionId,
                 meta: {
-                    origin: 'subagent',
                     cwd: options.bookRoot
                 },
                 agentOptions: {

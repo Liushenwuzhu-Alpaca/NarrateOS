@@ -256,6 +256,48 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         expect(normalized.shutdownTimeoutMs).toBe(5_000);
     });
 
+    it('环境变量 NARRATEOS_MODEL_* 可覆写插件 poolRouting 默认模型', async () => {
+        const prevStrong = process.env.NARRATEOS_MODEL_STRONG;
+        const prevFast = process.env.NARRATEOS_MODEL_FAST;
+        const prevAudit = process.env.NARRATEOS_MODEL_AUDIT;
+        process.env.NARRATEOS_MODEL_STRONG = 'override-strong-model';
+        process.env.NARRATEOS_MODEL_FAST = 'override-fast-model';
+        process.env.NARRATEOS_MODEL_AUDIT = 'override-audit-model';
+        try {
+            const bookRoot = await createGitBookWorkspace(tempDirs, 'book-env-model');
+            const booksRoot = join(bookRoot, '..');
+            const ctx = new Context();
+            const promptFiber = await ctx.plugin(SystemPrompt);
+            registerCleanup(() => promptFiber.dispose());
+            const toolsFiber = await ctx.plugin(ToolsService);
+            registerCleanup(() => toolsFiber.dispose());
+            const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot, booksRoot });
+            registerCleanup(() => storeFiber.dispose());
+            const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+            registerCleanup(() => bookToolsFiber.dispose());
+            await createHeadlessMockServices(ctx, {
+                onAgent: async () => {},
+                onLlmStream: () => textToStreamChunks('')
+            });
+
+            const pipelineFiber = await ctx.plugin(pipelinePlugin, { bookRoot, booksRoot });
+            registerCleanup(() => pipelineFiber.dispose());
+
+            expect(ctx.narratePipeline.poolRouting).toEqual({
+                strong_creative: { provider: 'deepseek-official', model: 'override-strong-model' },
+                fast_retrieval: { provider: 'deepseek-official', model: 'override-fast-model' },
+                audit: { provider: 'deepseek-official', model: 'override-audit-model' }
+            });
+        } finally {
+            if (prevStrong === undefined) delete process.env.NARRATEOS_MODEL_STRONG;
+            else process.env.NARRATEOS_MODEL_STRONG = prevStrong;
+            if (prevFast === undefined) delete process.env.NARRATEOS_MODEL_FAST;
+            else process.env.NARRATEOS_MODEL_FAST = prevFast;
+            if (prevAudit === undefined) delete process.env.NARRATEOS_MODEL_AUDIT;
+            else process.env.NARRATEOS_MODEL_AUDIT = prevAudit;
+        }
+    });
+
     it('在途步进期间 switchBook 与 POST /api/narrate/book/select 返回 409，并广播 activeSessionId SSE 与暴露 GET /api/narrate/runs', async () => {
         const bookA = await createGitBookWorkspace(tempDirs, 'book-a');
         const bookB = await createGitBookWorkspace(tempDirs, 'book-b');

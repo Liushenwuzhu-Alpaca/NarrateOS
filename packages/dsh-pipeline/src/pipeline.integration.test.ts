@@ -367,8 +367,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(result.featCommitSha).toBeTruthy();
         expect(result.stateCommitSha).toBeTruthy();
 
-        // 1. 验证多轮工种全部带有 meta.origin === 'subagent' 且记录至 .ops/runs.jsonl
-        expect(agentRuns.every((r) => r.origin === 'subagent')).toBe(true);
+        // 1. 验证多轮工种以独立顶层 Session 启动（不带无父地址的 subagent origin）且记录至 .ops/runs.jsonl
+        expect(agentRuns.every((r) => r.origin === undefined)).toBe(true);
         const runs = await ctx.narrateStore.openStore().listRunRecords({ chapter: 1 });
         expect(runs.some((r) => r.stage === 'LIBRARIAN' && r.status === 'completed')).toBe(true);
         expect(runs.some((r) => r.stage === 'PLANNER' && r.status === 'completed')).toBe(true);

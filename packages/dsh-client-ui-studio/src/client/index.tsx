@@ -661,6 +661,24 @@ export function NarrateStudioRoot({
                 setChapterDetail(null);
                 setHistoricalRuns([]);
             }
+
+            if (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) {
+                const activeTargetChapter = (statusRes.latestChapter ?? 0) + 1;
+                const activeRunsRes = await fetchRunRecords(activeTargetChapter).catch(() => null);
+                if (
+                    activeRunsRes &&
+                    activeRunsRes.runs.length > 0 &&
+                    isCurrentWorkspace(epoch) &&
+                    seq === refreshRequestRef.current
+                ) {
+                    setLiveRunChapter(activeTargetChapter);
+                    setStageOverrides((prev) =>
+                        Object.keys(prev).length > 0
+                            ? prev
+                            : deriveHistoricalStageOverrides(activeRunsRes.runs)
+                    );
+                }
+            }
         } catch (err) {
             if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
                 showToast(err instanceof Error ? err.message : String(err), 'error');
@@ -1421,10 +1439,14 @@ export function NarrateStudioRoot({
     );
 
     const effectiveStages = useMemo<Partial<Record<PipelineStageId, StageNodeState>>>(() => {
+        const isLiveUncommittedChapter =
+            liveRunChapter !== null &&
+            !chapters.some((ch) => ch.chapterNumber === liveRunChapter);
         const shouldOverlayLive =
             liveRunChapter === null ||
             selectedChapter === null ||
-            liveRunChapter === selectedChapter;
+            liveRunChapter === selectedChapter ||
+            isLiveUncommittedChapter;
         if (!shouldOverlayLive) {
             return historicalStageOverrides;
         }
@@ -1441,7 +1463,7 @@ export function NarrateStudioRoot({
             }
         }
         return merged;
-    }, [historicalStageOverrides, liveRunChapter, selectedChapter, stageOverrides]);
+    }, [chapters, historicalStageOverrides, liveRunChapter, selectedChapter, stageOverrides]);
 
     const stageArtifact = useMemo(() => {
         const base = deriveStageArtifact(latestSseStage);

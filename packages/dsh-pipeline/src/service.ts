@@ -41,6 +41,22 @@ const DEFAULT_POOL_ROUTING: LlmPoolRouting = {
     audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
 };
 
+function applyEnvRouteOverride(
+    base: LlmPoolRouting['strong_creative'],
+    modelEnvKey: string,
+    providerEnvKey: string
+): LlmPoolRouting['strong_creative'] {
+    const model = process.env[modelEnvKey]?.trim();
+    const provider = process.env[providerEnvKey]?.trim();
+    if (!model && !provider) {
+        return base;
+    }
+    return {
+        provider: provider || base.provider,
+        model: model || base.model
+    };
+}
+
 /** @narrateos/dsh-pipeline 插件原生 Schemastery 配置 Schema */
 export const Config = Schema.object({
     bookRoot: Schema.string().description('默认激活作品目录绝对路径（可选）'),
@@ -81,11 +97,21 @@ declare module '@deepseek-ai/cordis' {
  */
 export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
     const resolvedRouting: LlmPoolRouting = {
-        strong_creative:
+        strong_creative: applyEnvRouteOverride(
             config.poolRouting?.strong_creative ?? DEFAULT_POOL_ROUTING.strong_creative,
-        fast_retrieval:
+            'NARRATEOS_MODEL_STRONG',
+            'NARRATEOS_PROVIDER_STRONG'
+        ),
+        fast_retrieval: applyEnvRouteOverride(
             config.poolRouting?.fast_retrieval ?? DEFAULT_POOL_ROUTING.fast_retrieval,
-        audit: config.poolRouting?.audit ?? DEFAULT_POOL_ROUTING.audit
+            'NARRATEOS_MODEL_FAST',
+            'NARRATEOS_PROVIDER_FAST'
+        ),
+        audit: applyEnvRouteOverride(
+            config.poolRouting?.audit ?? DEFAULT_POOL_ROUTING.audit,
+            'NARRATEOS_MODEL_AUDIT',
+            'NARRATEOS_PROVIDER_AUDIT'
+        )
     };
 
     const controller = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, {
