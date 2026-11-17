@@ -5,6 +5,7 @@ import Schema from '@deepseek-ai/schemastery';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type {
     ApplyStatePatchOptions,
+    EntityProfile,
     NarrationSubjectivity,
     NarrateStoreService,
     TimelineMode
@@ -102,6 +103,10 @@ export interface BuildRoleToolsOptions {
     deferCommit?: boolean | undefined;
     /** Extractor applyStatePatch 附加参数 */
     applyOptions?: ApplyStatePatchOptions | undefined;
+    /** 可选内存可见实体快照视图（如 PARALLEL 分支已暂存实体） */
+    visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
+    /** 可选额外可达外键集合（如 PARALLEL 分支新增实体或章节键） */
+    reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
     /** 叙述人称主观度（用于 yield_boot_bundle 门禁） */
     narrationSubjectivity?: NarrationSubjectivity | undefined;
 }
@@ -255,6 +260,8 @@ export class NarrateToolsService {
                     allowInnateMutation: options.allowInnateMutation,
                     deferCommit: options.deferCommit,
                     applyOptions: options.applyOptions,
+                    visibleEntities: options.visibleEntities,
+                    reachableIds: options.reachableIds,
                     onYield: recordYield
                 })
             );

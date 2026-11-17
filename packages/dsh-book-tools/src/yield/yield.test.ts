@@ -6,9 +6,11 @@ import { Context } from '@deepseek-ai/cordis';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
 import {
     BookStore,
+    DEFAULT_SECTION_HEADINGS,
     ForeignKeyError,
     InnateLockViolationError,
-    NodeSystemAdapter
+    NodeSystemAdapter,
+    type EntityProfile
 } from '@narrateos/dsh-book-store';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +18,11 @@ import { GateValidationError } from '../errors.js';
 import * as bookToolsPlugin from '../index.js';
 
 const tempDirs: string[] = [];
+const cleanupCallbacks: Array<() => Promise<void> | void> = [];
+
+function registerCleanup(fn: () => Promise<void> | void): void {
+    cleanupCallbacks.push(fn);
+}
 
 function createSpyExec(name: string, args: unknown): {
     exec: ToolRunContext;
@@ -122,16 +129,25 @@ async function createInitializedGitBook(): Promise<string> {
     const system = new NodeSystemAdapter();
     const ctx = new Context();
     const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot: dir });
-    const store = ctx.narrateStore.openStore(dir);
-    await store.initializeWalFromDisk();
-    await system.initRepo(dir);
-    await system.commitPaths(dir, ['.'], 'chore(boot): init yield test book');
-    await storeFiber.dispose();
+    try {
+        const store = ctx.narrateStore.openStore(dir);
+        await store.initializeWalFromDisk();
+        await system.initRepo(dir);
+        await system.commitPaths(dir, ['.'], 'chore(boot): init yield test book');
+    } finally {
+        await storeFiber.dispose();
+    }
 
     return dir;
 }
 
 afterEach(async () => {
+    while (cleanupCallbacks.length > 0) {
+        const fn = cleanupCallbacks.pop();
+        if (fn) {
+            await fn();
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -145,7 +161,9 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         const bookRoot = await createInitializedGitBook();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-librarian',
@@ -155,6 +173,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             targetDay: 2,
             chapterGoal: '查明 item_001 归属'
         });
+        registerCleanup(() => roleSet.cleanup());
 
         const yieldPack = roleSet.toolMap.get('yield_context_pack')!;
         expect(yieldPack.isConcurrencySafe?.({})).toBe(false);
@@ -202,13 +221,16 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         const bookRoot = await createInitializedGitBook();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-planner',
             bookRoot,
             yieldTool: 'yield_outline'
         });
+        registerCleanup(() => roleSet.cleanup());
         const yieldOutline = roleSet.toolMap.get('yield_outline')!;
 
         const secretRationale = '全知幕后推演：真正的接头人将在第三章才现身，此处只是虚晃一枪';
@@ -255,7 +277,9 @@ describe('yield_* 终态门禁工具确定性校验', () => {
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-fc',
@@ -263,6 +287,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             yieldTool: 'yield_verdict',
             draftText
         });
+        registerCleanup(() => roleSet.cleanup());
         const yieldVerdict = roleSet.toolMap.get('yield_verdict')!;
 
         // 捏造草稿引文 -> 拒绝
@@ -352,7 +377,9 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         const bookRoot = await createInitializedGitBook();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         // 先走完第 2 章正文 feat 提交以进入 FEAT_COMMITTED
         const store = ctx.narrateStore.openStore(bookRoot);
@@ -365,6 +392,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             yieldTool: 'yield_state_patch',
             chapterNumber: 2
         });
+        registerCleanup(() => roleSet.cleanup());
         const yieldPatch = roleSet.toolMap.get('yield_state_patch')!;
 
         // 1. 篡改既有实体 Innate Locks -> 拒绝
@@ -472,7 +500,9 @@ describe('yield_* 终态门禁工具确定性校验', () => {
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         // 非安全相位 (FEAT_COMMITTED) 时必须拒绝 Dreaming
         const store = ctx.narrateStore.openStore(bookRoot);
@@ -484,6 +514,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             bookRoot,
             yieldTool: 'yield_dream_commit'
         });
+        registerCleanup(() => roleSetPhaseFail.cleanup());
         const phaseSpy = createSpyExec('yield_dream_commit', {});
         await expect(
             roleSetPhaseFail.toolMap.get('yield_dream_commit')!.execute(
@@ -503,6 +534,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             bookRoot,
             yieldTool: 'yield_dream_commit'
         });
+        registerCleanup(() => roleSetInnate.cleanup());
         await roleSetInnate.toolMap.get('book_edit')!.execute(
             {
                 path: 'entities/char_001.md',
@@ -528,6 +560,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             bookRoot,
             yieldTool: 'yield_dream_commit'
         });
+        registerCleanup(() => roleSetThreads.cleanup());
         const sixteenThreads = [
             '# 跨卷伏笔台账',
             '',
@@ -558,6 +591,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             bookRoot,
             yieldTool: 'yield_dream_commit'
         });
+        registerCleanup(() => roleSetFk.cleanup());
         await roleSetFk.toolMap.get('book_edit')!.execute(
             {
                 path: 'world/open_threads.md',
@@ -583,6 +617,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             bookRoot,
             yieldTool: 'yield_dream_commit'
         });
+        registerCleanup(() => roleSetOk.cleanup());
         await roleSetOk.toolMap.get('book_edit')!.execute(
             {
                 path: 'world/open_threads.md',
@@ -709,13 +744,16 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         const bookRoot = await createInitializedGitBook();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-boot-bundle',
             bookRoot,
             yieldTool: 'yield_boot_bundle'
         });
+        registerCleanup(() => roleSet.cleanup());
         const yieldBoot = roleSet.toolMap.get('yield_boot_bundle')!;
 
         const validBundle = {
@@ -778,5 +816,96 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         roleSet.cleanup();
         await toolsFiber.dispose();
         await storeFiber.dispose();
+    });
+
+    it('deferCommit 模式下 yield_state_patch 识别 visibleEntities 内存分支实体并保持 Innate Locks 防护与外键可达性', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const branchProfile: EntityProfile = {
+            metadata: {
+                entity_id: 'char_branch_01',
+                canonical_name: '陈九',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 2
+            },
+            sectionHeadings: { ...DEFAULT_SECTION_HEADINGS },
+            innateLocks: [{ visibility: 'PUBLIC', text: '左颊有旧刀疤', continuationLines: [] }],
+            acquiredState: [],
+            irreversibleTrajectory: [],
+            recentBuffer: []
+        };
+        const visibleEntities = new Map<string, EntityProfile>([[branchProfile.metadata.entity_id, branchProfile]]);
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-defer-branch',
+            bookRoot,
+            yieldTool: 'yield_state_patch',
+            chapterNumber: 3,
+            timelineMode: 'PARALLEL',
+            deferCommit: true,
+            visibleEntities,
+            reachableIds: ['ch_0002']
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const yieldPatch = roleSet.toolMap.get('yield_state_patch')!;
+
+        // 1. 篡改内存分支实体的 Innate Locks 必须被拦截
+        const innateSpy = createSpyExec('yield_state_patch', {});
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_branch_01',
+                            innate_locks_ops: [{ op: 'append', entry: { text: '抹去刀疤' } }]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    chapter_summary: '测试'
+                },
+                innateSpy.exec
+            )
+        ).rejects.toThrow(InnateLockViolationError);
+        expect(innateSpy.concludedCount()).toBe(0);
+
+        // 2. 更新磁盘尚未落盘的内存分支实体无需重复 canonical_name，且可引用分支实体与 reachableIds
+        const okSpy = createSpyExec('yield_state_patch', {});
+        const okRes = (await yieldPatch.execute(
+            {
+                entity_patches: [
+                    {
+                        entity_id: 'char_branch_01',
+                        last_seen_ch: 3,
+                        acquired_state_ops: [
+                            {
+                                op: 'upsert_slot',
+                                slot_key: 'location',
+                                entry: {
+                                    storyDay: 1,
+                                    chapter: 3,
+                                    visibility: 'PUBLIC',
+                                    text: '在 ch_0002 锚地接应 char_branch_01'
+                                }
+                            }
+                        ]
+                    }
+                ],
+                story_day_delta: 0,
+                chapter_summary: '支线二章推进'
+            },
+            okSpy.exec
+        )) as { accepted: boolean; updatedEntities: string[] };
+
+        expect(okRes.accepted).toBe(true);
+        expect(okRes.updatedEntities).toEqual(['char_branch_01']);
+        expect(okSpy.concludedCount()).toBe(1);
     });
 });
