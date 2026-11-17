@@ -1,3 +1,4 @@
+import { withTraceRun } from '../trace/trace.js';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SystemPort } from '../ports/system.js';
@@ -427,7 +428,7 @@ export class ParallelSandbox {
         assertSafeId(options.windowId, 'windowId');
         const baseTag = `parallel-fork-${options.windowId}`;
 
-        return await this.store.runWithTxLock(async () => {
+        return await withTraceRun(this.store.bookRoot, 'parallel-fork', { window: options.windowId }, () => this.store.runWithTxLock(async () => {
             await this.store.recoverWal();
             const metaPath = this.windowMetaPath(options.windowId);
             const snapshot = await this.store.loadSnapshot();
@@ -498,7 +499,7 @@ export class ParallelSandbox {
             }
             await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
             return metadata;
-        });
+        }));
     }
 
     /** 读取活跃窗口元数据与只读全局环境广播表 */
@@ -611,7 +612,7 @@ export class ParallelSandbox {
     async mergeWindow(options: MergeParallelWindowOptions): Promise<MergeParallelWindowResult> {
         assertSafeId(options.windowId, 'windowId');
 
-        return await this.store.runWithTxLock(async () => {
+        return await withTraceRun(this.store.bookRoot, 'parallel-merge', { window: options.windowId }, () => this.store.runWithTxLock(async () => {
             const windowMeta = await this.getWindow(options.windowId);
             if (windowMeta.status !== 'OPEN') {
                 throw new Error(`PARALLEL 时间窗 ${options.windowId} 当前状态为 ${windowMeta.status}，无法重复合并`);
@@ -720,7 +721,7 @@ export class ParallelSandbox {
                 totalChaptersUsed,
                 sha: commitRes.sha
             };
-        });
+        }));
     }
 
     private async readBranchDeltas(windowId: string): Promise<ParallelBranchDelta[]> {

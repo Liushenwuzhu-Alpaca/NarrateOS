@@ -1,3 +1,4 @@
+import { withTraceRun } from '../trace/trace.js';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
@@ -121,7 +122,8 @@ export class DreamingRunner {
      * 执行按脏页增量 VACUUM、future_horizon 翻转与冷归档，并检查前台镜头原则 Spotlight Trigger
      */
     async runDreaming(options: RunDreamingOptions): Promise<RunDreamingResult> {
-        return await this.store.withTxLock(() => this.runDreamingLocked(options));
+        return await withTraceRun(this.store.bookRoot, 'dream', {}, () =>
+            this.store.withTxLock(() => this.runDreamingLocked(options)));
     }
 
     private async runDreamingLocked(options: RunDreamingOptions): Promise<RunDreamingResult> {
@@ -218,6 +220,7 @@ export class DreamingRunner {
                 this.llm,
                 {
                     pool: 'fast_retrieval',
+                    traceStage: 'dream.vacuum',
                     staticPrefixBlocks: [
                         '你是长篇小说记忆整理器（Dreaming Vacuum）。仅输出合法 JSON，保留原章锚点与事实边界。'
                     ],
@@ -299,6 +302,7 @@ export class DreamingRunner {
                 this.llm,
                 {
                     pool: 'audit',
+                    traceStage: 'dream.horizon',
                     staticPrefixBlocks: [
                         '你是长篇小说远景推演、伏笔盘点与前台镜头裁判（On-Screen Principle）。重要冲突必须抛出 Spotlight Trigger 信号，仅输出合法 JSON。'
                     ],
@@ -441,6 +445,7 @@ export class DreamingRunner {
         conflicts: SuspectedConflict[],
         options: HealConflictsOptions = {}
     ): Promise<HealConflictsResult> {
+        return await withTraceRun(this.store.bookRoot, 'heal', {}, async () => {
         const usage = emptyUsage();
         const results: HealConflictItemResult[] = [];
         let quarantined = false;
@@ -504,6 +509,7 @@ export class DreamingRunner {
                     this.llm,
                     {
                         pool: 'audit',
+                        traceStage: 'heal.classify',
                         staticPrefixBlocks: [
                             '你是长篇小说跨章连续性自愈裁判。仅输出合法 JSON。'
                         ],
@@ -676,6 +682,7 @@ export class DreamingRunner {
             quarantineReport,
             usage
         };
+        });
     }
 
     private applyHorizonWarpAndArchive(

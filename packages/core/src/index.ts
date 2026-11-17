@@ -9,3 +9,4 @@ export * from './engine/index.js';
 export * from './boot/index.js';
 export * from './parallel/index.js';
 export * from './dreaming/index.js';
+export * from './trace/trace.js';

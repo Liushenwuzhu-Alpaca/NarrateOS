@@ -1,3 +1,4 @@
+import { traceArtifact, traceEvent } from '@narrateos/core';
 import type {
     CleanroomRequest,
     CleanroomResponse,
@@ -212,6 +213,7 @@ export class DshRuntimeClient implements LlmPort {
         const backoffMs = [1000, 2000, 4000, 8000, 16000];
         let lastError: unknown;
         for (let attempt = 0; attempt <= backoffMs.length; attempt += 1) {
+            await traceEvent('transport.started', { attempt: attempt + 1, model });
             const idleController = new AbortController();
             let idleTimer: ReturnType<typeof setTimeout> | undefined;
             const resetIdleWatchdog = (): void => {
@@ -251,6 +253,7 @@ export class DshRuntimeClient implements LlmPort {
                     const err = new Error(`DeepSeek API HTTP ${resp.status}: ${errText.slice(0, 300)}`);
                     if ((resp.status === 429 || resp.status >= 500) && attempt < backoffMs.length) {
                         lastError = err;
+                        await traceEvent('transport.retry', { attempt: attempt + 1, status: resp.status });
                         const delay = backoffMs[attempt] ?? 1000;
                         await new Promise((r) => setTimeout(r, delay));
                         continue;
@@ -276,6 +279,7 @@ export class DshRuntimeClient implements LlmPort {
                 }
                 lastError = err;
                 if (attempt < backoffMs.length) {
+                    await traceEvent('transport.retry', { attempt: attempt + 1, reason: 'transport_error' });
                     const delay = backoffMs[attempt] ?? 1000;
                     await new Promise((r) => setTimeout(r, delay));
                     continue;
@@ -373,6 +377,9 @@ export class DshRuntimeClient implements LlmPort {
             if (buffer.trim().length > 0) {
                 processLine(buffer);
             }
+        } catch (error) {
+            if (text) await traceArtifact('transport.partial', { text, modelId, incomplete: true });
+            throw error;
         } finally {
             reader.releaseLock();
         }

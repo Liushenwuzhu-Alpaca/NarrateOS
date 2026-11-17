@@ -5,6 +5,7 @@ export const BookConfigSchema = z.object({
     book_slug: z.string().min(1),
     title: z.string().min(1),
     tokens_per_char: z.number().positive(),
+    trace_level: z.enum(['full', 'metadata', 'off']).optional(),
     writer_token_budget: z.number().int().positive().nullable().optional().default(null),
     max_auto_rollback_chapters: z.number().int().positive().default(3),
     parallel_max_chapters: z.number().int().positive().optional(),

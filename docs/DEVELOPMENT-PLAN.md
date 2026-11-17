@@ -57,6 +57,32 @@ narrateos/
 | **`5. ProseGateAndTelemetry`** | `scanDraft(draft, recentChs, rulesCfg)` / `verifyDualQuotes(claims, store)` / `collectTelemetry(ch, usage)` | 提取并剥离头部 `<blocking>` 标签；运行可独立开关的 `Static Prose Gate` 正则配额表与跨章具象喻体复读检测，输出精确违规行号与上下窗口；执行双侧原句去标点子串验真；零模型计算 `MATTR-500`、Kontoyiannis 熵率 $\hat{H}_K$ 与句段长变异系数 CV。 |
 | **`6. NarrativeEngine`** | `bootBook()` / `stepChapter()` / `syncManuscripts()` / `runDreaming()` / `advanceVolume()` | 串联四阶段开书（三维正交坐标纯文本深推演 -> 三把手术刀编译 -> 三重门禁 -> 落盘）；驱动单章 6 步闭环（挂载选中 `lore_library` 词条与 `open_threads.md`、消费 `.ops/signals.jsonl`、`Stage Ceiling` 违规抛 `PlanConflictError`、落盘 `L2` 章卡并产出 `next_chapter_options`）；处理 `PARALLEL` 分支主时钟锁定与 3-Way Merge；执行人工手改 `Sync`；运行 `Dreaming`（脏页清洗、`open_threads` 周期立项/销账、`future_horizon` 多轨补货、`Spotlight Trigger` 派发与跨章三级自动自愈）及五步原子换卷 `advanceVolume()`。 |
 
+### 2.3 本地写作追踪
+
+- `world/book_config.yaml` 的 `trace_level` 支持 `full`、`metadata`、`off`，省略时为 `full`。新作品显式写入默认值；每次顶层操作重新读取配置。`off` 仅关闭新增追踪，不关闭事务 WAL、错误报告或既有调用统计。
+- 开书取得空目录初始化所有权后开始追踪；章节推进、Sync、Dreaming、自愈、换卷和并行开窗/合并均建立运行。宿主无关核心统一记录，CLI 与 DSH 使用相同格式。同书嵌套操作保留为所属运行的阶段。
+- `.ops/traces/<run_id>/run.json` 保存操作与配置，`events.jsonl` 追加阶段、调用、结构化验证重试、传输重试、提交及运行结果事件。事件关联 `run_id`、`stage_id`、`call_id`、重试序号及实际章号/并行窗口/支线；WAL 恢复采用恢复后的支线身份。
+- `full` 将每次 `LlmPort` 净室输入和返回正文分别写入 `<call_id>.input.json`、`<call_id>.output.json`。门禁前草稿、门禁诊断、验证错误及适配器可取得的失败流片段作为独立产物保存，可通过事件中的 `artifact_id` 查看。相同请求的传输重试共享调用 ID，各次传输有独立序号；第三方调度器内部未暴露的重试不伪造事件。
+- `metadata` 不保存提示词、正文或诊断产物，仍保留阶段、耗时、用量及结果。输入日志仅投影净室请求字段，不读取环境变量快照、HTTP 认证头或密钥；错误中的认证字段做遮蔽。完整追踪含作品秘密与历史草稿，只存本地，目录权限为 `0700`、新文件为 `0600`，通过自包含 `.gitignore` 排除作品 Git 提交。追踪不是业务事实源，不参与写手上下文。
+- 追踪故障向 stderr 明确报警，不改变业务成功/失败结果，也不重调模型。第一次记录故障后停止追加该运行日志，避免给不完整记录补上虚假的成功尾标。没有结束事件的运行显示 `active`、`incomplete` 或所有者不明的 `unknown`，不根据缺失日志推断业务失败。
+- 不做自动删除、逐字直播、Web 面板或任意中间步骤恢复。CLI 跟随按完整事件行读取；模型正文在调用结束后查看，流中断则仅保存已收到的片段。
+
+在 CLI 构建完成后，可通过 `node packages/cli/dist/bin.js` 使用以下命令；所有命令都接受 `--book <作品目录>`：
+
+```bash
+narrateos trace list --json
+narrateos trace stats
+narrateos trace events --run <run_id>
+narrateos trace follow --run <run_id>
+narrateos trace show --run <run_id> --call <call_id> --part input
+narrateos trace show --run <run_id> --call <call_id> --part output
+narrateos trace show --run <run_id> --artifact <artifact_id>
+narrateos trace prune --run <run_id>
+narrateos trace prune --run <run_id> --confirm <run_id>
+```
+
+`list`/`events`/`follow` 不主动显示完整输入输出；`show` 才显式读取内容。`follow` 在运行结束或无法确认仍活动时退出，Ctrl-C 只停止查看。`prune` 默认返回清理预览和字节数；确认值必须为完整运行 ID，删除前再次检查所有者，活动进程和未知所有者均禁止清理。读取与清理拒绝路径穿越和追踪目录内的符号链接。
+
 ---
 
 ## 3. `@deepseek-ai/dsh` 插件集与 Operator Studio 集成方案

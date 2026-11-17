@@ -14,6 +14,7 @@ import {
 } from '@narrateos/core';
 import { DshRuntimeClient } from './dsh-runtime.js';
 import { runPlotHaystackBenchmark } from './plot-haystack.js';
+import { runTraceCommand } from './trace-command.js';
 
 export type CliCommandName =
     | 'boot'
@@ -25,6 +26,7 @@ export type CliCommandName =
     | 'plot-haystack'
     | 'parallel-fork'
     | 'parallel-merge'
+    | 'trace'
     | 'help';
 
 export interface ParsedCliCommand {
@@ -54,6 +56,7 @@ const VALID_COMMANDS = new Set<string>([
     'plot-haystack',
     'parallel-fork',
     'parallel-merge',
+    'trace',
     'help'
 ]);
 
@@ -73,6 +76,11 @@ const HELP_TEXT = [
     '  plot-haystack   运行 40 章 Plot-Haystack 盲测基准并输出 10 枚探针核验报告',
     '  parallel-fork  开启并行窗口 (--window <id>)',
     '  parallel-merge 合并并行窗口 (--window <id>)',
+    '  trace list|stats 查看本地追踪运行与空间占用',
+    '  trace events|follow --run <id> 查看或跟随阶段事件',
+    '  trace show --run <id> --call <id> --part input|output 查看完整调用内容',
+    '  trace show --run <id> --artifact <id> 查看草稿或门禁诊断',
+    '  trace prune --run <id> [--confirm <id>] 预览或确认清理非活动运行',
     '',
     '通用选项:',
     '  --book <dir>    作品目录路径 (默认: 当前工作目录)',
@@ -82,6 +90,7 @@ const HELP_TEXT = [
 
 const BOOLEAN_FLAGS: Record<string, true> = { json: true, force: true, complete: true };
 const VALUE_FLAGS: Record<string, true> = { book: true, 'book-root': true, slug: true, title: true, pov: true, mode: true, 'seed-file': true, seed: true, t0: true, goal: true, chapter: true, 'target-day': true, 'story-day': true, entities: true, companions: true, chapters: true, window: true, branch: true };
+Object.assign(VALUE_FLAGS, { run: true, call: true, part: true, confirm: true, artifact: true });
 const INTEGER_FLAGS: Record<string, true> = { chapter: true, chapters: true, 'target-day': true, 'story-day': true };
 
 /** 解析命令行参数 */
@@ -227,6 +236,10 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps = {}): Promise
         }
 
         switch (parsed.command) {
+            case 'trace': {
+                await runTraceCommand(parsed, stdout);
+                return 0;
+            }
             case 'parallel-fork':
             case 'parallel-merge': {
                 const windowId = getStringFlag(parsed.flags, 'window');

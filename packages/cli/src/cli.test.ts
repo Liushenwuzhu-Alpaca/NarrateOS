@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+    listTraceRuns,
+    readTraceEvents,
+    readTraceCall,
     type CleanroomRequest,
     type CleanroomResponse,
     type LlmPort,
@@ -555,7 +558,7 @@ describe('@narrateos/cli', () => {
 
     it('应该完成无头 boot -> step -> status -> sync -> dream 端到端闭环', async () => {
         const bookRoot = await createTempBookDir();
-        const llm: LlmPort = createLifecycleScriptedLlm();
+        const llm = createLifecycleScriptedLlm();
 
         const captureStreams = () => {
             const out: string[] = [];
@@ -667,6 +670,21 @@ describe('@narrateos/cli', () => {
         expect(advanceJson.nextVolume).toBe(2);
         expect(advanceJson.tagName).toBe('arc-seal-vol-01');
         expect(advanceJson.completedBook).toBe(false);
+        const traceRuns = (await listTraceRuns(bookRoot)).runs;
+        expect(traceRuns.map((run) => run.operation)).toEqual(expect.arrayContaining(['boot', 'step', 'sync', 'dream', 'advance-volume']));
+        const stages: string[] = [];
+        for (const run of traceRuns) {
+            expect(run.status).toBe('ok');
+            for (const event of (await readTraceEvents(bookRoot, run.run_id)).events) {
+                if (event.type !== 'call.started') continue;
+                stages.push(String(event.data['stage']));
+                const input = await readTraceCall(bookRoot, run.run_id, String(event.data['call_id']), 'input') as { dynamicTail: string };
+                expect(llm.history.some((call) => call.request.dynamicTail === input.dynamicTail)).toBe(true);
+                const output = await readTraceCall(bookRoot, run.run_id, String(event.data['call_id']), 'output') as { text: string };
+                expect(output.text.trim()).not.toBe('');
+            }
+        }
+        expect(stages).toEqual(expect.arrayContaining(['boot.compile', 'librarian', 'planner', 'writer', 'fact_checker', 'extractor', 'dream.vacuum', 'volume.seal']));
     }, 15_000);
 
     it('应该完整跑通 Plot-Haystack 40 章盲测并输出 10 枚探针核验与四联遥测报告', async () => {

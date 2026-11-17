@@ -5,6 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+    generateTraced,
+    listTraceRuns,
+    readTraceCall,
+    readTraceEvents,
+    withTraceRun,
     BookStore,
     DEFAULT_SECTION_HEADINGS,
     NodeSystemAdapter,
@@ -143,6 +148,39 @@ class MockWebServer implements DshWebServerService {
 }
 
 describe('DshLlmAdapter', () => {
+    it('追踪保留失败流片段、传输重试和最终响应，使用实际作品模型名', async () => {
+        const bookRoot = await mkdtemp(join(tmpdir(), 'narrateos-stream-trace-'));
+        try {
+            let attempts = 0;
+            const service: DshLlmService = {
+                async *stream() {
+                    attempts++;
+                    yield { type: 'text-delta', index: 0, text: attempts === 1 ? '未完成的旧草稿' : '最终正文' };
+                    if (attempts === 1) {
+                        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: '连接断开' } } };
+                    } else {
+                        yield { type: 'finish', reason: { kind: 'stop' } };
+                    }
+                }
+            };
+            const adapter = new DshLlmAdapter(service, { poolRouting: DEFAULT_ROUTING, maxRetries: 1,
+                sleepFn: async () => {}, resolveModelRouting: async () => ({ strong_creative: 'book-model' }) });
+            const result = await withTraceRun(bookRoot, 'step', {}, () => generateTraced(adapter, {
+                pool: 'strong_creative', traceStage: 'writer', staticPrefixBlocks: [], dynamicTail: '开始写作'
+            }));
+            expect(result).toMatchObject({ text: '最终正文', modelId: 'book-model' });
+            const runId = (await listTraceRuns(bookRoot)).runs[0]!.run_id;
+            const events = (await readTraceEvents(bookRoot, runId)).events;
+            expect(events.filter((event) => event.type === 'transport.started').map((event) => event.data['attempt'])).toEqual([1, 2]);
+            const partial = events.find((event) => event.type === 'artifact.saved')!;
+            expect(await readTraceCall(bookRoot, runId, String(partial.data['artifact_id']), 'output')).toEqual({
+                kind: 'transport.partial', content: { text: '未完成的旧草稿', modelId: 'book-model', incomplete: true }
+            });
+            const completed = events.find((event) => event.type === 'call.finished')!;
+            expect(partial.data['call_id']).toBe(completed.data['call_id']);
+            expect(await readTraceCall(bookRoot, runId, String(completed.data['call_id']), 'output')).toMatchObject({ text: '最终正文' });
+        } finally { await rm(bookRoot, { recursive: true, force: true }); }
+    });
     it('每次调用解析当前作品路由并保留宿主 provider', async () => {
         const captured: DshGenerateOptions[] = [];
         let routing: Record<string, string> = { strong_creative: 'book-alpha' };

@@ -1,3 +1,4 @@
+import { generateTraced, withTraceRun } from '../trace/trace.js';
 import { mkdir, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
@@ -62,9 +63,10 @@ export async function calibrateTokensPerChar(
     signal?: AbortSignal | undefined
 ): Promise<number> {
     const text = sampleText && sampleText.trim().length > 0 ? sampleText : DEFAULT_CALIBRATION_SAMPLE_TEXT;
-    const response = await llm.generate(
+    const response = await generateTraced(llm,
         {
             pool: 'strong_creative',
+            traceStage: 'boot.calibration',
             staticPrefixBlocks: [],
             dynamicTail: `请仅回复 OK。\n\n标定样本：\n${text}`,
             temperature: 0,
@@ -304,6 +306,7 @@ export async function runPhase1PitchAndBible(
         deps.llm,
         {
             pool: 'strong_creative',
+            traceStage: 'boot.proposal',
             staticPrefixBlocks: [],
             dynamicTail: proposalPrompt,
             temperature: 0.7
@@ -339,6 +342,7 @@ export async function runPhase1PitchAndBible(
             deps.llm,
             {
                 pool: 'audit',
+                traceStage: 'boot.selection',
                 staticPrefixBlocks: [],
                 dynamicTail: selectPrompt,
                 temperature: 0
@@ -373,9 +377,10 @@ export async function runPhase1PitchAndBible(
         '5. 首批跨卷伏笔（open_threads）与近期外部世界惯性事件（future_horizon）。'
     ].join('\n');
 
-    const bibleResponse = await deps.llm.generate(
+    const bibleResponse = await generateTraced(deps.llm,
         {
             pool: 'strong_creative',
+            traceStage: 'boot.bible',
             staticPrefixBlocks: [],
             dynamicTail: biblePrompt,
             temperature: 0.6
@@ -530,6 +535,7 @@ async function compileOriginalWithGates(
             deps.llm,
             {
                 pool: 'strong_creative',
+                traceStage: 'boot.compile',
                 staticPrefixBlocks: [],
                 dynamicTail: buildCompilePrompt(input, phase1, feedback),
                 temperature: 0.4
@@ -578,6 +584,7 @@ async function compileOriginalWithGates(
             deps.llm,
             {
                 pool: 'audit',
+                traceStage: 'boot.audit',
                 staticPrefixBlocks: [],
                 dynamicTail: [
                     '请对照《全书架构圣经》中的里账本底牌，对编译后的公开视图 (PUBLIC 条目与公开摘要) 执行异构剧透盲审：',
@@ -668,6 +675,7 @@ async function compileFanficWithAudit(
             deps.llm,
             {
                 pool: 'strong_creative',
+                traceStage: 'boot.compile',
                 staticPrefixBlocks: [],
                 dynamicTail: buildCompilePrompt(input, undefined, feedback),
                 temperature: 0.2
@@ -693,6 +701,7 @@ async function compileFanficWithAudit(
             deps.llm,
             {
                 pool: 'audit',
+                traceStage: 'boot.audit',
                 staticPrefixBlocks: [],
                 dynamicTail: [
                     `请对照原始设定包与 T0 锚点 (${input.t0Anchor ?? 'story_day = 0'}) 执行独立盲审：`,
@@ -779,6 +788,7 @@ export async function bootBook(
     if ((await readdir(input.bookRoot)).some((name) => name !== '.boot-incomplete')) {
         throw new Error('开书目标目录在初始化期间发生变化，已停止写入');
     }
+    return await withTraceRun(input.bookRoot, 'boot', { book_slug: input.bookSlug }, async () => {
     const tokensPerChar = await calibrateTokensPerChar(
         deps.llm,
         input.calibrationSampleText,
@@ -834,6 +844,7 @@ export async function bootBook(
         book_slug: input.bookSlug,
         title: input.title,
         tokens_per_char: tokensPerChar,
+        trace_level: 'full',
         writer_token_budget: input.writerTokenBudget ?? null,
         max_auto_rollback_chapters: input.maxAutoRollbackChapters ?? 3,
         structured_json_retry: {
@@ -971,4 +982,5 @@ export async function bootBook(
         result.auditReport = auditReport;
     }
     return result;
+    });
 }

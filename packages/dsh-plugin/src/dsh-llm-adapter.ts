@@ -1,4 +1,6 @@
 import {
+    traceArtifact,
+    traceEvent,
     sleepWithSignal,
     type CleanroomRequest,
     type CleanroomResponse,
@@ -166,12 +168,14 @@ export class DshLlmAdapter implements LlmPort {
         let lastError: unknown;
         for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
             if (attempt > 0) {
+                await traceEvent('transport.retry', { attempt: attempt + 1 });
                 const delayMs = resolveRetryDelay(lastError, attempt - 1, this.backoffMs);
                 await this.sleepFn(delayMs, signal);
             }
 
+            await traceEvent('transport.started', { attempt: attempt + 1, model: options.model, provider: options.provider });
             try {
-                return await this.consumeStream(options, route.model, signal);
+                return await this.consumeStream(options, options.model, signal);
             } catch (err: unknown) {
                 lastError = err;
                 if (isAbortError(err, signal)) {
@@ -201,6 +205,7 @@ export class DshLlmAdapter implements LlmPort {
         };
         let finishReason: string | undefined;
 
+        try {
         for await (const chunk of this.llm.stream(options)) {
             if (signal?.aborted) {
                 throw signal.reason instanceof Error ? signal.reason : new Error('Aborted');
@@ -264,6 +269,10 @@ export class DshLlmAdapter implements LlmPort {
                 default:
                     break;
             }
+        }
+        } catch (error) {
+            if (textParts.length > 0) await traceArtifact('transport.partial', { text: textParts.join(''), modelId, incomplete: true });
+            throw error;
         }
 
         const response: CleanroomResponse = {

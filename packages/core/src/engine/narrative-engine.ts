@@ -1,3 +1,4 @@
+import { generateTraced, traceArtifact, traceEvent, withTraceRun, withTraceStage } from '../trace/trace.js';
 import { ParallelSandbox, type ForkParallelWindowOptions, type MergeParallelWindowOptions } from '../parallel/parallel-sandbox.js';
 import { analyzeParagraphs } from '../text/paragraphs.js';
 import { createHash } from 'node:crypto';
@@ -569,6 +570,7 @@ export class NarrativeEngine {
 
         const req: CleanroomRequest = {
             pool: 'fast_retrieval',
+            traceStage: 'librarian',
             staticPrefixBlocks: [
                 '你是小说记忆库图书管理员 (Librarian)。请根据本章目标与卷目录，选出需要挂载的实体 ID 与历史原稿检索关键词，并输出 JSON。',
                 catalog.staticPrefix
@@ -697,7 +699,7 @@ export class NarrativeEngine {
 
         const res = await generateJson(
             this.llm,
-            assembled.request,
+            { ...assembled.request, traceStage: 'planner' },
             PlannerOutlineSchema,
             retryOptions,
             signal
@@ -772,7 +774,7 @@ export class NarrativeEngine {
             pool: 'strong_creative'
         });
 
-        const res = await this.llm.generate(assembled.request, signal);
+        const res = await generateTraced(this.llm, { ...assembled.request, traceStage: 'writer' }, signal);
         addUsage(totalUsage, res.usage);
 
         const cleanProse = stripBlockingTags(res.text).cleanText.trim();
@@ -809,6 +811,7 @@ export class NarrativeEngine {
 
         const req: CleanroomRequest = {
             pool: 'strong_creative',
+            traceStage: 'patch',
             staticPrefixBlocks: [
                 '你是小说局部修补专员。请仅重写指定的违规段落，保持前后文语境与人称连贯，只输出修改后的目标段落正文（不要输出前后文参考段落）。'
             ],
@@ -822,7 +825,7 @@ export class NarrativeEngine {
                 .join('\n\n')
         };
 
-        const res = await this.llm.generate(req, signal);
+        const res = await generateTraced(this.llm, req, signal);
         addUsage(totalUsage, res.usage);
 
         const patchedClean = stripBlockingTags(res.text).cleanText.trim();
@@ -878,6 +881,7 @@ export class NarrativeEngine {
 
         const req: CleanroomRequest = {
             pool: 'audit',
+            traceStage: 'fact_checker',
             staticPrefixBlocks: [
                 [
                     '你是冷酷字面核查员 (Fact Checker)。请核查正文是否违反物理红线、POV 视角越界、算术闭合或提前揭穿 current_arc_envelope.md 中的阶段天花板禁区 (Stage Ceiling)，并严格按以下 JSON 格式输出（只输出 ```json ... ``` 代码块）：',
@@ -985,6 +989,7 @@ export class NarrativeEngine {
 
         const req: CleanroomRequest = {
             pool: 'fast_retrieval',
+            traceStage: 'extractor',
             staticPrefixBlocks: [
                 [
                     '你是增量状态抽取器 (Extractor)。请根据定稿正文抽取实体补丁 (entity_patches)、故事天数推进量 (story_day_delta)、章卡摘要 (chapter_summary) 与下一章候选推进方向 (next_chapter_options)，严格按以下 JSON 格式输出（只输出 ```json ... ``` 代码块）：',
@@ -1155,11 +1160,16 @@ export class NarrativeEngine {
      * Librarian -> Planner -> Writer -> Static Prose Gate -> Fact Checker -> Extractor + 双粒度 WAL 提交
      */
     async stepChapter(options: StepChapterOptions): Promise<StepChapterResult> {
-        return await this.store.withTxLock(() => this.stepChapterLocked(options));
+        return await withTraceRun(this.store.bookRoot, 'step', {
+            chapter: options.chapterNumber, window: options.parallelWindowId, branch: options.parallelBranchId,
+            timeline: options.timelineMode
+        }, () => this.store.withTxLock(() => this.stepChapterLocked(options)));
     }
 
     private async stepChapterLocked(options: StepChapterOptions): Promise<StepChapterResult> {
         const emit = (stage: EngineStageName, chapterNum: number, message: string): void => {
+            void traceEvent('progress', { stage, chapter: chapterNum, message });
+            if (stage === 'WAL_RECOVERY') void traceEvent('run.context', { chapter: chapterNum });
             if (!options.onProgress) return;
             try {
                 const evt: EngineProgressEvent = {
@@ -1185,6 +1195,7 @@ export class NarrativeEngine {
         const windowId = recoveredContext?.parallelWindowId ?? options.parallelWindowId;
         const branchId = recoveredContext?.parallelBranchId ?? options.parallelBranchId;
         const parallel = timelineMode === 'PARALLEL' && windowId && branchId ? { windowId, branchId } : undefined;
+        await traceEvent('run.context', { timeline: timelineMode, window: windowId, branch: branchId });
         if (timelineMode === 'PARALLEL') {
             if (!parallel) throw new Error('PARALLEL 需要 parallelWindowId 与 parallelBranchId');
             snapshot = await new ParallelSandbox(this.store, this.system).loadBranchSnapshot(snapshot, parallel.windowId, parallel.branchId);
@@ -1244,6 +1255,7 @@ export class NarrativeEngine {
         ))) {
             throw new Error('并行章号必须大于已提交章号，禁止覆盖主线或其他支线章节');
         }
+        await traceEvent('run.context', { chapter: chapterNumber });
         const targetDay = options.targetDay ?? snapshot.worldState.frontmatter.story_day;
         const [staticBaseAndVoiceRaw, currentArcEnvelopeRaw] = await Promise.all([
             readOptionalText(join(this.store.bookRoot, 'world/static_base_and_voice.md')),
@@ -1379,14 +1391,17 @@ export class NarrativeEngine {
                 activeProse = stripBlockingTags(activeProse).cleanText.trim();
 
                 emit('PROSE_GATE', chapterNumber, '运行 0 Token 静态文风门禁');
-                const gateResult = this.gate.evaluate(activeProse, {
+                await traceArtifact('draft.before_gate', activeProse);
+                const gateResult = await withTraceStage('prose_gate', async () => this.gate.evaluate(activeProse, {
                     enableAntiCliche: snapshot.config.prose_gate.enable_anti_cliche,
                     enableCrossChapterSimile: snapshot.config.prose_gate.enable_cross_chapter_simile,
                     crossChapterSimileWindow: snapshot.config.prose_gate.cross_chapter_simile_window,
                     rules: gateRules,
                     historicalChapters
-                });
+                }));
                 lastGateViolations = gateResult.violations;
+                await traceArtifact('prose_gate.result', gateResult);
+                await traceEvent('gate.result', { passed: gateResult.passed, violations: gateResult.violations.length, action: gateResult.recommendedAction });
 
                 if (!gateResult.passed) {
                     if (gateResult.recommendedAction === 'PATCH' && patchRounds < 2) {
@@ -1683,7 +1698,8 @@ export class NarrativeEngine {
      * - 历史旧章手改：刷新该章指纹并对下游已归档章节执行只读连续性冲突扫描（严禁改写下游手稿）
      */
     async syncManuscripts(options: SyncManuscriptsOptions = {}): Promise<SyncManuscriptsResult> {
-        return await this.store.runWithTxLock(() => this.syncManuscriptsLocked(options));
+        return await withTraceRun(this.store.bookRoot, 'sync', {}, () =>
+            this.store.runWithTxLock(() => this.syncManuscriptsLocked(options)));
     }
 
     private async syncManuscriptsLocked(options: SyncManuscriptsOptions): Promise<SyncManuscriptsResult> {
@@ -1717,6 +1733,7 @@ export class NarrativeEngine {
 
             const diffReq: CleanroomRequest = {
                 pool: 'fast_retrieval',
+                traceStage: 'sync.classify',
                 staticPrefixBlocks: [
                     '你是手稿增量同步定性器。请判断本次手改差异是否仅为字词修辞润色（无剧情事实、人物位置、物品持有或数值变更），输出 JSON。'
                 ],
@@ -1762,6 +1779,7 @@ export class NarrativeEngine {
 
             const extractReq: CleanroomRequest = {
                 pool: 'fast_retrieval',
+                traceStage: 'sync.extractor',
                 staticPrefixBlocks: [
                     '你是手稿增量状态抽取器 (Sync Extractor)。请根据最新修订的手稿与差异，输出实体增量补丁与摘要 JSON。'
                 ],
@@ -1848,6 +1866,7 @@ export class NarrativeEngine {
 
         const scanReq: CleanroomRequest = {
             pool: 'audit',
+            traceStage: 'sync.audit',
             staticPrefixBlocks: [
                 '你是只读连续性冲突扫描器。历史旧章已被作者修订，请扫描下游已归档章节是否存在与旧章修订内容冲突之处，精确标出章号、行号与原句。严禁建议自动修改下游正文。'
             ],
@@ -1905,7 +1924,7 @@ export class NarrativeEngine {
      * 五步原子换卷或全书完结封笔 (全程在 store.withTxLock 保护下执行)
      */
     async advanceVolume(options: AdvanceVolumeOptions = {}): Promise<AdvanceVolumeResult> {
-        return await this.store.withTxLock(async () => {
+        return await withTraceRun(this.store.bookRoot, 'advance-volume', {}, () => this.store.withTxLock(async () => {
             const completeBook = Boolean(options.completeBook);
             const config = await this.store.readBookConfig();
             const retryOptions = this.resolveRetryOptions(config);
@@ -1925,6 +1944,7 @@ export class NarrativeEngine {
 
             const sealReq: CleanroomRequest = {
                 pool: 'fast_retrieval',
+                traceStage: 'volume.seal',
                 staticPrefixBlocks: [
                     '你是长篇小说卷级归档编纂器。请根据当前卷章卡与卷级总表，输出本卷简明收束摘要 (volume_summary) 与故事日跨度 (story_day_span) JSON。'
                 ],
@@ -2004,6 +2024,7 @@ export class NarrativeEngine {
                 const currentVoiceBase = (await readOptionalText(voiceBasePath)) ?? '';
                 const mergeReq: CleanroomRequest = {
                     pool: 'fast_retrieval',
+                    traceStage: 'volume.style',
                     staticPrefixBlocks: [
                         '你是长篇小说文风基线提炼器。请将卷中风格修订去重压缩并合入 static_base_and_voice.md，输出 JSON 字段 merged_markdown，总字数严格控制在 1500 字以内。'
                     ],
@@ -2060,6 +2081,7 @@ export class NarrativeEngine {
 
                 const envelopeReq: CleanroomRequest = {
                     pool: 'strong_creative',
+                    traceStage: 'volume.envelope',
                     staticPrefixBlocks: [
                         '你是长篇小说卷级大纲编译器。请基于 L0 纪元总表、L1 卷级总表、存活角色档案与未解伏笔，编译下一卷的 current_arc_envelope（含新舞台冲突、跨图锚点与新 Stage Ceiling）以及 future_horizon 惯性事件，输出 JSON。'
                     ],
@@ -2115,7 +2137,7 @@ export class NarrativeEngine {
                 completedBook: completeBook,
                 commitSha
             };
-        });
+        }));
     }
 }
 

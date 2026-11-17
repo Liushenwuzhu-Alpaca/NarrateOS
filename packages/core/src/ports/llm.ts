@@ -1,3 +1,4 @@
+import { generateTraced, traceArtifact, traceEvent, withTraceStage } from '../trace/trace.js';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -16,6 +17,8 @@ export interface TokenUsage {
 
 /** 净室单轮请求结构（严禁携带工具声明或会话历史） */
 export interface CleanroomRequest {
+    /** 仅供本地追踪关联角色，不发送给模型提供商。 */
+    traceStage?: string;
     pool: LlmPool;
     staticPrefixBlocks: string[];
     dynamicTail: string;
@@ -141,6 +144,7 @@ export async function generateStructuredJson<T>(
     options: StructuredRetryOptions = {},
     signal?: AbortSignal
 ): Promise<{ data: T; totalUsage: TokenUsage; attempts: number }> {
+    return await withTraceStage(req.traceStage ?? 'model', async () => {
     const maxRetries = options.maxRetries ?? DEFAULT_STRUCTURED_MAX_RETRIES;
     const backoffMs = options.backoffMs ?? DEFAULT_STRUCTURED_BACKOFF_MS;
     const sleepFn = options.sleepFn ?? sleepWithSignal;
@@ -158,6 +162,7 @@ export async function generateStructuredJson<T>(
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         if (attempt > 0) {
+            await traceEvent('call.retry', { attempt: attempt + 1, reason: 'structured_validation' });
             const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)] ?? 16000;
             await sleepFn(delay, signal);
             // 将上次错误附带进动态尾部提示，绝不改动 staticPrefixBlocks 以保护 KV 缓存前缀
@@ -173,7 +178,7 @@ export async function generateStructuredJson<T>(
             };
         }
 
-        const res = await llm.generate(currentReq, signal);
+        const res = await generateTraced(llm, currentReq, signal, attempt + 1);
         totalUsage.inputTokens += res.usage.inputTokens;
         totalUsage.cacheReadTokens += res.usage.cacheReadTokens;
         totalUsage.cacheWriteTokens += res.usage.cacheWriteTokens;
@@ -197,9 +202,12 @@ export async function generateStructuredJson<T>(
         } catch (err) {
             lastValidationError = err instanceof Error ? err.message : String(err);
         }
+        await traceEvent('call.validation_failed', { attempt: attempt + 1 });
+        await traceArtifact('validation.error', { attempt: attempt + 1, message: lastValidationError });
     }
 
     throw new StructuredOutputError(maxRetries + 1, lastRawOutput, lastValidationError);
+    });
 }
 
 /** 计算静态前缀块的 SHA-256 指纹，供缓存一致性断言 */
@@ -305,7 +313,7 @@ export class LoggingLlmAdapter implements LlmPort {
                 await mkdir(dirname(this.logPath), { recursive: true });
                 await appendFile(this.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
             } catch {
-                // 审计日志写盘失败不阻断模型主调用
+                try { process.stderr.write('[llm-log] 调用统计写盘失败，写作继续\n'); } catch { /* 终端故障不改变模型结果 */ }
             }
         }
     }

@@ -1,3 +1,4 @@
+import { traceEvent } from '../trace/trace.js';
 import { execFile } from 'node:child_process';
 import { access, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
@@ -75,6 +76,7 @@ export class NodeSystemAdapter implements SystemPort {
             await this.runGit(bookRoot, ['commit', '-m', message, '--', ...paths]);
         }
         const { stdout: shaOut } = await this.runGit(bookRoot, ['rev-parse', 'HEAD']);
+        await traceEvent('assets.committed', { paths, commit: shaOut.trim(), message });
         return { sha: shaOut.trim() };
     }
 
