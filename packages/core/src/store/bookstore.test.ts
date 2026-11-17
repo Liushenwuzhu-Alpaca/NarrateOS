@@ -599,16 +599,21 @@ describe('BookStore', () => {
             releaseHolder = resolveGate;
         });
 
+        const acquired = Promise.withResolvers<void>();
         const holder = store.withTxLock(async () => {
+            acquired.resolve();
             await holderGate;
             return 'holder-done';
         });
 
-        // 在独立异步微任务队列中并发发起 beginDraft，应被 tx.lock 拦截
-        await expect(store.beginDraft(2)).rejects.toThrow(TxLockConflictError);
-
-        releaseHolder();
-        await expect(holder).resolves.toBe('holder-done');
+        // 等到持锁回调确实进入，再从独立异步上下文验证竞争者被拒绝。
+        await Promise.race([acquired.promise, holder]);
+        try {
+            await expect(store.beginDraft(2)).rejects.toThrow(TxLockConflictError);
+        } finally {
+            releaseHolder();
+            await expect(holder).resolves.toBe('holder-done');
+        }
     });
 
     it('FEAT 恢复保留未登记的实体、历史章手改和未跟踪笔记', async () => {
