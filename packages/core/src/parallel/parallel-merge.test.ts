@@ -1,7 +1,7 @@
 import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NodeSystemAdapter } from '../ports/index.js';
 import { BookStore, parseEntityMarkdown } from '../store/index.js';
 import {
@@ -128,6 +128,17 @@ afterEach(async () => {
 });
 
 describe('ParallelSandbox (PARALLEL 分叉暂存与 3-Way Merge)', () => {
+    it('开窗提交失败后可复用原标签重试，但拒绝过期分叉标签', async () => {
+        const { bookRoot, system, store, sandbox } = await createParallelTestRepo();
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('模拟提交失败'));
+        await expect(sandbox.forkWindow({ windowId: 'retry' })).rejects.toThrow('模拟提交失败');
+        expect((await store.readWorldState()).frontmatter.timeline_mode).toBe('MAINLINE');
+        expect((await sandbox.forkWindow({ windowId: 'retry' })).status).toBe('OPEN');
+        await sandbox.mergeWindow({ windowId: 'retry' });
+        await expect(sandbox.forkWindow({ windowId: 'retry' })).rejects.toThrow('分叉标签与当前提交不一致');
+        expect((await store.readWorldState()).frontmatter.timeline_mode).toBe('MAINLINE');
+        expect(await system.readFileAtRef(bookRoot, 'parallel-fork-retry', 'world/world_state.md')).not.toBeNull();
+    });
     it('开启 PARALLEL 时间窗会自动打分叉 Git tag、记录广播表并切换 timeline_mode', async () => {
         const { bookRoot, system, store, sandbox } = await createParallelTestRepo(4);
 

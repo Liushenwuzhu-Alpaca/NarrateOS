@@ -454,7 +454,15 @@ export class ParallelSandbox {
                 options.maxChapters ?? config.parallel_max_chapters ?? DEFAULT_PARALLEL_MAX_CHAPTERS;
 
             // 标签固定分叉前快照，窗口元数据与模式切换在同一提交中生效。
-            await this.system.createTag(this.store.bookRoot, baseTag, `PARALLEL fork window ${options.windowId}`);
+            try {
+                await this.system.createTag(this.store.bookRoot, baseTag, `PARALLEL fork window ${options.windowId}`);
+            } catch (error) {
+                const existingRevision = await this.system.currentRevision(this.store.bookRoot, `refs/tags/${baseTag}`).catch(() => null);
+                if (existingRevision === null) throw error;
+                if (existingRevision !== await this.system.currentRevision(this.store.bookRoot)) {
+                    throw new Error('分叉标签与当前提交不一致，请使用新的窗口 ID');
+                }
+            }
             const forkPaths = ['world/world_state.md', `.ops/parallel_deltas/${options.windowId}/window.json`];
             await this.store.recordPendingWrites(forkPaths);
             if (worldState.frontmatter.timeline_mode !== 'PARALLEL') {

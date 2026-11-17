@@ -102,6 +102,7 @@ narrateos/
   - L2 章卡持久化出场实体 ID，通用职务称谓仅在对应出场章集合内检索；旧章卡无出场索引时只保留实名与唯一别名召回，不将空白名单解释为全书放行。
   - PARALLEL 先显式 fork，再以 window/branch 标识推进；读取分叉实体加本支线增量，章卡、回表与前章窗口过滤其他支线。正文 WAL 持久化时间线上下文，抽取恢复沿原支线暂存，显式 merge 才更新主线并统一推进时钟。窗口开放期间拒绝主线 Sync、Dreaming 与换卷。
   - CLI：`parallel-fork --window <id>`、`step --mode PARALLEL --window <id> --branch <id> --goal <目标>`、`parallel-merge --window <id>`；REST：`POST /api/narrate/parallel/fork` 与 `/merge` 接收 `windowId`，step 同时传 `parallelWindowId`、`parallelBranchId`。
+  - 开窗失败重试仅复用指向当前提交的分叉标签；过期标签拒绝复用，不覆盖已有历史。
 
 ### Phase 2：确定性裁剪、成对检索与静态门禁内核 (`ViewSlicer` + `IndexRecall` + `ProseGateAndTelemetry`)
 - **交付内容**：零 LLM 调用完整实现 `ViewSlicer`、`IndexRecall` 与 `ProseGateAndTelemetry` 三个纯确定性深模块。
