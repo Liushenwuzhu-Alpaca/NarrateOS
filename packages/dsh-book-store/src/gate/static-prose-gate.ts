@@ -23,6 +23,7 @@ interface LineMeta {
 
 const ANTI_CLICHE_RULE_IDS = new Set<GateRuleId>([
     'negation_contrast',
+    'subjective_judgment',
     'micro_anatomy',
     'skeletal_quota',
     'filler_trace',
@@ -31,6 +32,12 @@ const ANTI_CLICHE_RULE_IDS = new Set<GateRuleId>([
     'deictic_density',
     'filler_cliche',
     'ending_moralizing'
+]);
+
+/** 强主观第一人称视角下默认豁免的主观镜头评判规则 */
+const SUBJECTIVE_EXEMPT_RULE_IDS = new Set<GateRuleId>([
+    'subjective_judgment',
+    'negation_contrast'
 ]);
 
 /**
@@ -67,7 +74,11 @@ export class StaticProseGate {
             const baseEnabled = defaultDef?.enabled ?? true;
             const antiClicheDisabled =
                 options.enableAntiCliche === false && ANTI_CLICHE_RULE_IDS.has(ruleId);
-            const enabled = overrideCfg?.enabled ?? (antiClicheDisabled ? false : baseEnabled);
+            const subjectiveExempt =
+                options.narrationSubjectivity === 'subjective_first' &&
+                SUBJECTIVE_EXEMPT_RULE_IDS.has(ruleId);
+            const enabled =
+                overrideCfg?.enabled ?? (antiClicheDisabled || subjectiveExempt ? false : baseEnabled);
 
             if (!enabled) {
                 ruleCounts[ruleId] = 0;
@@ -101,14 +112,18 @@ export class StaticProseGate {
                             continue;
                         }
                         const prefix = ruleId === 'tag_residue' ? text.slice(0, match.index) : '';
+                        const startLineIdx = ruleId === 'tag_residue' ? prefix.split('\n').length - 1 : -1;
                         const actualLine = ruleId === 'tag_residue'
-                            ? lineMetas[prefix.split('\n').length - 1] ?? lineMeta
+                            ? lineMetas[startLineIdx] ?? lineMeta
                             : lineMeta;
+                        const paragraphIndex = ruleId === 'tag_residue'
+                            ? this.resolveNonNegativeParagraphIndex(lineMetas, startLineIdx, match[0])
+                            : actualLine.paragraphIndex;
                         hits.push({
                             ruleId,
                             line: actualLine.lineNumber,
                             column: ruleId === 'tag_residue' ? match.index - prefix.lastIndexOf('\n') : match.index + 1,
-                            paragraphIndex: actualLine.paragraphIndex,
+                            paragraphIndex,
                             matchedText: match[0],
                             lineText: actualLine.text,
                             message: `触发规则 ${ruleId}: "${match[0]}"`
@@ -125,7 +140,7 @@ export class StaticProseGate {
                         ruleId: 'tag_residue',
                         line: 1,
                         column: 1,
-                        paragraphIndex: firstLine?.paragraphIndex ?? 0,
+                        paragraphIndex: this.resolveNonNegativeParagraphIndex(lineMetas, 0, '<blocking>'),
                         matchedText: '<blocking>',
                         lineText: firstLine?.text ?? '',
                         message: '检测到未闭合的 <blocking> 标签残留'
@@ -287,5 +302,36 @@ export class StaticProseGate {
         }
 
         return violations;
+    }
+
+    /** 将跨行匹配定位到非负自然段索引（起始行落在空白行时依次回退至段内或最近非空段落） */
+    private resolveNonNegativeParagraphIndex(
+        lineMetas: LineMeta[],
+        startLineIdx: number,
+        matchedText: string
+    ): number {
+        const clampedIdx = Math.max(0, Math.min(startLineIdx, Math.max(0, lineMetas.length - 1)));
+        const startMeta = lineMetas[clampedIdx];
+        if (startMeta && startMeta.paragraphIndex >= 0) {
+            return startMeta.paragraphIndex;
+        }
+        const spanLineCount = matchedText.split(/\r?\n/).length;
+        for (let offset = 1; offset < spanLineCount; offset++) {
+            const innerMeta = lineMetas[clampedIdx + offset];
+            if (innerMeta && innerMeta.paragraphIndex >= 0) {
+                return innerMeta.paragraphIndex;
+            }
+        }
+        for (let dist = 1; dist < lineMetas.length; dist++) {
+            const after = lineMetas[clampedIdx + dist];
+            if (after && after.paragraphIndex >= 0) {
+                return after.paragraphIndex;
+            }
+            const before = lineMetas[clampedIdx - dist];
+            if (before && before.paragraphIndex >= 0) {
+                return before.paragraphIndex;
+            }
+        }
+        return 0;
     }
 }

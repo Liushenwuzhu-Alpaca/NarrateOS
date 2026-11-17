@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BookSnapshot, EntityProfile } from '../store/schemas.js';
-import { ViewSlicer } from './index.js';
+import { ViewSlicer, sliceWorldDocuments } from './index.js';
 
 function createTestSnapshot(): BookSnapshot {
     const hero: EntityProfile = {
@@ -203,6 +203,7 @@ function createTestSnapshot(): BookSnapshot {
             book_slug: 'test-book',
             title: '测试长篇',
             tokens_per_char: 0.6,
+            narration_subjectivity: 'objective_third',
             writer_token_budget: null,
             max_auto_rollback_chapters: 3,
             structured_json_retry: { max_retries: 5, backoff_ms: [1000] },
@@ -540,5 +541,71 @@ describe('ViewSlicer', () => {
         expect(heroineHint?.sensoryCue).not.toContain('极度怕黑');
         expect(heroineHint?.sensoryCue).not.toContain('双生姐妹');
         expect(heroineHint?.sensoryCue).not.toContain('密室钥匙');
+    });
+});
+
+describe('sliceWorldDocuments', () => {
+    const sampleDocs = {
+        authorCharter: '# 作者契约\n隐藏真相：港口仓库地下室藏有走私账本。',
+        arcDirectorPlan: '# 导演禁区\nStage Ceiling: 第5章前不得揭露幕后主谋。',
+        currentArcEnvelope: [
+            '## 公开舞台态势',
+            '港口雾气沉重，货轮停靠在三号码头。',
+            '- [WARPED] 原定码头仓库失火计划已废止',
+            '  补充说明：已改走暗访调查线',
+            '- 港口巡夜班次调整为两小时一轮',
+            '',
+            '## Stage Ceiling',
+            '禁止在第三章前打开铁门。'
+        ].join('\n'),
+        staticBaseAndVoice: [
+            '# 静态基线',
+            '采用客观写实短句。',
+            '- [Stage Ceiling] 绝不触发超自然设定',
+            '- [WARPED] 旧时代电报设定已作废'
+        ].join('\n'),
+        opsStyleAmendments: [
+            '- 多描写煤油灯与海风咸腥味',
+            '- [WARPED] 取消第一卷末尾的暴雨戏'
+        ].join('\n'),
+        futureHorizon: '- [day:8] 稽查队抵达港口 [WARPED]'
+    };
+
+    it('writer 角色物理剥离 authorCharter、arcDirectorPlan、futureHorizon 及一切 WARPED / Stage Ceiling 指令（出现次数为 0）', () => {
+        const sliced = sliceWorldDocuments('writer', sampleDocs);
+
+        expect(sliced.forRole).toBe('writer');
+        expect(sliced.authorCharter).toBeNull();
+        expect(sliced.arcDirectorPlan).toBeNull();
+        expect(sliced.futureHorizon).toBeNull();
+
+        const writerCorpus = [
+            sliced.currentArcEnvelope ?? '',
+            sliced.staticBaseAndVoice ?? '',
+            sliced.opsStyleAmendments ?? ''
+        ].join('\n');
+
+        expect(writerCorpus).not.toMatch(/\bWARPED\b/i);
+        expect(writerCorpus).not.toMatch(/Stage\s*Ceiling/i);
+        expect(writerCorpus).not.toContain('隐藏真相');
+        expect(writerCorpus).not.toContain('禁止在第三章前打开铁门');
+        expect(writerCorpus).not.toContain('原定码头仓库失火计划已废止');
+        expect(writerCorpus).not.toContain('已改走暗访调查线');
+        expect(writerCorpus).toContain('港口雾气沉重，货轮停靠在三号码头。');
+        expect(writerCorpus).toContain('港口巡夜班次调整为两小时一轮');
+        expect(writerCorpus).toContain('采用客观写实短句。');
+        expect(writerCorpus).toContain('多描写煤油灯与海风咸腥味');
+    });
+
+    it('planner 与 fact_checker 角色保留契约、导演禁区与 futureHorizon 供统筹审校', () => {
+        const plannerDocs = sliceWorldDocuments('planner', sampleDocs);
+        expect(plannerDocs.authorCharter).toContain('走私账本');
+        expect(plannerDocs.arcDirectorPlan).toContain('Stage Ceiling');
+        expect(plannerDocs.futureHorizon).toContain('WARPED');
+        expect(plannerDocs.currentArcEnvelope).toContain('Stage Ceiling');
+
+        const checkerDocs = new ViewSlicer().sliceWorldDocuments('fact_checker', sampleDocs);
+        expect(checkerDocs.arcDirectorPlan).toContain('Stage Ceiling');
+        expect(checkerDocs.authorCharter).toContain('走私账本');
     });
 });

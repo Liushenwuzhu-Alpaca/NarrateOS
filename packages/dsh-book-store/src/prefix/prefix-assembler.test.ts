@@ -20,6 +20,7 @@ function createBaseConfig(overrides: Partial<BookConfig> = {}): BookConfig {
         book_slug: 'test-novel',
         title: '测试长篇',
         tokens_per_char: 0.6,
+        narration_subjectivity: 'objective_third',
         writer_token_budget: null,
         max_auto_rollback_chapters: 3,
         structured_json_retry: {

@@ -6,5 +6,7 @@ export * from './gate/index.js';
 export * from './plugins/index.js';
 export * from './prefix/index.js';
 export * from './parallel/index.js';
+export * from './staging/index.js';
 export * from './text/paragraphs.js';
 export * from './trace/trace.js';
+export * from './service.js';
