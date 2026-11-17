@@ -2,9 +2,9 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as bookStorePlugin from './index.js';
-import { BookSwitchConflictError } from './index.js';
+import { BookSwitchConflictError, NarrateStoreService } from './index.js';
 
 const tempDirs: string[] = [];
 
@@ -116,5 +116,132 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
 
         await fiber1.dispose();
         await fiber2.dispose();
+    });
+
+    it('支持 booksRoot 与可选 bookRoot，且 Config 符合 Schemastery 原生协议', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-books-root-'));
+        tempDirs.push(booksRoot);
+
+        // 验证导出 Config 满足 Schemastery 原生图协议（可供 DSH config-schema 投射）
+        expect(Reflect.get(bookStorePlugin.Config, Symbol.for('schemastery'))).toBe(true);
+        expect(bookStorePlugin.Config.type).toBe('object');
+        expect(bookStorePlugin.Config(undefined)).toEqual({});
+        expect(bookStorePlugin.Config({ booksRoot: './books' })).toEqual({ booksRoot: './books' });
+
+        const ctx = new Context();
+        const fiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+        expect(ctx.narrateStore.booksRoot).toBe(resolve(booksRoot));
+        expect(ctx.narrateStore.getBooksRoot()).toBe(resolve(booksRoot));
+        expect(ctx.narrateStore.bookRoot).toBeNull();
+
+        await fiber.dispose();
+    });
+
+    it('目标作品 .ops/tx.lock 正被其他进程持有时拒绝切书并返回 409', async () => {
+        const bookA = await createBookWorkspace('book-a');
+        const bookB = await createBookWorkspace('book-b');
+
+        // 模拟目标作品 bookB 正在被存活进程持锁
+        await writeFile(
+            join(bookB, '.ops/tx.lock'),
+            JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }),
+            'utf8'
+        );
+
+        const ctx = new Context();
+        const fiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA });
+        await expect(ctx.narrateStore.switchBook(bookB)).rejects.toMatchObject({
+            name: 'BookSwitchConflictError',
+            statusCode: 409
+        });
+        expect(ctx.narrateStore.bookRoot).toBe(resolve(bookA));
+
+        await fiber.dispose();
+    });
+
+    it('switchBook 在异步持锁检测期间若并发开启 runId 则拒绝切换，且并发 switchBook 串行化执行', async () => {
+        const bookA = await createBookWorkspace('book-a');
+        const bookB = await createBookWorkspace('book-b');
+        const bookC = await createBookWorkspace('book-c');
+
+        const service = new NarrateStoreService({ bookRoot: bookA });
+        let releaseLockProbe!: () => void;
+        const lockProbeGate = new Promise<void>((resolveGate) => {
+            releaseLockProbe = resolveGate;
+        });
+
+        const originalIsTxLockHeld = (
+            service as unknown as { isTxLockHeld: (root: string) => Promise<boolean> }
+        ).isTxLockHeld.bind(service);
+        const lockProbeSpy = vi
+            .spyOn(service as unknown as { isTxLockHeld: (root: string) => Promise<boolean> }, 'isTxLockHeld')
+            .mockImplementationOnce(async (root: string) => {
+                await lockProbeGate;
+                return await originalIsTxLockHeld(root);
+            });
+
+        // 发起 switchBook(bookB)，此时异步阻塞在持锁检测中
+        const pendingSwitchB = service.switchBook(bookB);
+        // 等待 microtask 让 switchBook 进入 isTxLockHeld 挂起状态
+        await Promise.resolve();
+        await Promise.resolve();
+
+        // 竞态场景：等待期间并发开启 runId，放行探测后 switchBook 必须二次核验并拒绝切书
+        const runId = service.beginRun('race-run');
+        releaseLockProbe();
+        await expect(pendingSwitchB).rejects.toMatchObject({
+            name: 'BookSwitchConflictError',
+            statusCode: 409
+        });
+        expect(service.bookRoot).toBe(resolve(bookA));
+        expect(lockProbeSpy).toHaveBeenCalled();
+
+        service.endRun(runId);
+
+        // 并发发起两个 switchBook 时串行执行，后完成的切书结果生效且无状态损坏
+        const [storeB, storeC] = await Promise.all([
+            service.switchBook(bookB),
+            service.switchBook(bookC)
+        ]);
+        expect(storeB.bookRoot).toBe(resolve(bookB));
+        expect(storeC.bookRoot).toBe(resolve(bookC));
+        expect(service.bookRoot).toBe(resolve(bookC));
+
+        service.dispose();
+    });
+
+    it('ctx.effect 卸载时先排空依赖消费者，最后才调用 service.dispose()', async () => {
+        const bookA = await createBookWorkspace('book-a');
+        const ctx = new Context();
+        const events: string[] = [];
+
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot: bookA });
+        const disposeSpy = vi.spyOn(ctx.narrateStore, 'dispose').mockImplementation(function (
+            this: NarrateStoreService
+        ) {
+            events.push('store.dispose');
+            NarrateStoreService.prototype.dispose.call(this);
+        });
+
+        const consumerPlugin = {
+            name: 'test-consumer',
+            inject: ['narrateStore'] as const,
+            apply(childCtx: Context) {
+                childCtx.effect(() => () => {
+                    // 消费者清理期间应早于 store.dispose 执行，且此时仍可读取完整状态
+                    events.push(`consumer.cleanup:hasActive=${childCtx.narrateStore.hasActiveRuns()}`);
+                });
+            }
+        };
+
+        await ctx.plugin(consumerPlugin);
+        ctx.narrateStore.beginRun('drain-order-run');
+
+        await storeFiber.dispose();
+        expect(events).toEqual([
+            'consumer.cleanup:hasActive=true',
+            'store.dispose'
+        ]);
+        expect(disposeSpy).toHaveBeenCalledTimes(1);
     });
 });

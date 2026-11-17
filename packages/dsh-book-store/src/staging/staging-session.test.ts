@@ -19,6 +19,20 @@ async function createBookDir(): Promise<string> {
     await writeFile(join(dir, 'entities/char_001.md'), '# 陈默\n驻留：码头\n', 'utf8');
     await writeFile(join(dir, 'manuscripts/ch_0001.md'), '第一章正文真源。\n', 'utf8');
     await writeFile(join(dir, '.ops/tx.lock'), JSON.stringify({ pid: process.pid }), 'utf8');
+    await writeFile(join(dir, '.ops/runs.jsonl'), '{"runId":"r1"}\n', 'utf8');
+    await writeFile(join(dir, '.ops/tx_state.json'), '{"phase":"IDLE"}\n', 'utf8');
+    await writeFile(join(dir, '.ops/pending_writes.json'), '{"files":[]}\n', 'utf8');
+    await writeFile(join(dir, '.ops/dream_watermark.json'), '{"last_dream_ch":0}\n', 'utf8');
+    await writeFile(join(dir, '.ops/safe_halt.json'), '{"halted":false}\n', 'utf8');
+    await mkdir(join(dir, '.ops/recovery'), { recursive: true });
+    await writeFile(join(dir, '.ops/recovery/backup.md'), 'recovery\n', 'utf8');
+    await mkdir(join(dir, '.ops/traces/run-1'), { recursive: true });
+    await writeFile(join(dir, '.ops/traces/run-1/events.jsonl'), '{}\n', 'utf8');
+    await mkdir(join(dir, '.ops/parallel_deltas'), { recursive: true });
+    await writeFile(join(dir, '.ops/parallel_deltas/b1.json'), '{}\n', 'utf8');
+    await writeFile(join(dir, '.ops/voice_samples.yaml'), 'samples: []\n', 'utf8');
+    await writeFile(join(dir, '.ops/signals.jsonl'), '{"type":"tone"}\n', 'utf8');
+    await writeFile(join(dir, '.ops/telemetry.jsonl'), '{"ch":1,"entropy":0.8}\n', 'utf8');
     await writeFile(join(dir, '.git/HEAD'), 'ref: refs/heads/main\n', 'utf8');
     return dir;
 }
@@ -107,5 +121,49 @@ describe('StagingSessionManager', () => {
 
         // manuscripts 原文件绝对未动
         expect(await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8')).toBe('第一章正文真源。\n');
+    });
+
+    it('全面屏蔽引擎内部 .ops/ 路径，同时放行 Dreamer 所需的 voice_samples/signals 与只读 telemetry.jsonl', async () => {
+        const bookRoot = await createBookDir();
+        await symlink(join(bookRoot, '.ops/tx_state.json'), join(bookRoot, 'world/tx_link.json'));
+
+        const staging = new StagingSessionManager();
+        staging.begin('run-ops', bookRoot);
+
+        const blockedOpsTargets = [
+            '.ops/runs.jsonl',
+            '.ops/tx.lock',
+            '.ops/tx_state.json',
+            '.ops/pending_writes.json',
+            '.ops/recovery/backup.md',
+            '.ops/traces/run-1/events.jsonl',
+            '.ops/parallel_deltas/b1.json',
+            '.ops/dream_watermark.json',
+            '.ops/safe_halt.json'
+        ];
+
+        for (const target of blockedOpsTargets) {
+            await expect(staging.read('run-ops', target)).rejects.toThrow();
+            expect(() => staging.stageWrite('run-ops', target, 'overwrite')).toThrow();
+            await expect(staging.edit('run-ops', target, 'a', 'b')).rejects.toThrow();
+        }
+        // 符号链接指向受限 .ops/ 路径同样在 read 时拦截
+        await expect(staging.read('run-ops', 'world/tx_link.json')).rejects.toThrow();
+
+        // Dreamer 可读写 .ops/voice_samples.yaml 与 .ops/signals.jsonl
+        expect(await staging.read('run-ops', '.ops/voice_samples.yaml')).toBe('samples: []\n');
+        await staging.edit('run-ops', '.ops/voice_samples.yaml', 'samples: []', 'samples:\n  - "短句示范"');
+        expect(await staging.read('run-ops', '.ops/voice_samples.yaml')).toContain('短句示范');
+
+        expect(await staging.read('run-ops', '.ops/signals.jsonl')).toBe('{"type":"tone"}\n');
+        staging.stageWrite('run-ops', '.ops/signals.jsonl', '{"type":"tone","applied":true}\n');
+        expect(await staging.read('run-ops', '.ops/signals.jsonl')).toContain('"applied":true');
+
+        // .ops/telemetry.jsonl 仅允许只读诊断，严禁写入或编辑
+        expect(await staging.read('run-ops', '.ops/telemetry.jsonl')).toContain('entropy');
+        expect(() => staging.stageWrite('run-ops', '.ops/telemetry.jsonl', 'tamper')).toThrow();
+        await expect(staging.edit('run-ops', '.ops/telemetry.jsonl', '0.8', '0.9')).rejects.toThrow();
+
+        staging.discard('run-ops');
     });
 });

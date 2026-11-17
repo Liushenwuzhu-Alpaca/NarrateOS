@@ -41,7 +41,7 @@ export const BookConfigSchema = z.object({
     narration_subjectivity: NarrationSubjectivitySchema.default('objective_third'),
     trace_level: z.enum(['full', 'metadata', 'off']).optional(),
     writer_token_budget: z.number().int().positive().nullable().optional().default(null),
-    max_auto_rollback_chapters: z.number().int().positive().default(3),
+    max_auto_rollback_chapters: z.number().int().nonnegative().default(3),
     parallel_max_chapters: z.number().int().positive().optional(),
     structured_json_retry: z
         .object({
@@ -208,7 +208,7 @@ export const WalPhaseSchema = z.enum([
 ]);
 export type WalPhase = z.infer<typeof WalPhaseSchema>;
 
-/** .ops/tx_state.json Schema */
+/** .ops/tx_state.json 事务相位持久化校验模式 */
 export const TxStateSchema = z.object({
     phase: WalPhaseSchema,
     active_chapter: z.number().int().positive().nullable(),
