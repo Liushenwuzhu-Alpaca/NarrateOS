@@ -28,6 +28,19 @@ function escapeRegExp(input: string): string {
     return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function compileSearchRegExp(pattern: string, fixedStrings: boolean): RegExp {
+    try {
+        return fixedStrings ? new RegExp(escapeRegExp(pattern)) : new RegExp(pattern);
+    } catch (err: unknown) {
+        if (err instanceof SyntaxError) {
+            throw new Error(
+                `book_grep 正则表达式参数无效 (${pattern}): ${err.message}。若需按字面量匹配请设置 fixed_strings=true`
+            );
+        }
+        throw err;
+    }
+}
+
 function grepTextInMemory(
     relPath: string,
     content: string,
@@ -36,9 +49,7 @@ function grepTextInMemory(
     contextLines: number
 ): GrepMatchItem[] {
     const lines = content.split(/\r?\n/);
-    const matcher = fixedStrings
-        ? new RegExp(escapeRegExp(pattern))
-        : new RegExp(pattern);
+    const matcher = compileSearchRegExp(pattern, fixedStrings);
     const matches: GrepMatchItem[] = [];
 
     for (let i = 0; i < lines.length; i += 1) {
@@ -177,7 +188,16 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                     });
                     stdout = res.stdout;
                 } catch (err: unknown) {
-                    const execErr = err as { code?: number };
+                    const execErr = err as { code?: number | string; stderr?: string };
+                    if (execErr.code === 2) {
+                        const detail =
+                            typeof execErr.stderr === 'string' && execErr.stderr.trim().length > 0
+                                ? execErr.stderr.trim()
+                                : '正则表达式语法错误或参数非法';
+                        throw new Error(
+                            `book_grep 正则表达式参数无效 (${args.pattern}): ${detail}。若需按字面量匹配请设置 fixed_strings=true`
+                        );
+                    }
                     if (execErr.code !== 1) {
                         throw err;
                     }
@@ -233,6 +253,10 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
 
             // 合并当前 runId 暂存覆盖层，保障 Read-Your-Own-Writes 检索一致性
             const stagedMap = store.staging.has(runId) ? store.staging.getPendingWrites(runId) : new Map<string, string>();
+            if (existingTargets.length === 0 && stagedMap.size === 0 && !fixedStrings) {
+                // 无可检索目录时仍需校验正则合法性，避免静默吞掉无效参数
+                compileSearchRegExp(args.pattern, false);
+            }
             const filteredDisk = diskMatches.filter((m) => !stagedMap.has(m.file));
             const stagedMatches: GrepMatchItem[] = [];
             for (const [relPath, content] of stagedMap.entries()) {

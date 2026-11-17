@@ -1,32 +1,12 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { StaticProseGate, type NarrationSubjectivity } from '@narrateos/dsh-book-store';
+import type { NarrationSubjectivity } from '@narrateos/dsh-book-store';
+import { validateBootBundle } from '../boot/boot-validation.js';
 import { GateValidationError } from '../errors.js';
-import { BootBundleOutputSchema, hasChineseCharacter, type BootBundleOutput } from './schemas.js';
+import { BootBundleOutputSchema, type BootBundleOutput } from './schemas.js';
 
 export interface YieldBootBundleOptions {
     narrationSubjectivity?: NarrationSubjectivity | undefined;
     onYield?: ((bundle: BootBundleOutput) => void) | undefined;
-}
-
-function countVolumesInMarkdown(markdown: string): number {
-    const volIds = new Set<string>();
-    const volRegex = /\bvol_(\d+)\b/gi;
-    let match: RegExpExecArray | null;
-    while ((match = volRegex.exec(markdown)) !== null) {
-        if (match[1]) {
-            volIds.add(String(Number(match[1])));
-        }
-    }
-
-    const cnVolIds = new Set<string>();
-    const cnRegex = /第\s*([一二三四五六七八九十百\d]+)\s*卷/g;
-    while ((match = cnRegex.exec(markdown)) !== null) {
-        if (match[1]) {
-            cnVolIds.add(match[1]);
-        }
-    }
-
-    return Math.max(volIds.size, cnVolIds.size);
 }
 
 /** 创建 Boot Compiler 终态门禁工具 yield_boot_bundle（校验开书三把手术刀编译产物） */
@@ -164,90 +144,12 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
                 };
             }
 
-            if (countVolumesInMarkdown(parsed.l1_volumes_markdown) < 1) {
-                throw new GateValidationError('yield_boot_bundle', 'l1_volumes_markdown 至少须包含 1 卷规划');
-            }
-
-            if (parsed.open_threads.length > 15) {
-                throw new GateValidationError(
-                    'yield_boot_bundle',
-                    `初始伏笔数 (${parsed.open_threads.length}) 不得超过 15 条上限`
-                );
-            }
-
-            const entityIdSet = new Set<string>();
-            for (const entity of parsed.entities) {
-                if (entityIdSet.has(entity.entityId)) {
-                    throw new GateValidationError('yield_boot_bundle', `重复的 entityId: ${entity.entityId}`);
-                }
-                entityIdSet.add(entity.entityId);
-                if (!hasChineseCharacter(entity.canonicalName)) {
-                    throw new GateValidationError(
-                        'yield_boot_bundle',
-                        `实体 ${entity.entityId} 必须提供包含中文字符的标准名称 canonicalName`
-                    );
-                }
-
-                // T0 泄露检查 (storyDay > 0)
-                for (const item of entity.acquiredState) {
-                    if (item.storyDay > 0) {
-                        throw new GateValidationError(
-                            'yield_boot_bundle',
-                            `T0 时间线泄露: ${entity.entityId}.acquiredState 存在 storyDay=${item.storyDay} > 0`
-                        );
-                    }
-                }
-                for (const item of entity.irreversibleTrajectory) {
-                    if (item.storyDay > 0) {
-                        throw new GateValidationError(
-                            'yield_boot_bundle',
-                            `T0 时间线泄露: ${entity.entityId}.irreversibleTrajectory 存在 storyDay=${item.storyDay} > 0`
-                        );
-                    }
-                }
-                for (const item of entity.recentBuffer) {
-                    if (item.storyDay !== undefined && item.storyDay > 0) {
-                        throw new GateValidationError(
-                            'yield_boot_bundle',
-                            `T0 时间线泄露: ${entity.entityId}.recentBuffer 存在 storyDay=${item.storyDay} > 0`
-                        );
-                    }
-                }
-            }
-
-            const loreIdSet = new Set<string>();
-            for (const lore of parsed.lore_entries) {
-                if (loreIdSet.has(lore.id)) {
-                    throw new GateValidationError('yield_boot_bundle', `重复的 lore id: ${lore.id}`);
-                }
-                loreIdSet.add(lore.id);
-            }
-
-            // StaticProseGate 检查
-            const proseGate = new StaticProseGate();
-            const textsToCheck: Array<{ label: string; text: string }> = [
-                { label: 'world_summary', text: parsed.world_summary },
-                { label: 'current_arc_envelope', text: parsed.current_arc_envelope }
-            ];
-            for (const sample of parsed.voice_samples) {
-                textsToCheck.push({ label: `voice_sample:${sample.tag}`, text: sample.sample });
-            }
-            for (const entity of parsed.entities) {
-                for (const entry of entity.innateLocks) {
-                    textsToCheck.push({ label: `${entity.entityId}.innateLocks`, text: entry.text });
-                }
-                for (const entry of entity.acquiredState) {
-                    textsToCheck.push({ label: `${entity.entityId}.acquiredState`, text: entry.text });
-                }
-            }
-            for (const item of textsToCheck) {
-                const res = proseGate.evaluate(item.text, { narrationSubjectivity });
-                if (!res.passed) {
-                    throw new GateValidationError(
-                        'yield_boot_bundle',
-                        `StaticProseGate 未通过 (${item.label}): ${res.violations.map((v) => v.message).join('; ')}`
-                    );
-                }
+            const outcome = validateBootBundle(parsed, {
+                narrationSubjectivity,
+                voiceSampleMode: 'strict'
+            });
+            if (outcome.issues.length > 0) {
+                throw new GateValidationError('yield_boot_bundle', outcome.issues.join('; '));
             }
 
             onYield?.(parsed);

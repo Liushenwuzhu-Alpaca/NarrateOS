@@ -96,6 +96,12 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                     'passed=true 时 issues 必须为空数组'
                 );
             }
+            if (!verdict.passed && verdict.issues.length === 0) {
+                throw new GateValidationError(
+                    'yield_verdict',
+                    'passed=false 时 issues 不能为空数组，必须给出至少一条带原句引文的冲突问题'
+                );
+            }
 
             let resolvedDraft = options.draftText;
             if (resolvedDraft === undefined && draftPath !== undefined) {

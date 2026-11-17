@@ -135,7 +135,7 @@ export class NarrateToolsService {
         config: NarrateToolsConfig = {}
     ) {
         this.defaultBookRoot = config.bookRoot ? resolve(config.bookRoot) : null;
-        this.booksRoot = resolve(config.booksRoot ?? 'books');
+        this.booksRoot = resolve(config.booksRoot ?? narrateStore.booksRoot ?? 'books');
     }
 
     /** 为单次角色运行实例化受控工具集（零模块级状态） */
@@ -304,6 +304,9 @@ export class NarrateToolsService {
         input: LockCharterAndBootInput,
         overrides?: Partial<LockCharterAndBootOptions>
     ): Promise<LockCharterAndBootResult> {
+        if (this.disposed) {
+            throw new Error('NarrateToolsService 已卸载，拒绝执行开书编译');
+        }
         return await lockCharterAndBoot(input, {
             booksRoot: overrides?.booksRoot ?? this.booksRoot,
             system: overrides?.system ?? this.narrateStore.system,

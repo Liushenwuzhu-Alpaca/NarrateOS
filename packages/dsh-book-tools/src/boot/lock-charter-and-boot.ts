@@ -1,4 +1,5 @@
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -8,7 +9,6 @@ import {
     DEFAULT_SECTION_HEADINGS,
     NodeSystemAdapter,
     serializeEntityMarkdown,
-    StaticProseGate,
     type BookConfig,
     type EntityEntry,
     type EntityProfile,
@@ -21,6 +21,7 @@ import {
     CompiledLoreEntrySchema,
     type CompiledEntity
 } from '../yield/schemas.js';
+import { validateBootBundle } from './boot-validation.js';
 
 /** 开篇序列节拍（3~5 拍，不绑定章号） */
 export const OpeningSequenceBeatSchema = z.object({
@@ -288,96 +289,17 @@ function validateBootPayloadDeterministically(
     cleanVoiceSamples: ParsedLockCharterAndBootInput['voice_samples'];
     filteredVoiceSampleCount: number;
 } {
-    const issues: string[] = [];
-
-    if (countVolumesInMarkdown(parsed.l1_volumes_markdown) < 1) {
-        issues.push('L1 卷级总表 (l1_volumes_markdown) 至少需包含 1 卷规划');
+    const outcome = validateBootBundle(parsed, {
+        narrationSubjectivity: subjectivity,
+        voiceSampleMode: 'filter'
+    });
+    if (outcome.issues.length > 0) {
+        throw new BootGateError(outcome.issues);
     }
-    if (parsed.open_threads.length > 15) {
-        issues.push(`初始活跃伏笔数量 (${parsed.open_threads.length}) 超过上限 15 条`);
-    }
-
-    const entityIds = new Set<string>();
-    for (const entity of parsed.entities) {
-        if (entityIds.has(entity.entityId)) {
-            issues.push(`entities 中存在重复 entityId: ${entity.entityId}`);
-        }
-        entityIds.add(entity.entityId);
-
-        for (const item of entity.acquiredState) {
-            if (item.storyDay > 0) {
-                issues.push(`T0 泄露 (${entity.entityId}.acquiredState): storyDay=${item.storyDay} > 0`);
-            }
-        }
-        for (const item of entity.irreversibleTrajectory) {
-            if (item.storyDay > 0) {
-                issues.push(`T0 泄露 (${entity.entityId}.irreversibleTrajectory): storyDay=${item.storyDay} > 0`);
-            }
-        }
-        for (const item of entity.recentBuffer) {
-            if (item.storyDay !== undefined && item.storyDay > 0) {
-                issues.push(`T0 泄露 (${entity.entityId}.recentBuffer): storyDay=${item.storyDay} > 0`);
-            }
-        }
-    }
-
-    const loreIds = new Set<string>();
-    for (const lore of parsed.lore_entries) {
-        if (loreIds.has(lore.id)) {
-            issues.push(`lore_entries 中存在重复 id: ${lore.id}`);
-        }
-        loreIds.add(lore.id);
-    }
-
-    const proseGate = new StaticProseGate();
-    const gateChecks: Array<{ label: string; text: string }> = [
-        { label: 'world_summary', text: parsed.world_summary },
-        { label: 'current_arc_envelope', text: parsed.current_arc_envelope }
-    ];
-    for (const entity of parsed.entities) {
-        for (const item of entity.innateLocks) {
-            gateChecks.push({ label: `${entity.entityId}.innateLocks`, text: item.text });
-        }
-        for (const item of entity.acquiredState) {
-            gateChecks.push({ label: `${entity.entityId}.acquiredState`, text: item.text });
-        }
-        for (const item of entity.irreversibleTrajectory) {
-            gateChecks.push({ label: `${entity.entityId}.irreversibleTrajectory`, text: item.text });
-        }
-        for (const item of entity.recentBuffer) {
-            gateChecks.push({ label: `${entity.entityId}.recentBuffer`, text: item.text });
-        }
-    }
-
-    for (const check of gateChecks) {
-        const res = proseGate.evaluate(check.text, { narrationSubjectivity: subjectivity });
-        if (!res.passed) {
-            issues.push(
-                `StaticProseGate 未通过 (${check.label}): ${res.violations.map((v) => v.message).join('; ')}`
-            );
-        }
-    }
-
-    const cleanVoiceSamples: ParsedLockCharterAndBootInput['voice_samples'] = [];
-    let filteredVoiceSampleCount = 0;
-    for (const sample of parsed.voice_samples) {
-        const res = proseGate.evaluate(sample.sample, { narrationSubjectivity: subjectivity });
-        if (res.passed) {
-            cleanVoiceSamples.push(sample);
-        } else {
-            filteredVoiceSampleCount += 1;
-        }
-    }
-
-    if (parsed.voice_samples.length > 0 && cleanVoiceSamples.length === 0) {
-        issues.push('作者提供的声纹样本全部未通过 StaticProseGate 静态文风门禁');
-    }
-
-    if (issues.length > 0) {
-        throw new BootGateError(issues);
-    }
-
-    return { cleanVoiceSamples, filteredVoiceSampleCount };
+    return {
+        cleanVoiceSamples: outcome.cleanVoiceSamples,
+        filteredVoiceSampleCount: outcome.filteredVoiceSampleCount
+    };
 }
 
 /**
@@ -402,157 +324,177 @@ export async function lockCharterAndBoot(
         parsed.narration_subjectivity
     );
 
-    await mkdir(bookRoot, { recursive: true });
-    if ((await readdir(bookRoot)).length > 0) {
+    const bookRootExistedBefore = existsSync(bookRoot);
+    if (bookRootExistedBefore && (await readdir(bookRoot)).length > 0) {
         throw new Error(`开书目标目录非空，禁止覆盖已有作品: ${bookRoot}`);
     }
 
-    const requiredDirs = [
-        'manuscripts',
-        'entities',
-        'entities/cold_archive',
-        'world',
-        'lore_library',
-        'index',
-        'index/L2_cards',
-        '.ops',
-        '.ops/parallel_deltas'
-    ];
-    for (const dir of requiredDirs) {
-        await mkdir(join(bookRoot, dir), { recursive: true });
-    }
+    await mkdir(bookRoot, { recursive: true });
 
-    await writeFile(join(bookRoot, 'manuscripts/.gitkeep'), '', 'utf8');
-    await writeFile(join(bookRoot, 'entities/cold_archive/.gitkeep'), '', 'utf8');
-    await writeFile(join(bookRoot, '.ops/parallel_deltas/.gitkeep'), '', 'utf8');
-    if (parsed.lore_entries.length === 0) {
-        await writeFile(join(bookRoot, 'lore_library/.gitkeep'), '', 'utf8');
-    }
-
-    const system = options.system ?? new NodeSystemAdapter();
-    const store = new BookStore(bookRoot, system);
-
-    const bookConfig: BookConfig = {
-        book_slug: parsed.book_slug,
-        title: parsed.title,
-        tokens_per_char: parsed.tokens_per_char,
-        narration_subjectivity: parsed.narration_subjectivity,
-        trace_level: 'full',
-        writer_token_budget: parsed.writer_token_budget,
-        max_auto_rollback_chapters: parsed.max_auto_rollback_chapters,
-        structured_json_retry: {
-            max_retries: 5,
-            backoff_ms: [1000, 2000, 4000, 8000, 16000]
-        },
-        craft_plugins: parsed.craft_plugins,
-        prose_gate: {
-            enable_anti_cliche: true,
-            enable_cross_chapter_simile: true,
-            cross_chapter_simile_window: 5
+    try {
+        const requiredDirs = [
+            'manuscripts',
+            'entities',
+            'entities/cold_archive',
+            'world',
+            'lore_library',
+            'index',
+            'index/L2_cards',
+            '.ops',
+            '.ops/parallel_deltas'
+        ];
+        for (const dir of requiredDirs) {
+            await mkdir(join(bookRoot, dir), { recursive: true });
         }
-    };
-    if (parsed.model_routing !== undefined) {
-        bookConfig.model_routing = parsed.model_routing;
-    }
-    await store.writeBookConfig(bookConfig);
 
-    await store.writeWorldState({
-        frontmatter: {
-            story_day: 0,
-            current_volume: 1,
-            current_chapter: 0,
-            pov_character: parsed.pov_character,
-            timeline_mode: 'MAINLINE'
-        },
-        summaryMarkdown: parsed.world_summary
-    });
+        await writeFile(join(bookRoot, 'manuscripts/.gitkeep'), '', 'utf8');
+        await writeFile(join(bookRoot, 'entities/cold_archive/.gitkeep'), '', 'utf8');
+        await writeFile(join(bookRoot, '.ops/parallel_deltas/.gitkeep'), '', 'utf8');
+        if (parsed.lore_entries.length === 0) {
+            await writeFile(join(bookRoot, 'lore_library/.gitkeep'), '', 'utf8');
+        }
 
-    await store.writeAuthorCharter(formatAuthorCharterMarkdown(parsed));
-    await store.writeArcDirectorPlan(formatArcDirectorPlanMarkdown(parsed));
-    await store.writeCurrentArcEnvelope(
-        `# 当前卷正向舞台常态 (Current Arc Envelope)\n\n${parsed.current_arc_envelope.trim()}\n`
-    );
-    await store.writeStaticBaseAndVoice(
-        `# 世界底层法则与抽象句法纪律\n\n${parsed.static_base_and_voice.trim()}\n`
-    );
-    await store.writeOpsStyleAmendments('# 卷中风格修订 (Ops Style Amendments)\n\n');
-    await store.writeFutureHorizon(formatFutureHorizonMarkdown(parsed));
-    await store.writeOpenThreads(formatOpenThreadsMarkdown(parsed));
+        const system = options.system ?? new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
 
-    // 无作者样章时保持 .ops/voice_samples.yaml 为空数组 samples: []
-    const normalizedVoiceSamples = cleanVoiceSamples.map((item, idx) => ({
-        id: `voice_${String(idx + 1).padStart(2, '0')}`,
-        tag: item.tag,
-        text: item.sample,
-        sample: item.sample,
-        last_used_ch: 0,
-        use_count: 0
-    }));
-    const voiceYaml = stringifyYaml({ samples: normalizedVoiceSamples }, { lineWidth: 0 });
-    await writeFile(join(bookRoot, '.ops/voice_samples.yaml'), voiceYaml, 'utf8');
+        const bookConfig: BookConfig = {
+            book_slug: parsed.book_slug,
+            title: parsed.title,
+            tokens_per_char: parsed.tokens_per_char,
+            narration_subjectivity: parsed.narration_subjectivity,
+            trace_level: 'full',
+            writer_token_budget: parsed.writer_token_budget,
+            max_auto_rollback_chapters: parsed.max_auto_rollback_chapters,
+            structured_json_retry: {
+                max_retries: 5,
+                backoff_ms: [1000, 2000, 4000, 8000, 16000]
+            },
+            craft_plugins: parsed.craft_plugins,
+            prose_gate: {
+                enable_anti_cliche: true,
+                enable_cross_chapter_simile: true,
+                cross_chapter_simile_window: 5
+            }
+        };
+        if (parsed.model_routing !== undefined) {
+            bookConfig.model_routing = parsed.model_routing;
+        }
+        await store.writeBookConfig(bookConfig);
 
-    await writeFile(
-        join(bookRoot, 'index/L0_sagas.md'),
-        formatMarkdownWithFallbackHeading(parsed.l0_sagas_markdown, '# L0 纪元折叠总表'),
-        'utf8'
-    );
-    await writeFile(
-        join(bookRoot, 'index/L1_volumes.md'),
-        formatMarkdownWithFallbackHeading(parsed.l1_volumes_markdown, '# L1 活跃卷级总表'),
-        'utf8'
-    );
-    await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), '# 第 1 卷双轨章卡\n\n', 'utf8');
+        await store.writeWorldState({
+            frontmatter: {
+                story_day: 0,
+                current_volume: 1,
+                current_chapter: 0,
+                pov_character: parsed.pov_character,
+                timeline_mode: 'MAINLINE'
+            },
+            summaryMarkdown: parsed.world_summary
+        });
 
-    const loreIds: string[] = [];
-    for (const lore of parsed.lore_entries) {
-        loreIds.push(lore.id);
-        const loreContent = [
-            `# ${lore.title}`,
-            '',
-            `> 摘要: ${lore.summary}`,
-            '',
-            lore.content.trim(),
-            ''
-        ].join('\n');
-        await writeFile(join(bookRoot, `lore_library/${lore.id}.md`), loreContent, 'utf8');
-    }
+        await store.writeAuthorCharter(formatAuthorCharterMarkdown(parsed));
+        await store.writeArcDirectorPlan(formatArcDirectorPlanMarkdown(parsed));
+        await store.writeCurrentArcEnvelope(
+            `# 当前卷正向舞台常态 (Current Arc Envelope)\n\n${parsed.current_arc_envelope.trim()}\n`
+        );
+        await store.writeStaticBaseAndVoice(
+            `# 世界底层法则与抽象句法纪律\n\n${parsed.static_base_and_voice.trim()}\n`
+        );
+        await store.writeOpsStyleAmendments('# 卷中风格修订 (Ops Style Amendments)\n\n');
+        await store.writeFutureHorizon(formatFutureHorizonMarkdown(parsed));
+        await store.writeOpenThreads(formatOpenThreadsMarkdown(parsed));
 
-    const entityIds: string[] = [];
-    for (const compiledEntity of parsed.entities) {
-        entityIds.push(compiledEntity.entityId);
-        const profile = toEntityProfile(compiledEntity);
+        // 无作者样章时保持 .ops/voice_samples.yaml 为空数组 samples: []
+        const normalizedVoiceSamples = cleanVoiceSamples.map((item, idx) => ({
+            id: `voice_${String(idx + 1).padStart(2, '0')}`,
+            tag: item.tag,
+            text: item.sample,
+            sample: item.sample,
+            last_used_ch: 0,
+            use_count: 0
+        }));
+        const voiceYaml = stringifyYaml({ samples: normalizedVoiceSamples }, { lineWidth: 0 });
+        await writeFile(join(bookRoot, '.ops/voice_samples.yaml'), voiceYaml, 'utf8');
+
         await writeFile(
-            join(bookRoot, `entities/${compiledEntity.entityId}.md`),
-            serializeEntityMarkdown(profile),
+            join(bookRoot, 'index/L0_sagas.md'),
+            formatMarkdownWithFallbackHeading(parsed.l0_sagas_markdown, '# L0 纪元折叠总表'),
             'utf8'
         );
+        await writeFile(
+            join(bookRoot, 'index/L1_volumes.md'),
+            formatMarkdownWithFallbackHeading(parsed.l1_volumes_markdown, '# L1 活跃卷级总表'),
+            'utf8'
+        );
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), '# 第 1 卷双轨章卡\n\n', 'utf8');
+
+        const loreIds: string[] = [];
+        for (const lore of parsed.lore_entries) {
+            loreIds.push(lore.id);
+            const loreContent = [
+                `# ${lore.title}`,
+                '',
+                `> 摘要: ${lore.summary}`,
+                '',
+                lore.content.trim(),
+                ''
+            ].join('\n');
+            await writeFile(join(bookRoot, `lore_library/${lore.id}.md`), loreContent, 'utf8');
+        }
+
+        const entityIds: string[] = [];
+        for (const compiledEntity of parsed.entities) {
+            entityIds.push(compiledEntity.entityId);
+            const profile = toEntityProfile(compiledEntity);
+            await writeFile(
+                join(bookRoot, `entities/${compiledEntity.entityId}.md`),
+                serializeEntityMarkdown(profile),
+                'utf8'
+            );
+        }
+
+        // 初始化 .ops/tx_state.json (last_committed_ch = 0) 并执行初始 Git 提交
+        await store.initializeWalFromDisk();
+        await system.initRepo(bookRoot);
+        const { sha } = await system.commitPaths(
+            bookRoot,
+            ['.'],
+            `chore(boot): initialize ${parsed.book_slug}`
+        );
+
+        const result: LockCharterAndBootResult = {
+            bookRoot,
+            bookSlug: parsed.book_slug,
+            commitSha: sha,
+            entityIds,
+            loreIds,
+            voiceSampleCount: normalizedVoiceSamples.length,
+            filteredVoiceSampleCount,
+            halted: true
+        };
+
+        if (options.onBookBooted) {
+            await options.onBookBooted(result);
+        }
+
+        return result;
+    } catch (err: unknown) {
+        if (!bookRootExistedBefore) {
+            await rm(bookRoot, { recursive: true, force: true }).catch(() => undefined);
+        } else {
+            try {
+                const entries = await readdir(bookRoot);
+                await Promise.all(
+                    entries.map((entry) =>
+                        rm(join(bookRoot, entry), { recursive: true, force: true })
+                    )
+                );
+            } catch {
+                // 保留原始建库失败原因，忽略回滚清理次生异常
+            }
+        }
+        throw err;
     }
-
-    // 初始化 .ops/tx_state.json (last_committed_ch = 0) 并执行初始 Git 提交
-    await store.initializeWalFromDisk();
-    await system.initRepo(bookRoot);
-    const { sha } = await system.commitPaths(
-        bookRoot,
-        ['.'],
-        `chore(boot): initialize ${parsed.book_slug}`
-    );
-
-    const result: LockCharterAndBootResult = {
-        bookRoot,
-        bookSlug: parsed.book_slug,
-        commitSha: sha,
-        entityIds,
-        loreIds,
-        voiceSampleCount: normalizedVoiceSamples.length,
-        filteredVoiceSampleCount,
-        halted: true
-    };
-
-    if (options.onBookBooted) {
-        await options.onBookBooted(result);
-    }
-
-    return result;
 }
 
 /** 创建主对话开书建库工具 lock_charter_and_boot */

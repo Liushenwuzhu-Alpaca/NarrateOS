@@ -1,9 +1,10 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
+import { NodeSystemAdapter } from '@narrateos/dsh-book-store';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BootGateError } from '../errors.js';
 import * as bookToolsPlugin from '../index.js';
@@ -192,6 +193,90 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         expect(voiceYaml).not.toContain('深吸一口气');
 
         await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+
+    it('拒绝缺少中文 canonicalName 与 static_base_and_voice 违规，且写入/Git 失败时彻底回滚新建目录', async () => {
+        const booksRoot = await makeTempBooksRoot();
+
+        // 1. 缺中文 canonicalName 拦截
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'no-cn-name',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: 'ShenMo',
+                            uniqueAliases: [],
+                            contextualTitles: [],
+                            innateLocks: [],
+                            acquiredState: [],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+        expect(existsSync(join(booksRoot, 'no-cn-name'))).toBe(false);
+
+        // 2. static_base_and_voice 触发 StaticProseGate 拦截
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-static-voice',
+                    static_base_and_voice: '他指节泛白，喉结滚动，眼神中闪过一丝寒意。'
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+        expect(existsSync(join(booksRoot, 'bad-static-voice'))).toBe(false);
+
+        // 3. Git initRepo 失败时回滚清理新建的半成品目录，确保重试可直接成功
+        const failingSystem = new NodeSystemAdapter();
+        failingSystem.initRepo = async () => {
+            throw new Error('simulated git init failure');
+        };
+        await expect(
+            lockCharterAndBoot(buildMinimalValidBootInput({ book_slug: 'rollback-retry' }), {
+                booksRoot,
+                system: failingSystem
+            })
+        ).rejects.toThrow('simulated git init failure');
+        expect(existsSync(join(booksRoot, 'rollback-retry'))).toBe(false);
+
+        // 4. 若空目录预先存在，失败后清空目录内容，重试同样不被残留阻塞
+        const emptyPreExisting = join(booksRoot, 'empty-preexisting');
+        await mkdir(emptyPreExisting, { recursive: true });
+        await expect(
+            lockCharterAndBoot(buildMinimalValidBootInput({ book_slug: 'empty-preexisting' }), {
+                booksRoot,
+                system: failingSystem
+            })
+        ).rejects.toThrow('simulated git init failure');
+        const retryRes = await lockCharterAndBoot(
+            buildMinimalValidBootInput({ book_slug: 'empty-preexisting' }),
+            { booksRoot }
+        );
+        expect(retryRes.halted).toBe(true);
+    });
+
+    it('NarrateToolsService 继承 narrateStore.booksRoot 且卸载后拒绝调用 lockCharterAndBoot', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin);
+
+        expect(ctx.narrateTools.booksRoot).toBe(booksRoot);
+        const toolsService = ctx.narrateTools;
+
+        await toolsFiber.dispose();
+        await expect(
+            toolsService.lockCharterAndBoot(buildMinimalValidBootInput({ book_slug: 'after-dispose' }))
+        ).rejects.toThrow('已卸载');
+
         await storeFiber.dispose();
     });
 });

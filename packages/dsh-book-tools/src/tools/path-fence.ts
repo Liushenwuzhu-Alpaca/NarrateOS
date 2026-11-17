@@ -25,6 +25,8 @@ const HARD_BLOCKED_OPS_PATHS = [
     '.ops/tx_state.json',
     '.ops/runs.jsonl',
     '.ops/pending_writes.json',
+    '.ops/dream_watermark.json',
+    '.ops/safe_halt.json',
     '.ops/recovery',
     '.ops/traces',
     '.ops/parallel_deltas',

@@ -15,6 +15,7 @@ import type {
     PostSignalResponse,
     PutChapterRequest,
     PutChapterResponse,
+    RunDetailPayload,
     RunsListPayload,
     SelectBookRequest,
     SelectBookResponse,
@@ -140,6 +141,13 @@ export async function fetchRunRecords(chapter?: number): Promise<RunsListPayload
     return {
         runs: Array.isArray(raw?.runs) ? raw.runs : []
     };
+}
+
+/** 查询指定 sessionId 的历史回合、思考链、工具调用与输出明细 */
+export function fetchRunDetail(sessionId: string): Promise<RunDetailPayload> {
+    return requestJson<RunDetailPayload>(
+        `/api/narrate/runs/detail?sessionId=${encodeURIComponent(sessionId)}`
+    );
 }
 
 /** 保存章节正文修改并自动触发 SHA-256 增量同步 */

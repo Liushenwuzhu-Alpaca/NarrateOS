@@ -320,12 +320,16 @@ function deriveHistoricalStageOverrides(
         if (!stageId) continue;
         // 洁净室 Writer 不创建交互式多轮会话；仅保留状态说明
         const sessionId = stageId === 'WRITER' ? undefined : asString(run.sessionId);
+        const parentSessionId = stageId === 'WRITER' ? undefined : asString(run.parentSessionId);
+        const mode = stageId === 'WRITER' ? undefined : asString(run.mode);
         mapped[stageId] = {
             status: mapRunStatusToStageStatus(run.status),
             summary: DEFAULT_STAGE_SUMMARIES[stageId],
             updatedAt: run.finishedAt ?? run.startedAt ?? run.timestamp,
             runId: run.runId,
-            ...(sessionId !== undefined ? { sessionId } : {})
+            ...(sessionId !== undefined ? { sessionId } : {}),
+            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+            ...(mode !== undefined ? { mode } : {})
         };
     }
     return mapped;
@@ -724,12 +728,17 @@ export function NarrateStudioRoot({
                     setLiveRunChapter(eventChapter);
                 }
                 const rawSessionId = asString(data['activeSessionId']) ?? asString(data['sessionId']);
+                const rawParentSessionId = asString(data['parentSessionId']);
+                const rawMode = asString(data['mode']);
                 const runId = asString(data['runId']);
                 const resolvedStage = resolveStageId(stageName);
                 if (resolvedStage && (message || rawSessionId || runId)) {
                     // PROSE_GATE 每章例行校验,只是 Writer 运行中;LOCAL_PATCH 才是拦截返修
                     const isPatch = stageName === 'LOCAL_PATCH';
                     const sessionId = resolvedStage === 'WRITER' ? undefined : rawSessionId;
+                    const parentSessionId =
+                        resolvedStage === 'WRITER' ? undefined : rawParentSessionId;
+                    const mode = resolvedStage === 'WRITER' ? undefined : rawMode;
                     setStageOverrides((prev) => {
                         const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
                         const resolvedIdx = STAGE_SEQUENCE.indexOf(resolvedStage);
@@ -749,6 +758,8 @@ export function NarrateStudioRoot({
                             updatedAt: timestamp ?? current?.updatedAt,
                             ...(isPatch ? { badge: '门禁 Patch' } : {}),
                             ...(sessionId !== undefined ? { sessionId } : {}),
+                            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                            ...(mode !== undefined ? { mode } : {}),
                             ...(runId !== undefined ? { runId } : {})
                         };
                         return next;
@@ -893,6 +904,8 @@ export function NarrateStudioRoot({
 
             if (event === 'dream:started') {
                 const dreamSessionId = asString(data['activeSessionId']) ?? asString(data['sessionId']);
+                const dreamParentSessionId = asString(data['parentSessionId']);
+                const dreamMode = asString(data['mode']);
                 const dreamRunId = asString(data['runId']);
                 const dreamMessage = asString(data['message']);
                 setLatestSseStage('DREAMING');
@@ -904,6 +917,10 @@ export function NarrateStudioRoot({
                             status: 'active',
                             summary: dreamMessage ?? prev.DREAMING?.summary ?? DEFAULT_STAGE_SUMMARIES.DREAMING,
                             ...(dreamSessionId !== undefined ? { sessionId: dreamSessionId } : {}),
+                            ...(dreamParentSessionId !== undefined
+                                ? { parentSessionId: dreamParentSessionId }
+                                : {}),
+                            ...(dreamMode !== undefined ? { mode: dreamMode } : {}),
                             ...(dreamRunId !== undefined ? { runId: dreamRunId } : {})
                         }
                     }));
@@ -1424,6 +1441,10 @@ export function NarrateStudioRoot({
                 stageId: matchedId ?? 'STAGE',
                 stageLabel: meta?.label ?? stageArtifact.stageName,
                 sessionId,
+                ...(nodeState?.parentSessionId !== undefined
+                    ? { parentSessionId: nodeState.parentSessionId }
+                    : {}),
+                ...(nodeState?.mode !== undefined ? { mode: nodeState.mode } : {}),
                 runId: nodeState?.runId,
                 status: nodeState?.status ?? 'done'
             });
@@ -1877,7 +1898,7 @@ function NarrateStudioSidebarIcon(): React.ReactElement {
     );
 }
 
-const STAGE_CONVERSATION_SLOT = 'narrateos.stage.conversation';
+export const STAGE_CONVERSATION_SLOT = 'narrateos.stage.conversation';
 
 /** 保持引用稳定的本地视图模式 Context，避免切换 Conversation/Trajectory 时重建 Factory 槽位 */
 const StageViewModeContext = createContext<string>('chat');
@@ -1889,57 +1910,95 @@ function StageConversationView(props: {
     return <>{props.renderSlot('conversation.session', { view })}</>;
 }
 
-interface StageConversationSlotPanelProps {
+function StageConversationUnavailable(props: {
     sessionId: string;
     view?: string | undefined;
-    useSession: <T>(selector: (snapshot: {
-        blank?: boolean;
-        awaitingFirstTurn?: boolean;
-        running?: boolean;
-        promptAttempted?: boolean;
-        openState?: string;
-        subagent?: { address: { mode: string }; parentAvailable?: boolean } | null;
-    }) => T) => T;
-    useConversation: <T>(selector: (snapshot: { activeTargets: { size: number } }) => T) => T;
-    useSessions: <T>(selector: (state: { byId: Record<string, { blank?: boolean }> }) => T) => T;
-    renderFactorySlot: (
-        name: string,
-        props: { variant: 'embedded'; phase: 'settling' | 'hero' | 'active'; hero: boolean },
-        overrides: { slots: { views: typeof StageConversationView } }
-    ) => React.ReactNode;
+}): React.ReactElement {
+    return (
+        <div className="ns-session-fallback" data-stage-conversation-fallback="true">
+            <div className="ns-session-fallback-title">原生 Conversation 渲染器暂不可用</div>
+            <p>
+                当前宿主尚未挂载 <code>conversation.content</code> Factory 或 <code>useConversation</code> Hook，
+                无法渲染原生 {props.view === 'trajectory' ? 'Trajectory' : 'Conversation'} 视图。
+            </p>
+            <dl className="ns-session-kv ns-mono">
+                <dt>sessionId</dt>
+                <dd>{props.sessionId}</dd>
+            </dl>
+        </div>
+    );
 }
 
-/**
- * 在 SessionProvider 作用域内挂载 DSH 原生 'conversation.content' 工厂，
- * 并通过 StageConversationView 动态透传当前选中的 'chat' 或 'trajectory' 视图。
- */
-function StageConversationSlotPanel({
+type StageSessionHook = <T>(selector: (snapshot: {
+    blank?: boolean;
+    awaitingFirstTurn?: boolean;
+    running?: boolean;
+    promptAttempted?: boolean;
+    openState?: string;
+    subagent?: { address: { mode: string }; parentAvailable?: boolean } | null;
+}) => T) => T;
+
+type StageConversationHook = <T>(
+    selector: (snapshot: { activeTargets?: { size?: number } }) => T
+) => T;
+
+type StageSessionsHook = <T>(
+    selector: (state: { byId?: Record<string, { blank?: boolean }> }) => T
+) => T;
+
+type StageRenderFactorySlot = (
+    name: string,
+    props: { variant: 'embedded'; phase: 'settling' | 'hero' | 'active'; hero: boolean },
+    overrides: {
+        slots: { views: typeof StageConversationView };
+        fallback?: React.ReactNode;
+    }
+) => React.ReactNode;
+
+export interface StageConversationSlotPanelProps {
+    sessionId: string;
+    view?: string | undefined;
+    useSession?: StageSessionHook | undefined;
+    useConversation?: StageConversationHook | undefined;
+    useSessions?: StageSessionsHook | undefined;
+    renderFactorySlot?: StageRenderFactorySlot | undefined;
+}
+
+function StageConversationSlotBody({
     sessionId,
     view = 'chat',
     useSession,
     useConversation,
     useSessions,
     renderFactorySlot
-}: StageConversationSlotPanelProps): React.ReactElement {
+}: {
+    sessionId: string;
+    view: string;
+    useSession: StageSessionHook;
+    useConversation: StageConversationHook;
+    useSessions: StageSessionsHook;
+    renderFactorySlot: StageRenderFactorySlot;
+}): React.ReactElement {
     const session = useSession((value) => value);
     const conversation = useConversation((value) => value);
-    const summaryBlank = useSessions((state) => state.byId[sessionId]?.blank);
+    const summaryBlank = useSessions((state) => state?.byId?.[sessionId]?.blank);
+    const activeTargetsSize = conversation?.activeTargets?.size ?? 0;
     const shellPhase =
-        conversation.activeTargets.size > 0 ||
-        (!session.blank && !session.awaitingFirstTurn) ||
-        session.running
+        activeTargetsSize > 0 ||
+        (!session?.blank && !session?.awaitingFirstTurn) ||
+        session?.running
             ? 'active'
-            : session.promptAttempted
+            : session?.promptAttempted
               ? 'engaging'
               : 'blank';
     const parentAvailabilityPending =
-        session.subagent?.address.mode === 'continuable' &&
+        session?.subagent?.address?.mode === 'continuable' &&
         session.subagent.parentAvailable === undefined;
     const settling =
-        (shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true) ||
+        (shellPhase === 'blank' && session?.openState === 'loading' && summaryBlank !== true) ||
         parentAvailabilityPending;
     const hero =
-        shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true);
+        shellPhase === 'blank' && (session?.openState === 'open' || summaryBlank === true);
 
     return (
         <StageViewModeContext.Provider value={view}>
@@ -1950,15 +2009,67 @@ function StageConversationSlotPanel({
                     phase: settling ? 'settling' : hero ? 'hero' : 'active',
                     hero
                 },
-                { slots: { views: StageConversationView } }
+                {
+                    slots: { views: StageConversationView },
+                    fallback: <StageConversationUnavailable sessionId={sessionId} view={view} />
+                }
             )}
         </StageViewModeContext.Provider>
     );
 }
 
-function readSessionsService(ctx: unknown): StudioSessionsService | undefined {
+/**
+ * 在 SessionProvider 作用域内挂载 DSH 原生 'conversation.content' 工厂，
+ * 并在缺少 useConversation 或未加载 Factory 时安全降级，避免抛出 TypeError。
+ */
+export function StageConversationSlotPanel({
+    sessionId,
+    view = 'chat',
+    useSession,
+    useConversation,
+    useSessions,
+    renderFactorySlot
+}: StageConversationSlotPanelProps): React.ReactElement {
+    if (
+        typeof useSession !== 'function' ||
+        typeof useConversation !== 'function' ||
+        typeof useSessions !== 'function' ||
+        typeof renderFactorySlot !== 'function'
+    ) {
+        return <StageConversationUnavailable sessionId={sessionId} view={view} />;
+    }
+
+    return (
+        <StageConversationSlotBody
+            sessionId={sessionId}
+            view={view}
+            useSession={useSession}
+            useConversation={useConversation}
+            useSessions={useSessions}
+            renderFactorySlot={renderFactorySlot}
+        />
+    );
+}
+
+function readContextService(ctx: unknown, serviceName: string): unknown {
     if (!ctx || typeof ctx !== 'object') return undefined;
-    const candidate = (ctx as { sessions?: unknown }).sessions;
+    const record = ctx as Record<string, unknown>;
+    if (record[serviceName] !== undefined) {
+        return record[serviceName];
+    }
+    const getter = record['get'];
+    if (typeof getter === 'function') {
+        try {
+            return (getter as (name: string) => unknown).call(ctx, serviceName);
+        } catch {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+
+function readSessionsService(ctx: unknown): StudioSessionsService | undefined {
+    const candidate = readContextService(ctx, 'sessions');
     if (
         candidate &&
         typeof candidate === 'object' &&
@@ -1969,13 +2080,23 @@ function readSessionsService(ctx: unknown): StudioSessionsService | undefined {
     return undefined;
 }
 
+function hasSessionUiServices(targetCtx: unknown, fallbackCtx?: unknown): boolean {
+    const uiSession =
+        readContextService(targetCtx, 'uiSession') ?? readContextService(fallbackCtx, 'uiSession');
+    const uiConversation =
+        readContextService(targetCtx, 'uiConversation') ??
+        readContextService(fallbackCtx, 'uiConversation');
+    return Boolean(uiSession && uiConversation);
+}
+
 interface NarrateStudioSlotProps {
     SessionProvider?: StudioSessionProviderComponent | undefined;
     renderSlot?: ((slotName: string, owner: Record<string, unknown>) => React.ReactNode) | undefined;
 }
 
 /**
- * Cordis 客户端插件入口：向 @deepseek-ai/dsh@0.2.2-rc.1 双半侧槽位注册主舞台与侧栏导航
+ * Cordis 客户端插件入口：向 @deepseek-ai/dsh@0.2.2-rc.1 双半侧槽位注册主舞台与侧栏导航。
+ * 仅当 uiSession 与 uiConversation 同时可用时才声明 scope: 'session' 子槽位，避免极简宿主抛出 SlotAssemblyError。
  */
 export function apply(ctx: Context): void {
     const slots = ctx.slots as
@@ -2053,7 +2174,7 @@ export function apply(ctx: Context): void {
     const injectSlot = slots.inject.bind(slots);
     const registerSlot = typeof slots.register === 'function' ? slots.register.bind(slots) : null;
 
-    const registerSlots = (): (() => void) => {
+    const registerMainSlots = (withSessionUi: boolean): (() => void) => {
         const disposers: Array<() => void> = [];
 
         const disposeMain = injectSlot(
@@ -2064,12 +2185,16 @@ export function apply(ctx: Context): void {
                           {
                               name: 'main',
                               key: PANEL_ID,
-                              children: {
-                                  [STAGE_CONVERSATION_SLOT]: {
-                                      kind: 'single',
-                                      scope: 'session'
-                                  }
-                              },
+                              ...(withSessionUi
+                                  ? {
+                                        children: {
+                                            [STAGE_CONVERSATION_SLOT]: {
+                                                kind: 'single',
+                                                scope: 'session'
+                                            }
+                                        }
+                                    }
+                                  : {}),
                               inject: () => ({ title: 'NarrateOS 创作室' })
                           },
                           NarrateStudioPanel as React.FC<Record<string, unknown>>
@@ -2084,7 +2209,7 @@ export function apply(ctx: Context): void {
             disposers.push(disposeMain as () => void);
         }
 
-        if (registerSlot) {
+        if (withSessionUi && registerSlot) {
             const disposeStageConversation = injectSlot(STAGE_CONVERSATION_SLOT, () =>
                 registerSlot(
                     { name: STAGE_CONVERSATION_SLOT },
@@ -2095,6 +2220,36 @@ export function apply(ctx: Context): void {
                 disposers.push(disposeStageConversation as () => void);
             }
         }
+
+        return () => {
+            for (const dispose of disposers.reverse()) {
+                try {
+                    dispose();
+                } catch {
+                    // 忽略重复卸载或宿主已清理时的异常
+                }
+            }
+        };
+    };
+
+    const registerSlots = (): (() => void) => {
+        const disposers: Array<() => void> = [];
+        let disposedAll = false;
+        let activeMainDisposer: (() => void) | null = null;
+        let currentSessionUi = false;
+
+        const syncMainRegistration = (withSessionUi: boolean): void => {
+            if (disposedAll) return;
+            if (activeMainDisposer && currentSessionUi === withSessionUi) {
+                return;
+            }
+            if (activeMainDisposer) {
+                activeMainDisposer();
+                activeMainDisposer = null;
+            }
+            currentSessionUi = withSessionUi;
+            activeMainDisposer = registerMainSlots(withSessionUi);
+        };
 
         const disposeSidebar = injectSlot(
             'sidebar.panellist',
@@ -2120,7 +2275,41 @@ export function apply(ctx: Context): void {
             disposers.push(disposeSidebar as () => void);
         }
 
+        if (typeof dynamicInject === 'function') {
+            try {
+                const disposeSessionUiInject = dynamicInject.call(
+                    ctx,
+                    ['uiSession', 'uiConversation'],
+                    (sessionUiCtx: Context) => {
+                        if (!hasSessionUiServices(sessionUiCtx, ctx)) {
+                            return;
+                        }
+                        syncMainRegistration(true);
+                        return () => {
+                            if (!disposedAll) {
+                                syncMainRegistration(false);
+                            }
+                        };
+                    }
+                );
+                if (typeof disposeSessionUiInject === 'function') {
+                    disposers.push(disposeSessionUiInject as () => void);
+                }
+            } catch {
+                // 宿主不支持多服务动态注入时安全回退为基础槽位
+            }
+        }
+
+        if (!activeMainDisposer) {
+            syncMainRegistration(hasSessionUiServices(ctx));
+        }
+
         return () => {
+            disposedAll = true;
+            if (activeMainDisposer) {
+                activeMainDisposer();
+                activeMainDisposer = null;
+            }
             for (const dispose of disposers) {
                 try {
                     dispose();

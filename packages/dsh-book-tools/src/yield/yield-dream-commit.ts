@@ -246,7 +246,20 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                     }
                 }
 
-                // 5. 全部确定性门禁通过：原子写入暂存文件到磁盘
+                // 5. 全部确定性门禁通过：在首次落盘前写入 .ops/pending_writes.json 崩溃恢复清单
+                const allTargetRelPaths = [...pendingWrites.keys()];
+                if (
+                    parsed.spotlight_triggers.length > 0 &&
+                    !allTargetRelPaths.includes('.ops/signals.jsonl')
+                ) {
+                    allTargetRelPaths.push('.ops/signals.jsonl');
+                }
+                if (!allTargetRelPaths.includes('.ops/dream_watermark.json')) {
+                    allTargetRelPaths.push('.ops/dream_watermark.json');
+                }
+                await bookStore.recordPendingWrites(allTargetRelPaths);
+
+                // 6. 原子写入暂存文件到磁盘
                 const committedRelPaths: string[] = [];
                 for (const [relPath, content] of pendingWrites.entries()) {
                     const absTarget = join(bookRoot, relPath);
@@ -271,7 +284,9 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                         });
                         await appendFile(signalsPath, `${signalLine}\n`, 'utf8');
                     }
-                    committedRelPaths.push('.ops/signals.jsonl');
+                    if (!committedRelPaths.includes('.ops/signals.jsonl')) {
+                        committedRelPaths.push('.ops/signals.jsonl');
+                    }
                 }
 
                 const chapterNumber = parsed.chapter_number ?? txState.last_committed_ch;
