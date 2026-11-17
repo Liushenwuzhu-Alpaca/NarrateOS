@@ -53,6 +53,21 @@ describe('作品运行追踪', () => {
         await system.commitPaths(root, ['.'], 'test: initialize book');
         const { stdout } = await promisify(execFile)('git', ['-C', root, 'ls-files', '.ops/traces']);
         expect(stdout).toBe('');
+        await system.cleanUntracked(root);
+        expect((await inspectTraceRun(root, runId)).status).toBe('ok');
+    });
+
+    it('追踪列表忽略系统文件和编辑器临时目录，空间统计仍包含它们', async () => {
+        const root = await fixture();
+        await withTraceRun(root, 'sync', {}, async () => {});
+        const before = await listTraceRuns(root);
+        const traceRoot = join(root, '.ops/traces');
+        await writeFile(join(traceRoot, '.DS_Store'), '系统文件');
+        await writeFile(join(traceRoot, 'editor-backup'), '临时备份');
+        await mkdir(join(traceRoot, '.editor-temp'));
+        const after = await listTraceRuns(root);
+        expect(after.runs).toEqual(before.runs);
+        expect(after.bytes - before.bytes).toBe(Buffer.byteLength('系统文件临时备份'));
     });
 
     it.each(['metadata', 'off'])('%s 档不保存内容，业务异常不会导致隐式重跑', async (level) => {

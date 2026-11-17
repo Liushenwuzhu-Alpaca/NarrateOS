@@ -292,9 +292,10 @@ export async function listTraceRuns(bookRoot: string): Promise<{ runs: TraceRunI
     let root: string;
     try { root = await rootDirectory(bookRoot); } catch (error) { if (isMissing(error)) return { runs: [], bytes: 0 }; throw error; }
     const runs: TraceRunInfo[] = [];
-    for (const name of (await readdir(root)).sort()) {
-        if (name === '.gitignore') continue;
-        validateId(name);
+    const entries = await readdir(root, { withFileTypes: true });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        const name = entry.name;
+        if (!entry.isDirectory() || !idPattern.test(name)) continue;
         try { runs.push(await inspectTraceRun(bookRoot, name)); }
         catch (error) { if (!isMissing(error)) throw error; }
     }
