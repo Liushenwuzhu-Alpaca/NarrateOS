@@ -251,7 +251,7 @@ function parseAnchorChapter(anchor: string): number | null {
 
 function buildEffectiveRuleList(query: EntityRecallQuery): ContextualTitleRule[] {
     if (query.contextualTitleRules) {
-        return query.contextualTitleRules;
+        return query.contextualTitleRules.map((rule) => ({ ...rule, appearanceChapters: rule.appearanceChapters ?? query.appearanceChapters ?? [] }));
     }
 
     return query.profile.metadata.contextual_titles.map((raw) => {
@@ -276,11 +276,7 @@ function isChapterEligibleForRule(
     chapterNumber: number,
     chapterDay: number | undefined
 ): boolean {
-    if (rule.appearanceChapters && rule.appearanceChapters.length > 0) {
-        if (!rule.appearanceChapters.includes(chapterNumber)) {
-            return false;
-        }
-    }
+    if (!rule.appearanceChapters?.includes(chapterNumber)) return false;
     if (rule.minChapter !== undefined && chapterNumber < rule.minChapter) {
         return false;
     }
@@ -516,6 +512,20 @@ export class IndexRecall {
 
     /** 多身份键 rg -C 2 原稿检索并包装时间差信封 */
     async recallEntitySlices(bookRoot: string, query: EntityRecallQuery): Promise<RecallSlice[]> {
+        if (query.appearanceChapters === undefined) {
+            const appearanceChapters: number[] = [];
+            const cardDir = join(bookRoot, 'index/L2_cards');
+            for (const file of await listOptionalDir(cardDir)) {
+                if (!VOLUME_CARD_FILE_RE.test(file)) continue;
+                const raw = await readOptionalUtf8(join(cardDir, file));
+                for (const section of raw?.split(/^##\s+ch_/m).slice(1) ?? []) {
+                    const chapter = Number(section.match(/^\d+/)?.[0]);
+                    const ids = section.match(/^-\s*出场实体：([^\n]*)/m)?.[1]?.split(/[,，\s]+/) ?? [];
+                    if (ids.includes(query.profile.metadata.entity_id) && Number.isSafeInteger(chapter)) appearanceChapters.push(chapter);
+                }
+            }
+            query = { ...query, appearanceChapters };
+        }
         const candidateFiles = await this.resolveCandidateChapterFiles(bookRoot, query);
         if (candidateFiles.length === 0) {
             return [];

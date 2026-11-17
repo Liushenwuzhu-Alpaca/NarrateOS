@@ -221,14 +221,15 @@ function upsertVolumeCardEntry(
     currentVolume: number,
     chapterNumber: number,
     storyDay: number,
-    chapterSummary: string
+    chapterSummary: string,
+    appearanceEntityIds: string[]
 ): string {
     const baseContent =
         rawCardContent && rawCardContent.trim().length > 0
             ? rawCardContent.replace(/\r\n/g, '\n')
             : `# 第 ${currentVolume} 卷双轨章卡\n\n`;
     const chKey = formatChapterKey(chapterNumber);
-    const entryBlock = `## ${chKey} (day:${storyDay})\n- 主干剧情：${chapterSummary.trim()}`;
+    const entryBlock = `## ${chKey} (day:${storyDay})\n- 主干剧情：${chapterSummary.trim()}\n- 出场实体：${[...new Set(appearanceEntityIds)].join(', ')}`;
     const sectionRe = new RegExp(
         `^##\\s+${chKey}\\b[^\\n]*\\n[\\s\\S]*?(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
         'm'
@@ -1079,7 +1080,8 @@ export class NarrativeEngine {
             currentVolume,
             chapterNumber,
             nextStoryDay,
-            extracted.chapter_summary
+            extracted.chapter_summary,
+            [...povCharIds, ...sanitizedPatches.map((patch) => patch.entity_id)]
         );
         await writeFile(cardAbsPath, updatedCard, 'utf8');
         extraCommitPaths.push(cardRelPath);

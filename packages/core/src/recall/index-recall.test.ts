@@ -50,6 +50,19 @@ function createSampleProfile(overrides: Partial<EntityProfile> = {}): EntityProf
 }
 
 describe('IndexRecall', () => {
+    it('通用职务称谓仅在 L2 出场白名单内召回，未知出场集合不全书放行', async () => {
+        const bookRoot = await createTempBookDir();
+        await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '风纪委员长推开门。', 'utf8');
+        await writeFile(join(bookRoot, 'manuscripts/ch_0002.md'), '风纪委员长走进另一所学校。', 'utf8');
+        const recall = new IndexRecall(new NodeSystemAdapter());
+        const query = { profile: createSampleProfile(), targetChapter: 3, targetDay: 10 };
+        expect(await recall.recallEntitySlices(bookRoot, query)).toEqual([]);
+        await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), '## ch_0001 (day:1)\n- 出场实体：char_002\n\n## ch_0002 (day:2)\n- 出场实体：char_003\n', 'utf8');
+        const slices = await recall.recallEntitySlices(bookRoot, query);
+        expect(slices.map((slice) => slice.chapterNumber)).toEqual([1]);
+    });
+
     it('构建双层章节目录：区分已封旧卷静态区与活跃卷动态尾，且活跃卷变更不破坏静态区字节稳定性', async () => {
         const bookRoot = await createTempBookDir();
         const system = new NodeSystemAdapter();
@@ -196,6 +209,7 @@ describe('IndexRecall', () => {
             targetChapter: 5,
             targetDay: 15,
             chapterDays: { 1: 1, 2: 3, 3: 10 },
+            appearanceChapters: [1, 3],
             contextualTitleRules: [
                 { title: '风纪委员长', minChapter: 1, maxChapter: 1, minStoryDay: 1, maxStoryDay: 2 },
                 { title: '代理会长', minChapter: 10, maxChapter: 20, minStoryDay: 20, maxStoryDay: 40 }
