@@ -6,7 +6,7 @@
  */
 import React, { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
     CenterWorkbench,
     type CenterWorkbenchDraftHandle,
@@ -14,7 +14,23 @@ import {
     type ChapterDetailData
 } from '../src/client/CenterWorkbench.js';
 
-(globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
+const globalState = globalThis as Record<string, unknown>;
+let hadReactActEnv = false;
+let prevReactActEnv: unknown;
+
+beforeAll(() => {
+    hadReactActEnv = Object.hasOwn(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
+    prevReactActEnv = globalState['IS_REACT_ACT_ENVIRONMENT'];
+    globalState['IS_REACT_ACT_ENVIRONMENT'] = true;
+});
+
+afterAll(() => {
+    if (hadReactActEnv) {
+        globalState['IS_REACT_ACT_ENVIRONMENT'] = prevReactActEnv;
+    } else {
+        delete globalState['IS_REACT_ACT_ENVIRONMENT'];
+    }
+});
 
 interface MountedWorkbench {
     container: HTMLElement;

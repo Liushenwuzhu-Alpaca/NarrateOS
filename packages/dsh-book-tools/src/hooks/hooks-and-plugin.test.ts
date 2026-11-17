@@ -15,6 +15,11 @@ import * as bookToolsPlugin from '../index.js';
 import { evaluateMainSessionWriteGuard } from '../hooks/main-session-guard.js';
 
 const tempDirs: string[] = [];
+const cleanups: Array<() => void | Promise<void>> = [];
+
+function registerCleanup(fn: () => void | Promise<void>): void {
+    cleanups.push(fn);
+}
 
 async function makeTempDir(): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), 'narrateos-hooks-test-'));
@@ -34,6 +39,12 @@ function makeToolExecution(name: string, args: unknown): ToolExecution {
 }
 
 afterEach(async () => {
+    while (cleanups.length > 0) {
+        const fn = cleanups.pop();
+        if (fn) {
+            await fn();
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -57,9 +68,13 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsSvcFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsSvcFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin);
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
 
         expect(ctx.narrateTools).toBeDefined();
         expect(ctx.tools.get('lock_charter_and_boot')).toBeDefined();
@@ -80,9 +95,13 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
         const toolsSvcFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsSvcFiber.dispose());
         const storeFiber = await ctx.plugin(bookStorePlugin);
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
 
         // 1. 拦截裸 write / edit / apply_patch / str_replace_editor 写入 books/<slug>/
         const rawWriteAbs = makeToolExecution('write', {
@@ -191,11 +210,6 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
                 makeToolExecution('write', { path: join(workspaceDir, 'notes/scratch.md'), content: 'ok' })
             )
         ).toBeUndefined();
-
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
-        await toolsSvcFiber.dispose();
-        await promptFiber.dispose();
     });
 
     it("'agent/turn-stopping' Hook 拦截未调 yield_* 的纯文本提前停止并注入 steer，达到 maxSteps 后安全中止并清理 StagingSession", async () => {
@@ -206,13 +220,16 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-escape-test',
             bookRoot,
             yieldTool: 'yield_outline'
         });
+        registerCleanup(() => roleSet.cleanup());
         await roleSet.toolMap.get('book_edit')!.execute(
             {
                 path: 'world/open_threads.md',
@@ -250,6 +267,7 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
                 exhaustedCalled += 1;
             }
         });
+        registerCleanup(disposeHook);
 
         const ac = new AbortController();
 
@@ -270,10 +288,6 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
         expect(steeredMessages).toHaveLength(2);
         expect(exhaustedCalled).toBe(1);
         expect(ctx.narrateStore.staging.has('run-escape-test')).toBe(false);
-
-        disposeHook();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
     });
 
     it("'agent/turn-stopping' 在已成功调用 yield_* 后直接放行，不触发 steer", async () => {
@@ -283,13 +297,16 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-yielded-ok',
             bookRoot,
             yieldTool: 'yield_outline'
         });
+        registerCleanup(() => roleSet.cleanup());
 
         await roleSet.toolMap.get('yield_outline')!.execute(
             {
@@ -326,6 +343,7 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
             hasYielded: () => roleSet.hasYielded(),
             cleanupStaging: () => roleSet.cleanup()
         });
+        registerCleanup(disposeHook);
 
         await ctx.serial('agent/turn-stopping', {
             agent: mockAgent,
@@ -333,10 +351,5 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
             signal: new AbortController().signal
         });
         expect(steeredMessages).toHaveLength(0);
-
-        disposeHook();
-        roleSet.cleanup();
-        await bookToolsFiber.dispose();
-        await storeFiber.dispose();
     });
 });

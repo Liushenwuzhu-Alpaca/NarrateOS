@@ -9,6 +9,11 @@ import { PathFenceError, ReadQuotaExceededError } from '../errors.js';
 import * as bookToolsPlugin from '../index.js';
 
 const tempDirs: string[] = [];
+const cleanups: Array<() => void | Promise<void>> = [];
+
+function registerCleanup(fn: () => void | Promise<void>): void {
+    cleanups.push(fn);
+}
 
 function createMockExec(name: string, args: unknown): ToolRunContext {
     return {
@@ -64,6 +69,12 @@ async function createSampleBook(): Promise<{ parentDir: string; bookRoot: string
 }
 
 afterEach(async () => {
+    while (cleanups.length > 0) {
+        const fn = cleanups.pop();
+        if (fn) {
+            await fn();
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -73,21 +84,20 @@ afterEach(async () => {
 });
 
 describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
-    it('路径围栏 100% 拦截 ../、跨书路径、.ops/、.git/ 与越界符号链接', async () => {
-        const { parentDir, bookRoot, otherBook } = await createSampleBook();
-        const outsideSecret = join(parentDir, 'outside.txt');
-        await writeFile(outsideSecret, 'TOP_SECRET', 'utf8');
-        await symlink(outsideSecret, join(bookRoot, 'world/escape_link.md'));
-        await symlink(join(otherBook, 'world/secret.md'), join(bookRoot, 'entities/cross_book.md'));
+    it('路径围栏 100% 拦截 ../、跨书路径、.ops/ 与 .git/', async () => {
+        const { bookRoot } = await createSampleBook();
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-fence',
             bookRoot
         });
+        registerCleanup(() => roleSet.cleanup());
 
         const bookRead = roleSet.toolMap.get('book_read')!;
         const bookGrep = roleSet.toolMap.get('book_grep')!;
@@ -100,9 +110,7 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
             '.ops/runs.jsonl',
             '.ops/voice_samples.yaml',
             '.git/config',
-            '/etc/passwd',
-            'world/escape_link.md',
-            'entities/cross_book.md'
+            '/etc/passwd'
         ];
 
         for (const badPath of blockedPaths) {
@@ -135,31 +143,63 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
             )
         ).rejects.toThrow(PathFenceError);
 
-        // 全书 glob 不得包含 .ops/ 或越界符号链接
+        // 全书 glob 不得包含 .ops/
         const globRes = (await bookGlob.execute({}, createMockExec('book_glob', {}))) as {
             files: string[];
         };
-        expect(globRes.files.some((f) => f.includes('.ops') || f.includes('escape_link') || f.includes('cross_book'))).toBe(
-            false
-        );
+        expect(globRes.files.some((f) => f.includes('.ops'))).toBe(false);
         expect(globRes.files).toContain('world/open_threads.md');
+    });
 
-        roleSet.cleanup();
-        await toolsFiber.dispose();
-        await storeFiber.dispose();
+    // Windows 非特权账号默认无权创建文件符号链接，跳过该平台独占校验
+    it.skipIf(process.platform === 'win32')('路径围栏拦截越界符号链接且全书 glob 不暴露符号链接目标', async () => {
+        const { parentDir, bookRoot, otherBook } = await createSampleBook();
+        const outsideSecret = join(parentDir, 'outside.txt');
+        await writeFile(outsideSecret, 'TOP_SECRET', 'utf8');
+        await symlink(outsideSecret, join(bookRoot, 'world/escape_link.md'));
+        await symlink(join(otherBook, 'world/secret.md'), join(bookRoot, 'entities/cross_book.md'));
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-fence-symlink',
+            bookRoot
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const bookRead = roleSet.toolMap.get('book_read')!;
+        const bookGlob = roleSet.toolMap.get('book_glob')!;
+
+        for (const badPath of ['world/escape_link.md', 'entities/cross_book.md']) {
+            await expect(
+                bookRead.execute({ path: badPath }, createMockExec('book_read', { path: badPath }))
+            ).rejects.toThrow(PathFenceError);
+        }
+
+        const globRes = (await bookGlob.execute({}, createMockExec('book_glob', {}))) as {
+            files: string[];
+        };
+        expect(globRes.files.some((f) => f.includes('escape_link') || f.includes('cross_book'))).toBe(false);
     });
 
     it('支持为 Dreamer 等显式授予 allowedOpsPaths 白名单，同时永久屏蔽事务核心文件', async () => {
         const { bookRoot } = await createSampleBook();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-ops-whitelist',
             bookRoot,
             allowedOpsPaths: ['.ops/voice_samples.yaml']
         });
+        registerCleanup(() => roleSet.cleanup());
 
         const bookRead = roleSet.toolMap.get('book_read')!;
         const voiceRes = (await bookRead.execute(
@@ -175,17 +215,15 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
                 createMockExec('book_read', { path: '.ops/runs.jsonl' })
             )
         ).rejects.toThrow(PathFenceError);
-
-        roleSet.cleanup();
-        await toolsFiber.dispose();
-        await storeFiber.dispose();
     });
 
     it('maxReadCalls = 3 时第 4 次只读调用（跨 read/grep/glob 共享）立即阻断并提示 yield_*', async () => {
         const { bookRoot } = await createSampleBook();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-quota',
@@ -193,6 +231,7 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
             maxReadCalls: 3,
             yieldTool: 'yield_outline'
         });
+        registerCleanup(() => roleSet.cleanup());
 
         const bookRead = roleSet.toolMap.get('book_read')!;
         const bookGrep = roleSet.toolMap.get('book_grep')!;
@@ -215,10 +254,6 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
         await expect(
             bookGrep.execute({ pattern: '钥匙' }, createMockExec('book_grep', { pattern: '钥匙' }))
         ).rejects.toThrow(/yield_outline/);
-
-        roleSet.cleanup();
-        await toolsFiber.dispose();
-        await storeFiber.dispose();
     });
 
     it('Read-Your-Own-Writes: book_edit 修改 open_threads.md 后 book_read 读回暂存文本，磁盘字节不变，manuscripts/ 当场拒绝', async () => {
@@ -227,12 +262,15 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-ryow',
             bookRoot
         });
+        registerCleanup(() => roleSet.cleanup());
 
         const bookEdit = roleSet.toolMap.get('book_edit')!;
         const bookRead = roleSet.toolMap.get('book_read')!;
@@ -280,8 +318,6 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
 
         roleSet.cleanup();
         expect(await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8')).toBe(diskBefore);
-        await toolsFiber.dispose();
-        await storeFiber.dispose();
     });
 
     it('PathFence 永久封锁 .ops/dream_watermark.json 与 .ops/safe_halt.json；book_grep 捕获无效正则并返回可操作提示', async () => {
@@ -291,7 +327,9 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
 
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         expect(() =>
             ctx.narrateTools.buildRoleTools({
@@ -313,6 +351,7 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
             runId: 'run-grep-invalid-regex',
             bookRoot
         });
+        registerCleanup(() => roleSet.cleanup());
         const bookRead = roleSet.toolMap.get('book_read')!;
         const bookGrep = roleSet.toolMap.get('book_grep')!;
         const bookEdit = roleSet.toolMap.get('book_edit')!;
@@ -353,9 +392,5 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
                 createMockExec('book_grep', { pattern: '(unclosed', path: 'world/open_threads.md' })
             )
         ).rejects.toThrow(/fixed_strings=true/);
-
-        roleSet.cleanup();
-        await toolsFiber.dispose();
-        await storeFiber.dispose();
     });
 });

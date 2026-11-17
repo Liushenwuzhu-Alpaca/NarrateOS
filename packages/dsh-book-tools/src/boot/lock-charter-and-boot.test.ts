@@ -11,6 +11,11 @@ import * as bookToolsPlugin from '../index.js';
 import { lockCharterAndBoot, type LockCharterAndBootInput } from './lock-charter-and-boot.js';
 
 const tempDirs: string[] = [];
+const cleanups: Array<() => void | Promise<void>> = [];
+
+function registerCleanup(fn: () => void | Promise<void>): void {
+    cleanups.push(fn);
+}
 
 async function makeTempBooksRoot(): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), 'narrateos-boot-test-'));
@@ -71,6 +76,12 @@ function buildMinimalValidBootInput(overrides: Partial<LockCharterAndBootInput> 
 }
 
 afterEach(async () => {
+    while (cleanups.length > 0) {
+        const fn = cleanups.pop();
+        if (fn) {
+            await fn();
+        }
+    }
     while (tempDirs.length > 0) {
         const dir = tempDirs.pop();
         if (dir) {
@@ -121,12 +132,12 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         // tx_state 初始化 last_committed_ch = 0 且 Git 工作区干净
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot: result.bookRoot });
+        registerCleanup(() => storeFiber.dispose());
         const store = ctx.narrateStore.openStore();
         const txState = await store.readTxState();
         expect(txState.last_committed_ch).toBe(0);
         expect(txState.phase).toBe('IDLE');
         expect(await ctx.narrateStore.system.isWorkingTreeClean(result.bookRoot)).toBe(true);
-        await storeFiber.dispose();
     });
 
     it('拦截 storyDay > 0 的 T0 时间线泄露与 StaticProseGate 违规文本，且不残余半成品目录', async () => {
@@ -174,7 +185,9 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         const booksRoot = await makeTempBooksRoot();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin);
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => toolsFiber.dispose());
 
         const res = await ctx.narrateTools.lockCharterAndBoot(
             buildMinimalValidBootInput({
@@ -191,9 +204,6 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         const voiceYaml = await readFile(join(res.bookRoot, '.ops/voice_samples.yaml'), 'utf8');
         expect(voiceYaml).toContain('单子上的骑缝章少了一角');
         expect(voiceYaml).not.toContain('深吸一口气');
-
-        await toolsFiber.dispose();
-        await storeFiber.dispose();
     });
 
     it('拒绝缺少中文 canonicalName 与 static_base_and_voice 违规，且写入/Git 失败时彻底回滚新建目录', async () => {
@@ -267,7 +277,9 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         const booksRoot = await makeTempBooksRoot();
         const ctx = new Context();
         const storeFiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+        registerCleanup(() => storeFiber.dispose());
         const toolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => toolsFiber.dispose());
 
         expect(ctx.narrateTools.booksRoot).toBe(booksRoot);
         const toolsService = ctx.narrateTools;
@@ -276,7 +288,5 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         await expect(
             toolsService.lockCharterAndBoot(buildMinimalValidBootInput({ book_slug: 'after-dispose' }))
         ).rejects.toThrow('已卸载');
-
-        await storeFiber.dispose();
     });
 });

@@ -5,7 +5,7 @@
  */
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../src/client/api.js';
 import { NarrateStudioRoot } from '../src/client/index.js';
 import type {
@@ -27,7 +27,23 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
     };
 });
 
-(globalThis as Record<string, unknown>)['IS_REACT_ACT_ENVIRONMENT'] = true;
+const globalState = globalThis as Record<string, unknown>;
+let hadReactActEnv = false;
+let prevReactActEnv: unknown;
+
+beforeAll(() => {
+    hadReactActEnv = Object.hasOwn(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
+    prevReactActEnv = globalState['IS_REACT_ACT_ENVIRONMENT'];
+    globalState['IS_REACT_ACT_ENVIRONMENT'] = true;
+});
+
+afterAll(() => {
+    if (hadReactActEnv) {
+        globalState['IS_REACT_ACT_ENVIRONMENT'] = prevReactActEnv;
+    } else {
+        delete globalState['IS_REACT_ACT_ENVIRONMENT'];
+    }
+});
 
 const books: BookSummary[] = [
     { bookRoot: '/books/a', slug: 'a', title: '作品甲', currentChapter: 2, storyDay: 2, walPhase: 'IDLE' },

@@ -95,26 +95,34 @@ describe('作品运行追踪', () => {
         await mkdir(join(root, '.ops'));
         await writeFile(join(root, '.ops/traces'), '阻止创建目录');
         const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-        const llm = new ScriptedLlmAdapter([{ text: '唯一结果', usage }]);
-        const result = await withTraceRun(root, 'step', {}, () => generateTraced(llm, request));
-        expect(result.text).toBe('唯一结果');
-        expect(llm.history).toHaveLength(1);
-        expect(warning).toHaveBeenCalled();
+        try {
+            const llm = new ScriptedLlmAdapter([{ text: '唯一结果', usage }]);
+            const result = await withTraceRun(root, 'step', {}, () => generateTraced(llm, request));
+            expect(result.text).toBe('唯一结果');
+            expect(llm.history).toHaveLength(1);
+            expect(warning).toHaveBeenCalled();
+        } finally {
+            warning.mockRestore();
+        }
     });
 
     it('响应落盘失败仍返回成功结果，记录标为不完整且不重调模型', async () => {
         const root = await fixture();
         const warning = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-        const llm = new ScriptedLlmAdapter([async () => {
-            const run = (await listTraceRuns(root)).runs[0]!;
-            const event = (await readTraceEvents(root, run.run_id)).events.find((item) => item.type === 'call.started')!;
-            await mkdir(join(root, '.ops/traces', run.run_id, `${String(event.data['call_id'])}.output.json`));
-            return { text: '写作成功', usage };
-        }]);
-        expect((await withTraceRun(root, 'step', {}, () => generateTraced(llm, request))).text).toBe('写作成功');
-        expect(llm.history).toHaveLength(1);
-        expect((await listTraceRuns(root)).runs[0]!.status).toBe('incomplete');
-        expect(warning).toHaveBeenCalled();
+        try {
+            const llm = new ScriptedLlmAdapter([async () => {
+                const run = (await listTraceRuns(root)).runs[0]!;
+                const event = (await readTraceEvents(root, run.run_id)).events.find((item) => item.type === 'call.started')!;
+                await mkdir(join(root, '.ops/traces', run.run_id, `${String(event.data['call_id'])}.output.json`));
+                return { text: '写作成功', usage };
+            }]);
+            expect((await withTraceRun(root, 'step', {}, () => generateTraced(llm, request))).text).toBe('写作成功');
+            expect(llm.history).toHaveLength(1);
+            expect((await listTraceRuns(root)).runs[0]!.status).toBe('incomplete');
+            expect(warning).toHaveBeenCalled();
+        } finally {
+            warning.mockRestore();
+        }
     });
 
     it('活动运行拒绝清理，结束后预览不删除，完整 ID 确认才清理', async () => {
@@ -156,13 +164,21 @@ describe('作品运行追踪', () => {
         await appendFile(path, '\n');
         expect((await readTraceEvents(root, run.run_id, first.offset)).events[0]!.data['value']).toBe('中文');
         await expect(readTraceEvents(root, '../escape')).rejects.toThrow('ID');
+    });
+
+    // Windows 非特权账号默认无权创建文件符号链接，跳过该平台独占校验
+    it.skipIf(process.platform === 'win32')('拒绝读取或清理追踪目录中的符号链接，原目标文件不受影响', async () => {
+        const root = await fixture();
+        await withTraceRun(root, 'step', {}, async () => {});
+        const run = (await listTraceRuns(root)).runs[0]!;
         await symlink(join(root, 'world/book_config.yaml'), join(root, '.ops/traces', run.run_id, 'linked.output.json'));
         await expect(readTraceCall(root, run.run_id, 'linked', 'output')).rejects.toThrow('符号链接');
         await expect(pruneTraceRun(root, run.run_id, run.run_id)).rejects.toThrow('符号链接');
         expect(await readFile(join(root, 'world/book_config.yaml'), 'utf8')).toContain('trace_level');
     });
 
-    it('真实子进程被终止后只显示未完成，不伪造业务失败事件', async () => {
+    // 依赖 POSIX SIGKILL 信号强杀子进程语义；Windows 无 POSIX 信号语义故显式跳过
+    it.skipIf(process.platform === 'win32')('真实子进程被终止后只显示未完成，不伪造业务失败事件', async () => {
         const root = await fixture();
         const moduleUrl = new URL('./trace.ts', import.meta.url).href;
         const child = spawn(process.execPath, ['--input-type=module', '-e', `
@@ -174,10 +190,31 @@ describe('作品运行追踪', () => {
             });
         `], { stdio: ['pipe', 'pipe', 'pipe'] });
         const exited = once(child, 'exit');
+        let stdout = '';
         let stderr = '';
         child.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+        const ready = new Promise<void>((resolve, reject) => {
+            const onData = (chunk: Buffer) => {
+                stdout += chunk.toString();
+                if (stdout.includes('ready')) {
+                    child.stdout!.off('data', onData);
+                    resolve();
+                }
+            };
+            child.stdout!.on('data', onData);
+            void exited.then(
+                ([code, signal]) => {
+                    child.stdout!.off('data', onData);
+                    reject(new Error(`追踪子进程提前退出 (code=${String(code)}, signal=${String(signal)}): ${stderr}`));
+                },
+                (err: unknown) => {
+                    child.stdout!.off('data', onData);
+                    reject(err);
+                }
+            );
+        });
         try {
-            await Promise.race([once(child.stdout!, 'data'), exited.then(() => { throw new Error(`追踪子进程提前退出: ${stderr}`); })]);
+            await ready;
             const run = (await listTraceRuns(root)).runs[0]!;
             expect(run.status).toBe('active');
             child.kill('SIGKILL');
@@ -187,8 +224,10 @@ describe('作品运行追踪', () => {
             await pruneTraceRun(root, run.run_id, run.run_id);
             expect((await listTraceRuns(root)).runs).toEqual([]);
         } finally {
-            child.kill('SIGKILL');
-            await exited;
+            if (child.exitCode === null && child.signalCode === null) {
+                child.kill('SIGKILL');
+            }
+            await exited.catch(() => undefined);
         }
     });
 });
