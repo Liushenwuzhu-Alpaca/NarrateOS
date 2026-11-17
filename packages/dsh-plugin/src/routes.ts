@@ -480,15 +480,14 @@ export class NarrateRuntimeController {
         try {
             const parsed = TxLockPayloadSchema.safeParse(JSON.parse(raw));
             if (parsed.success) {
-                const ageMs = Date.now() - Date.parse(parsed.data.acquiredAt);
                 let alive = false;
                 try {
                     process.kill(parsed.data.pid, 0);
                     alive = true;
                 } catch (err: unknown) {
-                    alive = (err as { code?: string }).code === 'EPERM';
+                    alive = !(err !== null && typeof err === 'object' && 'code' in err && err.code === 'ESRCH');
                 }
-                active = alive && ageMs < DEFAULT_LOCK_STALE_MS;
+                active = alive;
             } else {
                 const fileStat = await stat(lockPath);
                 active = Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;

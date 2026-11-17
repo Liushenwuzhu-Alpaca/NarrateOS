@@ -85,6 +85,7 @@ narrateos/
 - **完工判据（Exit Criteria）**：
   - `pnpm test --filter @narrateos/core` 退出码为 `0`；
   - 自动化测试完整覆盖并断言通过：① 并发/顺序行级补丁零状态丢失；② 企图修改实体 `canonical_name` 或 `Innate Locks` 已锁条目的补丁 100% 被拦截报错；③ 引用不存在的 `char_XXX` / `item_XXX` / `ch_XXXX` 触发外键异常阻止 `state` 提交；④ 模拟 `FEAT_COMMITTED` 后断电重启，`recoverWal()` 精确识别未完成状态并保持 Git 树零脏文件。
+  - 事务锁仅在持锁进程已退出时回收；锁龄不能使存活进程失去互斥保护。释放时核验本次获取的所有权，不删除其他持有者的锁。损坏锁仅按超时规则恢复。
 
 ### Phase 2：确定性裁剪、成对检索与静态门禁内核 (`ViewSlicer` + `IndexRecall` + `ProseGateAndTelemetry`)
 - **交付内容**：零 LLM 调用完整实现 `ViewSlicer`、`IndexRecall` 与 `ProseGateAndTelemetry` 三个纯确定性深模块。

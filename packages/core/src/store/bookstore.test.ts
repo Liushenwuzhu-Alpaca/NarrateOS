@@ -163,6 +163,21 @@ describe('BookStore', () => {
         await expect(store.withTxLock(async () => 'recovered-stale-lock')).resolves.toBe('recovered-stale-lock');
     });
 
+    it('存活持锁进程不因锁龄超时被抢占，释放时保留替换锁', async () => {
+        const { bookRoot, store } = await createTempBookRepo();
+        const lockPath = join(bookRoot, '.ops/tx.lock');
+        const oldLiveLock = JSON.stringify({ pid: process.pid, acquiredAt: '2020-01-01T00:00:00.000Z' });
+        await writeFile(lockPath, oldLiveLock, 'utf8');
+        await expect(store.withTxLock(async () => '不应进入')).rejects.toThrow(TxLockConflictError);
+        expect(await readFile(lockPath, 'utf8')).toBe(oldLiveLock);
+        await rm(lockPath);
+
+        await store.withTxLock(async () => {
+            await writeFile(lockPath, oldLiveLock, 'utf8');
+        });
+        expect(await readFile(lockPath, 'utf8')).toBe(oldLiveLock);
+    });
+
     it('能够读取并 Zod 校验 book_config.yaml 与 world/world_state.md', async () => {
         const { bookRoot, store } = await createTempBookRepo();
         const config = await store.readBookConfig();

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -149,6 +149,7 @@ export class BookStore {
         const staleMs = options?.staleMs ?? DEFAULT_LOCK_STALE_MS;
         const payload = JSON.stringify({
             pid: process.pid,
+            owner: randomUUID(),
             acquiredAt: new Date().toISOString()
         });
 
@@ -186,7 +187,9 @@ export class BookStore {
             return await this.lockContext.run(true, fn);
         } finally {
             try {
-                await unlink(this.txLockPath);
+                if (await readFile(this.txLockPath, 'utf8') === payload) {
+                    await unlink(this.txLockPath);
+                }
             } catch (err: unknown) {
                 const code = (err as { code?: string }).code;
                 if (code !== 'ENOENT') {
@@ -215,9 +218,8 @@ export class BookStore {
             }
             const parsed = TxLockPayloadSchema.safeParse(payload);
             if (parsed.success) {
-                const ageMs = Date.now() - Date.parse(parsed.data.acquiredAt);
                 const alive = isProcessAlive(parsed.data.pid);
-                if (alive && ageMs < staleMs) {
+                if (alive) {
                     return false;
                 }
             } else {
