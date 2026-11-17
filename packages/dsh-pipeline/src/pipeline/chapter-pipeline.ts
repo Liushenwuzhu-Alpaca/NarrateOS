@@ -5,7 +5,6 @@ import {
     analyzeParagraphs,
     computeTelemetry,
     CraftPluginLoader,
-    generateTraced,
     IndexRecall,
     ParallelSandbox,
     PrefixAssembler,
@@ -20,7 +19,6 @@ import {
     withTraceStage,
     type BookSnapshot,
     type BookStore,
-    type CleanroomRequest,
     type EntityPatch,
     type ForkParallelWindowOptions,
     type GateRuleConfig,
@@ -65,7 +63,9 @@ import {
     normalizeOpenThreads,
     normalizeOpsStyleAmendments,
     readOptionalText,
-    upsertVolumeCardEntry
+    readSignalsCursor,
+    upsertVolumeCardEntry,
+    writeSignalsCursor
 } from './helpers.js';
 
 export interface ChapterPipelineDeps {
@@ -342,7 +342,11 @@ export class ChapterPipeline {
             snapshot.chapterFiles
         );
         const voicePool = await this.readVoicePool();
-        const activeSignals = await this.loadActiveSignals(chapterNumber);
+        const {
+            signals: activeSignals,
+            currentCursor: signalsCursorBefore,
+            nextCursor: signalsCursorAfter
+        } = await this.loadActiveSignals(chapterNumber);
 
         // Step 1: Librarian (多轮受控探查 -> yield_context_pack)
         emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
@@ -352,6 +356,7 @@ export class ChapterPipeline {
             targetDay,
             options.chapterGoal,
             previousChapter,
+            totalUsage,
             options
         );
         const selectedLoreEntries = await this.loadSelectedLoreEntries(
@@ -425,6 +430,7 @@ export class ChapterPipeline {
                 effectivePlannerInjection,
                 voicePool,
                 planConflictFeedback,
+                totalUsage,
                 options
             );
             activeOutline = planned.outline;
@@ -465,6 +471,7 @@ export class ChapterPipeline {
                             snapshot.config.prose_gate.enable_cross_chapter_simile,
                         crossChapterSimileWindow:
                             snapshot.config.prose_gate.cross_chapter_simile_window,
+                        narrationSubjectivity: snapshot.config.narration_subjectivity,
                         rules: gateRules,
                         historicalChapters
                     })
@@ -549,6 +556,7 @@ export class ChapterPipeline {
                     previousChapter,
                     currentArcEnvelopeRaw,
                     arcDirectorPlanRaw,
+                    totalUsage,
                     options
                 );
                 lastFactIssues = verifiedIssues;
@@ -693,6 +701,13 @@ export class ChapterPipeline {
             parallel
         );
 
+        if (
+            !options.chapterGoal.includes('[待响应运维信号]') &&
+            signalsCursorAfter > signalsCursorBefore
+        ) {
+            await writeSignalsCursor(this.store.bookRoot, signalsCursorAfter);
+        }
+
         emit('COMMITTED', chapterNumber, `第 ${chapterNumber} 章双粒度提交完成`);
         return {
             status: 'COMMITTED',
@@ -718,6 +733,7 @@ export class ChapterPipeline {
         targetDay: number,
         chapterGoal: string,
         previousChapter: PreviousChapterContext | undefined,
+        totalUsage: TokenUsage,
         options: StepChapterOptions
     ): Promise<{ librarianOut: YieldContextPackResult['payload']; recallSlices: RecallSlice[] }> {
         const catalog = await this.recall.buildLibrarianCatalog(this.store.bookRoot, {
@@ -774,6 +790,7 @@ export class ChapterPipeline {
             signal: options.signal,
             onStageSession: options.onStageSession
         });
+        addUsage(totalUsage, runRes.usage);
 
         const pack = runRes.yieldResult;
         const mergedSlices: RecallSlice[] = [...pack.recalledSlices];
@@ -829,6 +846,7 @@ export class ChapterPipeline {
         plannerInjection: string,
         voicePool: VoiceSamplePool | undefined,
         planConflictFeedback: string | undefined,
+        totalUsage: TokenUsage,
         options: StepChapterOptions
     ): Promise<{ outline: PlannerOutline; plannerView: ReturnType<ViewSlicer['slice']> }> {
         const plannerView = this.slicer.slice({
@@ -895,6 +913,7 @@ export class ChapterPipeline {
             signal: options.signal,
             onStageSession: options.onStageSession
         });
+        addUsage(totalUsage, runRes.usage);
 
         return {
             outline: runRes.yieldResult,
@@ -989,7 +1008,7 @@ export class ChapterPipeline {
         };
     }
 
-    /** 执行局部 Patch（净室零工具单轮调用，仅传违规段与紧邻上下文） */
+    /** 执行局部 Patch（净室零工具单轮调用，按连续相邻索引分组，仅重写目标段落与紧邻参考） */
     private async runLocalPatch(
         bookConfig: BookSnapshot['config'],
         prose: string,
@@ -1003,50 +1022,82 @@ export class ChapterPipeline {
             return prose;
         }
 
-        const validIndices = violatedIndices.filter((idx) => idx >= 0 && idx < paragraphs.length);
-        if (validIndices.length === 0) {
+        const sortedUnique = Array.from(
+            new Set(violatedIndices.filter((idx) => idx >= 0 && idx < paragraphs.length))
+        ).sort((a, b) => a - b);
+        if (sortedUnique.length === 0) {
             return prose;
         }
 
-        const minIdx = Math.min(...validIndices);
-        const maxIdx = Math.max(...validIndices);
-        const beforeContext = minIdx > 0 ? paragraphs[minIdx - 1] : undefined;
-        const afterContext = maxIdx < paragraphs.length - 1 ? paragraphs[maxIdx + 1] : undefined;
-        const targetSegments = paragraphs.slice(minIdx, maxIdx + 1);
-
-        const writerRoleCfg = await this.roleLoader.loadRoleConfig('writer', this.store.bookRoot);
-        const req: CleanroomRequest = {
-            pool: writerRoleCfg.pool,
-            traceStage: 'patch',
-            temperature: 0.4,
-            staticPrefixBlocks: [
-                '你是小说局部修补专员。请仅重写指定的违规段落，保持前后文语境与人称连贯，只输出修改后的目标段落正文（不要输出前后文参考段落）。'
-            ],
-            dynamicTail: [
-                `## 修补原因\n${reason}`,
-                beforeContext ? `## 前文衔接参考（只读勿输出）\n${beforeContext}` : '',
-                `## 需重写的目标段落\n${targetSegments.join('\n\n')}`,
-                afterContext ? `## 后文衔接参考（只读勿输出）\n${afterContext}` : ''
-            ]
-                .filter(Boolean)
-                .join('\n\n')
-        };
-
-        const res = await generateTraced(this.llm, req, signal);
-        addUsage(totalUsage, res.usage);
-
-        const patchedClean = stripBlockingTags(res.text).cleanText.trim();
-        const replacementParagraphs = splitParagraphs(patchedClean);
-        if (replacementParagraphs.length === 0) {
-            return prose;
+        // 将连续相邻索引归并为一个分组，非相邻段落独立分组修补，严禁跨区间重写中间合规段落
+        const groups: Array<{ start: number; end: number }> = [];
+        for (const idx of sortedUnique) {
+            const last = groups[groups.length - 1];
+            if (last && idx === last.end + 1) {
+                last.end = idx;
+            } else {
+                groups.push({ start: idx, end: idx });
+            }
         }
 
-        const merged = [
-            ...paragraphs.slice(0, minIdx),
-            ...replacementParagraphs,
-            ...paragraphs.slice(maxIdx + 1)
-        ];
-        return merged.join('\n\n');
+        let patchRoleCfg;
+        try {
+            patchRoleCfg = await this.roleLoader.loadRoleConfig('patch', this.store.bookRoot);
+        } catch (err: unknown) {
+            if (err instanceof Error && err.message.includes('未找到角色配置文件')) {
+                patchRoleCfg = await this.roleLoader.loadRoleConfig('writer', this.store.bookRoot);
+            } else {
+                throw err;
+            }
+        }
+        if (!patchRoleCfg.cleanroom) {
+            throw new Error(`角色 ${patchRoleCfg.id} 必须保持 cleanroom: true`);
+        }
+
+        const updatedParagraphs = [...paragraphs];
+        for (let g = groups.length - 1; g >= 0; g -= 1) {
+            const group = groups[g]!;
+            const beforeContext = group.start > 0 ? updatedParagraphs[group.start - 1] : undefined;
+            const afterContext =
+                group.end < updatedParagraphs.length - 1
+                    ? updatedParagraphs[group.end + 1]
+                    : undefined;
+            const targetSegments = updatedParagraphs.slice(group.start, group.end + 1);
+
+            const { response } = await this.roleRunner.runCleanroom({
+                roleId: patchRoleCfg.id,
+                bookRoot: this.store.bookRoot,
+                bookConfig,
+                request: {
+                    pool: patchRoleCfg.pool,
+                    traceStage: 'patch',
+                    temperature: patchRoleCfg.temperature,
+                    staticPrefixBlocks: [patchRoleCfg.promptText],
+                    dynamicTail: [
+                        `## 修补原因\n${reason}`,
+                        beforeContext ? `## 前文衔接参考（只读勿输出）\n${beforeContext}` : '',
+                        `## 需重写的目标段落\n${targetSegments.join('\n\n')}`,
+                        afterContext ? `## 后文衔接参考（只读勿输出）\n${afterContext}` : ''
+                    ]
+                        .filter(Boolean)
+                        .join('\n\n')
+                },
+                signal
+            });
+            addUsage(totalUsage, response.usage);
+
+            const patchedClean = stripBlockingTags(response.text).cleanText.trim();
+            const replacementParagraphs = splitParagraphs(patchedClean);
+            if (replacementParagraphs.length > 0) {
+                updatedParagraphs.splice(
+                    group.start,
+                    group.end - group.start + 1,
+                    ...replacementParagraphs
+                );
+            }
+        }
+
+        return updatedParagraphs.join('\n\n');
     }
 
     /** 执行 Step 5: Fact Checker 多轮受控查证 -> yield_verdict */
@@ -1063,6 +1114,7 @@ export class ChapterPipeline {
         previousChapter: PreviousChapterContext | undefined,
         currentArcEnvelope: string | null,
         arcDirectorPlan: string | null,
+        totalUsage: TokenUsage,
         options: StepChapterOptions
     ): Promise<FactCheckIssue[]> {
         const auditView = this.slicer.slice({
@@ -1109,6 +1161,7 @@ export class ChapterPipeline {
             signal: options.signal,
             onStageSession: options.onStageSession
         });
+        addUsage(totalUsage, runRes.usage);
 
         const verdict = runRes.yieldResult;
         if (verdict.passed || verdict.issues.length === 0) {
@@ -1158,6 +1211,14 @@ export class ChapterPipeline {
             '请抽取实体补丁、story_day_delta、双轨章卡摘要及 2~3 条 next_chapter_options，并调用 `yield_state_patch` 提交。'
         ].join('\n\n');
 
+        const branchReachableIds = parallel
+            ? [
+                  ...Object.keys(snapshot.entities),
+                  ...snapshot.coldArchiveIds,
+                  ...snapshot.chapterFiles.map((fileName) => fileName.replace(/\.md$/, ''))
+              ]
+            : undefined;
+
         const runRes = await this.roleRunner.runMultiTurn<YieldStatePatchResult>({
             roleId: 'extractor',
             stage: 'EXTRACTOR',
@@ -1166,10 +1227,17 @@ export class ChapterPipeline {
             bookConfig: snapshot.config,
             timelineMode,
             deferCommit: true,
+            ...(parallel
+                ? {
+                      visibleEntities: snapshot.entities,
+                      reachableIds: branchReachableIds
+                  }
+                : {}),
             taskPrompt,
             signal: options.signal,
             onStageSession: options.onStageSession
         });
+        addUsage(totalUsage, runRes.usage);
 
         const extracted = runRes.yieldResult.output;
         const sanitizedPatches = sanitizeExtractorPatches(
@@ -1488,27 +1556,52 @@ export class ChapterPipeline {
         };
     }
 
-    private async loadActiveSignals(currentCh: number): Promise<OpsSignal[]> {
+    private async loadActiveSignals(currentCh: number): Promise<{
+        signals: OpsSignal[];
+        currentCursor: number;
+        nextCursor: number;
+    }> {
+        const currentCursor = await readSignalsCursor(this.store.bookRoot);
         const raw = await readOptionalText(join(this.store.bookRoot, '.ops/signals.jsonl'));
-        if (!raw) return [];
+        if (!raw) {
+            return { signals: [], currentCursor: 0, nextCursor: 0 };
+        }
+        const nonEmptyLines = raw
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+        const safeCursor = currentCursor > nonEmptyLines.length ? 0 : currentCursor;
+
         const signals: OpsSignal[] = [];
-        for (const line of raw.split(/\r?\n/)) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
+        let nextCursor = safeCursor;
+        let contiguousPrefix = true;
+
+        for (let idx = safeCursor; idx < nonEmptyLines.length; idx += 1) {
+            const trimmed = nonEmptyLines[idx]!;
             try {
                 const parsed = OpsSignalSchema.safeParse(JSON.parse(trimmed));
-                if (
-                    parsed.success &&
-                    parsed.data.chapter >= Math.max(0, currentCh - 1) &&
-                    parsed.data.chapter <= currentCh
-                ) {
-                    signals.push(parsed.data);
+                if (parsed.success && parsed.data.chapter <= currentCh) {
+                    if (parsed.data.chapter >= Math.max(0, currentCh - 1)) {
+                        signals.push(parsed.data);
+                    }
+                    if (contiguousPrefix) {
+                        nextCursor = idx + 1;
+                    }
+                } else if (!parsed.success) {
+                    if (contiguousPrefix) {
+                        nextCursor = idx + 1;
+                    }
+                } else {
+                    contiguousPrefix = false;
                 }
             } catch {
                 // 忽略格式异常的信号行
+                if (contiguousPrefix) {
+                    nextCursor = idx + 1;
+                }
             }
         }
-        return signals;
+        return { signals, currentCursor: safeCursor, nextCursor };
     }
 
     private async triggerSafeHalt(snapshot: SafeHaltSnapshot): Promise<never> {

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { z } from 'zod';
 import {
     serializeEntityMarkdown,
     type BookConfig,
@@ -9,6 +11,40 @@ import {
     type StaticPrefixInput,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
+
+export const SIGNALS_CURSOR_REL_PATH = '.ops/signals_cursor.json';
+
+export const SignalsCursorSchema = z.object({
+    consumedLines: z.number().int().nonnegative(),
+    updatedAt: z.string()
+});
+
+/** 读取已消费信号行游标（不存在或损坏时安全回退 0） */
+export async function readSignalsCursor(bookRoot: string): Promise<number> {
+    const raw = await readOptionalText(join(bookRoot, SIGNALS_CURSOR_REL_PATH));
+    if (raw === null) return 0;
+    try {
+        const parsed = SignalsCursorSchema.safeParse(JSON.parse(raw));
+        return parsed.success ? parsed.data.consumedLines : 0;
+    } catch {
+        return 0;
+    }
+}
+
+/** 持久化已消费信号行游标到 .ops/signals_cursor.json */
+export async function writeSignalsCursor(bookRoot: string, consumedLines: number): Promise<void> {
+    const opsDir = join(bookRoot, '.ops');
+    await mkdir(opsDir, { recursive: true });
+    const payload = SignalsCursorSchema.parse({
+        consumedLines: Math.max(0, Math.floor(consumedLines)),
+        updatedAt: new Date().toISOString()
+    });
+    await writeFile(
+        join(bookRoot, SIGNALS_CURSOR_REL_PATH),
+        `${JSON.stringify(payload, null, 4)}\n`,
+        'utf8'
+    );
+}
 
 export const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
 

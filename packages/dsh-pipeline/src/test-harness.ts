@@ -4,15 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Context } from '@deepseek-ai/cordis';
-import type {
-    Agent,
-    AgentHandle,
-    CreateAgentOptions
+import {
+    agentEvents,
+    type Agent,
+    type AgentHandle,
+    type CreateAgentOptions
 } from '@deepseek-ai/dsh-agent';
-import type { GenerateOptions, StreamChunk, ToolCallId } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, LlmCallConfig, LlmRuntime, StreamChunk, ToolCallId } from '@deepseek-ai/dsh-llm';
 import { createScope, scopeTarget } from '@deepseek-ai/dsh-scope';
+import { renderPrompt } from '@deepseek-ai/dsh-system-prompt';
 import type { ToolDefinition, ToolExecutor, ToolRunContext } from '@deepseek-ai/dsh-tools';
-import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
 import { BookStore, NodeSystemAdapter } from '@narrateos/dsh-book-store';
 
 const execFileAsync = promisify(execFile);
@@ -23,6 +24,7 @@ export interface RecordedAgentRun {
     cwd: string | undefined;
     provider: string | undefined;
     model: string | undefined;
+    temperature: number | undefined;
     toolNames: string[];
     systemPromptText: string;
     taskPrompt: string;
@@ -345,6 +347,7 @@ export async function createHeadlessMockServices(
                     const ac = new AbortController();
                     const fakeAgent = {
                         id: options.sessionId,
+                        session: { id: options.sessionId },
                         options: options.agentOptions ?? {},
                         status: 'idle' as const
                     } as unknown as Agent;
@@ -367,8 +370,18 @@ export async function createHeadlessMockServices(
                         const assembly = await agentCtx.systemPrompt.assemble({
                             scope: fakeAgent
                         });
-                        capturedSystemPrompt = assembly.sections.map((s) => s.text).join('\n\n');
+                        capturedSystemPrompt = renderPrompt(assembly);
                     }
+
+                    const callConfig = await agentEvents(agentCtx, fakeAgent).waterfall(
+                        'agent/request',
+                        { turn: 1, step: 1, signal: ac.signal },
+                        () =>
+                            Promise.resolve({
+                                provider: options.agentOptions?.provider ?? '',
+                                model: options.agentOptions?.model ?? ''
+                            } as LlmCallConfig)
+                    );
 
                     const execTool = async (name: string, args: unknown): Promise<unknown> => {
                         const def = registeredTools.get(name);
@@ -399,6 +412,11 @@ export async function createHeadlessMockServices(
                     };
                     (fakeAgent as { whenIdle: Agent['whenIdle'] }).whenIdle = () => idlePromise;
                     (fakeAgent as { followup: Agent['followup'] }).followup = (msg) => {
+                        if (typeof msg.id !== 'string' || msg.id.length === 0 || msg.role !== 'user') {
+                            throw new Error(
+                                `Invalid UserMessage passed to agent.followup: id=${String(msg.id)}, role=${String(msg.role)}`
+                            );
+                        }
                         if (started) return;
                         started = true;
                         const taskPrompt = msg.content
@@ -412,6 +430,7 @@ export async function createHeadlessMockServices(
                             cwd: options.meta?.cwd,
                             provider: options.agentOptions?.provider,
                             model: options.agentOptions?.model,
+                            temperature: callConfig.temperature,
                             toolNames: [...registeredTools.keys()],
                             systemPromptText: capturedSystemPrompt,
                             taskPrompt

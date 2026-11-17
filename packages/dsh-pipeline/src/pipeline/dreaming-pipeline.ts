@@ -7,6 +7,7 @@ import {
     generateStructuredJson,
     generateTraced,
     stripBlockingTags,
+    TxStateSchema,
     verifyDualQuotes,
     withTraceRun,
     type BookStore,
@@ -225,6 +226,7 @@ export class DreamingPipeline {
                 signal: options.signal,
                 onStageSession: options.onStageSession
             });
+            addUsage(usage, runRes.usage);
 
             const committedTxState = await this.store.readTxState();
             return {
@@ -250,7 +252,8 @@ export class DreamingPipeline {
         conflicts: SuspectedConflict[],
         options: HealConflictsOptions = {}
     ): Promise<HealConflictsResult> {
-        return await withTraceRun(this.store.bookRoot, 'heal', {}, async () => {
+        return await withTraceRun(this.store.bookRoot, 'heal', {}, () =>
+            this.store.withTxLock(async () => {
             const usage = createEmptyUsage();
             const results: HealConflictItemResult[] = [];
             let quarantined = false;
@@ -454,9 +457,10 @@ export class DreamingPipeline {
                     const targetChapter = Math.max(0, conflict.chapterB - 1);
                     const rollbackRef = options.resolveRollbackRef
                         ? await options.resolveRollbackRef(targetChapter)
-                        : await this.findRollbackRef(targetChapter, rollbackChapters);
+                        : await this.findRollbackRef(targetChapter);
 
                     await this.system.resetHard(this.store.bookRoot, rollbackRef);
+                    await this.system.cleanUntracked(this.store.bookRoot, ['.ops/**']);
 
                     if (options.onAutoRerun) {
                         try {
@@ -530,7 +534,7 @@ export class DreamingPipeline {
                 quarantineReport,
                 usage
             };
-        });
+        }));
     }
 
     private applyLineRangePatch(
@@ -555,7 +559,7 @@ export class DreamingPipeline {
         updatedContent: string
     ): Promise<void> {
         const chKey = formatChapterKey(chapterNumber);
-        await this.store.withTxLock(async () => {
+        await this.store.runWithTxLock(async () => {
             const currentTx = await this.store.readTxState();
             const nextTx: TxState = {
                 ...currentTx,
@@ -618,10 +622,65 @@ export class DreamingPipeline {
         return total;
     }
 
-    private async findRollbackRef(
-        targetChapter: number,
-        rollbackChapters: number
-    ): Promise<string> {
+    private async findRollbackRef(targetChapter: number): Promise<string> {
+        // 1. 优先从 Git commit log 逐条检索 <= targetChapter 的最近有效稳定基线（依据 .ops/tx_state.json 与原稿列表）
+        try {
+            const { stdout } = await execFileAsync(
+                'git',
+                ['-C', this.store.bookRoot, 'log', '-n', '250', '--format=%H'],
+                { encoding: 'utf8' }
+            );
+            const commits = stdout
+                .split(/\r?\n/)
+                .map((s) => s.trim())
+                .filter((s) => s.length > 0);
+
+            for (const sha of commits) {
+                const txRaw = await this.system.readFileAtRef(
+                    this.store.bookRoot,
+                    sha,
+                    '.ops/tx_state.json'
+                );
+                if (txRaw !== null) {
+                    try {
+                        const tx = TxStateSchema.parse(JSON.parse(txRaw));
+                        if (
+                            tx.last_committed_ch <= targetChapter &&
+                            tx.phase !== 'DRAFTING' &&
+                            tx.phase !== 'FEAT_COMMITTED'
+                        ) {
+                            return sha;
+                        }
+                        continue;
+                    } catch {
+                        // 若该历史提交 tx_state 解析异常，继续检查其原稿章节号
+                    }
+                }
+
+                // 无有效 tx_state 时回退检查该提交下 manuscripts/ 最大章号
+                const { stdout: treeOut } = await execFileAsync(
+                    'git',
+                    ['-C', this.store.bookRoot, 'ls-tree', '-r', '--name-only', sha, 'manuscripts'],
+                    { encoding: 'utf8' }
+                );
+                const chNumbers = treeOut
+                    .split(/\r?\n/)
+                    .map((p) => /ch_(\d{4})\.md$/.exec(p.trim())?.[1])
+                    .filter((m): m is string => Boolean(m))
+                    .map((m) => Number(m));
+                const maxCh = chNumbers.length > 0 ? Math.max(...chNumbers) : 0;
+                if (maxCh <= targetChapter) {
+                    return sha;
+                }
+            }
+
+            if (commits.length > 0) {
+                return commits[commits.length - 1]!;
+            }
+        } catch {
+            // 回退检查 tag 或 HEAD
+        }
+
         if (targetChapter > 0) {
             const tagPattern = formatChapterTag(targetChapter);
             try {
@@ -635,21 +694,10 @@ export class DreamingPipeline {
                     return sha;
                 }
             } catch {
-                // 回退使用相对步数
+                // 忽略
             }
         }
 
-        try {
-            const { stdout } = await execFileAsync(
-                'git',
-                ['-C', this.store.bookRoot, 'rev-list', '--count', 'HEAD'],
-                { encoding: 'utf8' }
-            );
-            const totalCommits = Number(stdout.trim());
-            const steps = Math.min(Math.max(1, rollbackChapters), Math.max(0, totalCommits - 1));
-            return steps > 0 ? `HEAD~${steps}` : 'HEAD';
-        } catch {
-            return 'HEAD';
-        }
+        return 'HEAD';
     }
 }

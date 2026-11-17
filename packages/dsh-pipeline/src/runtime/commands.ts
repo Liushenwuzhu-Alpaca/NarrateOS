@@ -7,6 +7,7 @@ function formatErr(err: unknown): string {
 
 /**
  * 注册 NarrateOS 聊天栏零开销斜杠命令：
+ * - /narrate-status
  * - /narrate-step [目标]
  * - /narrate-yolo [章数]
  * - /narrate-halt
@@ -14,13 +15,40 @@ function formatErr(err: unknown): string {
  * - /narrate-sync
  * - /narrate-signal <指令内容>
  *
- * 所有命令绕过模型（0 Token），校验准入后立即异步启动后台任务并返回短文本回执，不阻塞聊天输入框。
+ * 所有命令绕过模型（0 Token），校验准入后立即异步启动后台任务或返回只读状态回执，不阻塞聊天输入框。
  */
 export function registerNarrateCommands(
     commands: Pick<CommandRuntime, 'register'>,
     controller: NarrateRuntimeController
 ): () => void {
     const definitions: CommandDefinition[] = [
+        {
+            name: 'narrate-status',
+            description: '查看当前激活作品、章号、WAL 相位与运行态摘要（0 Token 只读）',
+            handler: async (): Promise<CommandResult> => {
+                try {
+                    controller.assertAdmissionOpen();
+                    const store = controller.requireBookStore();
+                    const [config, worldState, txState, pendingSignals] = await Promise.all([
+                        store.readBookConfig(),
+                        store.readWorldState(),
+                        store.readTxState(),
+                        controller.countPendingSignals()
+                    ]);
+                    const rt = controller.runtimeStatus;
+                    return {
+                        kind: 'success',
+                        text: [
+                            `作品：${config.title} (${config.book_slug})`,
+                            `卷/章：第 ${worldState.frontmatter.current_volume} 卷 第 ${txState.last_committed_ch} 章 (story_day=${worldState.frontmatter.story_day})`,
+                            `WAL 相位：${txState.phase} | 运行态：${rt.activeTask} | YOLO：${rt.yolo.running ? '运行中' : '空闲'} | 待消费信号：${pendingSignals}`
+                        ].join('\n')
+                    };
+                } catch (err) {
+                    return { kind: 'error', text: formatErr(err) };
+                }
+            }
+        },
         {
             name: 'narrate-step',
             description: '触发单章 6 阶段生产管线（0 Token 后台异步执行）',

@@ -40,6 +40,8 @@ export const RoleConfigSchema = z.object({
     maxSteps: z.number().int().positive(),
     maxReadCalls: z.number().int().nonnegative(),
     tools: z.array(ControlledBookToolNameSchema).default([]),
+    allowedOpsRead: z.array(z.string().min(1)).default([]),
+    allowedOpsWrite: z.array(z.string().min(1)).default([]),
     yieldTool: YieldToolNameSchema.nullable().default(null)
 });
 
@@ -56,6 +58,8 @@ export interface LoadedRoleConfig {
     maxSteps: number;
     maxReadCalls: number;
     tools: ControlledBookToolName[];
+    allowedOpsRead: string[];
+    allowedOpsWrite: string[];
     yieldTool: YieldToolName | null;
     promptText: string;
     roleFilePath: string;
@@ -154,7 +158,7 @@ export class RoleLoader {
         const promptFilePath = await this.resolvePromptFilePath(
             cfg.promptFile,
             dirname(roleFilePath),
-            isBookOverride ? bookRolesDir : bookRolesDir,
+            bookRolesDir,
             presetRolesDir
         );
         const promptText = (await readFile(promptFilePath, 'utf8')).trim();
@@ -172,6 +176,8 @@ export class RoleLoader {
             maxSteps: cfg.maxSteps,
             maxReadCalls: cfg.maxReadCalls,
             tools: [...cfg.tools],
+            allowedOpsRead: [...cfg.allowedOpsRead],
+            allowedOpsWrite: [...cfg.allowedOpsWrite],
             yieldTool: cfg.yieldTool,
             promptText,
             roleFilePath,
@@ -192,22 +198,26 @@ export class RoleLoader {
 
         const candidates: Array<{ baseDir: string; path: string }> = [];
 
-        // 1. 先相对于命中的 role YAML 所在目录解析
-        const fromYamlDir = resolve(roleYamlDir, promptFile);
-        assertInsideDirectory(roleYamlDir, fromYamlDir, 'promptFile');
-        candidates.push({ baseDir: roleYamlDir, path: fromYamlDir });
-
-        // 2. 若提供了 bookRoot 但 YAML 来自 presetRoot，也允许仅覆盖 world/roles/prompts/<name>.md
-        if (bookRolesDir && roleYamlDir !== bookRolesDir) {
+        // 1. 若存在单书 world/roles 目录且不同于预设目录，优先检查单书 Prompt 覆写（支持仅覆写 prompts/*.md）
+        if (bookRolesDir && bookRolesDir !== presetRolesDir) {
             const fromBookRoles = resolve(bookRolesDir, promptFile);
             assertInsideDirectory(bookRolesDir, fromBookRoles, 'promptFile');
             candidates.push({ baseDir: bookRolesDir, path: fromBookRoles });
         }
 
+        // 2. 其次相对于命中的 role YAML 所在目录解析
+        if (!bookRolesDir || roleYamlDir !== bookRolesDir) {
+            const fromYamlDir = resolve(roleYamlDir, promptFile);
+            assertInsideDirectory(roleYamlDir, fromYamlDir, 'promptFile');
+            candidates.push({ baseDir: roleYamlDir, path: fromYamlDir });
+        }
+
         // 3. 回退至 <presetRoot>/roles/<promptFile>
-        const fromPresetRoles = resolve(presetRolesDir, promptFile);
-        assertInsideDirectory(presetRolesDir, fromPresetRoles, 'promptFile');
-        candidates.push({ baseDir: presetRolesDir, path: fromPresetRoles });
+        if (presetRolesDir !== roleYamlDir && presetRolesDir !== bookRolesDir) {
+            const fromPresetRoles = resolve(presetRolesDir, promptFile);
+            assertInsideDirectory(presetRolesDir, fromPresetRoles, 'promptFile');
+            candidates.push({ baseDir: presetRolesDir, path: fromPresetRoles });
+        }
 
         for (const candidate of candidates) {
             if (await fileExists(candidate.path)) {
