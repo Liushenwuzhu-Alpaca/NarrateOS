@@ -1,15 +1,17 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
 import {
+    BookStore,
     ForeignKeyError,
     InnateLockViolationError,
     NodeSystemAdapter
 } from '@narrateos/dsh-book-store';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GateValidationError } from '../errors.js';
 import * as bookToolsPlugin from '../index.js';
 
@@ -265,6 +267,19 @@ describe('yield_* 终态门禁工具确定性校验', () => {
 
         // 捏造草稿引文 -> 拒绝
         const fakeDraftSpy = createSpyExec('yield_verdict', {});
+
+        // passed=false 但 issues 为空数组 -> 拒绝
+        const emptyIssuesSpy = createSpyExec('yield_verdict', {});
+        await expect(
+            yieldVerdict.execute(
+                {
+                    passed: false,
+                    issues: []
+                },
+                emptyIssuesSpy.exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(emptyIssuesSpy.concludedCount()).toBe(0);
         await expect(
             yieldVerdict.execute(
                 {
@@ -612,6 +627,155 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         expect(await readFile(join(bookRoot, '.ops/signals.jsonl'), 'utf8')).toContain('SPOTLIGHT_TRIGGER');
 
         roleSetOk.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
+
+    it('yield_dream_commit 在首份暂存文件写入磁盘前先调用 recordPendingWrites 落盘恢复清单', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-pending-order',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        await roleSet.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/open_threads.md',
+                target_text: '- [thread_001 | status: ACTIVE] item_001 黄铜钥匙去向',
+                replacement_text: '- [thread_001 | status: RESOLVED] item_001 黄铜钥匙去向（已核实）'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+
+        let pendingFileExistedAtRecordTime = false;
+        let recordedPaths: string[] = [];
+        let threadsHadResolvedAtRecordTime = false;
+        const origRecord = BookStore.prototype.recordPendingWrites;
+        const spy = vi.spyOn(BookStore.prototype, 'recordPendingWrites').mockImplementation(async function (
+            this: BookStore,
+            paths: string[]
+        ) {
+            if (recordedPaths.length === 0) {
+                recordedPaths = [...paths];
+                const diskThreads = await readFile(join(bookRoot, 'world/open_threads.md'), 'utf8');
+                threadsHadResolvedAtRecordTime = diskThreads.includes('status: RESOLVED');
+            }
+            await origRecord.call(this, paths);
+            if (!pendingFileExistedAtRecordTime) {
+                pendingFileExistedAtRecordTime = existsSync(join(bookRoot, '.ops/pending_writes.json'));
+            }
+        });
+
+        try {
+            const okSpy = createSpyExec('yield_dream_commit', {});
+            await roleSet.toolMap.get('yield_dream_commit')!.execute(
+                {
+                    summary: '崩溃恢复前置测试',
+                    chapter_number: 1,
+                    spotlight_triggers: [
+                        {
+                            entity_id: 'char_001',
+                            reason: '切镜测试',
+                            suggested_mode: 'MAINLINE'
+                        }
+                    ]
+                },
+                okSpy.exec
+            );
+
+            expect(spy).toHaveBeenCalled();
+            expect(threadsHadResolvedAtRecordTime).toBe(false);
+            expect(pendingFileExistedAtRecordTime).toBe(true);
+            expect(recordedPaths).toEqual(
+                expect.arrayContaining([
+                    'world/open_threads.md',
+                    '.ops/signals.jsonl',
+                    '.ops/dream_watermark.json'
+                ])
+            );
+        } finally {
+            spy.mockRestore();
+            roleSet.cleanup();
+            await toolsFiber.dispose();
+            await storeFiber.dispose();
+        }
+    });
+
+    it('yield_boot_bundle 与 lock_charter_and_boot 共享门禁：校验中文名、staticBaseAndVoice、trajectory 与 buffer', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-boot-bundle',
+            bookRoot,
+            yieldTool: 'yield_boot_bundle'
+        });
+        const yieldBoot = roleSet.toolMap.get('yield_boot_bundle')!;
+
+        const validBundle = {
+            world_summary: '冬夜港口停工，货仓外只留一盏风灯。',
+            static_base_and_voice: '第三人称限知视角，短句克制，重物理器械细节。',
+            current_arc_envelope: '沈默核对三号仓货单，寻找消失的木箱去向。',
+            stage_ceiling: '第一卷不得揭露海关签批人身份。',
+            opening_sequence_beats: [
+                { craft_focus: '风灯与铁锁', clue_budget: '三号仓编号', completion_sign: '确认空仓' },
+                { craft_focus: '交接账册', clue_budget: '夜班签名', completion_sign: '墨迹未干' },
+                { craft_focus: '驳船码头', clue_budget: '拖轮尾号', completion_sign: '锁定航向' }
+            ],
+            l1_volumes_markdown: '# L1\n\n- vol_01: 封港账',
+            entities: [
+                {
+                    entityId: 'char_001',
+                    canonicalName: '沈默',
+                    innateLocks: [{ visibility: 'PUBLIC', text: '左手旧伤' }],
+                    acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '在港口外廊' }],
+                    irreversibleTrajectory: [{ storyDay: 0, text: '接过提货单' }],
+                    recentBuffer: [{ storyDay: 0, text: '核对仓号' }]
+                }
+            ]
+        };
+
+        // static_base_and_voice 触发 StaticProseGate -> 拒绝
+        await expect(
+            yieldBoot.execute(
+                {
+                    ...validBundle,
+                    static_base_and_voice: '他指节泛白，喉结滚动，眼神中闪过一丝犹豫。'
+                },
+                createSpyExec('yield_boot_bundle', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // irreversibleTrajectory 触发 StaticProseGate -> 拒绝
+        await expect(
+            yieldBoot.execute(
+                {
+                    ...validBundle,
+                    entities: [
+                        {
+                            ...validBundle.entities[0]!,
+                            irreversibleTrajectory: [
+                                { storyDay: 0, text: '他指节泛白，眼神中闪过一丝寒意。' }
+                            ]
+                        }
+                    ]
+                },
+                createSpyExec('yield_boot_bundle', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        const okSpy = createSpyExec('yield_boot_bundle', {});
+        const res = (await yieldBoot.execute(validBundle, okSpy.exec)) as { accepted: boolean };
+        expect(res.accepted).toBe(true);
+        expect(okSpy.concludedCount()).toBe(1);
+
+        roleSet.cleanup();
         await toolsFiber.dispose();
         await storeFiber.dispose();
     });

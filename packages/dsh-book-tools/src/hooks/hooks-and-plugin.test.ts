@@ -114,6 +114,50 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
         });
         expect(ctx.tools.checkGuards(rawBashRm)).toContain('主会话写保护拦截');
 
+        // 2.1 拦截 ./books/、../books/、紧贴重定向 >./books/、tee/cp/mv/sed/python/node 等绕过路径
+        const bypassCommands = [
+            'echo "cheat" > ./books/demo-book/manuscripts/ch_0001.md',
+            'echo "cheat">>./books/demo-book/world/world_state.md',
+            'cat <<EOF | tee ./books/demo-book/world/world_state.md',
+            'cp /tmp/fake.md ../books/demo-book/manuscripts/ch_0001.md',
+            'mv /tmp/fake.md ./books/demo-book/world/world_state.md',
+            'sed -i "s/test/hack/" ./books/demo-book/world/world_state.md',
+            'python -c "open(\'./books/demo-book/world/world_state.md\', \'w\').write(\'x\')"',
+            'node -e "require(\'fs\').writeFileSync(\'./books/demo-book/world/world_state.md\', \'x\')"'
+        ];
+        for (const cmd of bypassCommands) {
+            expect(
+                evaluateMainSessionWriteGuard(makeToolExecution('bash', { command: cmd }), booksRoot)
+            ).toContain('主会话写保护拦截');
+        }
+
+        // 2.2 booksRoot 目录名含正则元字符时不得抛出 SyntaxError，且精准拦截目录内修改并放行无关目录
+        const specialBooksRoot = join(workspaceDir, 'my.books+(v1)[0]');
+        expect(() =>
+            evaluateMainSessionWriteGuard(
+                makeToolExecution('bash', {
+                    command: 'echo x > ./my.books+(v1)[0]/demo/ch_0001.md'
+                }),
+                specialBooksRoot
+            )
+        ).not.toThrow();
+        expect(
+            evaluateMainSessionWriteGuard(
+                makeToolExecution('bash', {
+                    command: 'echo x > ./my.books+(v1)[0]/demo/ch_0001.md'
+                }),
+                specialBooksRoot
+            )
+        ).toContain('主会话写保护拦截');
+        expect(
+            evaluateMainSessionWriteGuard(
+                makeToolExecution('bash', {
+                    command: 'echo x > ./notebooks/draft.md'
+                }),
+                specialBooksRoot
+            )
+        ).toBeUndefined();
+
         // 3. 验证 tools/pre-execute 瀑布流也返回 deny
         const preDecision = await ctx.waterfall(
             scopeTarget(ctx.tools, undefined),

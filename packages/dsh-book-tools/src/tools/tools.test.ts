@@ -283,4 +283,79 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
         await toolsFiber.dispose();
         await storeFiber.dispose();
     });
+
+    it('PathFence 永久封锁 .ops/dream_watermark.json 与 .ops/safe_halt.json；book_grep 捕获无效正则并返回可操作提示', async () => {
+        const { bookRoot } = await createSampleBook();
+        await writeFile(join(bookRoot, '.ops/dream_watermark.json'), '{"last_dream_ch":0}\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/safe_halt.json'), '{"halted":false}\n', 'utf8');
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+
+        expect(() =>
+            ctx.narrateTools.buildRoleTools({
+                runId: 'run-blocked-watermark',
+                bookRoot,
+                allowedOpsPaths: ['.ops/dream_watermark.json']
+            })
+        ).toThrow(PathFenceError);
+
+        expect(() =>
+            ctx.narrateTools.buildRoleTools({
+                runId: 'run-blocked-safehalt',
+                bookRoot,
+                allowedOpsPaths: ['.ops/safe_halt.json']
+            })
+        ).toThrow(PathFenceError);
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-grep-invalid-regex',
+            bookRoot
+        });
+        const bookRead = roleSet.toolMap.get('book_read')!;
+        const bookGrep = roleSet.toolMap.get('book_grep')!;
+        const bookEdit = roleSet.toolMap.get('book_edit')!;
+
+        await expect(
+            bookRead.execute(
+                { path: '.ops/dream_watermark.json' },
+                createMockExec('book_read', { path: '.ops/dream_watermark.json' })
+            )
+        ).rejects.toThrow(PathFenceError);
+        await expect(
+            bookRead.execute(
+                { path: '.ops/safe_halt.json' },
+                createMockExec('book_read', { path: '.ops/safe_halt.json' })
+            )
+        ).rejects.toThrow(PathFenceError);
+
+        // 磁盘 rg 无效正则 (exit code 2) -> 返回明确参数错误且提示 fixed_strings=true
+        await expect(
+            bookGrep.execute(
+                { pattern: '[unclosed' },
+                createMockExec('book_grep', { pattern: '[unclosed' })
+            )
+        ).rejects.toThrow(/fixed_strings=true/);
+
+        // 暂存内存路径同样拦截无效正则 SyntaxError
+        await bookEdit.execute(
+            {
+                path: 'world/open_threads.md',
+                target_text: '黄铜钥匙来源',
+                replacement_text: '黄铜钥匙来源（暂存）'
+            },
+            createMockExec('book_edit', {})
+        );
+        await expect(
+            bookGrep.execute(
+                { pattern: '(unclosed', path: 'world/open_threads.md' },
+                createMockExec('book_grep', { pattern: '(unclosed', path: 'world/open_threads.md' })
+            )
+        ).rejects.toThrow(/fixed_strings=true/);
+
+        roleSet.cleanup();
+        await toolsFiber.dispose();
+        await storeFiber.dispose();
+    });
 });

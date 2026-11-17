@@ -28,7 +28,11 @@ const RAW_SHELL_TOOLS = new Set<string>([
 ]);
 
 const SHELL_MUTATION_RE =
-    /(?:>{1,2}|<<|\b(?:tee|rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|truncate|dd|sed|awk|perl|python|python3|ruby|node|git|patch|install)\b)/i;
+    /(?:>{1,2}|<<|\b(?:tee|rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|truncate|dd|sed|awk|perl|python|python3|ruby|node|nodejs|git|patch|install)\b)/i;
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -47,12 +51,31 @@ function isPathInsideDir(targetPath: string, rootDir: string): boolean {
 }
 
 function resolveCandidateTargets(candidate: string, cwd: string, booksParentDir: string): string[] {
-    const trimmed = candidate.trim();
+    const trimmed = candidate.trim().replace(/\\/g, '/');
     if (trimmed.length === 0) return [];
     if (isAbsolute(trimmed)) {
         return [resolve(trimmed)];
     }
     return [resolve(cwd, trimmed), resolve(booksParentDir, trimmed)];
+}
+
+/** 从终端命令或内联脚本中提取潜在文件路径 Token，供 resolveCandidateTargets + isPathInsideDir 统一判定 */
+function extractShellPathTokens(command: string): string[] {
+    const tokens = new Set<string>();
+    const rawParts = command.split(/[\s"'`;|&()<>]+/);
+    for (const part of rawParts) {
+        const cleaned = part.replace(/,+$/, '').trim();
+        if (cleaned.length === 0) continue;
+        tokens.add(cleaned);
+        const eqIdx = cleaned.indexOf('=');
+        if (eqIdx !== -1 && eqIdx < cleaned.length - 1) {
+            const rhs = cleaned.slice(eqIdx + 1).trim();
+            if (rhs.length > 0) {
+                tokens.add(rhs);
+            }
+        }
+    }
+    return [...tokens];
 }
 
 function extractPatchFilePaths(patchText: string): string[] {
@@ -146,9 +169,19 @@ export function evaluateMainSessionWriteGuard(
             }
         }
 
+        const escapedDirName = escapeRegExp(booksDirName);
+        const relativeBooksRefRe = new RegExp(
+            `(?:^|[\\s"'\`=;(&|<>]|\\.\\.?[/\\\\])${escapedDirName}(?:[/\\\\]|$)`
+        );
+        const tokenHitsBooksRoot = extractShellPathTokens(command).some((token) =>
+            resolveCandidateTargets(token, sessionCwd, booksParentDir).some((abs) =>
+                isPathInsideDir(abs, resolvedBooksRoot)
+            )
+        );
         const referencesBooks =
             command.includes(resolvedBooksRoot) ||
-            new RegExp(`(?:^|[\\s"'\`=;(&|])${booksDirName}(?:[/\\\\]|$)`).test(command);
+            tokenHitsBooksRoot ||
+            relativeBooksRefRe.test(command);
         if (referencesBooks && SHELL_MUTATION_RE.test(command)) {
             return `主会话写保护拦截：检测到 ${exec.name} 命令企图修改 ${booksDirName}/ 作品目录，请改用 NarrateOS 受控工具或工作台同步流程。`;
         }
