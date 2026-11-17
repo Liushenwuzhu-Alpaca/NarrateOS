@@ -586,6 +586,9 @@ export class BookStore {
     async markDreamCommitted(chapterNumber: number, extraPaths: string[] = []): Promise<TxState> {
         return await this.runWithTxLock(async () => {
             const current = await this.readTxState();
+            if (!BEGIN_DRAFT_ALLOWED_PHASES.has(current.phase)) {
+                throw new Error(`非法 WAL 状态迁移: 无法从 ${current.phase} 执行 Dreaming`);
+            }
             await this.recordPendingWrites(extraPaths);
             const next: TxState = {
                 ...current,

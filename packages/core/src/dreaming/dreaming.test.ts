@@ -134,6 +134,24 @@ afterEach(async () => {
 });
 
 describe('DreamingRunner', () => {
+    it.each(['DRAFTING', 'FEAT_COMMITTED'] as const)('强制 Dreaming 不覆盖 %s 待恢复章节', async (phase) => {
+        const { bookRoot, store, system } = await createDreamingTestRepo();
+        await store.beginDraft(2);
+        if (phase === 'FEAT_COMMITTED') await store.commitDraft(2, '等待抽取的正文');
+        const before = await store.readTxState();
+        const entityPath = join(bookRoot, 'entities/char_001.md');
+        const original = await readFile(entityPath, 'utf8');
+        const runner = new DreamingRunner(store, new ScriptedLlmAdapter([]), system);
+        await expect(runner.runDreaming({
+            currentChapter: 2,
+            activeEntityIds: ['char_001'],
+            force: true
+        })).rejects.toThrow('需要先完成章节恢复');
+        await expect(store.markDreamCommitted(2)).rejects.toThrow('非法 WAL 状态迁移');
+        expect(await store.readTxState()).toEqual(before);
+        expect(await readFile(entityPath, 'utf8')).toBe(original);
+    });
+
     it('按脏页增量 VACUUM：压缩脏缓冲入第 3 区并保留原章锚点，未出场干净实体 mtime 完全不变，并提交 DREAM_COMMITTED', async () => {
         const { bookRoot, system, store } = await createDreamingTestRepo();
 
