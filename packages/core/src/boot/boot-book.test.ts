@@ -8,6 +8,7 @@ import { NodeSystemAdapter } from '../ports/system.js';
 import { BookStore } from '../store/bookstore.js';
 import {
     BootAuditError,
+    BootCompilePayloadSchema,
     SillyTavernCharacterCardAdapter,
     SillyTavernLorebookAdapter,
     bootBook
@@ -40,6 +41,15 @@ afterEach(async () => {
 });
 
 describe('bootBook 开书编译与导入接缝', () => {
+    it('开书编译拒绝重复实体与设定 ID，避免后项覆盖前项', () => {
+        const entity = { entityId: 'char_001', canonicalName: '林雾' };
+        const lore = { id: 'lore_001', title: '旧校舍', summary: '空间设定', content: '三楼有一间活动室。' };
+        const payload = { worldSummary: '雨夜', staticBaseAndVoice: '动作推进', currentArcEnvelope: '第一卷', entities: [entity], loreEntries: [lore] };
+        expect(BootCompilePayloadSchema.safeParse(payload).success).toBe(true);
+        expect(() => BootCompilePayloadSchema.parse({ ...payload, entities: [entity, { ...entity, canonicalName: '另一角色' }] })).toThrow('entityId 必须唯一');
+        expect(() => BootCompilePayloadSchema.parse({ ...payload, loreEntries: [lore, { ...lore, content: '另一份设定' }] })).toThrow('id 必须唯一');
+    });
+
     it('已有资产和失败初始化目录在调用模型前被拒绝', async () => {
         const bookRoot = await createTempBookRoot();
         const asset = join(bookRoot, 'notes.md');

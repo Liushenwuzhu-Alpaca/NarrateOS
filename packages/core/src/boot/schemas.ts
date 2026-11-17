@@ -191,8 +191,14 @@ export const BootCompilePayloadSchema = z.object({
             })
         )
         .default([]),
-    loreEntries: z.array(CompiledLoreEntrySchema).default([]),
-    entities: z.array(CompiledEntitySchema).min(1)
+    loreEntries: z.array(CompiledLoreEntrySchema).default([]).refine(
+        (entries) => new Set(entries.map((entry) => entry.id)).size === entries.length,
+        'loreEntries 中的 id 必须唯一'
+    ),
+    entities: z.array(CompiledEntitySchema).min(1).refine(
+        (entities) => new Set(entities.map((entity) => entity.entityId)).size === entities.length,
+        'entities 中的 entityId 必须唯一'
+    )
 });
 
 export type BootCompilePayload = z.infer<typeof BootCompilePayloadSchema>;
