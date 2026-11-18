@@ -416,49 +416,65 @@ function deriveStagesFromSse(
     };
 
     if (sseStage) {
-        if (sseStage === 'COMMITTED') {
-            for (const id of STAGE_ORDER) {
-                if (id === 'DREAMING') continue;
-                base[id] = { status: 'done', summary: '已完成并提交入库' };
-            }
-        } else if (sseStage === 'SAFE_HALT') {
-            base.FACT_CHECKER = { status: 'halt', summary: '检测到设定冲突，已拦截落盘' };
-        } else if (sseStage === 'PROSE_GATE') {
-            base.LIBRARIAN = { status: 'done' };
-            base.PLANNER = { status: 'done' };
-            base.WRITER = { status: 'active', summary: '静态文风门禁校验中' };
-        } else if (sseStage === 'LOCAL_PATCH' || sseStage === 'REWRITE') {
-            const meta = STAGE_REPAIR_META[sseStage]!;
-            base.LIBRARIAN = { status: 'done' };
-            base.PLANNER = { status: 'done' };
-            base.WRITER = { status: 'healing', summary: meta.defaultSummary, badge: meta.badge };
-            if (sseStage === 'REWRITE') {
-                base.FACT_CHECKER = { status: 'healing', summary: '发现矛盾，触发重写' };
-            }
-        } else if (sseStage === 'REPLAN') {
-            const meta = STAGE_REPAIR_META['REPLAN']!;
-            base.LIBRARIAN = { status: 'done' };
-            base.PLANNER = { status: 'healing', summary: meta.defaultSummary, badge: meta.badge };
-            base.FACT_CHECKER = { status: 'healing', summary: '要求重排细纲' };
-        } else if (sseStage === 'DREAMING') {
-            for (const id of STAGE_ORDER) {
-                if (id === 'DREAMING') continue;
-                base[id] = { status: 'done' };
-            }
-            base.DREAMING = { status: 'active', summary: '跨章整理与归纳运行中' };
-        } else {
-            const resolved = resolveStageId(sseStage);
-            const activeIndex = resolved ? STAGE_ORDER.indexOf(resolved) : -1;
-            if (activeIndex >= 0) {
-                for (let i = 0; i < STAGE_ORDER.length; i++) {
-                    const id = STAGE_ORDER[i];
-                    if (!id || id === 'DREAMING') continue;
-                    if (i < activeIndex) {
-                        base[id] = { status: 'done', summary: '已完成' };
-                    } else if (i === activeIndex) {
-                        base[id] = { status: 'active', summary: '运行中' };
+        switch (sseStage) {
+            case 'COMMITTED': {
+                for (const id of STAGE_ORDER) {
+                    if (id !== 'DREAMING') {
+                        base[id] = { status: 'done', summary: '已完成并提交入库' };
                     }
                 }
+                break;
+            }
+            case 'SAFE_HALT':
+                base.FACT_CHECKER = { status: 'halt', summary: '检测到设定冲突，已拦截落盘' };
+                break;
+            case 'PROSE_GATE':
+                base.LIBRARIAN = { status: 'done' };
+                base.PLANNER = { status: 'done' };
+                base.WRITER = { status: 'active', summary: '静态文风门禁校验中' };
+                break;
+            case 'LOCAL_PATCH':
+            case 'REWRITE': {
+                const meta = STAGE_REPAIR_META[sseStage]!;
+                base.LIBRARIAN = { status: 'done' };
+                base.PLANNER = { status: 'done' };
+                base.WRITER = { status: 'healing', summary: meta.defaultSummary, badge: meta.badge };
+                if (sseStage === 'REWRITE') {
+                    base.FACT_CHECKER = { status: 'healing', summary: '发现矛盾，触发重写' };
+                }
+                break;
+            }
+            case 'REPLAN': {
+                const meta = STAGE_REPAIR_META['REPLAN']!;
+                base.LIBRARIAN = { status: 'done' };
+                base.PLANNER = { status: 'healing', summary: meta.defaultSummary, badge: meta.badge };
+                base.FACT_CHECKER = { status: 'healing', summary: '要求重排细纲' };
+                break;
+            }
+            case 'DREAMING': {
+                for (const id of STAGE_ORDER) {
+                    if (id !== 'DREAMING') {
+                        base[id] = { status: 'done' };
+                    }
+                }
+                base.DREAMING = { status: 'active', summary: '跨章整理与归纳运行中' };
+                break;
+            }
+            default: {
+                const resolved = resolveStageId(sseStage);
+                const activeIndex = resolved ? STAGE_ORDER.indexOf(resolved) : -1;
+                if (activeIndex >= 0) {
+                    for (let i = 0; i < STAGE_ORDER.length; i++) {
+                        const id = STAGE_ORDER[i];
+                        if (!id || id === 'DREAMING') continue;
+                        if (i < activeIndex) {
+                            base[id] = { status: 'done', summary: '已完成' };
+                        } else if (i === activeIndex) {
+                            base[id] = { status: 'active', summary: '运行中' };
+                        }
+                    }
+                }
+                break;
             }
         }
     }
@@ -507,10 +523,901 @@ function getStageStatusText(status: StageNodeStatus): string {
     }
 }
 
+async function sendJsonRequest(
+    url: string,
+    fallbackError: string,
+    options?: { method?: 'POST' | 'PUT'; body?: unknown }
+): Promise<void> {
+    const init: RequestInit = { method: options?.method ?? 'POST' };
+    if (options?.body !== undefined) {
+        init.headers = { 'Content-Type': 'application/json' };
+        init.body = JSON.stringify(options.body);
+    }
+    const resp = await fetch(url, init);
+    if (!resp.ok) {
+        const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errBody.error ?? `${fallbackError} (${resp.status})`);
+    }
+}
+
+function resolveSignalRequestType(kind: DirectorSignalKind): string {
+    if (kind === 'RETCON' || kind === 'Retcon') {
+        return 'RETCON';
+    }
+    if (kind === 'SPOTLIGHT_TRIGGER') {
+        return 'SPOTLIGHT_TRIGGER';
+    }
+    return 'DIRECTOR_NOTE';
+}
+
+function getStopButtonLabel(stopPending: boolean, haltWaiting: boolean): string {
+    if (!stopPending) return '写完本章暂停';
+    return haltWaiting ? '等待安全点收束…' : '写完本章即停…';
+}
+
+function getDiffRowClassName(kind: 'ctx' | 'add' | 'del'): string {
+    if (kind === 'del') return 'ns-diff-row ns-diff-row-del';
+    if (kind === 'add') return 'ns-diff-row ns-diff-row-add';
+    return 'ns-diff-row';
+}
+
+function getOutlineEmptyTitle(
+    outlineStatus: 'available' | 'missing' | 'error',
+    hasDetail: boolean
+): string {
+    if (outlineStatus === 'error') return '细纲读取失败';
+    return hasDetail ? '历史章节未留存细纲' : '细纲暂不可用';
+}
+
+function getOutlineEmptyHint(
+    outlineStatus: 'available' | 'missing' | 'error',
+    hasDetail: boolean
+): string {
+    if (outlineStatus === 'error') {
+        return '本章已保存的细纲文件损坏或读取失败，正文仍可正常审阅；可重试只读读取，不会触发生成或同步。';
+    }
+    if (hasDetail) {
+        return '本章生成时未持久化细纲快照，历史细纲无法回看。后续新生成的章节会随正文一并留存细纲。';
+    }
+    return '当前章节详情尚未加载，加载后可查看已留存的细纲。';
+}
+
+function buildStageSessionSelection(params: {
+    stageId: PipelineStageId;
+    stageLabel: string;
+    sessionId: string;
+    status: StageNodeStatus;
+    parentSessionId?: string | undefined;
+    mode?: string | undefined;
+    runId?: string | undefined;
+    cleanroom?: boolean | undefined;
+}): StageSessionSelection {
+    const selection: StageSessionSelection = {
+        stageId: params.stageId,
+        stageLabel: params.stageLabel,
+        sessionId: params.sessionId,
+        status: params.status
+    };
+    if (params.parentSessionId !== undefined) selection.parentSessionId = params.parentSessionId;
+    if (params.mode !== undefined) selection.mode = params.mode;
+    if (params.runId !== undefined) selection.runId = params.runId;
+    if (params.cleanroom !== undefined) selection.cleanroom = params.cleanroom;
+    return selection;
+}
+
+function renderBookMenu(params: {
+    open: boolean;
+    books: readonly CenterBookSummary[];
+    currentBookRoot?: string | undefined;
+    onClose: () => void;
+    onSelectBook?: ((bookRoot: string) => void) | undefined;
+    onNewBook?: (() => void) | undefined;
+}): React.ReactElement | null {
+    if (!params.open) return null;
+    return (
+        <div className="ns-menu-pop ns-left" role="menu" aria-label="切换作品">
+            {params.books.map((book) => (
+                <button
+                    key={book.bookRoot}
+                    type="button"
+                    role="menuitem"
+                    className="ns-menu-row"
+                    onClick={() => {
+                        params.onClose();
+                        if (book.bookRoot !== params.currentBookRoot) {
+                            params.onSelectBook?.(book.bookRoot);
+                        }
+                    }}
+                >
+                    <b>{book.title || book.slug}</b>
+                    <span>
+                        {book.currentChapter > 0
+                            ? `已写至第 ${book.currentChapter} 章`
+                            : '新书待开篇'}
+                    </span>
+                </button>
+            ))}
+            {params.onNewBook && (
+                <>
+                    {params.books.length > 0 && <div className="ns-menu-divider" />}
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className="ns-menu-row"
+                        onClick={() => {
+                            params.onClose();
+                            params.onNewBook?.();
+                        }}
+                    >
+                        <b>+ 开启新作品</b>
+                        <span>打开建库向导或切回构思对话</span>
+                    </button>
+                </>
+            )}
+        </div>
+    );
+}
+
+function renderCompactTocMenu(params: {
+    open: boolean;
+    chapters: readonly ChapterSummaryItem[];
+    onClose: () => void;
+    onSelectChapter: (chapterNumber: number) => void;
+    onOpenCodex: () => void;
+}): React.ReactElement | null {
+    if (!params.open) return null;
+    return (
+        <div className="ns-menu-pop ns-left" role="menu" aria-label="章节与设定集">
+            {params.chapters.map((ch) => (
+                <button
+                    key={ch.chapterNumber}
+                    type="button"
+                    role="menuitem"
+                    className="ns-menu-row"
+                    onClick={() => {
+                        params.onClose();
+                        params.onSelectChapter(ch.chapterNumber);
+                    }}
+                >
+                    <b>
+                        第 {ch.chapterNumber} 章 · {ch.title}
+                    </b>
+                    <span>{ch.charCount !== undefined ? `${ch.charCount} 字` : '已入库'}</span>
+                </button>
+            ))}
+            <div className="ns-menu-divider" />
+            <button
+                type="button"
+                role="menuitem"
+                className="ns-menu-row"
+                onClick={() => {
+                    params.onClose();
+                    params.onOpenCodex();
+                }}
+            >
+                <b>打开全书设定集</b>
+                <span>人物档案 · 未解伏笔 · 预案与废案</span>
+            </button>
+        </div>
+    );
+}
+
+function renderTaskStatusBadge(params: {
+    isYoloRunning: boolean;
+    yolo?: YoloStatusData | undefined;
+    currentChapter: number;
+    activeTask: RuntimeTaskKind;
+}): React.ReactElement | null {
+    if (params.isYoloRunning) {
+        const text =
+            params.yolo && params.yolo.targetChapters > 0
+                ? `YOLO 连写 ${params.yolo.completedChapters}/${params.yolo.targetChapters} 章`
+                : `YOLO 连写中 · 第 ${params.currentChapter + 1} 章`;
+        return <span className="ns-badge ns-badge-accent">{text}</span>;
+    }
+    if (params.activeTask !== 'IDLE') {
+        return (
+            <span className="ns-badge ns-badge-accent">
+                {ACTIVE_TASK_LABELS[params.activeTask] ?? '正在处理'}
+            </span>
+        );
+    }
+    return null;
+}
+
+function renderStopSplitAction(params: {
+    stopPending: boolean;
+    haltWaiting: boolean;
+    menuOpen: boolean;
+    onToggleMenu: () => void;
+    onSoftStop: () => void;
+    onForceStop: () => void;
+}): React.ReactElement {
+    return (
+        <div className="ns-split-action">
+            <button
+                type="button"
+                className="ns-btn ns-btn-warn"
+                disabled={params.stopPending}
+                onClick={params.onSoftStop}
+            >
+                {StudioIcons.pause}
+                <span>{getStopButtonLabel(params.stopPending, params.haltWaiting)}</span>
+            </button>
+            <button
+                type="button"
+                className="ns-btn ns-btn-warn"
+                aria-haspopup="menu"
+                aria-expanded={params.menuOpen}
+                aria-label="更多停止选项"
+                onClick={params.onToggleMenu}
+            >
+                {StudioIcons.chev}
+            </button>
+            {params.menuOpen && (
+                <div className="ns-menu-pop" role="menu" aria-label="停止方式">
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className="ns-menu-row"
+                        onClick={params.onSoftStop}
+                    >
+                        <b>写完本章后平稳停下（推荐）</b>
+                        <span>等当前章节保存完整后再退出运行</span>
+                    </button>
+                    <div className="ns-menu-divider" />
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className="ns-menu-row ns-danger"
+                        onClick={params.onForceStop}
+                    >
+                        <b>立即中断并撤回半截草稿</b>
+                        <span>强行打断当前生成，恢复到上一章干净状态</span>
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function renderRunSplitAction(params: {
+    disabled: boolean;
+    stepSubmitting: boolean;
+    menuOpen: boolean;
+    onStepOne: () => void;
+    onToggleMenu: () => void;
+    onStartYolo: (targetChapters: number) => void;
+}): React.ReactElement {
+    return (
+        <div className="ns-split-action">
+            <button
+                type="button"
+                className="ns-btn ns-btn-primary"
+                disabled={params.disabled}
+                onClick={params.onStepOne}
+            >
+                {StudioIcons.play}
+                <span>{params.stepSubmitting ? '正在开启…' : '写下一章'}</span>
+            </button>
+            <button
+                type="button"
+                className="ns-btn ns-btn-primary"
+                disabled={params.disabled}
+                aria-haspopup="menu"
+                aria-expanded={params.menuOpen}
+                onClick={params.onToggleMenu}
+            >
+                <span>YOLO</span>
+                {StudioIcons.chev}
+            </button>
+            {params.menuOpen && (
+                <div className="ns-menu-pop" role="menu" aria-label="YOLO 连写模式">
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className="ns-menu-row"
+                        onClick={() => params.onStartYolo(0)}
+                    >
+                        <b>YOLO 持续连写</b>
+                        <span>遇到设定冲突、关键视角切镜或手动暂停时自动停下</span>
+                    </button>
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className="ns-menu-row"
+                        onClick={() => params.onStartYolo(5)}
+                    >
+                        <b>YOLO 连写 5 章</b>
+                        <span>写满 5 章后自动停下待审</span>
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function renderOpsMenu(params: {
+    open: boolean;
+    isBusy: boolean;
+    isParallelMode: boolean;
+    activeChapterNumber: number;
+    onClose: () => void;
+    onDream: () => void;
+    onOpenAdvanceVolumeModal?: (() => void) | undefined;
+    onOpenParallelModal?: (() => void) | undefined;
+    onHarvestVoice?: ((chapterNumber?: number) => Promise<void> | void) | undefined;
+    onRefreshViews?: (() => Promise<void> | void) | undefined;
+}): React.ReactElement | null {
+    if (!params.open) return null;
+    const parallelLabel = params.isParallelMode
+        ? '管理 / 合流多线并行窗口'
+        : '开启多线并行章节';
+    return (
+        <div className="ns-menu-pop" role="menu" aria-label="更多创作操作">
+            <button
+                type="button"
+                role="menuitem"
+                className="ns-menu-row"
+                disabled={params.isBusy}
+                onClick={params.onDream}
+            >
+                <b>立即整理设定与伏笔</b>
+                <span>归纳近期章节的人物变化与复现线索</span>
+            </button>
+            <button
+                type="button"
+                role="menuitem"
+                className="ns-menu-row"
+                disabled={params.isBusy}
+                onClick={() => {
+                    params.onClose();
+                    params.onOpenAdvanceVolumeModal?.();
+                }}
+            >
+                <b>结束本卷 / 开启下一卷</b>
+                <span>勾选随行人物、归档退场角色并规划新卷</span>
+            </button>
+            <button
+                type="button"
+                role="menuitem"
+                className="ns-menu-row"
+                disabled={params.isBusy}
+                onClick={() => {
+                    params.onClose();
+                    params.onOpenParallelModal?.();
+                }}
+            >
+                <b>{parallelLabel}</b>
+                <span>同一时间段分头推进两条人物支线</span>
+            </button>
+            <div className="ns-menu-divider" />
+            <button
+                type="button"
+                role="menuitem"
+                className="ns-menu-row"
+                disabled={params.isBusy}
+                onClick={() => {
+                    params.onClose();
+                    void params.onHarvestVoice?.(
+                        params.activeChapterNumber > 0 ? params.activeChapterNumber : undefined
+                    );
+                }}
+            >
+                <b>重新提取本章对话声纹</b>
+                <span>从当前选定章节采集鲜活表达标本</span>
+            </button>
+            {params.onRefreshViews && (
+                <button
+                    type="button"
+                    role="menuitem"
+                    className="ns-menu-row"
+                    disabled={params.isBusy}
+                    onClick={() => {
+                        params.onClose();
+                        void params.onRefreshViews?.();
+                    }}
+                >
+                    <b>刷新工作区数据</b>
+                    <span>重新读取最新章节与设定集视图</span>
+                </button>
+            )}
+        </div>
+    );
+}
+
+function renderPipelineDrawer(params: {
+    open: boolean;
+    stageMap: Record<PipelineStageId, StageNodeState>;
+    inspectedStageId: PipelineStageId;
+    resolveStageModelLabel: (stageDef: StageDefinition) => string;
+    onInspectStep: (stageDef: StageDefinition) => void;
+}): React.ReactElement | null {
+    if (!params.open) return null;
+    return (
+        <section className="ns-pipeline-drawer" aria-label="6 步 Agent 工序与模型矩阵">
+            {PIPELINE_STAGES.map((stage) => {
+                const nodeState = params.stageMap[stage.id];
+                const effectiveModel = params.resolveStageModelLabel(stage);
+                const isRunningLive =
+                    nodeState.status === 'active' || nodeState.status === 'healing';
+                const isSelected = params.inspectedStageId === stage.id;
+                const cardClass = [
+                    'ns-pipe-card',
+                    isSelected ? 'ns-selected' : '',
+                    isRunningLive ? 'ns-running-live' : ''
+                ]
+                    .filter(Boolean)
+                    .join(' ');
+                return (
+                    <button
+                        key={stage.id}
+                        type="button"
+                        className={cardClass}
+                        data-stage-id={stage.id}
+                        data-session-id={nodeState.sessionId ?? ''}
+                        onClick={() => params.onInspectStep(stage)}
+                        title={`点击查看 ${stage.label} 思考过程`}
+                    >
+                        <div className="ns-pipe-card-top">
+                            <span className="ns-pipe-step-name">
+                                <i
+                                    className={`ns-lamp ${getLampStatusClass(nodeState.status)}`}
+                                    aria-hidden="true"
+                                />
+                                <span>{stage.label}</span>
+                            </span>
+                            <span className="ns-pipe-step-state">
+                                {getStageStatusText(nodeState.status)}
+                            </span>
+                        </div>
+                        <div className="ns-pipe-live-note">
+                            {nodeState.summary ?? stage.shortDesc}
+                        </div>
+                        <div className="ns-pipe-model-tag">{effectiveModel}</div>
+                    </button>
+                );
+            })}
+        </section>
+    );
+}
+
+function renderActorPill(actor: string, key?: string): React.ReactElement {
+    return (
+        <span key={key} className="ns-actor-pill">
+            <i className={`ns-actor-avatar ns-avatar-tone-${getAvatarToneIndex(actor)}`}>
+                {actor.slice(0, 1)}
+            </i>
+            {actor}
+        </span>
+    );
+}
+
+function renderActorList(actors: readonly string[], emptyText: string): React.ReactNode {
+    if (actors.length === 0) {
+        return <span className="ns-muted">{emptyText}</span>;
+    }
+    return actors.map((actor) => renderActorPill(actor, actor));
+}
+
+function renderBeatCumulativeMarks(beats: readonly { percent: number }[]): React.ReactElement[] {
+    let acc = 0;
+    return beats.slice(0, -1).map((beat, idx) => {
+        acc += beat.percent;
+        return <span key={idx}>{acc}%</span>;
+    });
+}
+
+function renderCoverSheet(params: {
+    ribbonRef: React.RefObject<HTMLDivElement>;
+    displayVolumeLabel: string;
+    displayBookTitle: string;
+    storyDay: number;
+    disabled: boolean;
+    onStepOne: () => void;
+    onOpenCodex: () => void;
+}): React.ReactElement {
+    return (
+        <article className="ns-manuscript-sheet ns-cover-sheet" aria-label="新书开卷扉页">
+            <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+            <div className="ns-cover-badge-row">
+                <span className="ns-cover-seal">开卷</span>
+                <span className="ns-badge ns-badge-neutral">{params.displayVolumeLabel}</span>
+            </div>
+            <h1>《{params.displayBookTitle}》</h1>
+            <p className="ns-cover-desc">
+                作者契约与人物初始档案已编译完成，当前停机待命在故事第 {params.storyDay} 天。点击下方按钮开启第 1 章首章执笔与对话声纹校准，也可先在下方递交导演便签调整开篇走向。
+            </p>
+            <div className="ns-cover-actions">
+                <button
+                    type="button"
+                    className="ns-btn ns-btn-primary"
+                    disabled={params.disabled}
+                    onClick={params.onStepOne}
+                >
+                    {StudioIcons.play}
+                    <span>写第 1 章（开篇校准）</span>
+                </button>
+                <button
+                    type="button"
+                    className="ns-btn ns-btn-outline"
+                    onClick={params.onOpenCodex}
+                >
+                    <span>先核对全书设定集</span>
+                </button>
+            </div>
+        </article>
+    );
+}
+
+function renderProseEndmark(params: {
+    isChapterDirty: boolean;
+    sealJustStamped: boolean;
+    commitDisplay?: string | undefined;
+}): React.ReactElement {
+    if (params.isChapterDirty) {
+        return (
+            <div className="ns-editorial-endmark">
+                <span className="ns-badge ns-badge-warn">
+                    本章含未同步手改 · 点击顶部「同步修改」更新人物台账后重新盖印
+                </span>
+            </div>
+        );
+    }
+    const stampClass = params.sealJustStamped ? 'ns-seal-stamp ns-stamping' : 'ns-seal-stamp';
+    return (
+        <div className="ns-editorial-endmark">
+            <div className={stampClass}>定稿</div>
+            <span className="ns-mono ns-muted">
+                {params.commitDisplay
+                    ? `commit ${params.commitDisplay} · 双门禁核验入库`
+                    : '双门禁核验入库'}
+            </span>
+        </div>
+    );
+}
+
+function renderProseBody(params: {
+    isEditing: boolean;
+    draftContent: string;
+    isDraftDirty: boolean;
+    savingEdit: boolean;
+    isBusy: boolean;
+    chapterLoading: boolean;
+    proseParagraphs: ReadonlyArray<{ text: string; isBreak: boolean }>;
+    proseBodyRef: React.RefObject<HTMLDivElement>;
+    conflictTargetLine: number | null;
+    isChapterDirty: boolean;
+    sealJustStamped: boolean;
+    commitDisplay?: string | undefined;
+    onChangeDraft: (value: string) => void;
+    onCancelEditing: () => void;
+    onSaveEditedChapter: () => void;
+}): React.ReactElement {
+    if (params.isEditing) {
+        return (
+            <div className="ns-editor-wrap">
+                <textarea
+                    className="ns-editor-textarea"
+                    value={params.draftContent}
+                    onChange={(e) => params.onChangeDraft(e.target.value)}
+                    rows={20}
+                    placeholder="在此直接修订本章正文…"
+                />
+                <div className="ns-editor-footer">
+                    <span className="ns-muted">
+                        {params.isDraftDirty
+                            ? '有未保存修改 · 切章或切书会自动暂存草稿'
+                            : '保存后将写入原稿真源并自动同步人物与伏笔台账'}
+                    </span>
+                    <div className="ns-header-right">
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-outline"
+                            disabled={params.savingEdit}
+                            onClick={params.onCancelEditing}
+                        >
+                            取消
+                        </button>
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-primary"
+                            disabled={params.savingEdit || params.isBusy}
+                            onClick={params.onSaveEditedChapter}
+                        >
+                            {params.savingEdit ? '正在保存并同步…' : '保存并自动同步'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    if (params.chapterLoading && params.proseParagraphs.length === 0) {
+        return (
+            <div className="ns-prose-skel" role="status" aria-label="正文加载中">
+                {Array.from({ length: 6 }, (_, idx) => (
+                    <span
+                        key={idx}
+                        className={`ns-skel ns-skel-line${idx % 3 === 2 ? ' ns-skel-line-short' : ''}`}
+                    />
+                ))}
+            </div>
+        );
+    }
+
+    if (params.proseParagraphs.length === 0) {
+        return (
+            <div className="ns-muted">
+                当前章节尚无正文内容，请点击右上角「写下一章」或切换其他历史章节。
+            </div>
+        );
+    }
+
+    return (
+        <>
+            <div ref={params.proseBodyRef} className="ns-prose-body ns-prose">
+                {params.proseParagraphs.map((para, idx) => {
+                    if (para.isBreak) {
+                        return (
+                            <p key={idx} className="ns-brk">
+                                · · ·
+                            </p>
+                        );
+                    }
+                    const highlightClass =
+                        params.conflictTargetLine === idx + 1 ? 'ns-conflict-highlight' : undefined;
+                    return (
+                        <div key={idx} className="ns-prose-para-wrap">
+                            <span className="ns-prose-folio">
+                                P{String(idx + 1).padStart(2, '0')}
+                            </span>
+                            <p className={highlightClass}>{para.text}</p>
+                        </div>
+                    );
+                })}
+            </div>
+            {renderProseEndmark({
+                isChapterDirty: params.isChapterDirty,
+                sealJustStamped: params.sealJustStamped,
+                commitDisplay: params.commitDisplay
+            })}
+        </>
+    );
+}
+
+function renderPlanSection(params: {
+    ribbonRef: React.RefObject<HTMLDivElement>;
+    activeChapterNumber: number;
+    parsedPlan: ReturnType<typeof parseStructuredPlan>;
+    outlineStatus: 'available' | 'missing' | 'error';
+    hasChapterDetail: boolean;
+    chapterLoading: boolean;
+    onRetryChapterDetail?: (() => void) | undefined;
+}): React.ReactElement {
+    if (!params.parsedPlan) {
+        return (
+            <section className="ns-manuscript-sheet">
+                <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+                <div className="ns-plan-empty">
+                    <h2 className="ns-plan-title ns-plan-title-sm">
+                        第 {params.activeChapterNumber} 章 ·{' '}
+                        {getOutlineEmptyTitle(params.outlineStatus, params.hasChapterDetail)}
+                    </h2>
+                    <p className="ns-plan-empty-hint">
+                        {getOutlineEmptyHint(params.outlineStatus, params.hasChapterDetail)}
+                    </p>
+                    {params.outlineStatus === 'error' && params.onRetryChapterDetail && (
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-outline"
+                            disabled={params.chapterLoading}
+                            onClick={params.onRetryChapterDetail}
+                        >
+                            {params.chapterLoading ? '正在重试…' : '重试读取细纲'}
+                        </button>
+                    )}
+                </div>
+            </section>
+        );
+    }
+
+    const plan = params.parsedPlan;
+    return (
+        <section className="ns-manuscript-sheet">
+            <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+            <header className="ns-plan-head">
+                <h2 className="ns-plan-title">
+                    第 {params.activeChapterNumber} 章 · {plan.chapterTitle}
+                </h2>
+                <div className="ns-plan-meta">
+                    <span className="ns-plan-pill">
+                        timeline_mode <b>{plan.timelineMode ?? '未提供'}</b>
+                    </span>
+                    <span className="ns-plan-pill">
+                        pov <b>{plan.povCharacter ?? '未提供'}</b>
+                    </span>
+                    <span className="ns-plan-pill">
+                        target{' '}
+                        <b>
+                            {plan.targetWordCount
+                                ? `${plan.targetWordCount.toLocaleString('zh-CN')} 字`
+                                : '自适应'}
+                        </b>
+                    </span>
+                    <span className="ns-plan-pill">
+                        ending <b>{plan.endingBeat}</b>
+                    </span>
+                </div>
+            </header>
+
+            <div>
+                <div className="ns-beats">
+                    {plan.beats.map((beat, idx) => (
+                        <div
+                            key={`${beat.label}-${idx}`}
+                            className={`ns-beat${beat.isSpotlight ? ' eye' : ''}`}
+                            style={{ flex: beat.percent }}
+                            title={`${beat.label} (${beat.percent}%): ${beat.summary}`}
+                        >
+                            <b>
+                                {beat.label} {beat.percent}%
+                            </b>
+                            <span>{beat.summary}</span>
+                        </div>
+                    ))}
+                </div>
+                <div className="ns-beats-cap">
+                    <span>0%</span>
+                    {renderBeatCumulativeMarks(plan.beats)}
+                    <span>100%</span>
+                </div>
+            </div>
+
+            <dl className="ns-plan-kv">
+                <dt>
+                    视角
+                    <small>pov_character</small>
+                </dt>
+                <dd>
+                    {plan.povCharacter ? (
+                        renderActorPill(plan.povCharacter)
+                    ) : (
+                        <span className="ns-muted">未提供</span>
+                    )}
+                </dd>
+
+                <dt>
+                    焦点角色
+                    <small>focus_cast</small>
+                </dt>
+                <dd>{renderActorList(plan.focusCast, '本章无')}</dd>
+
+                <dt>
+                    背景角色
+                    <small>background_cast</small>
+                </dt>
+                <dd>{renderActorList(plan.backgroundCast, '本章无')}</dd>
+
+                <dt>
+                    戏眼
+                    <small>spotlight</small>
+                </dt>
+                <dd className="ns-plan-prose">{plan.spotlight}</dd>
+
+                <dt>
+                    收尾节拍
+                    <small>ending_beat</small>
+                </dt>
+                <dd className="ns-plan-prose ns-plan-ending">
+                    <span className="ns-pill ns-pill-brand ns-mono">{plan.endingBeat}</span>
+                    <span>{plan.endingSummary}</span>
+                </dd>
+
+                <dt>
+                    细纲正文
+                    <small>outline_text</small>
+                </dt>
+                <dd className="ns-plan-prose ns-plan-outline">{plan.outlineText}</dd>
+            </dl>
+        </section>
+    );
+}
+
+function renderDiffSection(params: {
+    ribbonRef: React.RefObject<HTMLDivElement>;
+    activeChapterNumber: number;
+    diffHunks: ReturnType<typeof parseUnifiedDiff>;
+    isChapterDirty: boolean;
+    isBusy: boolean;
+    syncingFromDiff: boolean;
+    activeTask: RuntimeTaskKind;
+    chapterFileName: string;
+    walPhase: string;
+    featHash?: string | undefined;
+    stateHash?: string | undefined;
+    sha256?: string | undefined;
+    onSyncFromDiff: () => void;
+}): React.ReactElement {
+    const header = (
+        <header className="ns-plan-head">
+            <h2 className="ns-plan-title">改动对比 · {formatChapterLabel(params.activeChapterNumber)}</h2>
+        </header>
+    );
+
+    if (params.diffHunks.length === 0) {
+        return (
+            <section className="ns-manuscript-sheet">
+                <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+                {header}
+                <div className="ns-diff-clean">
+                    <div className="ns-diff-clean-head">
+                        <span className="ns-badge ns-badge-ok">正文与版本库一致 · 无未同步差异</span>
+                        <span className="ns-mono ns-diff-clean-file">{params.chapterFileName}</span>
+                    </div>
+                    <div className="ns-diff-clean-text">
+                        当前章节正文已与定稿版本对齐，无待同步的人工手改。
+                    </div>
+                    <div className="ns-mono ns-diff-clean-meta">
+                        <span>状态: {params.walPhase}</span>
+                        {params.featHash && <span> · feat {params.featHash}</span>}
+                        {params.stateHash && <span> · state {params.stateHash}</span>}
+                        {params.sha256 && <span> · sha256 {params.sha256.slice(0, 12)}</span>}
+                    </div>
+                </div>
+            </section>
+        );
+    }
+
+    const syncButtonLabel =
+        params.activeTask === 'SYNCING' || params.syncingFromDiff ? '正在同步…' : '立即同步修改';
+    const hunkBadgeClass = params.isChapterDirty ? 'ns-badge-warn' : 'ns-badge-ok';
+    const hunkBadgeText = params.isChapterDirty ? '人工手改 · 待同步' : '已对齐';
+
+    return (
+        <section className="ns-manuscript-sheet">
+            <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+            {header}
+            {params.diffHunks.map((hunk, hunkIdx) => (
+                <div key={`${hunk.fileName}-${hunk.header}-${hunkIdx}`} className="ns-hunk">
+                    <div className="ns-hunk-head">
+                        <span className="ns-mono ns-hunk-file">{hunk.fileName}</span>
+                        <span className="ns-mono ns-hunk-range">{hunk.header}</span>
+                        <span className="ns-hunk-spacer" />
+                        <span className={`ns-badge ${hunkBadgeClass}`}>{hunkBadgeText}</span>
+                    </div>
+                    <div>
+                        {hunk.rows.map((row, rowIdx) => (
+                            <div key={rowIdx} className={getDiffRowClassName(row.kind)}>
+                                <span className="ns-diff-ln">{row.lineNumber ?? ''}</span>
+                                <span className="ns-diff-glyph">{row.glyph}</span>
+                                <span className="ns-diff-text">{row.text || ' '}</span>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="ns-hunk-foot">
+                        <span>
+                            新增 +{hunk.addCount} / 删除 -{hunk.delCount} 行
+                        </span>
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-outline ns-btn-xs"
+                            disabled={params.isBusy || params.syncingFromDiff}
+                            onClick={params.onSyncFromDiff}
+                        >
+                            {syncButtonLabel}
+                        </button>
+                    </div>
+                </div>
+            ))}
+        </section>
+    );
+}
+
 /**
  * NarrateOS 中栏清样书稿与总控舞台组件
  */
-export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
+export function CenterWorkbench({
     bookTitle,
     bookSlug,
     currentBookRoot,
@@ -576,7 +1483,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     onDraftControlReady,
     onInspectStage,
     onSelectStageSession
-}) => {
+}: CenterWorkbenchProps): React.ReactElement {
     const activeChapterNumber = chapterDetail?.chapterNumber ?? selectedChapter ?? currentChapter;
     const isYoloRunning = Boolean(yolo?.running);
     const isBusy = activeTask !== 'IDLE' || isYoloRunning;
@@ -797,15 +1704,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             if (onStepOne) {
                 await onStepOne(options);
             } else {
-                const resp = await fetch('/api/narrate/step', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(options ?? {})
+                await sendJsonRequest('/api/narrate/step', '写下一章失败', {
+                    body: options ?? {}
                 });
-                if (!resp.ok) {
-                    const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
-                    throw new Error(errBody.error ?? `写下一章失败 (${resp.status})`);
-                }
             }
             showFeedback('已启动章节生成');
         } catch (err) {
@@ -822,15 +1723,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             if (onStartYolo) {
                 await onStartYolo(targetChapters);
             } else {
-                const resp = await fetch('/api/narrate/yolo/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ targetChapters })
+                await sendJsonRequest('/api/narrate/yolo/start', '启动 YOLO 连写失败', {
+                    body: { targetChapters }
                 });
-                if (!resp.ok) {
-                    const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
-                    throw new Error(errBody.error ?? `启动 YOLO 连写失败 (${resp.status})`);
-                }
             }
             showFeedback(
                 targetChapters === 0
@@ -885,11 +1780,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             if (onSync) {
                 await onSync();
             } else {
-                const resp = await fetch('/api/narrate/sync', { method: 'POST' });
-                if (!resp.ok) {
-                    const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
-                    throw new Error(errBody.error ?? `同步修改失败 (${resp.status})`);
-                }
+                await sendJsonRequest('/api/narrate/sync', '同步修改失败');
             }
             showFeedback('已完成手改同步与人物台账更新');
         } catch (err) {
@@ -903,15 +1794,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             if (onDream) {
                 await onDream();
             } else {
-                const resp = await fetch('/api/narrate/dream', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ force: true })
+                await sendJsonRequest('/api/narrate/dream', '整理设定失败', {
+                    body: { force: true }
                 });
-                if (!resp.ok) {
-                    const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
-                    throw new Error(errBody.error ?? `整理设定失败 (${resp.status})`);
-                }
             }
             showFeedback('已启动跨章设定与伏笔整理');
         } catch (err) {
@@ -962,15 +1847,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             if (onSaveChapter) {
                 await onSaveChapter(targetChapterNumber, contentToSave);
             } else {
-                const resp = await fetch('/api/narrate/chapter', {
+                await sendJsonRequest('/api/narrate/chapter', '保存并同步失败', {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chapterNumber: targetChapterNumber, content: contentToSave })
+                    body: { chapterNumber: targetChapterNumber, content: contentToSave }
                 });
-                if (!resp.ok) {
-                    const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
-                    throw new Error(errBody.error ?? `保存并同步失败 (${resp.status})`);
-                }
             }
             setDraftBaseline(contentToSave);
             setIsEditing(false);
@@ -990,14 +1870,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 await onSubmitSignal(payload);
             } else {
                 const isSpotlight = payload.kind === 'SPOTLIGHT_TRIGGER';
-                const isRetcon = payload.kind === 'RETCON' || payload.kind === 'Retcon';
                 const isFlashback = payload.kind === 'FLASHBACK';
                 const req: Record<string, unknown> = {
-                    type: isRetcon
-                        ? 'RETCON'
-                        : isSpotlight
-                          ? 'SPOTLIGHT_TRIGGER'
-                          : 'DIRECTOR_NOTE',
+                    type: resolveSignalRequestType(payload.kind),
                     content: payload.content.trim(),
                     reason: payload.content.trim(),
                     chapter: Math.max(0, currentChapter),
@@ -1009,21 +1884,13 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 if (isFlashback) {
                     req['suggested_mode'] = 'FLASHBACK';
                 }
-                const resp = await fetch('/api/narrate/signals', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(req)
-                });
-                if (!resp.ok) {
-                    const errBody = (await resp.json().catch(() => ({}))) as { error?: string };
-                    throw new Error(errBody.error ?? `递交便签失败 (${resp.status})`);
-                }
+                await sendJsonRequest('/api/narrate/signals', '递交便签失败', { body: req });
                 if (payload.runAfter) {
-                    await handleStepOne(
+                    const stepReq: StepChapterRequest | undefined =
                         isFlashback && payload.targetDay
                             ? { timelineMode: 'FLASHBACK', targetDay: payload.targetDay }
-                            : undefined
-                    );
+                            : undefined;
+                    await handleStepOne(stepReq);
                 }
             }
             setNoteText('');
@@ -1235,26 +2102,29 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         runWithViewTransition(() => {
             setInspectedStageId(stageDef.id);
             onInspectStage?.(stageDef.id);
-            if (nodeState.sessionId && onSelectStageSession) {
-                onSelectStageSession({
-                    stageId: stageDef.id,
-                    stageLabel: stageDef.label,
-                    sessionId: nodeState.sessionId,
-                    ...(nodeState.parentSessionId !== undefined
-                        ? { parentSessionId: nodeState.parentSessionId }
-                        : {}),
-                    ...(nodeState.mode !== undefined ? { mode: nodeState.mode } : {}),
-                    runId: nodeState.runId,
-                    status: nodeState.status
-                });
-            } else if (stageDef.id === 'WRITER' && onSelectStageSession) {
-                onSelectStageSession({
-                    stageId: stageDef.id,
-                    stageLabel: stageDef.label,
-                    sessionId: `cleanroom-ch-${activeChapterNumber}`,
-                    status: nodeState.status,
-                    cleanroom: true
-                });
+            if (!onSelectStageSession) return;
+            if (nodeState.sessionId) {
+                onSelectStageSession(
+                    buildStageSessionSelection({
+                        stageId: stageDef.id,
+                        stageLabel: stageDef.label,
+                        sessionId: nodeState.sessionId,
+                        parentSessionId: nodeState.parentSessionId,
+                        mode: nodeState.mode,
+                        runId: nodeState.runId,
+                        status: nodeState.status
+                    })
+                );
+            } else if (stageDef.id === 'WRITER') {
+                onSelectStageSession(
+                    buildStageSessionSelection({
+                        stageId: stageDef.id,
+                        stageLabel: stageDef.label,
+                        sessionId: `cleanroom-ch-${activeChapterNumber}`,
+                        status: nodeState.status,
+                        cleanroom: true
+                    })
+                );
             }
         });
     };
@@ -1263,34 +2133,39 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         runWithViewTransition(() => {
             setInspectedStageId('WRITER');
             onInspectStage?.('WRITER');
-            if (patchSession && onSelectStageSession) {
-                onSelectStageSession({
-                    stageId: 'WRITER',
-                    stageLabel: '3. Writer',
-                    sessionId: patchSession.sessionId,
-                    ...(patchSession.parentSessionId !== undefined
-                        ? { parentSessionId: patchSession.parentSessionId }
-                        : {}),
-                    ...(patchSession.mode !== undefined ? { mode: patchSession.mode } : {}),
-                    runId: patchSession.runId,
-                    status: stageMap.WRITER.status
-                });
-            } else if (stageMap.WRITER.sessionId && onSelectStageSession) {
-                onSelectStageSession({
-                    stageId: 'WRITER',
-                    stageLabel: '3. Writer',
-                    sessionId: stageMap.WRITER.sessionId,
-                    runId: stageMap.WRITER.runId,
-                    status: stageMap.WRITER.status
-                });
-            } else if (onSelectStageSession) {
-                onSelectStageSession({
-                    stageId: 'WRITER',
-                    stageLabel: '3. Writer',
-                    sessionId: `cleanroom-patch-ch-${activeChapterNumber}`,
-                    status: stageMap.WRITER.status,
-                    cleanroom: true
-                });
+            if (!onSelectStageSession) return;
+            if (patchSession) {
+                onSelectStageSession(
+                    buildStageSessionSelection({
+                        stageId: 'WRITER',
+                        stageLabel: '3. Writer',
+                        sessionId: patchSession.sessionId,
+                        parentSessionId: patchSession.parentSessionId,
+                        mode: patchSession.mode,
+                        runId: patchSession.runId,
+                        status: stageMap.WRITER.status
+                    })
+                );
+            } else if (stageMap.WRITER.sessionId) {
+                onSelectStageSession(
+                    buildStageSessionSelection({
+                        stageId: 'WRITER',
+                        stageLabel: '3. Writer',
+                        sessionId: stageMap.WRITER.sessionId,
+                        runId: stageMap.WRITER.runId,
+                        status: stageMap.WRITER.status
+                    })
+                );
+            } else {
+                onSelectStageSession(
+                    buildStageSessionSelection({
+                        stageId: 'WRITER',
+                        stageLabel: '3. Writer',
+                        sessionId: `cleanroom-patch-ch-${activeChapterNumber}`,
+                        status: stageMap.WRITER.status,
+                        cleanroom: true
+                    })
+                );
             }
         });
     };
@@ -1304,6 +2179,219 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
         }
         signalInputRef.current?.focus();
     };
+
+    const handleOpenCodexFromCenter = () => {
+        runWithViewTransition(() => {
+            setMainSurface('codex');
+            setCodexTab('entities');
+            onOpenCodex?.('entities');
+        });
+    };
+
+    const handleSyncFromDiff = () => {
+        setSyncingFromDiff(true);
+        void Promise.resolve(handleSync()).finally(() => {
+            setSyncingFromDiff(false);
+        });
+    };
+
+    const renderStageCanvas = (): React.ReactElement => {
+        if (mainSurface === 'codex') {
+            return (
+                <CodexView
+                    bookTitle={displayBookTitle}
+                    hasChapters={hasChapterContent}
+                    activeChapterNumber={activeChapterNumber}
+                    activeTab={codexTab}
+                    entities={materializedViews?.entities ?? []}
+                    coldArchiveCount={materializedViews?.coldArchiveCount ?? 0}
+                    horizonMarkdown={materializedViews?.horizonMarkdown}
+                    threadsMarkdown={materializedViews?.threadsMarkdown}
+                    onSelectTab={(tab) => {
+                        setCodexTab(tab);
+                        onCodexTabChange?.(tab);
+                    }}
+                    onBackToProse={() =>
+                        runWithViewTransition(() => {
+                            setMainSurface('chapter');
+                            onCloseCodex?.();
+                        })
+                    }
+                />
+            );
+        }
+
+        if (!hasChapterContent) {
+            return renderCoverSheet({
+                ribbonRef,
+                displayVolumeLabel,
+                displayBookTitle,
+                storyDay,
+                disabled: isBusy || stepSubmitting,
+                onStepOne: () => void handleStepOne(),
+                onOpenCodex: handleOpenCodexFromCenter
+            });
+        }
+
+        if (chapterTab === 'prose') {
+            return (
+                <article className="ns-manuscript-sheet">
+                    <div ref={ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+                    <header className="ns-editorial-masthead">
+                        <div className="ns-editorial-numeral">
+                            {String(Math.max(0, activeChapterNumber)).padStart(2, '0')}
+                        </div>
+                        <div>
+                            <h1>{activeChapterTitle}</h1>
+                            <div className="ns-ch-meta-line">
+                                <span className="ns-num">
+                                    {displayVolumeLabel} · 故事第 {storyDay} 天 ·{' '}
+                                    {proseCharCount > 0
+                                        ? `${proseCharCount.toLocaleString('zh-CN')} 字`
+                                        : '暂无正文内容'}
+                                </span>
+                                <span
+                                    className={`ns-badge ${
+                                        isChapterDirty ? 'ns-badge-warn' : 'ns-badge-ok'
+                                    }`}
+                                >
+                                    {isChapterDirty ? '待同步修改' : '已定稿'}
+                                </span>
+                            </div>
+                        </div>
+                    </header>
+
+                    {showPatchColophon && (
+                        <div className="ns-patch-colophon-bar">
+                            <span>
+                                校勘记录：本章成稿时已自动润色
+                                {patchedViolationCount > 0
+                                    ? `消除 ${patchedViolationCount} 处高频套话`
+                                    : '完成局部门禁修补'}
+                            </span>
+                            <button type="button" onClick={handleOpenPatchTrace}>
+                                查看润色思考过程 →
+                            </button>
+                        </div>
+                    )}
+
+                    {renderProseBody({
+                        isEditing,
+                        draftContent,
+                        isDraftDirty,
+                        savingEdit,
+                        isBusy,
+                        chapterLoading,
+                        proseParagraphs,
+                        proseBodyRef,
+                        conflictTargetLine,
+                        isChapterDirty,
+                        sealJustStamped,
+                        commitDisplay,
+                        onChangeDraft: setDraftContent,
+                        onCancelEditing: handleCancelEditing,
+                        onSaveEditedChapter: () => void handleSaveEditedChapter()
+                    })}
+
+                    {!isEditing && (prevChapterSummary || nextChapterSummary) && (
+                        <nav className="ns-chap-nav" aria-label="上下章快捷导航">
+                            {prevChapterSummary ? (
+                                <button
+                                    type="button"
+                                    className="ns-btn ns-btn-outline"
+                                    onClick={() =>
+                                        onSelectChapter?.(prevChapterSummary.chapterNumber)
+                                    }
+                                >
+                                    上一章 · {prevChapterSummary.title}
+                                </button>
+                            ) : (
+                                <span />
+                            )}
+                            {nextChapterSummary ? (
+                                <button
+                                    type="button"
+                                    className="ns-btn ns-btn-outline"
+                                    onClick={() =>
+                                        onSelectChapter?.(nextChapterSummary.chapterNumber)
+                                    }
+                                >
+                                    下一章 · {nextChapterSummary.title}
+                                </button>
+                            ) : (
+                                <span />
+                            )}
+                        </nav>
+                    )}
+                </article>
+            );
+        }
+
+        if (chapterTab === 'plan') {
+            return renderPlanSection({
+                ribbonRef,
+                activeChapterNumber,
+                parsedPlan,
+                outlineStatus,
+                hasChapterDetail: Boolean(chapterDetail),
+                chapterLoading,
+                onRetryChapterDetail
+            });
+        }
+
+        return renderDiffSection({
+            ribbonRef,
+            activeChapterNumber,
+            diffHunks,
+            isChapterDirty,
+            isBusy,
+            syncingFromDiff,
+            activeTask,
+            chapterFileName,
+            walPhase,
+            featHash,
+            stateHash,
+            sha256: chapterDetail?.sha256,
+            onSyncFromDiff: handleSyncFromDiff
+        });
+    };
+
+    const isParallelMode = timelineMode === 'PARALLEL' || Boolean(parallelWindowId);
+    const parallelBadgeLabel = parallelWindowId ? `多线并行 · ${parallelWindowId}` : '多线并行';
+    const compactNavPrefix =
+        hasChapterContent && activeChapterNumber > 0 ? `第 ${activeChapterNumber} 章` : '新书';
+    const rightToggleClass = [
+        'ns-btn',
+        'ns-btn-icon-only',
+        rightOpen ? 'ns-btn-subtle' : '',
+        hasSafeHalt ? 'ns-btn-halt-alert' : ''
+    ]
+        .filter(Boolean)
+        .join(' ');
+    const rightToggleTitle = rightOpen ? '收起右侧面板' : '展开右侧面板';
+    const feedbackText = actionError ?? actionMessage;
+
+    const toggleMenu = (target: 'book' | 'toc' | 'run' | 'stop' | 'ops'): void => {
+        setOpenMenu((prev) => (prev === target ? null : target));
+    };
+
+    const primaryActionSplit = isBusy
+        ? renderStopSplitAction({
+              stopPending,
+              haltWaiting,
+              menuOpen: openMenu === 'stop',
+              onToggleMenu: () => toggleMenu('stop'),
+              onSoftStop: () => void handleSoftStop(),
+              onForceStop: () => void handleForceStop()
+          })
+        : renderRunSplitAction({
+              disabled: isBusy || stepSubmitting,
+              stepSubmitting,
+              menuOpen: openMenu === 'run',
+              onStepOne: () => void handleStepOne(),
+              onToggleMenu: () => toggleMenu('run'),
+              onStartYolo: (targetChapters) => void handleStartYolo(targetChapters)
+          });
 
     return (
         <main className="ns-center-workbench ns-center-pane">
@@ -1345,51 +2433,17 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             <span>《{displayBookTitle}》</span>
                             {StudioIcons.chev}
                         </button>
-                        {openMenu === 'book' ? (
-                            <div className="ns-menu-pop ns-left" role="menu" aria-label="切换作品">
-                                {books.map((book) => (
-                                    <button
-                                        key={book.bookRoot}
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row"
-                                        onClick={() => {
-                                            setOpenMenu(null);
-                                            if (book.bookRoot !== currentBookRoot) {
-                                                onSelectBook?.(book.bookRoot);
-                                            }
-                                        }}
-                                    >
-                                        <b>{book.title || book.slug}</b>
-                                        <span>
-                                            {book.currentChapter > 0
-                                                ? `已写至第 ${book.currentChapter} 章`
-                                                : '新书待开篇'}
-                                        </span>
-                                    </button>
-                                ))}
-                                {onNewBook ? (
-                                    <>
-                                        {books.length > 0 ? <div className="ns-menu-divider" /> : null}
-                                        <button
-                                            type="button"
-                                            role="menuitem"
-                                            className="ns-menu-row"
-                                            onClick={() => {
-                                                setOpenMenu(null);
-                                                onNewBook();
-                                            }}
-                                        >
-                                            <b>+ 开启新作品</b>
-                                            <span>打开建库向导或切回构思对话</span>
-                                        </button>
-                                    </>
-                                ) : null}
-                            </div>
-                        ) : null}
+                        {renderBookMenu({
+                            open: openMenu === 'book',
+                            books,
+                            currentBookRoot,
+                            onClose: () => setOpenMenu(null),
+                            onSelectBook,
+                            onNewBook
+                        })}
                     </div>
 
-                    {showCompactNav ? (
+                    {showCompactNav && (
                         <div className="ns-header-pop-wrap">
                             <button
                                 type="button"
@@ -1400,81 +2454,36 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     setOpenMenu((prev) => (prev === 'toc' ? null : 'toc'))
                                 }
                             >
-                                <span>
-                                    {hasChapterContent && activeChapterNumber > 0
-                                        ? `第 ${activeChapterNumber} 章`
-                                        : '新书'}{' '}
-                                    · 目录与设定集
-                                </span>
+                                <span>{compactNavPrefix} · 目录与设定集</span>
                                 {StudioIcons.chev}
                             </button>
-                            {openMenu === 'toc' ? (
-                                <div className="ns-menu-pop ns-left" role="menu" aria-label="章节与设定集">
-                                    {chapters.map((ch) => (
-                                        <button
-                                            key={ch.chapterNumber}
-                                            type="button"
-                                            role="menuitem"
-                                            className="ns-menu-row"
-                                            onClick={() => {
-                                                setOpenMenu(null);
-                                                setMainSurface('chapter');
-                                                onSelectChapter?.(ch.chapterNumber);
-                                            }}
-                                        >
-                                            <b>
-                                                第 {ch.chapterNumber} 章 · {ch.title}
-                                            </b>
-                                            <span>
-                                                {ch.charCount !== undefined
-                                                    ? `${ch.charCount} 字`
-                                                    : '已入库'}
-                                            </span>
-                                        </button>
-                                    ))}
-                                    <div className="ns-menu-divider" />
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row"
-                                        onClick={() => {
-                                            setOpenMenu(null);
-                                            runWithViewTransition(() => {
-                                                setMainSurface('codex');
-                                                setCodexTab('entities');
-                                                onOpenCodex?.('entities');
-                                            });
-                                        }}
-                                    >
-                                        <b>打开全书设定集</b>
-                                        <span>人物档案 · 未解伏笔 · 预案与废案</span>
-                                    </button>
-                                </div>
-                            ) : null}
+                            {renderCompactTocMenu({
+                                open: openMenu === 'toc',
+                                chapters,
+                                onClose: () => setOpenMenu(null),
+                                onSelectChapter: (chapterNumber) => {
+                                    setMainSurface('chapter');
+                                    onSelectChapter?.(chapterNumber);
+                                },
+                                onOpenCodex: handleOpenCodexFromCenter
+                            })}
                         </div>
-                    ) : null}
+                    )}
 
-                    {isYoloRunning ? (
-                        <span className="ns-badge ns-badge-accent">
-                            {yolo && yolo.targetChapters > 0
-                                ? `YOLO 连写 ${yolo.completedChapters}/${yolo.targetChapters} 章`
-                                : `YOLO 连写中 · 第 ${currentChapter + 1} 章`}
-                        </span>
-                    ) : activeTask !== 'IDLE' ? (
-                        <span className="ns-badge ns-badge-accent">
-                            {ACTIVE_TASK_LABELS[activeTask] ?? '正在处理'}
-                        </span>
-                    ) : null}
+                    {renderTaskStatusBadge({
+                        isYoloRunning,
+                        yolo,
+                        currentChapter,
+                        activeTask
+                    })}
 
-                    {timelineMode === 'PARALLEL' || parallelWindowId ? (
-                        <span className="ns-badge ns-badge-warn">
-                            多线并行{parallelWindowId ? ` · ${parallelWindowId}` : ''}
-                        </span>
-                    ) : null}
+                    {isParallelMode && (
+                        <span className="ns-badge ns-badge-warn">{parallelBadgeLabel}</span>
+                    )}
                 </div>
 
                 <div className="ns-header-right">
-                    {dirtyChaptersCount > 0 ? (
+                    {dirtyChaptersCount > 0 && (
                         <button
                             type="button"
                             className="ns-btn ns-btn-warn"
@@ -1489,109 +2498,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     : `同步修改 (${dirtyChaptersCount})`}
                             </span>
                         </button>
-                    ) : null}
-
-                    {isBusy ? (
-                        <div className="ns-split-action">
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-warn"
-                                disabled={stopPending}
-                                onClick={() => void handleSoftStop()}
-                            >
-                                {StudioIcons.pause}
-                                <span>
-                                    {stopPending
-                                        ? haltWaiting
-                                            ? '等待安全点收束…'
-                                            : '写完本章即停…'
-                                        : '写完本章暂停'}
-                                </span>
-                            </button>
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-warn"
-                                aria-haspopup="menu"
-                                aria-expanded={openMenu === 'stop'}
-                                aria-label="更多停止选项"
-                                onClick={() =>
-                                    setOpenMenu((prev) => (prev === 'stop' ? null : 'stop'))
-                                }
-                            >
-                                {StudioIcons.chev}
-                            </button>
-                            {openMenu === 'stop' ? (
-                                <div className="ns-menu-pop" role="menu" aria-label="停止方式">
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row"
-                                        onClick={() => void handleSoftStop()}
-                                    >
-                                        <b>写完本章后平稳停下（推荐）</b>
-                                        <span>等当前章节保存完整后再退出运行</span>
-                                    </button>
-                                    <div className="ns-menu-divider" />
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row ns-danger"
-                                        onClick={() => void handleForceStop()}
-                                    >
-                                        <b>立即中断并撤回半截草稿</b>
-                                        <span>强行打断当前生成，恢复到上一章干净状态</span>
-                                    </button>
-                                </div>
-                            ) : null}
-                        </div>
-                    ) : (
-                        <div className="ns-split-action">
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-primary"
-                                disabled={isBusy || stepSubmitting}
-                                onClick={() => void handleStepOne()}
-                            >
-                                {StudioIcons.play}
-                                <span>{stepSubmitting ? '正在开启…' : '写下一章'}</span>
-                            </button>
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-primary"
-                                disabled={isBusy || stepSubmitting}
-                                aria-haspopup="menu"
-                                aria-expanded={openMenu === 'run'}
-                                onClick={() =>
-                                    setOpenMenu((prev) => (prev === 'run' ? null : 'run'))
-                                }
-                            >
-                                <span>YOLO</span>
-                                {StudioIcons.chev}
-                            </button>
-                            {openMenu === 'run' ? (
-                                <div className="ns-menu-pop" role="menu" aria-label="YOLO 连写模式">
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row"
-                                        onClick={() => void handleStartYolo(0)}
-                                    >
-                                        <b>YOLO 持续连写</b>
-                                        <span>遇到设定冲突、关键视角切镜或手动暂停时自动停下</span>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row"
-                                        onClick={() => void handleStartYolo(5)}
-                                    >
-                                        <b>YOLO 连写 5 章</b>
-                                        <span>写满 5 章后自动停下待审</span>
-                                    </button>
-                                </div>
-                            ) : null}
-                        </div>
                     )}
+
+                    {primaryActionSplit}
 
                     <div className="ns-header-pop-wrap">
                         <button
@@ -1607,99 +2516,36 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         >
                             {StudioIcons.more}
                         </button>
-                        {openMenu === 'ops' ? (
-                            <div className="ns-menu-pop" role="menu" aria-label="更多创作操作">
-                                <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="ns-menu-row"
-                                    disabled={isBusy}
-                                    onClick={() => void handleDream()}
-                                >
-                                    <b>立即整理设定与伏笔</b>
-                                    <span>归纳近期章节的人物变化与复现线索</span>
-                                </button>
-                                <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="ns-menu-row"
-                                    disabled={isBusy}
-                                    onClick={() => {
-                                        setOpenMenu(null);
-                                        onOpenAdvanceVolumeModal?.();
-                                    }}
-                                >
-                                    <b>结束本卷 / 开启下一卷</b>
-                                    <span>勾选随行人物、归档退场角色并规划新卷</span>
-                                </button>
-                                <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="ns-menu-row"
-                                    disabled={isBusy}
-                                    onClick={() => {
-                                        setOpenMenu(null);
-                                        onOpenParallelModal?.();
-                                    }}
-                                >
-                                    <b>
-                                        {timelineMode === 'PARALLEL' || parallelWindowId
-                                            ? '管理 / 合流多线并行窗口'
-                                            : '开启多线并行章节'}
-                                    </b>
-                                    <span>同一时间段分头推进两条人物支线</span>
-                                </button>
-                                <div className="ns-menu-divider" />
-                                <button
-                                    type="button"
-                                    role="menuitem"
-                                    className="ns-menu-row"
-                                    disabled={isBusy}
-                                    onClick={() => {
-                                        setOpenMenu(null);
-                                        void onHarvestVoice?.(
-                                            activeChapterNumber > 0 ? activeChapterNumber : undefined
-                                        );
-                                    }}
-                                >
-                                    <b>重新提取本章对话声纹</b>
-                                    <span>从当前选定章节采集鲜活表达标本</span>
-                                </button>
-                                {onRefreshViews ? (
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="ns-menu-row"
-                                        disabled={isBusy}
-                                        onClick={() => {
-                                            setOpenMenu(null);
-                                            void onRefreshViews();
-                                        }}
-                                    >
-                                        <b>刷新工作区数据</b>
-                                        <span>重新读取最新章节与设定集视图</span>
-                                    </button>
-                                ) : null}
-                            </div>
-                        ) : null}
+                        {renderOpsMenu({
+                            open: openMenu === 'ops',
+                            isBusy,
+                            isParallelMode,
+                            activeChapterNumber,
+                            onClose: () => setOpenMenu(null),
+                            onDream: () => void handleDream(),
+                            onOpenAdvanceVolumeModal,
+                            onOpenParallelModal,
+                            onHarvestVoice,
+                            onRefreshViews
+                        })}
                     </div>
 
-                    {onToggleRight ? (
+                    {onToggleRight && (
                         <button
                             type="button"
-                            className={`ns-btn ns-btn-icon-only${rightOpen ? ' ns-btn-subtle' : ''}${hasSafeHalt ? ' ns-btn-halt-alert' : ''}`}
+                            className={rightToggleClass}
                             onClick={onToggleRight}
-                            title={rightOpen ? '收起右侧面板' : '展开右侧面板'}
-                            aria-label={rightOpen ? '收起右侧面板' : '展开右侧面板'}
+                            title={rightToggleTitle}
+                            aria-label={rightToggleTitle}
                         >
                             {StudioIcons.rightbar}
                         </button>
-                    ) : null}
+                    )}
                 </div>
             </header>
 
             {/* 单章工具栏（严禁出现原型 .sim-bar；独立设定集视图下隐藏） */}
-            {mainSurface === 'chapter' && hasChapterContent ? (
+            {mainSurface === 'chapter' && hasChapterContent && (
                 <div className="ns-reader-toolbar-wrap">
                     <div className="ns-reader-bar">
                         <div
@@ -1769,13 +2615,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 type="button"
                                 className={`ns-btn${isEditing ? ' ns-btn-subtle' : ''}`}
                                 disabled={savingEdit}
-                                onClick={() => {
-                                    if (isEditing) {
-                                        handleCancelEditing();
-                                    } else {
-                                        handleStartEditing();
-                                    }
-                                }}
+                                onClick={isEditing ? handleCancelEditing : handleStartEditing}
                             >
                                 {StudioIcons.edit}
                                 <span>{isEditing ? '退出编辑' : '直接改稿'}</span>
@@ -1783,53 +2623,19 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         </div>
                     </div>
 
-                    {stageDrawerOpen ? (
-                        <section className="ns-pipeline-drawer" aria-label="6 步 Agent 工序与模型矩阵">
-                            {PIPELINE_STAGES.map((stage) => {
-                                const nodeState = stageMap[stage.id];
-                                const effectiveModel = resolveStageModelLabel(stage);
-                                const isRunningLive =
-                                    nodeState.status === 'active' || nodeState.status === 'healing';
-                                const isSelected = inspectedStageId === stage.id;
-                                return (
-                                    <button
-                                        key={stage.id}
-                                        type="button"
-                                        className={`ns-pipe-card${isSelected ? ' ns-selected' : ''}${
-                                            isRunningLive ? ' ns-running-live' : ''
-                                        }`}
-                                        data-stage-id={stage.id}
-                                        data-session-id={nodeState.sessionId ?? ''}
-                                        onClick={() => handleInspectStep(stage)}
-                                        title={`点击查看 ${stage.label} 思考过程`}
-                                    >
-                                        <div className="ns-pipe-card-top">
-                                            <span className="ns-pipe-step-name">
-                                                <i
-                                                    className={`ns-lamp ${getLampStatusClass(nodeState.status)}`}
-                                                    aria-hidden="true"
-                                                />
-                                                <span>{stage.label}</span>
-                                            </span>
-                                            <span className="ns-pipe-step-state">
-                                                {getStageStatusText(nodeState.status)}
-                                            </span>
-                                        </div>
-                                        <div className="ns-pipe-live-note">
-                                            {nodeState.summary ?? stage.shortDesc}
-                                        </div>
-                                        <div className="ns-pipe-model-tag">{effectiveModel}</div>
-                                    </button>
-                                );
-                            })}
-                        </section>
-                    ) : null}
+                    {renderPipelineDrawer({
+                        open: stageDrawerOpen,
+                        stageMap,
+                        inspectedStageId,
+                        resolveStageModelLabel,
+                        onInspectStep: handleInspectStep
+                    })}
                 </div>
-            ) : null}
+            )}
 
-            {actionMessage || actionError ? (
+            {feedbackText && (
                 <div className={`ns-feedback-bar ${actionError ? 'ns-feedback-err' : 'ns-feedback-ok'}`}>
-                    <span>{actionError ?? actionMessage}</span>
+                    <span>{feedbackText}</span>
                     <button
                         type="button"
                         className="ns-btn ns-btn-xs"
@@ -1841,7 +2647,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         ×
                     </button>
                 </div>
-            ) : null}
+            )}
 
             {/* 舞台滚动画布 */}
             <div
@@ -1855,7 +2661,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                 tabIndex={0}
             >
                 {/* 暂存未保存草稿温和恢复条（Q5） */}
-                {stashedDraft && !isEditing && mainSurface === 'chapter' ? (
+                {stashedDraft && !isEditing && mainSurface === 'chapter' && (
                     <div className="ns-stash-restore-bar" role="status">
                         <span>检测到第 {stashedDraft.chapterNumber} 章有你刚才暂存的未保存手改草稿</span>
                         <div className="ns-header-right">
@@ -1888,10 +2694,10 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             </button>
                         </div>
                     </div>
-                ) : null}
+                )}
 
                 {/* 双模式设定冲突裁决卡 */}
-                {mainSurface === 'chapter' && (syncConflict || safeHalt) ? (
+                {mainSurface === 'chapter' && (syncConflict || safeHalt) && (
                     <ConflictVerdictCard
                         safeHalt={safeHalt}
                         syncConflict={syncConflict}
@@ -1914,510 +2720,12 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         }}
                         onFocusNoteDock={handleFocusNoteDock}
                     />
-                ) : null}
-
-                {mainSurface === 'codex' ? (
-                    <CodexView
-                        bookTitle={displayBookTitle}
-                        hasChapters={hasChapterContent}
-                        activeChapterNumber={activeChapterNumber}
-                        activeTab={codexTab}
-                        entities={materializedViews?.entities ?? []}
-                        coldArchiveCount={materializedViews?.coldArchiveCount ?? 0}
-                        horizonMarkdown={materializedViews?.horizonMarkdown}
-                        threadsMarkdown={materializedViews?.threadsMarkdown}
-                        onSelectTab={(tab) => {
-                            setCodexTab(tab);
-                            onCodexTabChange?.(tab);
-                        }}
-                        onBackToProse={() =>
-                            runWithViewTransition(() => {
-                                setMainSurface('chapter');
-                                onCloseCodex?.();
-                            })
-                        }
-                    />
-                ) : !hasChapterContent ? (
-                    <article className="ns-manuscript-sheet ns-cover-sheet" aria-label="新书开卷扉页">
-                        <div ref={ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
-                        <div className="ns-cover-badge-row">
-                            <span className="ns-cover-seal">开卷</span>
-                            <span className="ns-badge ns-badge-neutral">{displayVolumeLabel}</span>
-                        </div>
-                        <h1>《{displayBookTitle}》</h1>
-                        <p className="ns-cover-desc">
-                            作者契约与人物初始档案已编译完成，当前停机待命在故事第 {storyDay} 天。点击下方按钮开启第 1 章首章执笔与对话声纹校准，也可先在下方递交导演便签调整开篇走向。
-                        </p>
-                        <div className="ns-cover-actions">
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-primary"
-                                disabled={isBusy || stepSubmitting}
-                                onClick={() => void handleStepOne()}
-                            >
-                                {StudioIcons.play}
-                                <span>写第 1 章（开篇校准）</span>
-                            </button>
-                            <button
-                                type="button"
-                                className="ns-btn ns-btn-outline"
-                                onClick={() =>
-                                    runWithViewTransition(() => {
-                                        setMainSurface('codex');
-                                        setCodexTab('entities');
-                                        onOpenCodex?.('entities');
-                                    })
-                                }
-                            >
-                                <span>先核对全书设定集</span>
-                            </button>
-                        </div>
-                    </article>
-                ) : chapterTab === 'prose' ? (
-                    <article className="ns-manuscript-sheet">
-                        <div ref={ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
-                        <header className="ns-editorial-masthead">
-                            <div className="ns-editorial-numeral">
-                                {String(Math.max(0, activeChapterNumber)).padStart(2, '0')}
-                            </div>
-                            <div>
-                                <h1>{activeChapterTitle}</h1>
-                                <div className="ns-ch-meta-line">
-                                    <span className="ns-num">
-                                        {displayVolumeLabel} · 故事第 {storyDay} 天 ·{' '}
-                                        {proseCharCount > 0
-                                            ? `${proseCharCount.toLocaleString('zh-CN')} 字`
-                                            : '暂无正文内容'}
-                                    </span>
-                                    <span
-                                        className={`ns-badge ${
-                                            isChapterDirty ? 'ns-badge-warn' : 'ns-badge-ok'
-                                        }`}
-                                    >
-                                        {isChapterDirty ? '待同步修改' : '已定稿'}
-                                    </span>
-                                </div>
-                            </div>
-                        </header>
-
-                        {showPatchColophon ? (
-                            <div className="ns-patch-colophon-bar">
-                                <span>
-                                    校勘记录：本章成稿时已自动润色
-                                    {patchedViolationCount > 0
-                                        ? `消除 ${patchedViolationCount} 处高频套话`
-                                        : '完成局部门禁修补'}
-                                </span>
-                                <button type="button" onClick={handleOpenPatchTrace}>
-                                    查看润色思考过程 →
-                                </button>
-                            </div>
-                        ) : null}
-
-                        {isEditing ? (
-                            <div className="ns-editor-wrap">
-                                <textarea
-                                    className="ns-editor-textarea"
-                                    value={draftContent}
-                                    onChange={(e) => setDraftContent(e.target.value)}
-                                    rows={20}
-                                    placeholder="在此直接修订本章正文…"
-                                />
-                                <div className="ns-editor-footer">
-                                    <span className="ns-muted">
-                                        {isDraftDirty
-                                            ? '有未保存修改 · 切章或切书会自动暂存草稿'
-                                            : '保存后将写入原稿真源并自动同步人物与伏笔台账'}
-                                    </span>
-                                    <div className="ns-header-right">
-                                        <button
-                                            type="button"
-                                            className="ns-btn ns-btn-outline"
-                                            disabled={savingEdit}
-                                            onClick={handleCancelEditing}
-                                        >
-                                            取消
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="ns-btn ns-btn-primary"
-                                            disabled={savingEdit || isBusy}
-                                            onClick={() => void handleSaveEditedChapter()}
-                                        >
-                                            {savingEdit ? '正在保存并同步…' : '保存并自动同步'}
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        ) : chapterLoading && proseParagraphs.length === 0 ? (
-                            <div className="ns-prose-skel" role="status" aria-label="正文加载中">
-                                {Array.from({ length: 6 }, (_, idx) => (
-                                    <span
-                                        key={idx}
-                                        className={`ns-skel ns-skel-line${
-                                            idx % 3 === 2 ? ' ns-skel-line-short' : ''
-                                        }`}
-                                    />
-                                ))}
-                            </div>
-                        ) : proseParagraphs.length > 0 ? (
-                            <>
-                                <div ref={proseBodyRef} className="ns-prose-body ns-prose">
-                                    {proseParagraphs.map((para, idx) =>
-                                        para.isBreak ? (
-                                            <p key={idx} className="ns-brk">
-                                                · · ·
-                                            </p>
-                                        ) : (
-                                            <div key={idx} className="ns-prose-para-wrap">
-                                                <span className="ns-prose-folio">
-                                                    P{String(idx + 1).padStart(2, '0')}
-                                                </span>
-                                                <p
-                                                    className={
-                                                        conflictTargetLine === idx + 1
-                                                            ? 'ns-conflict-highlight'
-                                                            : undefined
-                                                    }
-                                                >
-                                                    {para.text}
-                                                </p>
-                                            </div>
-                                        )
-                                    )}
-                                </div>
-
-                                {!isChapterDirty ? (
-                                    <div className="ns-editorial-endmark">
-                                        <div
-                                            className={`ns-seal-stamp${
-                                                sealJustStamped ? ' ns-stamping' : ''
-                                            }`}
-                                        >
-                                            定稿
-                                        </div>
-                                        <span className="ns-mono ns-muted">
-                                            {commitDisplay
-                                                ? `commit ${commitDisplay} · 双门禁核验入库`
-                                                : '双门禁核验入库'}
-                                        </span>
-                                    </div>
-                                ) : (
-                                    <div className="ns-editorial-endmark">
-                                        <span className="ns-badge ns-badge-warn">
-                                            本章含未同步手改 · 点击顶部「同步修改」更新人物台账后重新盖印
-                                        </span>
-                                    </div>
-                                )}
-                            </>
-                        ) : (
-                            <div className="ns-muted">
-                                当前章节尚无正文内容，请点击右上角「写下一章」或切换其他历史章节。
-                            </div>
-                        )}
-
-                        {!isEditing && (prevChapterSummary || nextChapterSummary) ? (
-                            <nav className="ns-chap-nav" aria-label="上下章快捷导航">
-                                {prevChapterSummary ? (
-                                    <button
-                                        type="button"
-                                        className="ns-btn ns-btn-outline"
-                                        onClick={() =>
-                                            onSelectChapter?.(prevChapterSummary.chapterNumber)
-                                        }
-                                    >
-                                        上一章 · {prevChapterSummary.title}
-                                    </button>
-                                ) : (
-                                    <span />
-                                )}
-                                {nextChapterSummary ? (
-                                    <button
-                                        type="button"
-                                        className="ns-btn ns-btn-outline"
-                                        onClick={() =>
-                                            onSelectChapter?.(nextChapterSummary.chapterNumber)
-                                        }
-                                    >
-                                        下一章 · {nextChapterSummary.title}
-                                    </button>
-                                ) : (
-                                    <span />
-                                )}
-                            </nav>
-                        ) : null}
-                    </article>
-                ) : chapterTab === 'plan' ? (
-                    <section className="ns-manuscript-sheet">
-                        <div ref={ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
-                        {parsedPlan ? (
-                            <>
-                                <header className="ns-plan-head">
-                                    <h2 className="ns-plan-title">
-                                        第 {activeChapterNumber} 章 · {parsedPlan.chapterTitle}
-                                    </h2>
-                                    <div className="ns-plan-meta">
-                                        <span className="ns-plan-pill">
-                                            timeline_mode <b>{parsedPlan.timelineMode ?? '未提供'}</b>
-                                        </span>
-                                        <span className="ns-plan-pill">
-                                            pov <b>{parsedPlan.povCharacter ?? '未提供'}</b>
-                                        </span>
-                                        <span className="ns-plan-pill">
-                                            target{' '}
-                                            <b>
-                                                {parsedPlan.targetWordCount
-                                                    ? `${parsedPlan.targetWordCount.toLocaleString('zh-CN')} 字`
-                                                    : '自适应'}
-                                            </b>
-                                        </span>
-                                        <span className="ns-plan-pill">
-                                            ending <b>{parsedPlan.endingBeat}</b>
-                                        </span>
-                                    </div>
-                                </header>
-
-                                <div>
-                                    <div className="ns-beats">
-                                        {parsedPlan.beats.map((beat, idx) => (
-                                            <div
-                                                key={`${beat.label}-${idx}`}
-                                                className={`ns-beat${beat.isSpotlight ? ' eye' : ''}`}
-                                                style={{ flex: beat.percent }}
-                                                title={`${beat.label} (${beat.percent}%): ${beat.summary}`}
-                                            >
-                                                <b>
-                                                    {beat.label} {beat.percent}%
-                                                </b>
-                                                <span>{beat.summary}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="ns-beats-cap">
-                                        <span>0%</span>
-                                        {(() => {
-                                            let acc = 0;
-                                            return parsedPlan.beats.slice(0, -1).map((beat, idx) => {
-                                                acc += beat.percent;
-                                                return <span key={idx}>{acc}%</span>;
-                                            });
-                                        })()}
-                                        <span>100%</span>
-                                    </div>
-                                </div>
-
-                                <dl className="ns-plan-kv">
-                                    <dt>
-                                        视角
-                                        <small>pov_character</small>
-                                    </dt>
-                                    <dd>
-                                        {parsedPlan.povCharacter ? (
-                                            <span className="ns-actor-pill">
-                                                <i
-                                                    className={`ns-actor-avatar ns-avatar-tone-${getAvatarToneIndex(
-                                                        parsedPlan.povCharacter
-                                                    )}`}
-                                                >
-                                                    {parsedPlan.povCharacter.slice(0, 1)}
-                                                </i>
-                                                {parsedPlan.povCharacter}
-                                            </span>
-                                        ) : (
-                                            <span className="ns-muted">未提供</span>
-                                        )}
-                                    </dd>
-
-                                    <dt>
-                                        焦点角色
-                                        <small>focus_cast</small>
-                                    </dt>
-                                    <dd>
-                                        {parsedPlan.focusCast.length > 0 ? (
-                                            parsedPlan.focusCast.map((actor) => (
-                                                <span key={actor} className="ns-actor-pill">
-                                                    <i
-                                                        className={`ns-actor-avatar ns-avatar-tone-${getAvatarToneIndex(
-                                                            actor
-                                                        )}`}
-                                                    >
-                                                        {actor.slice(0, 1)}
-                                                    </i>
-                                                    {actor}
-                                                </span>
-                                            ))
-                                        ) : (
-                                            <span className="ns-muted">本章无</span>
-                                        )}
-                                    </dd>
-
-                                    <dt>
-                                        背景角色
-                                        <small>background_cast</small>
-                                    </dt>
-                                    <dd>
-                                        {parsedPlan.backgroundCast.length > 0 ? (
-                                            parsedPlan.backgroundCast.map((actor) => (
-                                                <span key={actor} className="ns-actor-pill">
-                                                    <i
-                                                        className={`ns-actor-avatar ns-avatar-tone-${getAvatarToneIndex(
-                                                            actor
-                                                        )}`}
-                                                    >
-                                                        {actor.slice(0, 1)}
-                                                    </i>
-                                                    {actor}
-                                                </span>
-                                            ))
-                                        ) : (
-                                            <span className="ns-muted">本章无</span>
-                                        )}
-                                    </dd>
-
-                                    <dt>
-                                        戏眼
-                                        <small>spotlight</small>
-                                    </dt>
-                                    <dd className="ns-plan-prose">{parsedPlan.spotlight}</dd>
-
-                                    <dt>
-                                        收尾节拍
-                                        <small>ending_beat</small>
-                                    </dt>
-                                    <dd className="ns-plan-prose ns-plan-ending">
-                                        <span className="ns-pill ns-pill-brand ns-mono">
-                                            {parsedPlan.endingBeat}
-                                        </span>
-                                        <span>{parsedPlan.endingSummary}</span>
-                                    </dd>
-
-                                    <dt>
-                                        细纲正文
-                                        <small>outline_text</small>
-                                    </dt>
-                                    <dd className="ns-plan-prose ns-plan-outline">
-                                        {parsedPlan.outlineText}
-                                    </dd>
-                                </dl>
-                            </>
-                        ) : (
-                            <div className="ns-plan-empty">
-                                <h2 className="ns-plan-title ns-plan-title-sm">
-                                    第 {activeChapterNumber} 章 ·{' '}
-                                    {outlineStatus === 'error'
-                                        ? '细纲读取失败'
-                                        : chapterDetail
-                                          ? '历史章节未留存细纲'
-                                          : '细纲暂不可用'}
-                                </h2>
-                                <p className="ns-plan-empty-hint">
-                                    {outlineStatus === 'error'
-                                        ? '本章已保存的细纲文件损坏或读取失败，正文仍可正常审阅；可重试只读读取，不会触发生成或同步。'
-                                        : chapterDetail
-                                          ? '本章生成时未持久化细纲快照，历史细纲无法回看。后续新生成的章节会随正文一并留存细纲。'
-                                          : '当前章节详情尚未加载，加载后可查看已留存的细纲。'}
-                                </p>
-                                {outlineStatus === 'error' && onRetryChapterDetail ? (
-                                    <button
-                                        type="button"
-                                        className="ns-btn ns-btn-outline"
-                                        disabled={chapterLoading}
-                                        onClick={onRetryChapterDetail}
-                                    >
-                                        {chapterLoading ? '正在重试…' : '重试读取细纲'}
-                                    </button>
-                                ) : null}
-                            </div>
-                        )}
-                    </section>
-                ) : (
-                    <section className="ns-manuscript-sheet">
-                        <div ref={ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
-                        <header className="ns-plan-head">
-                            <h2 className="ns-plan-title">改动对比 · {formatChapterLabel(activeChapterNumber)}</h2>
-                        </header>
-                        {diffHunks.length > 0 ? (
-                            diffHunks.map((hunk, hunkIdx) => (
-                                <div
-                                    key={`${hunk.fileName}-${hunk.header}-${hunkIdx}`}
-                                    className="ns-hunk"
-                                >
-                                    <div className="ns-hunk-head">
-                                        <span className="ns-mono ns-hunk-file">{hunk.fileName}</span>
-                                        <span className="ns-mono ns-hunk-range">{hunk.header}</span>
-                                        <span className="ns-hunk-spacer" />
-                                        <span
-                                            className={`ns-badge ${
-                                                isChapterDirty ? 'ns-badge-warn' : 'ns-badge-ok'
-                                            }`}
-                                        >
-                                            {isChapterDirty ? '人工手改 · 待同步' : '已对齐'}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        {hunk.rows.map((row, rowIdx) => (
-                                            <div
-                                                key={rowIdx}
-                                                className={`ns-diff-row${
-                                                    row.kind === 'del'
-                                                        ? ' ns-diff-row-del'
-                                                        : row.kind === 'add'
-                                                          ? ' ns-diff-row-add'
-                                                          : ''
-                                                }`}
-                                            >
-                                                <span className="ns-diff-ln">{row.lineNumber ?? ''}</span>
-                                                <span className="ns-diff-glyph">{row.glyph}</span>
-                                                <span className="ns-diff-text">{row.text || ' '}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="ns-hunk-foot">
-                                        <span>
-                                            新增 +{hunk.addCount} / 删除 -{hunk.delCount} 行
-                                        </span>
-                                        <button
-                                            type="button"
-                                            className="ns-btn ns-btn-outline ns-btn-xs"
-                                            disabled={isBusy || syncingFromDiff}
-                                            onClick={() => {
-                                                setSyncingFromDiff(true);
-                                                void Promise.resolve(handleSync()).finally(() => {
-                                                    setSyncingFromDiff(false);
-                                                });
-                                            }}
-                                        >
-                                            {activeTask === 'SYNCING' || syncingFromDiff
-                                                ? '正在同步…'
-                                                : '立即同步修改'}
-                                        </button>
-                                    </div>
-                                </div>
-                            ))
-                        ) : (
-                            <div className="ns-diff-clean">
-                                <div className="ns-diff-clean-head">
-                                    <span className="ns-badge ns-badge-ok">正文与版本库一致 · 无未同步差异</span>
-                                    <span className="ns-mono ns-diff-clean-file">{chapterFileName}</span>
-                                </div>
-                                <div className="ns-diff-clean-text">
-                                    当前章节正文已与定稿版本对齐，无待同步的人工手改。
-                                </div>
-                                <div className="ns-mono ns-diff-clean-meta">
-                                    <span>状态: {walPhase}</span>
-                                    {featHash ? <span> · feat {featHash}</span> : null}
-                                    {stateHash ? <span> · state {stateHash}</span> : null}
-                                    {chapterDetail?.sha256 ? (
-                                        <span> · sha256 {chapterDetail.sha256.slice(0, 12)}</span>
-                                    ) : null}
-                                </div>
-                            </div>
-                        )}
-                    </section>
                 )}
+
+                {renderStageCanvas()}
             </div>
 
-            {mainSurface === 'chapter' ? (
+            {mainSurface === 'chapter' && (
                 <DirectorNoteDock
                     nextChapterOptions={nextChapterOptions}
                     pendingSignals={pendingSignals}
@@ -2439,7 +2747,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                     }
                     onDismissSignal={onDismissSignal}
                 />
-            ) : null}
+            )}
 
             <Modal
                 open={discardConfirmOpen}
@@ -2475,4 +2783,4 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             </Modal>
         </main>
     );
-};
+}

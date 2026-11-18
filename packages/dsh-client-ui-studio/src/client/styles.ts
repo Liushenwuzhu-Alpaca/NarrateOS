@@ -2224,15 +2224,6 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     flex-shrink: 0;
 }
 
-.ns-right-scroll {
-    flex: 1;
-    overflow-y: auto;
-    padding: 14px 14px 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
 details.ns-acc {
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-1);
