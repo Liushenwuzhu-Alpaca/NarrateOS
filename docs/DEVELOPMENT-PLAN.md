@@ -28,6 +28,7 @@ narrateos/
 │           ├── librarian.yml
 │           ├── planner.yml
 │           ├── writer.yml
+│           ├── patch.yml
 │           ├── fact-checker.yml
 │           ├── extractor.yml
 │           ├── dreamer.yml
@@ -53,9 +54,9 @@ narrateos/
 | 插件包 | 静态 `inject` | 动态可选 `ctx.inject` | 对外服务与核心职责 |
 | :--- | :--- | :--- | :--- |
 | **`@narrateos/dsh-book-store`** | 无模型/Web 依赖 | 无 | 提供 `ctx.narrateStore`：管理多书切换（在途任务未排空前拒绝 `switchBook` 并返回 `409`）、`.ops/tx.lock` 排他锁、WAL 双粒度提交恢复、`Innate Locks` 防篡改、1ms 外键可达性校验、`ParallelSandbox`（`PARALLEL` 分叉与三方合并）、`ViewSlicer`（POV / `WARPED` / `author_charter` / `arc_director_plan` 物理剥离）、`IndexRecall`（带时间差信封与成对挂载核验）、`StaticProseGate`、双侧原句去标点验真、退化遥测、`.ops/runs.jsonl` 会话索引，以及**按 `runId` 隔离的 `StagingSession`（内存暂存覆盖层）**。 |
-| **`@narrateos/dsh-book-tools`** | `narrateStore` | `tools`（主会话写保护守卫） | 导出按 `runId` 与角色 YAML 配置实例化的受控工具构建器，并对主会话挂载 `tools/pre-execute` 守卫（禁止普通对话用裸 `write/edit/bash` 直接修改 `books/<slug>/`）：<br>1. `book_read` / `book_grep` / `book_glob`：锁死当前 `bookRoot` 允许目录（物理屏蔽 `.ops/` 与跨书路径），`book_read` **优先读取本轮 `StagingSession` 覆盖层（Read-Your-Own-Writes）**，按角色配置 `maxReadCalls` 执行硬计数限流；<br>2. `book_edit`：局部字符串替换写入当前 `runId` 独占 `StagingSession`，禁碰 `manuscripts/`，`finally` 块无条件丢弃未提交暂存；<br>3. `yield_*` 终态门禁：禁用并行（`isConcurrencySafe: false`），**先完成全部确定性校验与 WAL/Git 原子落盘，最后一行调用 `exec.concludeTurn()`**；配套 `'agent/turn-stopping'` Hook 拦截未完成 `yield_*` 的纯文本提前停止并注入 `steer` 继续指令（受 `maxSteps` 兜底限制）；<br>4. `lock_charter_and_boot`：锁定《作者契约》快照并执行原子建库。 |
-| **`@narrateos/dsh-pipeline`** | `narrateStore`, `agents`, `llm` | `webServer`, `commands`, `skills` | 提供 `ctx.narratePipeline`：解析外部 `roles/*.yml`（优先读取 `books/<slug>/world/roles/` 单书覆盖，回退至预设包默认配置）；多轮工种通过 `ctx.agents.create({ sessionId, meta: { origin: 'subagent' }, agentOptions, setup })` 启动，`cleanroom: true` 工种（`Writer` / `Patch`）直调 `ctx.llm` 零工具单轮流；编排开书编译、单章 6 阶段、YOLO 连跑、`Sync`、多轮 `Dreaming`、三级跨章自愈与五步换卷。动态挂载 REST/SSE 控制通道、`/narrate-*` 零开销斜杠命令与 `narrate-boot` Skill。 |
-| **`@narrateos/dsh-client-ui-studio`** | 浏览器侧 `slots`, `layout` | 无 | 注册 `'main'` 槽位 `narrateos-studio` 与侧栏入口：渲染左栏书目/章卡/物化视图、中栏 6 节点状态图 + `正文 \| 细纲 \| Diff` 编辑检阅（含未保存草稿导航守卫）+ 底部**无 Agent Loop 微调信号输入栏**、右栏运维诊断检查器；支持**点击运行中或历史阶段节点，按 `sessionId` 在右侧分栏打开 DSH 原生 `Conversation`（实时思考与工具流）与 `Trajectory`（轮次折叠耗时/Token/JSON 明细）检查器**。 |
+| **`@narrateos/dsh-book-tools`** | `narrateStore` | `tools`（主会话写保护守卫） | 导出按 `runId` 与角色 YAML 配置实例化的受控工具构建器，并对主会话挂载 `tools/pre-execute` 守卫（禁止普通对话用裸 `write/edit/bash` 直接修改 `books/<slug>/`）：<br>1. `book_read` / `book_grep` / `book_glob`：锁死当前 `bookRoot` 允许目录（物理屏蔽 `.ops/` 与跨书路径），`book_read` **优先读取本轮 `StagingSession` 覆盖层（Read-Your-Own-Writes）**，按角色配置 `maxReadCalls` 执行硬计数限流；<br>2. `book_edit`：局部字符串替换写入当前 `runId` 独占 `StagingSession`，禁碰 `manuscripts/`，`finally` 块无条件丢弃未提交暂存；<br>3. `patch_paragraphs` & `yield_patched_draft`：面向 `Patch` 的纯内存段落编辑闭环（`InMemoryDraftPatchSession`，零磁盘读写与 `maxReadCalls: 0`），按 `0-based` 索引执行非重叠区间替换并内置实时 `StaticProseGate` 复核；<br>4. `yield_*` 终态门禁（`yield_context_pack`、`yield_outline`、`yield_verdict`、`yield_state_patch`、`yield_dream_commit`、`yield_boot_bundle`、`yield_patched_draft`）：禁用并行（`isConcurrencySafe: false`），**先完成全部确定性校验与 WAL/Git 原子落盘，最后一行调用 `exec.concludeTurn()`**；配套 `'agent/turn-stopping'` Hook 拦截未完成 `yield_*` 的纯文本提前停止并注入 `steer` 继续指令（受 `maxSteps` 兜底限制）；<br>5. `lock_charter_and_boot`：锁定《作者契约》快照并执行原子建库，建库后自动调用 `ctx.narrateStore.switchBook(res.bookRoot)` 激活新书（遇在途锁冲突不回滚已落盘建库结果）。 |
+| **`@narrateos/dsh-pipeline`** | `narrateStore`, `agents`, `llm` | `webServer`, `commands`, `skills` | 提供 `ctx.narratePipeline`：解析外部 `roles/*.yml`（优先读取 `books/<slug>/world/roles/` 单书覆盖，回退至预设包默认配置）；`RoleRunner` **全面统一基于 `ctx.agents.create`（通过最外层 `{ prepend: true }` 拦截 `agent/pre-step` 剥离 `agent-instructions` / `AGENTS.md`）** 为全工种建立可回放会话——多轮工种挂受控白名单与 `yield_*` 防逃逸 Hook，`writer`（`cleanroom: true`）保持零工具单轮净室调用（`REWRITE` 仅接收正向脱敏 `rewriteFeedback`），`patch`（`cleanroom: false`, `maxReadCalls: 0`）运行于纯内存段落编辑闭环；支持分角色两层模型路由 `role_routing` 与单章/YOLO/`Sync`/多轮 `Dreaming`/跨章自愈/换卷调度，并动态挂载 REST/SSE（含 `POST /api/narrate/voice-harvest`）、`/narrate-*` 斜杠命令与 `narrate-boot` Skill。 |
+| **`@narrateos/dsh-client-ui-studio`** | 浏览器侧 `slots`, `layout` | 无 | 注册 `'main'` 槽位 `narrateos-studio` 与侧栏入口：渲染左栏书目/章卡/物化视图、中栏 6 节点状态图（`SSE_STAGE_ALIAS` 将 `LOCAL_PATCH` / `REWRITE` 归集于 `WRITER` 节点、`REPLAN` 归集于 `PLANNER` 节点并按序保留全部尝试会话 `StageAttemptSession[]`）+ `正文 \| 细纲 \| Diff` 编辑检阅（含未保存草稿导航守卫）+ 底部**无 Agent Loop 微调信号输入栏**、右栏运维诊断检查器（含「关联会话轨迹列表」按次点入任意 `attempt`）与「工具」页签（挂载 `RoleRoutingEditor` 直接编辑分角色两层模型路由及「声纹采集 (Voice Harvest)」操作卡片）；`StageSessionViewer` 支持实时原生视图与 `.ops/session_logs` 归档回放，展示 `modelId`、`thinkingChars`、完整 `requestInput` 与完整 `tool-result` 原文。 |
 
 ### 2.2 Cordis 生命周期与斜杠命令契约
 
@@ -65,8 +66,8 @@ narrateos/
 
 ### 2.3 原生会话日志与本地追踪协同
 
-1. **多轮工种原生会话留存**：每个通过 `ctx.agents.create` 创建的工种设置 `meta: { origin: 'subagent' }`（不在左侧普通对话列表刷屏），执行完毕仅调用 `handle.dispose()` 停止循环，保留 DSH 持久化 Session 日志，并将 `{ runId, chapter, stage, role, sessionId, status }` 追加记录至作品 `.ops/runs.jsonl`。
-2. **净室请求与门禁产物本地追踪**：对不走完整 `Agent` 会话的 `ctx.llm` 净室单轮调用（`Writer`、`Patch`、分词标定）及门禁前废稿/诊断，继续支持 `world/book_config.yaml` 的 `trace_level`（`full` | `metadata` | `off`，默认 `full`）落盘至 `.ops/traces/<run_id>/`（目录权限 `0700`、文件 `0600`，`.gitignore` 排除提交，遮蔽认证字段，追踪故障仅写 stderr 绝不影响业务结果）。
+1. **全工种统一原生会话留存与 `.ops/session_logs/` 调试归档**：`RoleRunner` 对多轮探查工种、`Patch` 内存闭环与净室单轮 `Writer` 统一基于 `ctx.agents.create` 启动独立会话（设置 `meta: { cwd: bookRoot }` 并在 `setup` 内以最外层 `{ prepend: true }` 拦截 `agent/pre-step` 过滤宿主 `agent-instructions` / `AGENTS.md`，同时调用 `agentCtx.tools.restrict({ allow: [] })` 屏蔽宿主全局工具），执行完毕调用 `handle.dispose()` 停止循环，保留 DSH 持久化 Session 日志；同时将 `{ runId, chapter, stage, role, sessionId, status, attempt, triggerReason, parentSessionId, mode }` 追加记录至作品 `.ops/runs.jsonl`，并将完整会话调试快照落盘至 `.ops/session_logs/<sessionId>.json`（含 `modelId`、`usage`、`reasoning`、`thinkingChars`、在 `trace_level !== 'off'` 时写入的完整 `requestInput` 输入上下文，以及最大 `32000` 字符的完整 `tool-result` 与实时流事件）。
+2. **极简环境回退与门禁产物本地追踪**：仅当极简单测环境未注入 `ctx.agents.create` 时，`runCleanroom` 安全回退至 `DshLlmAdapter` 直调；分词标定、净室 `Writer`（经 `generateTraced`）及门禁前废稿/诊断，继续支持 `world/book_config.yaml` 的 `trace_level`（`full` | `metadata` | `off`，默认 `full`）落盘至 `.ops/traces/<run_id>/`（目录权限 `0700`、文件 `0600`，`.gitignore` 排除提交，遮蔽认证字段，追踪故障仅写 stderr 绝不影响业务结果）。
 
 ---
 
@@ -76,17 +77,17 @@ narrateos/
 
 ```yaml
 id: planner
-pool: strong_creative               # 映射作品/宿主配置的 strong_creative | fast_retrieval | audit
-cleanroom: false                    # true 则直调 ctx.llm 零工具单轮；false 则经 ctx.agents.create 启动多轮工种
+pool: strong_creative               # 映射作品/宿主配置的 strong_creative | fast_retrieval | audit（可被 book_config.yaml role_routing[id] 覆盖）
+cleanroom: false                    # 统一经 ctx.agents.create 启动：true 为零工具单轮净室路径；false 为挂载受控工具与 yield_* 的多轮路径
 promptFile: ./prompts/planner.md    # 相对路径，支持单书在 world/roles/prompts/ 覆盖
 temperature: 0.5
 reasoningEffort: high
 maxSteps: 6                         # 多轮工种最大步数兜底
-maxReadCalls: 3                     # 工具层对 book_read / book_grep / book_glob 的硬限流总次数
-tools:                              # 仅挂载列出的受控工具名
+maxReadCalls: 3                     # 工具层对 book_read / book_grep / book_glob 的硬限流总次数（patch 置为 0）
+tools:                              # 仅挂载列出的受控工具名（patch 仅挂纯内存 patch_paragraphs）
     - book_read
     - book_grep
-yieldTool: yield_outline            # 必须成功调用方可结束回合的终态门禁工具
+yieldTool: yield_outline            # 必须成功调用方可结束回合的终态门禁工具（patch 为 yield_patched_draft）
 ```
 
 ---
@@ -107,33 +108,35 @@ yieldTool: yield_outline            # 必须成功调用方可结束回合的终
 
 ### Phase 2：受控领域工具库、`yield_*` 门禁与防逃逸 Hook (`@narrateos/dsh-book-tools`)
 
-- **交付内容**：实现 `book_read` / `book_grep` / `book_glob`、`book_edit`、全套 `yield_*`（`yield_context_pack`、`yield_outline`、`yield_verdict`、`yield_state_patch`、`yield_dream_commit`）、`lock_charter_and_boot`、`'agent/turn-stopping'` 未提交续跑 Hook 及主会话 `books/<slug>/` 裸写拦截守卫。
+- **交付内容**：实现 `book_read` / `book_grep` / `book_glob`、`book_edit`、纯内存段落编辑工具 `patch_paragraphs`（`InMemoryDraftPatchSession`）、全套 `yield_*`（`yield_context_pack`、`yield_outline`、`yield_verdict`、`yield_state_patch`、`yield_dream_commit`、`yield_boot_bundle`、`yield_patched_draft`）、`lock_charter_and_boot`（建库后自动 `switchBook`）、`'agent/turn-stopping'` 未提交续跑 Hook 及主会话 `books/<slug>/` 裸写拦截守卫。
 - **完工判据**：
   - `pnpm --filter @narrateos/dsh-book-tools test` 退出码为 `0`：
   - **路径围栏与配额守卫**：企图通过 `book_read / book_grep / book_glob` 读取 `../`、其他作品目录或 `.ops/` 时 100% 拦截报错；当 `maxReadCalls = 3` 时，第 4 次只读调用被确定性拦截并返回调用 `yield_*` 提示。
+  - **纯内存修补闭环与自动切书**：`patch_paragraphs` 校验 `0-based` 非重叠区间替换、自动保留第 0 段 `# ` 一级标题并在每次修改后实时运行 `StaticProseGate`；`yield_patched_draft` 提交前再次强制复检门禁（`enforceProseGateOnYield`），全程零磁盘读写；`lock_charter_and_boot` 落盘后自动调用 `ctx.narrateStore.switchBook`（遇在途锁冲突不回滚已建库资产）。
   - **Read-Your-Own-Writes 与红线保护**：同一 `runId` 内调用 `book_edit` 修改 `open_threads.md` 后紧接着调用 `book_read`，准确读回修改后的暂存文本；企图 `book_edit` 修改 `manuscripts/` 当场拒绝；`yield_dream_commit` 与 `yield_state_patch` 对篡改 `Innate Locks`、超 `15` 条活跃伏笔、缺中文 `canonical_name` 或断链外键 100% 报错打回且磁盘零写入，全部校验与 WAL/Git 落盘成功后方才触发 `exec.concludeTurn()`。
   - **防纯文本逃逸**：模拟工种模型未调 `yield_*` 直接返回纯文本，`'agent/turn-stopping'` Hook 准确拦截停止并注入继续指令；达 `maxSteps` 仍未提交时安全中止并清理暂存区。
 
 ### Phase 3：外部化角色配置、后台管线调度与斜杠命令 (`@narrateos/dsh-pipeline` + `@narrateos/dsh-preset-narrateos`)
 
-- **交付内容**：搭建 `presets/dsh-preset-narrateos/`（顶层模式 `cordis.patch.yml`、全套 `roles/*.yml` 与 `prompts/*.md`）；实现 `@narrateos/dsh-pipeline` 的配置加载器（支持单书覆盖）、通用 `RoleRunner`（`ctx.agents.create` + `ctx.llm` 净室双路径）、单章 6 阶段管线、YOLO 连跑、`Sync`（共用作品锁与 `.ops/manual_edits/` 备份）、多轮 `Dreaming`、三级跨章自愈、五步换卷、动态 `webServer` REST/SSE 路由与 `/narrate-*` 斜杠命令，以及基于精简 Cordis Host 的无头批处理入口。
+- **交付内容**：搭建 `presets/dsh-preset-narrateos/`（顶层模式 `cordis.patch.yml`、全套 `roles/*.yml` 含 `patch.yml` 与 `prompts/*.md`）；实现 `@narrateos/dsh-pipeline` 的配置加载器（支持单书覆盖及 `role_routing` 两层模型路由）、统一基于 `ctx.agents.create` 的通用 `RoleRunner`（最外层 `{ prepend: true }` 拦截 `agent/pre-step` 剥离 `AGENTS.md`，写手保持零工具单轮净室且支持正向脱敏 `rewriteFeedback`，`Patch` 接入纯内存多轮段落编辑闭环，`.ops/session_logs/<sessionId>.json` 留档 `requestInput` 与完整 `tool-result`，`.ops/runs.jsonl` 记录 `attempt` / `triggerReason`）、单章 6 阶段管线（分散超标 `<=15` 段且占比 `<=60%` 优先 `LOCAL_PATCH`，大面积失控或 `Fact Checker` `>=3` 段崩盘触发 `REWRITE`）、YOLO 连跑、`Sync`（共用作品锁与 `.ops/manual_edits/` 备份）、多轮 `Dreaming`、三级跨章自愈、五步换卷、动态 `webServer` REST/SSE 路由（含 `POST /api/narrate/voice-harvest`）与 `/narrate-*` 斜杠命令，以及基于精简 Cordis Host 的无头批处理入口。
 - **完工判据**：
   - 在无 `webServer` 的精简 Cordis Host 下跑通全部管线集成测试（退出码 `0`）：
-  - **配置解耦与模式纯净度**：修改单本书 `world/roles/planner.yml` 的 `maxReadCalls` 或提示词无需重新编译即生效；挂载 `dsh-preset-narrateos` 后，前端模式列表仅新增单一「NarrateOS 创作模式」，编码向冗余工具在该模式下不可见。
-  - **多工种管线与多轮 Dreaming**：单章推进完整写入 `.ops/runs.jsonl` 各阶段 `sessionId`（`origin: 'subagent'`）；`Dreamer` 多轮读取章卡与原稿后通过 `book_edit` 同步更新脏实体、伏笔表、惯性表与 `arc_director_plan.md` 并在单次 `dream` 提交落盘，未出场干净实体 `mtime` 不变；跑章期间请求 `switchBook` 返回 `409`。
+  - **配置解耦与模式纯净度**：修改单本书 `world/roles/planner.yml` 的 `maxReadCalls`、`prompts/*.md` 或 `book_config.yaml` 中的 `role_routing` 无需重新编译即生效；挂载 `dsh-preset-narrateos` 后，前端模式列表仅新增单一「NarrateOS 创作模式」，编码向冗余工具在该模式下不可见。
+  - **多工种管线、内存修补与多轮 Dreaming**：单章推进完整写入 `.ops/runs.jsonl`（含 `attempt` / `triggerReason`）与 `.ops/session_logs/<sessionId>.json`（含 `requestInput` 与 `tool-result`）；`Writer` 与 `Patch` 均隔离宿主 `AGENTS.md` 及全知档案；`Dreamer` 多轮读取章卡与原稿后通过 `book_edit` 同步更新脏实体、伏笔表、惯性表与 `arc_director_plan.md` 并在单次 `dream` 提交落盘，未出场干净实体 `mtime` 不变；跑章期间请求 `switchBook` 返回 `409`。
   - **斜杠命令与优雅停机**：`/narrate-step`、`/narrate-yolo`、`/narrate-halt`、`/narrate-signal` 零模型调用异步触发并立即返回回执；在途章节生成中触发插件卸载，服务等待当前安全点或取消收束完成后释放，零残留锁文件。
 
 ### Phase 4：Studio 独立前端、实时节点会话钻取与开书端到端验收 (`@narrateos/dsh-client-ui-studio` + `narrate-boot`)
 
-- **交付内容**：将现有三栏工作台迁入独立包 `@narrateos/dsh-client-ui-studio`；打通点击中栏运行中/历史阶段节点按 `sessionId` 在右侧分栏展示 DSH 原生 `Conversation` 与 `Trajectory` 检查器；编写 `< 8,192` 字符主体的 `skills/narrate-boot/SKILL.md`（及 `references/`）与首章 `Voice Harvest` 采集逻辑。
+- **交付内容**：将三栏工作台迁入独立包 `@narrateos/dsh-client-ui-studio`；打通中栏 6 节点流水线状态（`SSE_STAGE_ALIAS` 将 `LOCAL_PATCH` / `REWRITE` 归集于 `WRITER` 节点、`REPLAN` 归集于 `PLANNER` 节点，按序保留 `StageAttemptSession[]`）与右栏「关联会话轨迹列表」按次点入 `StageSessionViewer` 展示 DSH 原生 `Conversation` / `Trajectory`、`modelId`、`thinkingChars`、完整 `requestInput` 与 `tool-result` 原文；在右栏「工具」页签挂载 `RoleRoutingEditor` 与「声纹采集 (Voice Harvest)」操作卡片（`POST /api/narrate/voice-harvest`）；编写 `< 8,192` 字符主体的 `skills/narrate-boot/SKILL.md`（及 `references/`）与首章 `Voice Harvest` 采集逻辑。
 - **完工判据**：
   - 前端与端到端检查全部通过，并在真实 `dsh web` 界面完成实测验证：
-  - **界面与实时钻取验证**：三栏布局、未保存草稿导航守卫、底部无 Loop 微调信号投递与撤回正常运作；在单章推进与 `Dreaming` 运行期间点击活跃节点，右侧实时流式展示该工种的思考块与工具调用，历史章节同样可点开只读 `Trajectory` 审计。
-  - **同源种子端到端实跑验收**：使用写实港口核验种子跑通 `主对话 /narrate-boot 构思锁定契约 -> lock_charter_and_boot 建库停机 -> Studio 书目自动刷新 -> 手动点启动生成第 1 章（0 声纹起步，仅消费第 1 拍）-> 首章校准与 Voice Harvest 入池 -> 连跑推进触发首次多轮 Dreaming`，核验 `T0` 100% 守恒、零超自然越权漂移、写手输入零禁区词泄露、声纹池零案情私货。
+  - **界面、路由编辑与多尝试钻取验证**：三栏布局、未保存草稿导航守卫、底部无 Loop 微调信号投递与撤回正常运作；右栏「工具」页签可直接调整并持久化 `role_routing`，亦可手动触发 `Voice Harvest`；单章推进与 `Dreaming` 期间点击活跃节点或历史节点「关联会话轨迹列表」中的任意尝试，可实时或从 `.ops/session_logs` 回放思考流、`requestInput` 与工具调用原文。
+  - **同源种子端到端实跑验收**：使用写实港口核验种子跑通 `主对话 /narrate-boot 构思锁定契约 -> lock_charter_and_boot 建库停机并自动 switchBook -> Studio 书目自动刷新 -> 手动点启动生成第 1 章（0 声纹起步，仅消费第 1 拍）-> 首章校准与 Voice Harvest 入池 -> 连跑推进触发首次多轮 Dreaming`，核验 `T0` 100% 守恒、零超自然越权漂移、写手输入零禁区词泄露、声纹池零案情私货。
 
-### Phase 5（二期规划）：开篇方案评判修正 Bench、40 章盲测与存稿反向建库
+### Phase 5（二期规划与后续专项演进）：开篇 Bench、40 章盲测、存稿建库与未实装演进项
 
-在主业务流程端到端稳定运行后推进：
+在主业务流程端到端稳定运行后推进（以下各项当前均属规划或后续专项演进，未在当前基线实装）：
 1. **`Boot Plan Bench`（开篇大纲方案评判修正循环）**：固定跨题材种子集，利用解耦的 `skills/narrate-boot` 与 `roles/` 配置自动跑完「开书建库 + 试写前 3 章正文」，结合契约违背率、节奏早泄检测与盲测阅读评分迭代寻优开篇构思方案。
 2. **`Plot-Haystack` 40 章盲测基准**：运行 40 章同源种子与 10 枚探针核验套件，验证 Ch.36-40 负向红线零穿帮、跨 35 章伏笔 `100%` 成对召回与首尾语言熵率稳定。
 3. **既有存稿两步反向建库**：支持导入已写 `ch_0001..K.md` 手稿计算哈希建档、滑窗抽取现状并人工复核 `Innate Locks` 与声纹，再进入构思对话补齐未揭底牌与后续卷纲无缝续写。
+4. **Flow B 卷中改纲受控写回与 Boot 多 Agent 并行拆解**：主对话卷中重大改纲专用的受控资产写回工具（`replan_book_assets`）与开书编排多 Agent 并行拆解留待后续专项迭代落地；当前卷中微调通过 `.ops/signals.jsonl` 在安全点消费，开书统一经 `lock_charter_and_boot` 原子编译并自动 `switchBook`。

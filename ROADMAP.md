@@ -12,7 +12,7 @@
 - **Author Charter（作者契约与对齐）**：开书构思与重大改纲收口沉淀进作品的只读权威文件（`world/author_charter.md`），区分**核心承诺**（作者锁定的体验、排雷红线与原话 `T0` 现场）、**当前方案**（可调整的实现路径）与**授权范围**（系统可自主择优的边界）。向规划、审校、睡眠整理与换卷暴露，对写手物理屏蔽。
 - **Bootloader（开书引导与建库停机）**：在主对话中经构思 Skill 完成行业/舞台取证与因果自检，锁定契约后编译标准作品资产并执行初始化门禁；建库完成即原地停机，待作者检阅并手动启动第一章。流程见 [开书与校准](docs/ARCHITECTURE.md#3-作者对齐开书建库与开篇校准)。
 - **Opening Calibration & Voice Harvest（开篇校准与声纹采集）**：以正式生成并归档的第一章核对人物气口、节奏、描写密度与信息释放；校准认可且初始声纹池为空时，从第一章定稿采集脱敏纯表达示范写入 `.ops/voice_samples.yaml`，随后由作者手动放行日常生产。
-- **Scoped Role Agents & Cleanroom Writer（受控探查工种与净室写手）**：检索（`Librarian`）、规划（`Planner`）、核查（`Fact Checker`）、抽取（`Extractor`）与睡眠整理（`Dreamer`）运行为带受控作品工具与专属 `yield_*` 终态门禁的多轮工种；执笔写手（`Prose Writer`）与局部修补（`Patch`）保持零工具、零多轮历史的单轮净室调用。
+- **Scoped Role Agents, Cleanroom Writer & In-Memory Patch（受控探查工种、净室写手与内存修补）**：检索（`Librarian`）、规划（`Planner`）、核查（`Fact Checker`）、抽取（`Extractor`）与睡眠整理（`Dreamer`）运行为带受控磁盘工具与专属 `yield_*` 终态门禁的多轮工种；执笔写手（`Prose Writer`，含 `WRITER` / `REWRITE`）保持零工具、零多轮历史的单轮净室调用；局部修补（`Patch`）运行于净室内存段落编辑闭环（仅配纯内存 `patch_paragraphs` 与 `yield_patched_draft`，零磁盘读写）。全工种统一经原生会话引擎驱动并物理剥离宿主 `AGENTS.md`。
 - **Static Base & Voice Samples（静态法则基线与动态声纹池）**：常驻世界法则、叙述人称基线与抽象句法纪律（`world/static_base_and_voice.md`），配合按场景标签 `LRU` 轮换抽样的 `.ops/voice_samples.yaml`（支持 `0~N` 条，随 `Dreaming` 淘汰高频复读标本）。详见 [声纹契约](docs/WRITING-CRAFT.md#31-默认内聚的无感环境补集对写手零填表负担)。
 - **Inside-Outside Dual Ledger（里表双账本与解密翻转）**：表象与角色主观认知标为 `PUBLIC / SELF_ONLY`，戏剧反讽标为 `READER_KNOWN`，未揭晓底牌标为 `OMNISCIENT_SECRET`（明牌作品允许 `0` 条底牌）。`Planner` 在全知 `director_rationale` 中推演因果，向写手输出含表面动作与当场表演潜台词指导的 `outline_text`；正式揭秘章定稿后由 `Extractor` 将对应底牌翻转为 `PUBLIC` 或 `READER_KNOWN`。
 - **Volume Envelope & Arc Director Plan（正向卷域包络与导演禁区计划）**：中程规划拆分为两份文件——`world/current_arc_envelope.md` 仅承载对写手安全的正向舞台常态；`world/arc_director_plan.md` 承载**阶段天花板禁区（`Stage Ceiling`）**、未揭秘三幕拐点及开局至第一幕转折的 **3~5 个无章号开篇序列节拍（`Opening Sequence Beats`）**，仅对规划、核查与睡眠整理可见。
@@ -33,7 +33,7 @@
 | :--- | :--- | :--- | :--- |
 | **引擎与作品隔离** | **已确认** | 根仓库仅存通用插件与预设；作品存 `books/<slug>/` 独立 Git 仓，双粒度原子提交（`feat` 正文 + `state` 视图）配排他锁与 WAL 恢复 | 具体作品目录位置、分支与备份标签策略 |
 | **DSH 插件与角色解耦** | **已确认** | 全面扎根 `@deepseek-ai/dsh` 插件与单一顶层创作模式；Host 服务与前端 UI 物理分包；多轮工种经 `yield_*` 门禁与未提交续跑 Hook 收口 | `roles/*.yml` 与 `prompts/*.md` 声明的模型池、工具白名单、调用配额与提示词（支持单书覆盖） |
-| **净室执笔与前缀缓存** | **已确认** | 写手与局部修补保持零工具单轮净室调用；各工种跨章独立复用自身前缀缓存；超预算执行四级降级裁剪链 | `writer_token_budget`（按模型设定或置 `null` 直通）、各工种异构模型路由映射 |
+| **净室执笔与前缀缓存** | **已确认** | 写手（`WRITER` / `REWRITE`）保持零工具单轮净室调用，`Patch` 为纯内存多轮闭环（零磁盘读写）；各工种统一经原生会话隔离运行并独立复用自身前缀缓存；超预算执行四级降级裁剪链 | `writer_token_budget`（按模型设定或置 `null` 直通）、`model_routing` 与分角色两层 `role_routing` 映射 |
 | **全题材开书与双账本** | **已确认** | 构思收口沉淀只读 `author_charter.md`；导演禁区拆入 `arc_director_plan.md`；建库完成即停机待手动启动；支持单卷本（`>=1` 卷）与明牌 `0` 黑幕 | 体验承诺、POV 切镜体制、卷/副本尺度、远期留白（`OPEN_HORIZON`）与局部闭环边界；开书构思 Skill 迭代版本 |
 | **声纹防污染与人称适配** | **已确认** | 无预设样章时开书声纹池留空 `0` 条；首章校准通过后经 `Voice Harvest` 采集脱敏句式；运行期 `LRU` 轮换并在 `Dreaming` 周期代谢复读标本 | 叙述人称与主观度基线、声纹标签集合与标本数（`0~N`）、跨章喻体复读窗口与各门禁开关阈值 |
 | **多轮维护与换卷交接** | **已确认** | `Dreamer` 只读核实原稿 + 隔离暂存区联动 `book_edit` + `yield_dream_commit` 一次性校验 `Innate Locks` 与伏笔上限后原子落盘 | 触发字数/缓冲水位、分卷跨度、完结封笔或后续新卷展开 |
