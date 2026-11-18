@@ -4,10 +4,14 @@
     "version": "0.1.0",
     "type": "module",
     "scripts": {
-        "test": "vitest run",
+        "test": "vitest run && pnpm --filter @narrateos/dsh-preset-narrateos test",
         "test:watch": "vitest",
         "build": "pnpm -r --if-present build",
-        "typecheck": "pnpm -r --if-present typecheck"
+        "typecheck": "pnpm -r --if-present typecheck",
+        "lint": "node scripts/lint-repo.mjs",
+        "check": "pnpm run build && pnpm run typecheck && pnpm run lint && pnpm test",
+        "dev:sandbox": "bash scripts/dev-sandbox.sh",
+        "prepare": "git config core.hooksPath .githooks || true"
     },
     "devDependencies": {
         "@deepseek-ai/cordis": "^4.1.0",

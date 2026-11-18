@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Git 提交前快速确定性门禁：检查连字符/配置红线与全仓 TypeScript 类型。
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+node scripts/lint-repo.mjs --fast
+pnpm run typecheck
