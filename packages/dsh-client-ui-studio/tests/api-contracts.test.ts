@@ -82,10 +82,11 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
         );
     }
 
-    it('KNOWN_SSE_EVENTS 覆盖全部 26 个后端 SSE 事件（含 Wave 4 新增 6 项）并正确分发', () => {
+    it('KNOWN_SSE_EVENTS 覆盖全部 27 个后端 SSE 事件（含 default_model_changed）并正确分发', () => {
         const expectedEvents: readonly SseEventName[] = [
             'connected',
             'book_switched',
+            'default_model_changed',
             'halt:requested',
             'halt:waiting',
             'halt:completed',
@@ -168,6 +169,9 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
             resumedFromPlan: false,
             timestamp: '2026-11-18T10:02:00.000Z'
         });
+        createdSource!.emit('default_model_changed', {
+            defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' }
+        });
 
         expect(received.map((r) => r.event)).toEqual([
             'stage:event',
@@ -175,7 +179,8 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
             'volume:advanced',
             'task:idle',
             'heal:started',
-            'heal:completed'
+            'heal:completed',
+            'default_model_changed'
         ]);
         expect(received[0]?.data['sessionId']).toBe('sess-writer-1');
         expect(received[3]?.data['task']).toBe('STEPPING');
@@ -423,7 +428,9 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
                 totalChapters: 20
             },
             healPlan: null,
-            syncConflictsCount: 0
+            syncConflictsCount: 0,
+            defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' },
+            poolOverrides: { strong_creative: 'openai:gpt-4.1' }
         };
         expect(statusSample.runtime.activeTask).toBe('ADVANCING_VOLUME');
 

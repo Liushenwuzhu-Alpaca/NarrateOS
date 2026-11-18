@@ -742,6 +742,12 @@ export const StudioIcons = {
             <path d="M10 3.5L5.5 8l4.5 4.5" />
         </svg>
     ),
+    leftbar: (
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+            <path d="M5.5 2.5v11" />
+        </svg>
+    ),
     rightbar: (
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <rect x="1.5" y="2.5" width="13" height="11" rx="2" />

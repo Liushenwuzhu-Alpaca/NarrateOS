@@ -19,7 +19,7 @@ export interface WalLockTelemetry {
 export interface ModelPoolTelemetry {
     fastModel: string;
     strongModel: string;
-    auditModel: string;
+    auditModel?: string | undefined;
     /** 未缓存输入 Token（与缓存读取/写入互不重叠） */
     inputTokens: number;
     cacheReadTokens: number;
@@ -28,11 +28,10 @@ export interface ModelPoolTelemetry {
     outputTokens?: number;
 }
 
-/** 三池模型路由明细 (兼容 modelRouting 配置对象) */
+/** 双池模型路由明细 (兼容 modelRouting 配置对象) */
 export interface ModelRoutingSnapshot {
     strong_creative?: string;
     fast_retrieval?: string;
-    audit?: string;
 }
 
 /** 3. 6 步产物 & 预算降级 */
@@ -193,7 +192,7 @@ export interface RightOpsInspectorProps {
     onTriggerDreaming?: () => void;
     /** 查看/定位挂起冲突详情回调 */
     onInspectHalt?: () => void;
-    /** 真实三池模型路由配置 (可选，缺省回退至 modelPool) */
+    /** 真实双池模型路由配置 (可选，缺省回退至 modelPool) */
     modelRouting?: ModelRoutingSnapshot | null;
     /** 活跃实体列表 (可选) */
     entities?: InspectorEntityItem[];
@@ -375,17 +374,12 @@ const MODEL_ROUTE_DESCRIPTORS: ReadonlyArray<{
     {
         poolId: 'strong_creative',
         modelClass: 'ns-mono ns-i-route-model ns-i-route-model-brand',
-        roles: 'Planner · Writer · Patch · Dreamer'
+        roles: 'Planner · Writer · Checker · Patch · Dreamer'
     },
     {
         poolId: 'fast_retrieval',
         modelClass: 'ns-mono ns-i-route-model ns-i-route-model-green',
         roles: 'Librarian · Extractor'
-    },
-    {
-        poolId: 'audit',
-        modelClass: 'ns-mono ns-i-route-model ns-i-route-model-amber',
-        roles: 'Checker'
     }
 ];
 
@@ -811,8 +805,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
     const resolvedRouting = useMemo(
         () => ({
             strong_creative: modelRouting?.strong_creative || modelPool.strongModel || '--',
-            fast_retrieval: modelRouting?.fast_retrieval || modelPool.fastModel || '--',
-            audit: modelRouting?.audit || modelPool.auditModel || '--'
+            fast_retrieval: modelRouting?.fast_retrieval || modelPool.fastModel || '--'
         }),
         [modelRouting, modelPool]
     );
@@ -1423,10 +1416,10 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             {renderThreadsList(resolvedThreads)}
                         </div>
 
-                        {/* 三池模型路由只读快照 */}
+                        {/* 双池模型路由只读快照 */}
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
-                                <span>三池模型路由 (modelRouting)</span>
+                                <span>双池模型路由 (modelRouting)</span>
                             </div>
                             <div className="ns-i-route-list">
                                 {MODEL_ROUTE_DESCRIPTORS.map((desc) => {

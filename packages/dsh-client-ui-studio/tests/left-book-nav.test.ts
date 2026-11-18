@@ -218,6 +218,79 @@ describe('BootBookModal 主对话开书构思引导横幅', () => {
         click(switchBtn!);
         expect(onSwitchToChatBootHint).toHaveBeenCalledTimes(1);
     });
+
+    it('步骤条向后跳步逐级校验前置必填项，且 isCompleted 严格要求前置步骤全部完成', () => {
+        mountElement(
+            createElement(BootBookModal, {
+                open: true,
+                onClose: vi.fn()
+            })
+        );
+
+        const dialog = document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="开新书编译引导"]')!;
+        const stepButtons = (): HTMLButtonElement[] =>
+            Array.from(dialog.querySelectorAll<HTMLButtonElement>('.ns-b-steps .ns-b-step-btn'));
+
+        // 未填第 1 步直接点跳第 4 步：拦截跳转并展示错误，第 2/3 步绝不可变绿
+        click(stepButtons()[3]!);
+        expect(stepButtons()[0]?.getAttribute('aria-current')).toBe('step');
+        expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('作品标识');
+        expect(stepButtons().every((btn) => !btn.classList.contains('ns-b-step-btn--done'))).toBe(true);
+
+        // 切换到同人模式并填完第 1 步，但 T0 锚点留空；从第 1 步直接点击第 4 步应停在第 2 步并报错
+        const fanficBtn = Array.from(dialog.querySelectorAll<HTMLButtonElement>('.ns-b-mode-card')).find((b) =>
+            b.textContent?.includes('同人设定包')
+        )!;
+        click(fanficBtn);
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const textareaSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        const slugInput = dialog.querySelector<HTMLInputElement>('#ns-boot-slug')!;
+        const titleInput = dialog.querySelector<HTMLInputElement>('#ns-boot-title')!;
+        const materialInput = dialog.querySelector<HTMLTextAreaElement>('#ns-boot-material')!;
+        act(() => {
+            inputSetter?.call(slugInput, 'fanfic-case');
+            slugInput.dispatchEvent(new Event('input', { bubbles: true }));
+            slugInput.dispatchEvent(new Event('change', { bubbles: true }));
+            inputSetter?.call(titleInput, '同人测试');
+            titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+            titleInput.dispatchEvent(new Event('change', { bubbles: true }));
+            textareaSetter?.call(materialInput, '原作设定包内容');
+            materialInput.dispatchEvent(new Event('input', { bubbles: true }));
+            materialInput.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        click(stepButtons()[3]!);
+        expect(stepButtons()[1]?.getAttribute('aria-current')).toBe('step');
+        expect(stepButtons()[0]?.classList.contains('ns-b-step-btn--done')).toBe(true);
+        expect(stepButtons()[1]?.classList.contains('ns-b-step-btn--done')).toBe(false);
+        expect(stepButtons()[2]?.classList.contains('ns-b-step-btn--done')).toBe(false);
+        expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('T0 锚点');
+
+        // 补全 T0 锚点后再跳第 4 步：1、2、3 步全部变绿
+        const t0Input = dialog.querySelector<HTMLInputElement>('#ns-boot-t0')!;
+        act(() => {
+            inputSetter?.call(t0Input, '开学典礼前夜');
+            t0Input.dispatchEvent(new Event('input', { bubbles: true }));
+            t0Input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        click(stepButtons()[3]!);
+        expect(stepButtons()[3]?.getAttribute('aria-current')).toBe('step');
+        expect(stepButtons()[0]?.classList.contains('ns-b-step-btn--done')).toBe(true);
+        expect(stepButtons()[1]?.classList.contains('ns-b-step-btn--done')).toBe(true);
+        expect(stepButtons()[2]?.classList.contains('ns-b-step-btn--done')).toBe(true);
+
+        // 回到第 1 步清空书名后尝试跳回第 3 步：被拦截，且 1/2/3 都不亮绿灯
+        click(stepButtons()[0]!);
+        const titleInputAgain = dialog.querySelector<HTMLInputElement>('#ns-boot-title')!;
+        act(() => {
+            inputSetter?.call(titleInputAgain, '');
+            titleInputAgain.dispatchEvent(new Event('input', { bubbles: true }));
+            titleInputAgain.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        click(stepButtons()[2]!);
+        expect(stepButtons()[0]?.getAttribute('aria-current')).toBe('step');
+        expect(stepButtons().every((btn) => !btn.classList.contains('ns-b-step-btn--done'))).toBe(true);
+    });
 });
 
 describe('StudioActionModals 换卷封存与多线并行弹窗', () => {

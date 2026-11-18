@@ -242,6 +242,7 @@ export interface CenterWorkbenchProps {
     materializedViews?: MaterializedViewsData | undefined;
     dirtyChaptersCount?: number | undefined;
     externalViewCommand?: ExternalViewCommand | undefined;
+    leftOpen?: boolean | undefined;
     leftCollapsed?: boolean | undefined;
     showCompactNav?: boolean | undefined;
     rightOpen?: boolean | undefined;
@@ -335,10 +336,10 @@ const PIPELINE_STAGES: readonly StageDefinition[] = [
     {
         id: 'FACT_CHECKER',
         roleId: 'fact_checker',
-        defaultPool: 'audit',
+        defaultPool: 'strong_creative',
         label: '4. Checker',
         shortDesc: '独立核对前后设定矛盾',
-        defaultSummary: '异构模型核查与双侧原句验真'
+        defaultSummary: '双视角核查与双侧原句验真'
     },
     {
         id: 'EXTRACTOR',
@@ -1010,13 +1011,41 @@ function renderBeatCumulativeMarks(beats: readonly { percent: number }[]): React
 
 function renderCoverSheet(params: {
     ribbonRef: React.RefObject<HTMLDivElement>;
+    hasActiveBook: boolean;
     displayVolumeLabel: string;
     displayBookTitle: string;
     storyDay: number;
     disabled: boolean;
+    onNewBook?: (() => void) | undefined;
     onStepOne: () => void;
     onOpenCodex: () => void;
 }): React.ReactElement {
+    if (!params.hasActiveBook) {
+        return (
+            <article className="ns-manuscript-sheet ns-cover-sheet" aria-label="创作室扉页">
+                <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
+                <div className="ns-cover-badge-row">
+                    <span className="ns-cover-seal">开卷</span>
+                    <span className="ns-badge ns-badge-neutral">尚未开启作品</span>
+                </div>
+                <h1>NarrateOS 创作室</h1>
+                <p className="ns-cover-desc">
+                    当前工作区尚未创建或打开作品。点击下方按钮启动 Step 0 开书编译引导，或在主对话使用 /narrate-boot 与 AI 共同推敲《作者契约》；也可在右侧「模型分配」提前配置双池默认模型。
+                </p>
+                <div className="ns-cover-actions">
+                    <button
+                        type="button"
+                        className="ns-btn ns-btn-primary"
+                        onClick={() => params.onNewBook?.()}
+                    >
+                        {StudioIcons.play}
+                        <span>开启新作品</span>
+                    </button>
+                </div>
+            </article>
+        );
+    }
+
     return (
         <article className="ns-manuscript-sheet ns-cover-sheet" aria-label="新书开卷扉页">
             <div ref={params.ribbonRef} className="ns-reading-ribbon" aria-hidden="true" />
@@ -1442,6 +1471,7 @@ export function CenterWorkbench({
     materializedViews,
     dirtyChaptersCount = 0,
     externalViewCommand,
+    leftOpen = true,
     showCompactNav = false,
     rightOpen = true,
     hasSafeHalt = false,
@@ -1457,6 +1487,7 @@ export function CenterWorkbench({
     stashedDraft = null,
     onSelectBook,
     onNewBook,
+    onToggleLeft,
     onToggleRight,
     onOpenCodex,
     onCodexTabChange,
@@ -1918,8 +1949,7 @@ export function CenterWorkbench({
                 poolRoutes?.fast_retrieval ??
                 modelRouting?.['fast_retrieval'] ??
                 modelRouting?.['fast'] ??
-                '--',
-            audit: poolRoutes?.audit ?? modelRouting?.['audit'] ?? '--'
+                '--'
         }),
         [modelRouting, poolRoutes]
     );
@@ -2092,8 +2122,10 @@ export function CenterWorkbench({
         return 'Agent 工序与模型';
     }, [safeHalt, stageMap, syncConflict]);
 
+    const hasActiveBook = Boolean(currentBookRoot);
     const hasChapterContent = chapters.length > 0 || chapterDetail !== null;
-    const displayBookTitle = bookTitle || bookSlug || '未命名作品';
+    const displayBookTitle =
+        bookTitle || bookSlug || (hasActiveBook ? '未命名作品' : '选择或开启作品');
     const displayVolumeLabel =
         chapterDetail?.volumeLabel || currentVolumeLabel || (hasChapterContent ? '第一卷' : '第一卷 · 尚未开写');
 
@@ -2224,10 +2256,12 @@ export function CenterWorkbench({
         if (!hasChapterContent) {
             return renderCoverSheet({
                 ribbonRef,
+                hasActiveBook,
                 displayVolumeLabel,
                 displayBookTitle,
                 storyDay,
                 disabled: isBusy || stepSubmitting,
+                onNewBook,
                 onStepOne: () => void handleStepOne(),
                 onOpenCodex: handleOpenCodexFromCenter
             });
@@ -2360,6 +2394,14 @@ export function CenterWorkbench({
     const parallelBadgeLabel = parallelWindowId ? `多线并行 · ${parallelWindowId}` : '多线并行';
     const compactNavPrefix =
         hasChapterContent && activeChapterNumber > 0 ? `第 ${activeChapterNumber} 章` : '新书';
+    const leftToggleClass = [
+        'ns-btn',
+        'ns-btn-icon-only',
+        leftOpen ? 'ns-btn-subtle' : ''
+    ]
+        .filter(Boolean)
+        .join(' ');
+    const leftToggleTitle = leftOpen ? '收起左侧目录栏' : '展开左侧目录栏';
     const rightToggleClass = [
         'ns-btn',
         'ns-btn-icon-only',
@@ -2420,6 +2462,19 @@ export function CenterWorkbench({
             {/* 顶栏：左侧无框书名切换 + 窄屏目录浮层 + 状态胶囊；右侧同步、写下一章/YOLO、⋯、右栏开关 */}
             <header className="ns-center-header" ref={headerRef}>
                 <div className="ns-header-left">
+                    {!showCompactNav && onToggleLeft && (
+                        <button
+                            type="button"
+                            className={leftToggleClass}
+                            onClick={onToggleLeft}
+                            title={leftToggleTitle}
+                            aria-label={leftToggleTitle}
+                            aria-pressed={leftOpen}
+                        >
+                            {StudioIcons.leftbar}
+                        </button>
+                    )}
+
                     <div className="ns-header-pop-wrap">
                         <button
                             type="button"
@@ -2430,7 +2485,7 @@ export function CenterWorkbench({
                                 setOpenMenu((prev) => (prev === 'book' ? null : 'book'))
                             }
                         >
-                            <span>《{displayBookTitle}》</span>
+                            <span>{hasActiveBook ? `《${displayBookTitle}》` : displayBookTitle}</span>
                             {StudioIcons.chev}
                         </button>
                         {renderBookMenu({
@@ -2537,6 +2592,7 @@ export function CenterWorkbench({
                             onClick={onToggleRight}
                             title={rightToggleTitle}
                             aria-label={rightToggleTitle}
+                            aria-pressed={rightOpen}
                         >
                             {StudioIcons.rightbar}
                         </button>

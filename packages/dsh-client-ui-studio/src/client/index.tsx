@@ -135,7 +135,7 @@ const PIPELINE_STAGE_META: ReadonlyArray<{
     { id: 'LIBRARIAN', roleId: 'librarian', defaultPool: 'fast_retrieval', label: '1. Librarian' },
     { id: 'PLANNER', roleId: 'planner', defaultPool: 'strong_creative', label: '2. Planner' },
     { id: 'WRITER', roleId: 'writer', defaultPool: 'strong_creative', label: '3. Writer' },
-    { id: 'FACT_CHECKER', roleId: 'fact_checker', defaultPool: 'audit', label: '4. Checker' },
+    { id: 'FACT_CHECKER', roleId: 'fact_checker', defaultPool: 'strong_creative', label: '4. Checker' },
     { id: 'EXTRACTOR', roleId: 'extractor', defaultPool: 'fast_retrieval', label: '5. Extractor' },
     { id: 'DREAMING', roleId: 'dreamer', defaultPool: 'strong_creative', label: '6. Dreamer' }
 ];
@@ -150,6 +150,55 @@ const DEFAULT_STAGE_SUMMARIES: Record<PipelineStageId, string> = {
 };
 
 const MAX_LIVE_EVENTS_PER_SESSION = 500;
+const WIDE_BREAKPOINT_PX = 1100;
+const COMPACT_BREAKPOINT_PX = 820;
+const LEFT_OPEN_STORAGE_KEY = 'narrateos.studio.leftOpen';
+const LEFT_WIDTH_STORAGE_KEY = 'narrateos.studio.leftWidth';
+const RIGHT_WIDTH_STORAGE_KEY = 'narrateos.studio.rightWidth';
+const LEFT_WIDTH_DEFAULT = 224;
+const LEFT_WIDTH_MIN = 180;
+const LEFT_WIDTH_MAX = 380;
+const RIGHT_WIDTH_DEFAULT = 340;
+const RIGHT_WIDTH_MIN = 280;
+const RIGHT_WIDTH_MAX = 540;
+
+function clampPaneWidth(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readStoredBoolean(key: string, fallback: boolean): boolean {
+    if (typeof window === 'undefined') return fallback;
+    try {
+        const raw = window.localStorage?.getItem(key);
+        if (raw === 'true') return true;
+        if (raw === 'false') return false;
+        return fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function readStoredWidth(key: string, fallback: number, min: number, max: number): number {
+    if (typeof window === 'undefined') return fallback;
+    try {
+        const raw = window.localStorage?.getItem(key);
+        if (!raw) return fallback;
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isFinite(parsed)) return fallback;
+        return clampPaneWidth(parsed, min, max);
+    } catch {
+        return fallback;
+    }
+}
+
+function writeStorageItem(key: string, value: string): void {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage?.setItem(key, value);
+    } catch {
+        // 忽略无存储权限或配额异常
+    }
+}
 
 function asNumber(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -871,8 +920,31 @@ export function NarrateStudioRoot({
     const [containerWidth, setContainerWidth] = useState<number>(() =>
         typeof window !== 'undefined' ? window.innerWidth || 1280 : 1280
     );
+    const [leftOpen, setLeftOpen] = useState<boolean>(() =>
+        readStoredBoolean(LEFT_OPEN_STORAGE_KEY, true)
+    );
+    const [leftWidth, setLeftWidth] = useState<number>(() =>
+        readStoredWidth(LEFT_WIDTH_STORAGE_KEY, LEFT_WIDTH_DEFAULT, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX)
+    );
+    const [rightWidth, setRightWidth] = useState<number>(() =>
+        readStoredWidth(
+            RIGHT_WIDTH_STORAGE_KEY,
+            RIGHT_WIDTH_DEFAULT,
+            RIGHT_WIDTH_MIN,
+            RIGHT_WIDTH_MAX
+        )
+    );
+    const [resizingSide, setResizingSide] = useState<'left' | 'right' | null>(null);
+    const dragRef = useRef<{
+        side: 'left' | 'right';
+        startX: number;
+        startWidth: number;
+        latestWidth: number;
+    } | null>(null);
     const [rightOpen, setRightOpen] = useState<boolean>(() =>
-        typeof window !== 'undefined' ? (window.innerWidth || 1280) >= 820 : true
+        typeof window !== 'undefined'
+            ? (window.innerWidth || 1280) >= COMPACT_BREAKPOINT_PX
+            : true
     );
     const [rightTab, setRightTab] = useState<'trace' | 'status' | 'routing'>('trace');
 
@@ -903,7 +975,7 @@ export function NarrateStudioRoot({
         const updateWidth = (width: number) => {
             if (width <= 0) return;
             setContainerWidth(width);
-            if (prevWidthRef.current >= 820 && width < 820) {
+            if (prevWidthRef.current >= COMPACT_BREAKPOINT_PX && width < COMPACT_BREAKPOINT_PX) {
                 setRightOpen(false);
             }
             prevWidthRef.current = width;
@@ -1135,7 +1207,6 @@ export function NarrateStudioRoot({
                 const activeRoot = booksRes.currentBookRoot;
                 if (!activeRoot) {
                     currentBookRootRef.current = '';
-                    setStatus(null);
                     setChapters([]);
                     setSelectedChapter(null);
                     setChapterDetail(null);
@@ -1147,6 +1218,11 @@ export function NarrateStudioRoot({
                     setSignalsView(null);
                     setHaltView(null);
                     setSyncConflictsView(null);
+                    const noBookStatus = await fetchStatus().catch(() => null);
+                    if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                    if (statusSeq === statusRequestRef.current) {
+                        setStatus(noBookStatus);
+                    }
                     return;
                 }
 
@@ -1287,6 +1363,34 @@ export function NarrateStudioRoot({
                 return;
             }
             if (switchingBookRef.current) return;
+
+            if (event === 'default_model_changed') {
+                setStatus((prev) => {
+                    if (!prev) return prev;
+                    const next: NarrateStatusPayload = { ...prev };
+                    if ('defaultModel' in data) {
+                        next.defaultModel =
+                            (data['defaultModel'] as NarrateStatusPayload['defaultModel']) ?? null;
+                    }
+                    if (Array.isArray(data['availableModels'])) {
+                        next.availableModels =
+                            data['availableModels'] as NarrateStatusPayload['availableModels'];
+                    }
+                    if (data['poolOverrides'] && typeof data['poolOverrides'] === 'object') {
+                        next.poolOverrides = data['poolOverrides'] as Record<string, string>;
+                    }
+                    if (data['modelRouting'] && typeof data['modelRouting'] === 'object') {
+                        next.modelRouting = data['modelRouting'] as Record<string, string>;
+                    }
+                    if (Array.isArray(data['roleDefinitions'])) {
+                        next.roleDefinitions =
+                            data['roleDefinitions'] as NarrateStatusPayload['roleDefinitions'];
+                    }
+                    return next;
+                });
+                void loadStatus().catch(() => undefined);
+                return;
+            }
 
             if (event === 'stage:event') {
                 const sessionId = asString(data['sessionId']);
@@ -2023,9 +2127,14 @@ export function NarrateStudioRoot({
                     if (!prev) return prev;
                     const next = { ...prev };
                     if (res.modelRouting !== undefined) next.modelRouting = res.modelRouting;
+                    if (res.poolOverrides !== undefined) next.poolOverrides = res.poolOverrides;
+                    if (res.defaultModel !== undefined) next.defaultModel = res.defaultModel;
                     if (res.roleRouting !== undefined) next.roleRouting = res.roleRouting;
                     if (res.roleDefinitions !== undefined) {
                         next.roleDefinitions = res.roleDefinitions;
+                    }
+                    if (res.availableModels !== undefined) {
+                        next.availableModels = res.availableModels;
                     }
                     return next;
                 });
@@ -2233,22 +2342,38 @@ export function NarrateStudioRoot({
         return merged;
     }, [chapters, historicalStageOverrides, liveRunChapter, selectedChapter, stageOverrides]);
 
+    const defaultModelString = useMemo(() => {
+        const dm = status?.defaultModel;
+        if (!dm?.model) return '';
+        if (dm.provider && !dm.model.includes(':')) {
+            return `${dm.provider}:${dm.model}`;
+        }
+        return dm.model;
+    }, [status?.defaultModel]);
+
     const modelPools = useMemo(() => {
         const routing = status?.modelRouting ?? {};
+        const fallback = defaultModelString || '--';
         return {
-            strongModel: routing['strong_creative'] ?? routing['strong'] ?? '--',
-            fastModel: routing['fast_retrieval'] ?? routing['fast'] ?? '--',
-            auditModel: routing['audit'] ?? '--'
+            strongModel: routing['strong_creative'] ?? routing['strong'] ?? fallback,
+            fastModel: routing['fast_retrieval'] ?? routing['fast'] ?? fallback
         };
-    }, [status?.modelRouting]);
+    }, [defaultModelString, status?.modelRouting]);
 
     const effectivePoolRoutes = useMemo<Record<RolePoolId, string>>(
         () => ({
-            strong_creative: status?.modelRouting?.['strong_creative'] || modelPools.strongModel || '--',
-            fast_retrieval: status?.modelRouting?.['fast_retrieval'] || modelPools.fastModel || '--',
-            audit: status?.modelRouting?.['audit'] || modelPools.auditModel || '--'
+            strong_creative:
+                status?.modelRouting?.['strong_creative'] ||
+                modelPools.strongModel ||
+                defaultModelString ||
+                '--',
+            fast_retrieval:
+                status?.modelRouting?.['fast_retrieval'] ||
+                modelPools.fastModel ||
+                defaultModelString ||
+                '--'
         }),
-        [modelPools, status?.modelRouting]
+        [defaultModelString, modelPools, status?.modelRouting]
     );
 
     const poolProviders = useMemo(
@@ -2489,12 +2614,118 @@ export function NarrateStudioRoot({
         return safeHaltInfo?.gateViolations ?? [];
     }, [gateViolations, safeHaltInfo?.gateViolations]);
 
-    const isWide = containerWidth >= 1200;
-    const isCompact = containerWidth < 820;
+    const isWide = containerWidth >= WIDE_BREAKPOINT_PX;
+    const isCompact = containerWidth < COMPACT_BREAKPOINT_PX;
+    const showLeftPane = isWide && leftOpen;
     const layoutClass = resolveLayoutClass(isWide, isCompact);
+    const shellClassName = [
+        'ns-studio-shell',
+        layoutClass,
+        rightOpen ? 'ns-right-open' : 'ns-right-closed',
+        isWide && !leftOpen ? 'ns-left-closed' : '',
+        resizingSide ? 'ns-resizing' : ''
+    ]
+        .filter(Boolean)
+        .join(' ');
     const shellStyle = {
-        '--ns-right-w': rightOpen && !isCompact ? '340px' : '0px'
+        '--ns-left-w': showLeftPane ? `${leftWidth}px` : '0px',
+        '--ns-right-w': rightOpen && !isCompact ? `${rightWidth}px` : '0px'
     } as React.CSSProperties;
+
+    const handleToggleLeft = useCallback(() => {
+        setLeftOpen((prev) => {
+            const next = !prev;
+            writeStorageItem(LEFT_OPEN_STORAGE_KEY, String(next));
+            return next;
+        });
+    }, []);
+
+    const beginPaneResize = (
+        side: 'left' | 'right',
+        ev: React.PointerEvent<HTMLDivElement>
+    ): void => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        try {
+            ev.currentTarget.setPointerCapture?.(ev.pointerId);
+        } catch {
+            // 忽略合成事件在 jsdom 下的 pointerId 校验
+        }
+        const startWidth = side === 'left' ? leftWidth : rightWidth;
+        dragRef.current = {
+            side,
+            startX: ev.clientX,
+            startWidth,
+            latestWidth: startWidth
+        };
+        setResizingSide(side);
+    };
+
+    const movePaneResize = (
+        side: 'left' | 'right',
+        ev: React.PointerEvent<HTMLDivElement>
+    ): void => {
+        const drag = dragRef.current;
+        if (!drag || drag.side !== side) return;
+        const delta = ev.clientX - drag.startX;
+        if (side === 'left') {
+            const next = clampPaneWidth(drag.startWidth + delta, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX);
+            drag.latestWidth = next;
+            setLeftWidth(next);
+            return;
+        }
+        const next = clampPaneWidth(drag.startWidth - delta, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX);
+        drag.latestWidth = next;
+        setRightWidth(next);
+    };
+
+    const endPaneResize = (
+        side: 'left' | 'right',
+        ev: React.PointerEvent<HTMLDivElement>
+    ): void => {
+        const drag = dragRef.current;
+        if (!drag || drag.side !== side) return;
+        dragRef.current = null;
+        setResizingSide(null);
+        try {
+            ev.currentTarget.releasePointerCapture?.(ev.pointerId);
+        } catch {
+            // 忽略合成事件释放异常
+        }
+        writeStorageItem(
+            side === 'left' ? LEFT_WIDTH_STORAGE_KEY : RIGHT_WIDTH_STORAGE_KEY,
+            String(drag.latestWidth)
+        );
+    };
+
+    const resetPaneWidth = (side: 'left' | 'right'): void => {
+        if (side === 'left') {
+            setLeftWidth(LEFT_WIDTH_DEFAULT);
+            writeStorageItem(LEFT_WIDTH_STORAGE_KEY, String(LEFT_WIDTH_DEFAULT));
+            return;
+        }
+        setRightWidth(RIGHT_WIDTH_DEFAULT);
+        writeStorageItem(RIGHT_WIDTH_STORAGE_KEY, String(RIGHT_WIDTH_DEFAULT));
+    };
+
+    const handleSeparatorKeyDown = (
+        side: 'left' | 'right',
+        ev: React.KeyboardEvent<HTMLDivElement>
+    ): void => {
+        if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+        ev.preventDefault();
+        const step = ev.shiftKey ? 24 : 12;
+        const sign = ev.key === 'ArrowRight' ? 1 : -1;
+        if (side === 'left') {
+            const next = clampPaneWidth(leftWidth + sign * step, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX);
+            setLeftWidth(next);
+            writeStorageItem(LEFT_WIDTH_STORAGE_KEY, String(next));
+            return;
+        }
+        const next = clampPaneWidth(rightWidth - sign * step, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX);
+        setRightWidth(next);
+        writeStorageItem(RIGHT_WIDTH_STORAGE_KEY, String(next));
+    };
 
     const navChapters = useMemo(
         () =>
@@ -2555,7 +2786,6 @@ export function NarrateStudioRoot({
                     modelPool={{
                         fastModel: modelPools.fastModel,
                         strongModel: modelPools.strongModel,
-                        auditModel: modelPools.auditModel,
                         inputTokens: aggregateTokens.inputTokens,
                         cacheReadTokens: aggregateTokens.cacheReadTokens,
                         cacheWriteTokens: aggregateTokens.cacheWriteTokens,
@@ -2619,6 +2849,8 @@ export function NarrateStudioRoot({
             return (
                 <RoleRoutingEditor
                     resetKey={status?.bookRoot ?? null}
+                    defaultModel={status?.defaultModel ?? null}
+                    poolOverrides={status?.poolOverrides ?? null}
                     poolRoutes={effectivePoolRoutes}
                     modelRouting={status?.modelRouting ?? null}
                     roleRouting={status?.roleRouting ?? null}
@@ -2635,10 +2867,10 @@ export function NarrateStudioRoot({
     return (
         <div
             ref={shellRef}
-            className={`ns-studio-shell ${layoutClass} ${rightOpen ? 'ns-right-open' : 'ns-right-closed'}`}
+            className={shellClassName}
             style={shellStyle}
         >
-            {isWide && (
+            {showLeftPane && (
                 <LeftBookNav
                     currentBookRoot={currentBookRoot}
                     currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
@@ -2661,6 +2893,28 @@ export function NarrateStudioRoot({
                     onNewBook={handleOpenNewBook}
                     onSelectChapter={handleSelectChapter}
                     onOpenView={handleOpenView}
+                />
+            )}
+
+            {showLeftPane && (
+                <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="调整左侧目录栏宽度"
+                    aria-valuemin={LEFT_WIDTH_MIN}
+                    aria-valuemax={LEFT_WIDTH_MAX}
+                    aria-valuenow={leftWidth}
+                    tabIndex={0}
+                    className={`ns-pane-resizer ns-pane-resizer-left${
+                        resizingSide === 'left' ? ' ns-pane-resizer-active' : ''
+                    }`}
+                    style={{ left: 'calc(var(--ns-left-w, 224px) - 3px)' }}
+                    onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => beginPaneResize('left', e)}
+                    onPointerMove={(e: React.PointerEvent<HTMLDivElement>) => movePaneResize('left', e)}
+                    onPointerUp={(e: React.PointerEvent<HTMLDivElement>) => endPaneResize('left', e)}
+                    onPointerCancel={(e: React.PointerEvent<HTMLDivElement>) => endPaneResize('left', e)}
+                    onDoubleClick={() => resetPaneWidth('left')}
+                    onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) => handleSeparatorKeyDown('left', e)}
                 />
             )}
 
@@ -2695,6 +2949,7 @@ export function NarrateStudioRoot({
                 }}
                 dirtyChaptersCount={dirtyChaptersCount}
                 externalViewCommand={externalViewCommand}
+                leftOpen={leftOpen}
                 showCompactNav={!isWide}
                 rightOpen={rightOpen}
                 hasSafeHalt={Boolean(safeHaltInfo || syncConflictInfo)}
@@ -2729,6 +2984,7 @@ export function NarrateStudioRoot({
                 }}
                 onSelectBook={handleSelectBook}
                 onNewBook={handleOpenNewBook}
+                onToggleLeft={handleToggleLeft}
                 onToggleRight={() => setRightOpen((prev) => !prev)}
                 onOpenCodex={(kind) => {
                     setActiveViewKind(kind);
@@ -2783,6 +3039,28 @@ export function NarrateStudioRoot({
                     className="ns-drawer-backdrop"
                     aria-hidden="true"
                     onClick={() => setRightOpen(false)}
+                />
+            )}
+
+            {rightOpen && !isCompact && (
+                <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="调整右侧状态栏宽度"
+                    aria-valuemin={RIGHT_WIDTH_MIN}
+                    aria-valuemax={RIGHT_WIDTH_MAX}
+                    aria-valuenow={rightWidth}
+                    tabIndex={0}
+                    className={`ns-pane-resizer ns-pane-resizer-right${
+                        resizingSide === 'right' ? ' ns-pane-resizer-active' : ''
+                    }`}
+                    style={{ right: 'calc(var(--ns-right-w, 340px) - 3px)' }}
+                    onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => beginPaneResize('right', e)}
+                    onPointerMove={(e: React.PointerEvent<HTMLDivElement>) => movePaneResize('right', e)}
+                    onPointerUp={(e: React.PointerEvent<HTMLDivElement>) => endPaneResize('right', e)}
+                    onPointerCancel={(e: React.PointerEvent<HTMLDivElement>) => endPaneResize('right', e)}
+                    onDoubleClick={() => resetPaneWidth('right')}
+                    onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) => handleSeparatorKeyDown('right', e)}
                 />
             )}
 

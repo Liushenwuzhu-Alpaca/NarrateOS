@@ -128,6 +128,7 @@ function resolveChapterBadge(chapter: ChapterNavItem): {
 }
 
 function renderChapterListBody(options: {
+    hasActiveBook: boolean;
     chapters: readonly ChapterNavItem[];
     activeViewKind: MaterializedViewKind | null;
     selectedChapter: number | null;
@@ -135,7 +136,15 @@ function renderChapterListBody(options: {
     embedded: boolean;
     onSelectChapter: (chapterNumber: number) => void;
 }): React.ReactElement {
-    const { chapters, activeViewKind, selectedChapter, loading, embedded, onSelectChapter } = options;
+    const {
+        hasActiveBook,
+        chapters,
+        activeViewKind,
+        selectedChapter,
+        loading,
+        embedded,
+        onSelectChapter
+    } = options;
     if (!embedded && loading && chapters.length === 0) {
         return (
             <div className="ns-ch-list" aria-label="章节目录加载中" role="status">
@@ -153,7 +162,9 @@ function renderChapterListBody(options: {
     if (chapters.length === 0) {
         return (
             <div className="ns-empty-hint">
-                新书契约已就绪，点击右上角「写下一章」开启首章校准。
+                {hasActiveBook
+                    ? '新书契约已就绪，点击右上角「写下一章」开启首章校准。'
+                    : '当前尚未开启作品，点击中央「开启新作品」开始创作。'}
             </div>
         );
     }
@@ -284,6 +295,7 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
     );
 
     const chapterListBody = renderChapterListBody({
+        hasActiveBook: Boolean(props.currentBookRoot),
         chapters: sortedChapters,
         activeViewKind,
         selectedChapter,

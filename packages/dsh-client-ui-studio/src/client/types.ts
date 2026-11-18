@@ -56,8 +56,15 @@ export interface RuntimeStatusSummary {
     haltRequested: boolean;
 }
 
-/** 后端标准模型池标识 */
-export type RolePoolId = 'strong_creative' | 'fast_retrieval' | 'audit';
+/** 后端标准模型池标识（双池架构：强模型池 + 快模型池） */
+export type RolePoolId = 'strong_creative' | 'fast_retrieval';
+
+/** DSH 本体全局默认模型选择 */
+export interface DefaultModelSelection {
+    provider: string;
+    model: string;
+    reasoningEffort?: string | undefined;
+}
 
 /** 分角色模型路由第一层档位覆盖 */
 export type RoleTierOverride = 'strong' | 'weak';
@@ -75,10 +82,10 @@ export interface RoleModelOverride {
 /** 后端下发的工种模型解析定义（对应 status.roleDefinitions） */
 export interface RoleDefinitionItem {
     id: string;
-    defaultPool?: RolePoolId | undefined;
+    defaultPool?: RolePoolId | 'audit' | undefined;
     defaultReasoningEffort?: RoleReasoningEffort | undefined;
     effectiveTier?: RoleTierOverride | null | undefined;
-    effectivePool?: RolePoolId | undefined;
+    effectivePool?: RolePoolId | 'audit' | undefined;
     effectiveProvider: string;
     effectiveModel: string;
     effectiveReasoningEffort?: RoleReasoningEffort | undefined;
@@ -206,6 +213,8 @@ export interface NarrateStatusPayload {
     yolo: YoloStatusSummary;
     runtime: RuntimeStatusSummary;
     modelRouting?: Record<string, string> | undefined;
+    poolOverrides?: Record<string, string> | undefined;
+    defaultModel?: DefaultModelSelection | null | undefined;
     roleRouting?: Record<string, RoleModelOverride> | undefined;
     roleDefinitions?: RoleDefinitionItem[] | undefined;
     availableModels?: AvailableModelItem[] | undefined;
@@ -237,8 +246,11 @@ export interface SaveModelRoutingRequest {
 export interface SaveModelRoutingResponse {
     status: string;
     modelRouting?: Record<string, string> | undefined;
+    poolOverrides?: Record<string, string> | undefined;
+    defaultModel?: DefaultModelSelection | null | undefined;
     roleRouting?: Record<string, RoleModelOverride> | undefined;
     roleDefinitions?: RoleDefinitionItem[] | undefined;
+    availableModels?: AvailableModelItem[] | undefined;
 }
 
 /** 章节列表单项摘要（对应 GET /api/narrate/chapters） */
@@ -788,6 +800,7 @@ export interface YoloStopResponse {
 export type SseEventName =
     | 'connected'
     | 'book_switched'
+    | 'default_model_changed'
     | 'halt:requested'
     | 'halt:waiting'
     | 'halt:completed'

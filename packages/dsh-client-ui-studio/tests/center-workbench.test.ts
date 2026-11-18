@@ -416,16 +416,15 @@ describe('Wave 4B 清样画布、3x2 矩阵、独立设定集与动效', () => {
                     },
                     {
                         id: 'fact_checker',
-                        defaultPool: 'audit',
-                        effectivePool: 'audit',
+                        defaultPool: 'strong_creative',
+                        effectivePool: 'strong_creative',
                         effectiveProvider: 'openai',
                         effectiveModel: 'gpt-4.1'
                     }
                 ],
                 poolRoutes: {
                     strong_creative: 'deepseek:deepseek-reasoner',
-                    fast_retrieval: 'deepseek:deepseek-chat',
-                    audit: 'openai:gpt-4.1'
+                    fast_retrieval: 'deepseek:deepseek-chat'
                 },
                 stages: {
                     WRITER: { status: 'active', summary: '正在执笔正文', sessionId: 'sess-w1' },
@@ -827,6 +826,90 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
 
         click(buttonByText(view.container, '返回第 1 章正文'));
         expect(onCloseCodex).toHaveBeenCalledTimes(1);
+        view.unmount();
+    });
+
+    it('无书态中栏扉页主按钮为开启新作品并触发 onNewBook 打开 BootBookModal', () => {
+        const onNewBook = vi.fn();
+        const onStepOne = vi.fn();
+        const view = mountWorkbench({
+            currentBookRoot: '',
+            bookTitle: '',
+            bookSlug: '',
+            currentChapter: 0,
+            chapters: [],
+            chapterDetail: null,
+            onNewBook,
+            onStepOne
+        });
+
+        const cover = view.container.querySelector('.ns-cover-sheet');
+        expect(cover).not.toBeNull();
+        expect(cover?.textContent).not.toContain('写第 1 章');
+        click(buttonByText(cover!, '开启新作品'));
+        expect(onNewBook).toHaveBeenCalledTimes(1);
+        expect(onStepOne).not.toHaveBeenCalled();
+        view.unmount();
+    });
+
+    it('DirectorNoteDock 支持 placeholder 斜杠提示、下拉菜单命令标注及键盘 ArrowUp/ArrowDown/Enter/Tab 选指令并清空前缀', () => {
+        const onSubmitSignal = vi.fn();
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            materializedViews: {
+                entities: [{ entityId: 'char_chen', canonicalName: '陈砚', markdown: '' }]
+            },
+            onSubmitSignal
+        });
+
+        const noteInput = view.container.querySelector<HTMLInputElement>('.ns-note-input')!;
+        expect(noteInput.placeholder).toContain('/plot');
+        expect(noteInput.placeholder).toContain('/spotlight');
+        expect(noteInput.placeholder).toContain('/flashback');
+        expect(noteInput.placeholder).toContain('/retcon');
+
+        // 菜单按钮展开项同步标注 /plot 等命令名
+        click(view.container.querySelector<HTMLButtonElement>('.ns-note-kind-btn')!);
+        const menuText = view.container.querySelector('[role="menu"][aria-label="选择便签类型"]')?.textContent ?? '';
+        expect(menuText).toContain('/plot');
+        expect(menuText).toContain('/spotlight');
+        expect(menuText).toContain('/flashback');
+        expect(menuText).toContain('/retcon');
+        click(view.container.querySelector<HTMLButtonElement>('.ns-note-kind-btn')!);
+
+        // 输入 / 呼出斜杠联想菜单，ArrowDown 切换高亮，Enter 选中指令并清空前缀且不提交
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        act(() => {
+            inputSetter?.call(noteInput, '/');
+            noteInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        expect(view.container.querySelector('.ns-slash-menu')).not.toBeNull();
+
+        act(() => {
+            noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        });
+        const items = Array.from(view.container.querySelectorAll<HTMLButtonElement>('.ns-slash-item'));
+        expect(items[1]?.classList.contains('is-active')).toBe(true);
+        expect(items[1]?.getAttribute('aria-selected')).toBe('true');
+
+        act(() => {
+            noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        });
+        expect(onSubmitSignal).not.toHaveBeenCalled();
+        expect(noteInput.value).toBe('');
+        expect(view.container.querySelector('.ns-note-kind-btn')?.textContent).toContain('切换视角');
+
+        // 输入 /ret 后按 Tab 也能选中 /retcon 并清空前缀
+        act(() => {
+            inputSetter?.call(noteInput, '/ret');
+            noteInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        act(() => {
+            noteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+        });
+        expect(onSubmitSignal).not.toHaveBeenCalled();
+        expect(noteInput.value).toBe('');
+        expect(view.container.querySelector('.ns-note-kind-btn')?.textContent).toContain('圆谎修补');
         view.unmount();
     });
 });

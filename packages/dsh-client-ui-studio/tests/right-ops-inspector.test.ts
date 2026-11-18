@@ -485,6 +485,8 @@ describe('Wave 4A 右栏「运行状态」三段摘要与底层校验明细', ()
         expect(text).toContain('6120 字');
         expect(text).toContain('左腕旧骨折未愈，无法单手推举重物');
         expect(text).toContain('陈砚抬起完好无损的左手推开账房木门');
+        expect(text).toContain('双池模型路由');
+        expect(text).not.toContain('独立挑错池');
         expect(text).not.toContain('Fact Checker');
         expect(text).not.toContain('Fact Check');
     });
