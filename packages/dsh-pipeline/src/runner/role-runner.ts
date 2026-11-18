@@ -197,6 +197,19 @@ export interface RoleRunnerDeps {
 
 const SESSION_ID_SAFE_RE = /^[a-zA-Z0-9_.-]+$/;
 
+function buildStageAttemptMeta(params: {
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
+}): {
+    attempt?: number;
+    triggerReason?: string;
+} {
+    return {
+        ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+        ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
+    };
+}
+
 async function appendExtendedRunRecord(
     bookRoot: string,
     record: ExtendedRunRecord
@@ -405,6 +418,7 @@ export class RoleRunner {
             params.poolOverride
         );
         const modelId = `${route.provider}:${route.model}`;
+        const attemptMeta = buildStageAttemptMeta(params);
 
         const sessionDetail: StageSessionDetail = {
             sessionId: sessionIdStr,
@@ -417,8 +431,7 @@ export class RoleRunner {
             modelId,
             ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
             ...(params.agentMode ? { mode: params.agentMode } : {}),
-            ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
-            ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
+            ...attemptMeta,
             live: true,
             events: []
         };
@@ -504,8 +517,7 @@ export class RoleRunner {
                 startedAt,
                 ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
                 ...(params.agentMode ? { mode: params.agentMode } : {}),
-                ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
-                ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
+                ...attemptMeta
             });
 
             try {
@@ -519,8 +531,7 @@ export class RoleRunner {
                         ? { parentSessionId: params.parentSessionId }
                         : {}),
                     ...(params.agentMode ? { mode: params.agentMode } : {}),
-                    ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
-                    ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
+                    ...attemptMeta
                 });
             } catch {
                 // 避免 SSE 回调异常中断执行
@@ -862,8 +873,7 @@ export class RoleRunner {
                 finishedAt: new Date().toISOString(),
                 ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
                 ...(params.agentMode ? { mode: params.agentMode } : {}),
-                ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
-                ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
+                ...attemptMeta
             });
 
             return {
@@ -896,8 +906,7 @@ export class RoleRunner {
                 error: err instanceof Error ? err.message : String(err),
                 ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
                 ...(params.agentMode ? { mode: params.agentMode } : {}),
-                ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
-                ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
+                ...attemptMeta
             }).catch(() => {});
             throw err;
         } finally {

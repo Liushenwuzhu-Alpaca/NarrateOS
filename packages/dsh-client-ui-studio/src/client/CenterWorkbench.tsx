@@ -896,17 +896,41 @@ function parseUnifiedDiff(rawDiff: string, defaultFileName: string): ParsedDiffH
     return hunks;
 }
 
+/** 返修阶段展示元信息（统一映射目标节点、徽标与默认摘要） */
+export interface StageRepairMeta {
+    targetStage: PipelineStageId;
+    badge: string;
+    defaultSummary: string;
+}
+
+/** 返修重演阶段共享元数据表（LOCAL_PATCH / REWRITE / REPLAN） */
+export const STAGE_REPAIR_META: Readonly<Record<string, StageRepairMeta>> = {
+    LOCAL_PATCH: {
+        targetStage: 'WRITER',
+        badge: '门禁 Patch',
+        defaultSummary: '正在净室内存局部 Patch 自愈'
+    },
+    REWRITE: {
+        targetStage: 'WRITER',
+        badge: 'Rewrite',
+        defaultSummary: '核查打回，正在整章净室重写自愈'
+    },
+    REPLAN: {
+        targetStage: 'PLANNER',
+        badge: 'Replan',
+        defaultSummary: '触发 Replan 重排细纲'
+    }
+};
+
 /**
  * 后端 SSE 阶段名 -> 展示节点映射。
  * PROSE_GATE / LOCAL_PATCH / REWRITE 归并到 WRITER 节点；REPLAN 归并到 PLANNER 节点。
  */
 const SSE_STAGE_ALIAS: Readonly<Record<string, PipelineStageId>> = {
     PROSE_GATE: 'WRITER',
-    STATIC_GATE: 'WRITER',
-    LOCAL_PATCH: 'WRITER',
-    PATCH: 'WRITER',
-    REWRITE: 'WRITER',
-    REPLAN: 'PLANNER'
+    LOCAL_PATCH: STAGE_REPAIR_META['LOCAL_PATCH']!.targetStage,
+    REWRITE: STAGE_REPAIR_META['REWRITE']!.targetStage,
+    REPLAN: STAGE_REPAIR_META['REPLAN']!.targetStage
 };
 
 /** 将后端阶段名归一化为展示节点 ID（未知阶段返回 null） */
@@ -951,21 +975,32 @@ function deriveStagesFromSse(
                 summary: '静态门禁校验中（0-LLM 确定性步骤）'
             };
         } else if (sseStage === 'LOCAL_PATCH') {
+            const meta = STAGE_REPAIR_META['LOCAL_PATCH']!;
             base.LIBRARIAN = { status: 'done' };
             base.PLANNER = { status: 'done' };
             base.WRITER = {
                 status: 'healing',
-                summary: '静态门禁拦截，正在局部 Patch 自愈（0-LLM 确定性步骤）',
-                badge: '门禁 Patch'
+                summary: meta.defaultSummary,
+                badge: meta.badge
             };
         } else if (sseStage === 'REWRITE') {
+            const meta = STAGE_REPAIR_META['REWRITE']!;
             base.LIBRARIAN = { status: 'done' };
             base.PLANNER = { status: 'done' };
-            base.WRITER = { status: 'healing', summary: '核查打回，正在局部重写自愈', badge: 'Rewrite' };
+            base.WRITER = {
+                status: 'healing',
+                summary: meta.defaultSummary,
+                badge: meta.badge
+            };
             base.FACT_CHECKER = { status: 'healing', summary: '发现穿帮，触发 Rewrite' };
         } else if (sseStage === 'REPLAN') {
+            const meta = STAGE_REPAIR_META['REPLAN']!;
             base.LIBRARIAN = { status: 'done' };
-            base.PLANNER = { status: 'healing', summary: '触发 Replan 重排细纲', badge: 'Replan v2' };
+            base.PLANNER = {
+                status: 'healing',
+                summary: meta.defaultSummary,
+                badge: meta.badge
+            };
             base.FACT_CHECKER = { status: 'healing', summary: '要求重规划细纲' };
         } else if (sseStage === 'DREAMING') {
             for (const id of STAGE_ORDER) {

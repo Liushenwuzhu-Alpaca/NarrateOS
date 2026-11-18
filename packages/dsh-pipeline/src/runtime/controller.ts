@@ -699,10 +699,12 @@ export class NarrateRuntimeController {
         });
     }
 
-    /** 处理工种会话启动事件并向 SSE 推送 activeSessionId / sessionId / runId */
+    /** 处理工种会话启动事件并向 SSE 推送 stage:session 与 activeSessionId / sessionId / runId */
     private handleStageSession = (evt: StageSessionEvent): void => {
         this.activeStageSessions.set(evt.stage, evt);
         const now = new Date().toISOString();
+
+        this.emitEvent('stage:session', evt);
 
         if (evt.stage === 'DREAMING') {
             this.emitEvent('dream:started', {
@@ -761,10 +763,16 @@ export class NarrateRuntimeController {
                             if (this.yoloState.running) {
                                 this.yoloState.currentStage = evt.stage;
                             }
+                            if (!evt.activeSessionId) {
+                                // 进入新一轮子调用前清理同阶段上一轮残留会话，避免在 onStageSession 到达前误绑旧 sessionId
+                                this.activeStageSessions.delete(evt.stage);
+                            }
                             const sessionEvt = this.activeStageSessions.get(evt.stage);
                             const activeSessionId =
                                 evt.activeSessionId ?? sessionEvt?.sessionId;
                             const runId = evt.runId ?? sessionEvt?.runId;
+                            const attempt = sessionEvt?.attempt;
+                            const triggerReason = sessionEvt?.triggerReason;
 
                             this.emitEvent('stage', {
                                 stage: evt.stage,
@@ -772,14 +780,18 @@ export class NarrateRuntimeController {
                                 message: evt.message,
                                 timestamp: evt.timestamp,
                                 ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
-                                ...(runId ? { runId } : {})
+                                ...(runId ? { runId } : {}),
+                                ...(attempt !== undefined ? { attempt } : {}),
+                                ...(triggerReason ? { triggerReason } : {})
                             });
                             this.emitEvent('chapter:phase', {
                                 phase: evt.stage,
                                 chapterNumber: evt.chapterNumber,
                                 message: evt.message,
                                 ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
-                                ...(runId ? { runId } : {})
+                                ...(runId ? { runId } : {}),
+                                ...(attempt !== undefined ? { attempt } : {}),
+                                ...(triggerReason ? { triggerReason } : {})
                             });
                             options.onProgress?.({
                                 ...evt,

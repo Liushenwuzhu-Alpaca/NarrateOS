@@ -7,6 +7,7 @@ import {
     type StructuredRetryOptions,
     type VoiceSample
 } from '@narrateos/dsh-book-store';
+import { NotFoundError, ValidationError } from '../errors.js';
 import { VoiceHarvestOutputSchema, type VoiceHarvestResult } from '../schemas.js';
 import { formatChapterKey, readOptionalText } from './helpers.js';
 
@@ -41,7 +42,7 @@ export async function harvestVoiceFromChapter(
     const chRelPath = `manuscripts/${formatChapterKey(chapterNumber)}.md`;
     const chapterText = await readOptionalText(join(options.store.bookRoot, chRelPath));
     if (!chapterText || chapterText.trim().length === 0) {
-        throw new Error(`Voice Harvest 失败：未找到已定稿章节 ${chRelPath}`);
+        throw new NotFoundError(`Voice Harvest 失败：未找到已定稿章节 ${chRelPath}`);
     }
 
     const config = await options.store.readBookConfig();
@@ -95,7 +96,7 @@ export async function harvestVoiceFromChapter(
     }
 
     if (accepted.length === 0) {
-        throw new Error('Voice Harvest 采集到的候选标本均未通过 StaticProseGate 校验');
+        throw new ValidationError('Voice Harvest 采集到的候选标本均未通过 StaticProseGate 校验');
     }
 
     await options.store.writeVoiceSamples({ samples: accepted });

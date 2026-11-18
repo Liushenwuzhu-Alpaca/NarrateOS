@@ -3,9 +3,7 @@ import type { ProseGateOptions } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
 import {
     formatPatchViolationsText,
-    type InMemoryDraftPatchSession,
-    type PatchParagraphViolation,
-    type ViolatedParagraphSnapshot
+    type InMemoryDraftPatchSession
 } from '../tools/patch-paragraphs.js';
 import {
     YieldPatchedDraftInputSchema,
@@ -70,26 +68,12 @@ export function createYieldPatchedDraftTool(options: YieldPatchedDraftOptions): 
 
             const effectiveGateOptions = proseGateOptions ?? session.proseGateOptions;
             if (effectiveGateOptions && enforceProseGateOnYield !== false) {
-                const gateResult = session.evaluateProseGate(effectiveGateOptions);
-                if (gateResult && !gateResult.passed) {
-                    const paragraphs = session.getParagraphs();
-                    const violations: PatchParagraphViolation[] = gateResult.violations.map((v) => ({
-                        paragraphIndex: v.paragraphIndex,
-                        ruleId: v.ruleId,
-                        line: v.line,
-                        column: v.column,
-                        matchedText: v.matchedText,
-                        lineText: v.lineText
-                    }));
-                    const violatedParagraphs: ViolatedParagraphSnapshot[] =
-                        gateResult.violatedParagraphIndices.map((idx) => ({
-                            index: idx,
-                            text: paragraphs[idx] ?? ''
-                        }));
-                    const detail = formatPatchViolationsText(violations, violatedParagraphs);
+                const report = session.evaluateGateReport(effectiveGateOptions);
+                if (report.configured && !report.passed) {
+                    const detail = formatPatchViolationsText(report.violations, report.violatedParagraphs);
                     throw new GateValidationError(
                         'yield_patched_draft',
-                        `StaticProseGate 终态复检未通过：仍有 ${gateResult.violatedParagraphCount} 个违规段落 [${gateResult.violatedParagraphIndices.join(', ')}]，请继续调用 patch_paragraphs 修正后重试。\n${detail}`
+                        `StaticProseGate 终态复检未通过：仍有 ${report.violatedParagraphCount} 个违规段落 [${report.violatedParagraphIndices.join(', ')}]，请继续调用 patch_paragraphs 修正后重试。\n${detail}`
                     );
                 }
             }

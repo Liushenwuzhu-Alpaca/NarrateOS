@@ -158,10 +158,15 @@ function renderToolCallList(calls: readonly RunDetailToolCall[] | undefined, key
     );
 }
 
-/** 渲染完整 LLM 请求输入快照（systemPrompt、taskPromptBlocks、采样与路由参数） */
-function renderRequestInputSection(
+interface ExtractedRequestInputView {
+    paramEntries: Array<[string, string]>;
+    systemPrompt: string | undefined;
+    taskBlocks: string[];
+}
+
+function extractRequestInputView(
     requestInput: RunDetailRequestInput | undefined
-): React.ReactNode {
+): ExtractedRequestInputView | null {
     if (!requestInput) return null;
     const paramEntries: Array<[string, string]> = [];
     if (requestInput.pool) paramEntries.push(['pool', requestInput.pool]);
@@ -193,9 +198,26 @@ function renderRequestInputSection(
             paramEntries.push([key, formatted]);
         }
     }
+    const systemPrompt =
+        typeof requestInput.systemPrompt === 'string' && requestInput.systemPrompt.length > 0
+            ? requestInput.systemPrompt
+            : undefined;
     const taskBlocks = Array.isArray(requestInput.taskPromptBlocks)
-        ? requestInput.taskPromptBlocks
+        ? requestInput.taskPromptBlocks.filter((b): b is string => typeof b === 'string' && b.length > 0)
         : [];
+    if (paramEntries.length === 0 && !systemPrompt && taskBlocks.length === 0) {
+        return null;
+    }
+    return { paramEntries, systemPrompt, taskBlocks };
+}
+
+/** 渲染完整 LLM 请求输入快照（systemPrompt、taskPromptBlocks、采样与路由参数） */
+function renderRequestInputSection(
+    requestInput: RunDetailRequestInput | undefined
+): React.ReactNode {
+    const view = extractRequestInputView(requestInput);
+    if (!view) return null;
+    const { paramEntries, systemPrompt, taskBlocks } = view;
 
     return (
         <details
@@ -214,10 +236,10 @@ function renderRequestInputSection(
                         ))}
                     </dl>
                 ) : null}
-                {requestInput.systemPrompt ? (
+                {systemPrompt ? (
                     <div className="ns-session-request-block">
                         <div className="ns-session-request-label ns-mono">systemPrompt</div>
-                        <pre className="ns-session-pre">{requestInput.systemPrompt}</pre>
+                        <pre className="ns-session-pre">{systemPrompt}</pre>
                     </div>
                 ) : null}
                 {taskBlocks.length > 0 ? (
@@ -476,11 +498,12 @@ export function StageSessionViewer({
     );
 
     useEffect(() => {
-        setRunDetail(null);
         if (!shouldFetchDetail || !selection?.sessionId) {
+            setRunDetail(null);
             setDetailLoading(false);
             return;
         }
+        setRunDetail((prev) => (prev && prev.sessionId === selection.sessionId ? prev : null));
 
         let cancelled = false;
         setDetailLoading(true);
@@ -505,7 +528,7 @@ export function StageSessionViewer({
         return () => {
             cancelled = true;
         };
-    }, [shouldFetchDetail, selection?.sessionId]);
+    }, [shouldFetchDetail, selection?.sessionId, selection?.status]);
 
     const handleCopySessionId = () => {
         if (!selection?.sessionId) return;
@@ -551,26 +574,32 @@ export function StageSessionViewer({
     const normalizedEvents = normalizeEventsPayload(runDetail?.events);
     const topLevelThinking =
         runDetail?.thinking ?? runDetail?.reasoning ?? normalizedEvents.thinking;
-    const mergedToolCalls =
+    const rootOrEventToolCalls =
         runDetail?.toolCalls && runDetail.toolCalls.length > 0
             ? runDetail.toolCalls
             : normalizedEvents.toolCalls;
+    const turnToolCalls = Array.isArray(runDetail?.turns)
+        ? runDetail.turns.flatMap((turn) => turn.toolCalls ?? turn.tool_calls ?? [])
+        : [];
+    const supplementaryToolCalls =
+        rootOrEventToolCalls.length > 0 ? rootOrEventToolCalls : turnToolCalls;
     const topLevelOutput =
         runDetail?.output ??
         runDetail?.finalOutput ??
         runDetail?.summary ??
         normalizedEvents.output;
+    const hasRequestInput = Boolean(extractRequestInputView(runDetail?.requestInput));
     const hasDetailBody = Boolean(
         runDetail &&
             ((Array.isArray(runDetail.turns) && runDetail.turns.length > 0) ||
                 topLevelThinking ||
-                mergedToolCalls.length > 0 ||
+                rootOrEventToolCalls.length > 0 ||
                 topLevelOutput ||
-                runDetail.requestInput)
+                hasRequestInput)
     );
     const hasSupplementary = Boolean(
-        runDetail?.requestInput ||
-            mergedToolCalls.some(
+        hasRequestInput ||
+            supplementaryToolCalls.some(
                 (call) => call.result !== undefined && formatDetailValue(call.result).length > 0
             )
     );
@@ -685,7 +714,7 @@ export function StageSessionViewer({
                         {hasSupplementary && runDetail ? (
                             <div className="ns-session-supplementary">
                                 {renderRequestInputSection(runDetail.requestInput)}
-                                {renderToolResultsSupplementary(mergedToolCalls)}
+                                {renderToolResultsSupplementary(supplementaryToolCalls)}
                             </div>
                         ) : null}
                     </>
@@ -740,7 +769,7 @@ export function StageSessionViewer({
                                         <pre className="ns-session-pre">{topLevelThinking}</pre>
                                     </details>
                                 ) : null}
-                                {renderToolCallList(mergedToolCalls, 'root')}
+                                {renderToolCallList(rootOrEventToolCalls, 'root')}
                                 {Array.isArray(runDetail.turns) && runDetail.turns.length > 0 ? (
                                     <div className="ns-session-turns">
                                         {runDetail.turns.map((turn, idx) => renderRunTurn(turn, idx))}

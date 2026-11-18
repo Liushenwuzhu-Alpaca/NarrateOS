@@ -694,5 +694,36 @@ describe('真实根组件的草稿身份与异步隔离', () => {
 
         expect(api.harvestVoice).toHaveBeenCalledWith(1);
         expect(document.body.textContent).toContain('2');
+
+        // 1. res.skipped === true 时展示准确提示
+        vi.mocked(api.harvestVoice).mockResolvedValueOnce({
+            harvestedCount: 0,
+            skipped: true,
+            samples: []
+        });
+        await click(harvestBtn!);
+        expect(document.body.textContent).toContain('当前作品已有声纹标本，已跳过本次采集');
+
+        // 2. 在途切书（SSE book_switched）使旧工作区声纹采集结果失效，不向新作品弹出旧提示
+        const harvestDeferred = Promise.withResolvers<{
+            harvestedCount: number;
+            skipped: boolean;
+            samples: Array<{ id: string; tag: string; text: string }>;
+        }>();
+        vi.mocked(api.harvestVoice).mockReturnValueOnce(harvestDeferred.promise);
+        await click(harvestBtn!);
+
+        activeBookRoot = '/books/b';
+        await emit({ event: 'book_switched', data: { bookRoot: '/books/b' } });
+
+        await act(async () => {
+            harvestDeferred.resolve({
+                harvestedCount: 4,
+                skipped: false,
+                samples: [{ id: 'stale', tag: '旧书', text: '旧书样本。' }]
+            });
+            await harvestDeferred.promise;
+        });
+        expect(document.body.textContent).not.toContain('新增 4 条样本');
     });
 });
