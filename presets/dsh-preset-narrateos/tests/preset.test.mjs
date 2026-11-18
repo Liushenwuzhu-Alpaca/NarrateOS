@@ -360,9 +360,10 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     assert.ok(patchPrompt.includes('# '), 'patch.md 必须正向约定保留目标段落中的一级标题行');
 
     const librarianPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/librarian.md'), 'utf8');
-    for (const marker of ['已由管线预注入', 'world_state.md', 'open_threads.md', 'last_seen_ch', 'book_read({ paths:', 'maxReadCalls']) {
+    for (const marker of ['已由管线预注入', 'world_state.md', 'open_threads.md', 'last_seen_ch', 'book_read({ paths:', 'lore_library/lore_xxx.md', 'maxReadCalls']) {
         assert.ok(librarianPrompt.includes(marker), `librarian.md 缺少关键契约锚点: ${marker}`);
     }
+    assert.ok(!librarianPrompt.includes('"lore_xxx.md"'), 'librarian.md 示例路径必须补全 lore_library/ 前缀，避免触发 PathFence 拦截');
 
     const extractorPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/extractor.md'), 'utf8');
     for (const marker of [
