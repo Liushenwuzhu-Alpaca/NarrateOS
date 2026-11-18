@@ -357,4 +357,352 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
         });
         expect(steeredMessages).toHaveLength(0);
     });
+
+    it('主会话写保护守卫拦截带引号/转义/时间戳的 apply_patch 路径，并支持动态保护 switchBook 切换后的外部 bookRoot', async () => {
+        const workspaceDir = await makeTempDir();
+        const booksRoot = join(workspaceDir, 'books');
+        const externalBookRoot = resolve(join(workspaceDir, 'external-novels', 'side-story'));
+        await mkdir(join(booksRoot, 'demo-book/world'), { recursive: true });
+        await mkdir(join(externalBookRoot, '.ops'), { recursive: true });
+        await mkdir(join(externalBookRoot, 'world'), { recursive: true });
+        await writeFile(join(externalBookRoot, 'world/world_state.md'), 'init', 'utf8');
+
+        // 1. 带双引号、Git a/b 前缀、八进制 UTF-8 转义及 \t<timestamp> 尾缀的 unified diff 均须拦截
+        const quotedTimestampPatches = [
+            `--- /dev/null\n+++ "b/books/demo-book/world/world_state.md"\t2026-11-18 12:00:00 +0800\n@@ -0,0 +1 @@\n+hack`,
+            `--- "a/books/demo-book/manuscripts/ch_0001.md"\t2026-11-18 12:00:00 +0800\n+++ /dev/null`,
+            `--- /dev/null\n+++ "b/books/demo-book/manuscripts/\\347\\254\\254\\344\\270\\200\\347\\253\\240.md"\t2026-11-18 12:00:00 +0800`,
+            `+++ b/books/demo-book/world/world_state.md\t2026-11-18 12:00:00 +0800`
+        ];
+        for (const patch of quotedTimestampPatches) {
+            expect(
+                evaluateMainSessionWriteGuard(makeToolExecution('apply_patch', { patch }), booksRoot)
+            ).toContain('主会话写保护拦截');
+        }
+
+        // booksRoot 之外的带引号/时间戳 patch 路径正常放行
+        expect(
+            evaluateMainSessionWriteGuard(
+                makeToolExecution('apply_patch', {
+                    patch: '--- /dev/null\n+++ "b/notes/scratch.md"\t2026-11-18 12:00:00 +0800'
+                }),
+                booksRoot
+            )
+        ).toBeUndefined();
+
+        // 2. 挂载插件后通过 switchBook 切换到 booksRoot 之外的外部 bookRoot，守卫动态将其纳入写保护
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsSvcFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsSvcFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin);
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        await ctx.narrateStore.switchBook(externalBookRoot);
+
+        const extWriteExec = makeToolExecution('write', {
+            path: join(externalBookRoot, 'world/world_state.md'),
+            content: 'tampered'
+        });
+        expect(ctx.tools.checkGuards(extWriteExec)).toContain('主会话写保护拦截');
+
+        const extPreDecision = await ctx.waterfall(
+            scopeTarget(ctx.tools, undefined),
+            'tools/pre-execute',
+            makeToolExecution('apply_patch', {
+                patch: `+++ "b/${externalBookRoot.replace(/^\/+/, '/')}/world/world_state.md"\t2026-11-18 12:00:00 +0800`
+            }),
+            async () => ({ kind: 'allow' as const })
+        );
+        expect(extPreDecision.kind).toBe('deny');
+
+        expect(
+            ctx.tools.checkGuards(
+                makeToolExecution('bash', {
+                    command: `./fix.sh ${join(externalBookRoot, 'world/world_state.md')}`
+                })
+            )
+        ).toContain('主会话写保护拦截');
+        expect(
+            ctx.tools.checkGuards(
+                makeToolExecution('bash', {
+                    command: `cat ${join(externalBookRoot, 'world/world_state.md')}`
+                })
+            )
+        ).toBeUndefined();
+    });
+
+    it('主会话 Shell 守卫对受保护作品目录采用严格纯只读白名单：拦截未知脚本与高危工具，放行纯只读查看命令', async () => {
+        const workspaceDir = await makeTempDir();
+        const booksRoot = join(workspaceDir, 'books');
+        await mkdir(join(booksRoot, 'demo-book/world'), { recursive: true });
+
+        const blockedCommands = [
+            './fix.sh books/demo-book/world/world_state.md',
+            'bun run fix.ts books/demo-book',
+            'deno eval "console.log(1)" books/demo-book',
+            'tsx fix.ts books/demo-book',
+            'jq ".a = 1" books/demo-book/meta.json',
+            'rsync -a /tmp/x books/demo-book/',
+            'tar -xf evil.tar -C books/demo-book',
+            'find books/demo-book -delete',
+            'find books/demo-book -exec rm {} +',
+            'git -C books/demo-book checkout -- .',
+            'cat books/demo-book/world/world_state.md > /tmp/leak.md',
+            'ls books/demo-book && ./fix.sh',
+            'rg --pre=./evil.sh foo books/demo-book',
+            'GIT_EXTERNAL_DIFF=./evil.sh git -C books/demo-book diff'
+        ];
+        for (const cmd of blockedCommands) {
+            expect(
+                evaluateMainSessionWriteGuard(makeToolExecution('bash', { command: cmd }), booksRoot),
+                `期望拦截命令: ${cmd}`
+            ).toContain('主会话写保护拦截');
+        }
+
+        const allowedReadOnlyCommands = [
+            'ls -la books/demo-book/world',
+            'cat books/demo-book/world/world_state.md',
+            'head -n 10 books/demo-book/world/world_state.md',
+            'tail -n 5 books/demo-book/world/world_state.md',
+            'wc -l books/demo-book/world/world_state.md',
+            'stat books/demo-book/world/world_state.md',
+            'rg -n "test" books/demo-book/world',
+            'grep -rn "test" books/demo-book/world',
+            'git -C books/demo-book status',
+            'git -C books/demo-book log -n 5',
+            'git -C books/demo-book diff HEAD~1',
+            'cat books/demo-book/world/world_state.md | wc -l'
+        ];
+        for (const cmd of allowedReadOnlyCommands) {
+            expect(
+                evaluateMainSessionWriteGuard(makeToolExecution('bash', { command: cmd }), booksRoot),
+                `期望放行只读命令: ${cmd}`
+            ).toBeUndefined();
+        }
+    });
+
+    it('attachYieldEnforcementHook 将工具调用回合与 turn-stopping 纠偏合并计入 maxSteps 上限，并在 hasYielded 后于 agent/disposed 幂等清理 StagingSession', async () => {
+        const workspaceDir = await makeTempDir();
+        const bookRoot = resolve(join(workspaceDir, 'books', 'hook-steps-book'));
+        await mkdir(join(bookRoot, 'world'), { recursive: true });
+        await writeFile(join(bookRoot, 'world/open_threads.md'), '- [thread_001] 初始\n', 'utf8');
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const ac = new AbortController();
+        const dummySelection = { provider: 'mock', model: 'mock-model' };
+
+        // 场景 A：通过 tools/pre-execute 消耗 2 步后在 turn-stopping 纯文本停机（maxSteps = 3 -> 不再 steer，直接触发 onExhausted 并清理）
+        {
+            const roleSet = ctx.narrateTools.buildRoleTools({
+                runId: 'run-tool-budget-a',
+                bookRoot,
+                yieldTool: 'yield_outline'
+            });
+            registerCleanup(() => roleSet.cleanup());
+            expect(ctx.narrateStore.staging.has('run-tool-budget-a')).toBe(true);
+
+            const steeredMessages: UserMessage[] = [];
+            let exhaustedCalled = 0;
+            const mockAgent = {
+                steer(msg: UserMessage) {
+                    steeredMessages.push(msg);
+                }
+            } as unknown as Agent;
+
+            const disposeHook = ctx.narrateTools.attachYieldEnforcementHook(ctx, {
+                expectedYieldTool: 'yield_outline',
+                maxSteps: 3,
+                hasYielded: () => roleSet.hasYielded(),
+                cleanupStaging: () => roleSet.cleanup(),
+                onExhausted: () => {
+                    exhaustedCalled += 1;
+                }
+            });
+
+            await ctx.waterfall(
+                'tools/pre-execute',
+                makeToolExecution('book_read', { path: 'world/open_threads.md' }),
+                async () => ({ kind: 'allow' as const })
+            );
+            await ctx.waterfall(
+                'tools/pre-execute',
+                makeToolExecution('book_grep', { pattern: 'thread_001' }),
+                async () => ({ kind: 'allow' as const })
+            );
+            await ctx.serial('agent/turn-stopping', { agent: mockAgent, turn: 1, signal: ac.signal });
+
+            expect(steeredMessages).toHaveLength(0);
+            expect(exhaustedCalled).toBe(1);
+            expect(ctx.narrateStore.staging.has('run-tool-budget-a')).toBe(false);
+            disposeHook();
+        }
+
+        // 场景 B：agent/pre-step 与并行 tools/pre-execute 联动，同一步内多次并行工具调用不重复扣步，第 3 步 turn-stopping 达上限停止
+        {
+            const roleSet = ctx.narrateTools.buildRoleTools({
+                runId: 'run-tool-budget-b',
+                bookRoot,
+                yieldTool: 'yield_outline'
+            });
+            registerCleanup(() => roleSet.cleanup());
+            expect(ctx.narrateStore.staging.has('run-tool-budget-b')).toBe(true);
+
+            const steeredMessages: UserMessage[] = [];
+            let exhaustedCalled = 0;
+            const mockAgent = {
+                steer(msg: UserMessage) {
+                    steeredMessages.push(msg);
+                }
+            } as unknown as Agent;
+
+            const disposeHook = ctx.narrateTools.attachYieldEnforcementHook(ctx, {
+                expectedYieldTool: 'yield_outline',
+                maxSteps: 3,
+                hasYielded: () => roleSet.hasYielded(),
+                cleanupStaging: () => roleSet.cleanup(),
+                onExhausted: () => {
+                    exhaustedCalled += 1;
+                }
+            });
+
+            // Step 1: agent/pre-step + 两次并行工具调用 -> 合计仅占 1 步
+            await ctx.waterfall(
+                'agent/pre-step',
+                {
+                    agent: mockAgent,
+                    messages: [],
+                    turn: 1,
+                    step: 1,
+                    signal: ac.signal,
+                    modelSelection: dummySelection
+                },
+                async () => ({ kind: 'enter' as const, messages: [] })
+            );
+            await ctx.waterfall(
+                'tools/pre-execute',
+                makeToolExecution('book_read', { path: 'world/open_threads.md' }),
+                async () => ({ kind: 'allow' as const })
+            );
+            await ctx.waterfall(
+                'tools/pre-execute',
+                makeToolExecution('book_glob', { pattern: 'world/*.md' }),
+                async () => ({ kind: 'allow' as const })
+            );
+
+            // Step 2: 纯文本提前停止 -> 允许 steer 第 1 次
+            await ctx.waterfall(
+                'agent/pre-step',
+                {
+                    agent: mockAgent,
+                    messages: [],
+                    turn: 1,
+                    step: 2,
+                    signal: ac.signal,
+                    modelSelection: dummySelection
+                },
+                async () => ({ kind: 'enter' as const, messages: [] })
+            );
+            await ctx.serial('agent/turn-stopping', { agent: mockAgent, turn: 1, signal: ac.signal });
+            expect(steeredMessages).toHaveLength(1);
+            expect(exhaustedCalled).toBe(0);
+
+            // Step 3: 再次纯文本停止 -> 达到 maxSteps = 3 上限，不再 steer，触发 onExhausted 并清理
+            await ctx.waterfall(
+                'agent/pre-step',
+                {
+                    agent: mockAgent,
+                    messages: [],
+                    turn: 1,
+                    step: 3,
+                    signal: ac.signal,
+                    modelSelection: dummySelection
+                },
+                async () => ({ kind: 'enter' as const, messages: [] })
+            );
+            await ctx.serial('agent/turn-stopping', { agent: mockAgent, turn: 1, signal: ac.signal });
+            expect(steeredMessages).toHaveLength(1);
+            expect(exhaustedCalled).toBe(1);
+            expect(ctx.narrateStore.staging.has('run-tool-budget-b')).toBe(false);
+            disposeHook();
+        }
+
+        // 场景 C：非提交型工种调用 yield_outline 成功（hasYielded() === true）后未手动 cleanup，agent/disposed 仍无条件幂等清理 StagingSession
+        {
+            const roleSet = ctx.narrateTools.buildRoleTools({
+                runId: 'run-disposed-after-yield',
+                bookRoot,
+                yieldTool: 'yield_outline'
+            });
+            registerCleanup(() => roleSet.cleanup());
+
+            await roleSet.toolMap.get('book_edit')!.execute(
+                {
+                    path: 'world/open_threads.md',
+                    target_text: '- [thread_001] 初始',
+                    replacement_text: '- [thread_001] 已暂存但未提交'
+                },
+                {
+                    token: Symbol('e') as ToolExecutionToken,
+                    callId: 'c1' as ToolCallId,
+                    rootCallId: 'c1' as ToolCallId,
+                    name: 'book_edit',
+                    arguments: {},
+                    signal: ac.signal,
+                    deferContext() {},
+                    concludeTurn() {}
+                }
+            );
+            await roleSet.toolMap.get('yield_outline')!.execute(
+                {
+                    chapter_title: '第一章',
+                    target_word_count: 2000,
+                    focus_cast: ['char_001'],
+                    director_rationale: '幕后原因推演',
+                    chapter_turn: '突生变故',
+                    scene_plan: [{ scene_index: 1, location: '站台', summary: '遇袭', is_spotlight: true }],
+                    outline_text: '雨夜站台起风，黑影贴近柱后。'
+                },
+                {
+                    token: Symbol('e') as ToolExecutionToken,
+                    callId: 'c2' as ToolCallId,
+                    rootCallId: 'c2' as ToolCallId,
+                    name: 'yield_outline',
+                    arguments: {},
+                    signal: ac.signal,
+                    deferContext() {},
+                    concludeTurn() {}
+                }
+            );
+            expect(roleSet.hasYielded()).toBe(true);
+            expect(ctx.narrateStore.staging.has('run-disposed-after-yield')).toBe(true);
+
+            let cleanupCalls = 0;
+            const disposeHook = ctx.narrateTools.attachYieldEnforcementHook(ctx, {
+                expectedYieldTool: 'yield_outline',
+                maxSteps: 3,
+                hasYielded: () => roleSet.hasYielded(),
+                cleanupStaging: () => {
+                    cleanupCalls += 1;
+                    roleSet.cleanup();
+                }
+            });
+
+            ctx.emit('agent/disposed', { agent: {} as Agent });
+            expect(cleanupCalls).toBe(1);
+            expect(ctx.narrateStore.staging.has('run-disposed-after-yield')).toBe(false);
+
+            // 再次调用 disposeHook 幂等，不重复触发 cleanupStaging
+            disposeHook();
+            expect(cleanupCalls).toBe(1);
+        }
+    });
 });
