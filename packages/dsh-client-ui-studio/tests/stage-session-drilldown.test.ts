@@ -1442,4 +1442,117 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(liveDetail?.textContent).toContain('命中 ch_0001.md 第 4 行');
         expect(liveDetail?.textContent).toContain('已打包港口相关实体。');
     });
+
+    it('FACT_CHECK 阶段标识规范化为 4. Checker，无 seq 多分片 thinking/text 无缝拼接且与带 seq runDetail 重叠去重', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        // 1. FACT_CHECK + 活跃 runDetail (带 seq) 与无 seq liveEvents 重叠且多分片流式 delta 无缝拼接
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-stream-dedup',
+            runId: 'run-stream-dedup',
+            stage: 'FACT_CHECK',
+            status: 'running',
+            events: [
+                { seq: 0, kind: 'thinking', text: '先核' },
+                { seq: 1, kind: 'thinking', text: '对 ' },
+                {
+                    seq: 2,
+                    kind: 'tool-call',
+                    toolName: 'book_read',
+                    callId: 'call-dedup-1',
+                    text: '{"path":"entities/char_chen.md"}'
+                }
+            ]
+        });
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'FACT_CHECK',
+                        stageLabel: '核查阶段',
+                        sessionId: 'sess-stream-dedup',
+                        status: 'active'
+                    },
+                    liveEvents: [
+                        { kind: 'thinking', text: '对 ' },
+                        {
+                            kind: 'tool-call',
+                            toolName: 'book_read',
+                            callId: 'call-dedup-1',
+                            text: '{"path":"entities/char_chen.md"}'
+                        },
+                        {
+                            kind: 'tool-result',
+                            toolName: 'book_read',
+                            callId: 'call-dedup-1',
+                            text: '左腕旧伤',
+                            status: 'completed'
+                        },
+                        { kind: 'thinking', text: '继续' },
+                        { kind: 'thinking', text: '比对' },
+                        { kind: 'text', text: '结论：' },
+                        { kind: 'text', text: '通过' }
+                    ]
+                })
+            );
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(container.querySelector('.ns-trace-role')?.textContent).toBe('4. Checker');
+
+        const thinkingPre = container.querySelector('.ns-session-turn-thinking pre.ns-session-pre');
+        expect(thinkingPre?.textContent).toBe('先核对 \n继续比对');
+
+        const toolCalls = container.querySelectorAll('.ns-session-tool-call');
+        expect(toolCalls).toHaveLength(1);
+        expect(toolCalls[0]?.textContent).toContain('左腕旧伤');
+
+        const outputDiv = container.querySelector('.ns-session-turn-output');
+        expect(outputDiv?.textContent).toBe('结论：通过');
+
+        // 2. runDetail 达到终态 completed 后直接采用归档事件，不因 liveEvents 重复追加
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-stream-done',
+            runId: 'run-stream-done',
+            stage: 'FACT_CHECK',
+            status: 'completed',
+            finishedAt: '2026-11-18T12:00:00.000Z',
+            events: [
+                { seq: 0, kind: 'thinking', text: '完整归档思考' },
+                { seq: 1, kind: 'text', text: '最终结论' }
+            ]
+        });
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'FACT_CHECK',
+                        stageLabel: '核查阶段',
+                        sessionId: 'sess-stream-done',
+                        status: 'done'
+                    },
+                    liveEvents: [
+                        { kind: 'thinking', text: '完整' },
+                        { kind: 'thinking', text: '归档思考' },
+                        { kind: 'text', text: '最终结论' }
+                    ]
+                })
+            );
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(
+            container.querySelector('.ns-session-turn-thinking pre.ns-session-pre')?.textContent
+        ).toBe('完整归档思考');
+        expect(container.querySelector('.ns-session-turn-output')?.textContent).toBe('最终结论');
+    });
 });

@@ -448,19 +448,17 @@ export function RoleRoutingEditor({
             </datalist>
 
             {/* 第一层：全局强弱基础模型底座 */}
-            <section className="panel-section ns-i-section" aria-label="全局强弱基础模型底座">
-                <div className="sec-head ns-i-card-head">
+            <section className="ns-panel-section" aria-label="全局强弱基础模型底座">
+                <div className="ns-sec-head">
                     <span>第一层 · 全局强弱基础模型底座</span>
                     <span className="ns-pill ns-pill-muted">可直接修改</span>
                 </div>
-                <div className="ns-i-role-controls">
-                    <label className="ns-i-role-field ns-i-role-field-full">
-                        <span className="ns-i-role-label">
-                            强模型池（默认负责 Planner · Writer · Patch · Dreamer）
-                        </span>
+                <div className="ns-pool-edit-list">
+                    <label className="ns-field-row">
+                        <span>强模型池（默认负责 Planner · Writer · Patch · Dreamer）</span>
                         <input
                             type="text"
-                            className="ns-i-input"
+                            className="ns-mono"
                             list={datalistId}
                             aria-label="强模型池"
                             disabled={busy || savingRouting}
@@ -468,13 +466,11 @@ export function RoleRoutingEditor({
                             onChange={(e) => updatePoolDraft('strong_creative', e.target.value)}
                         />
                     </label>
-                    <label className="ns-i-role-field ns-i-role-field-full">
-                        <span className="ns-i-role-label">
-                            快模型池（默认负责 Librarian · Extractor）
-                        </span>
+                    <label className="ns-field-row">
+                        <span>快模型池（默认负责 Librarian · Extractor）</span>
                         <input
                             type="text"
-                            className="ns-i-input"
+                            className="ns-mono"
                             list={datalistId}
                             aria-label="快模型池"
                             disabled={busy || savingRouting}
@@ -482,13 +478,11 @@ export function RoleRoutingEditor({
                             onChange={(e) => updatePoolDraft('fast_retrieval', e.target.value)}
                         />
                     </label>
-                    <label className="ns-i-role-field ns-i-role-field-full">
-                        <span className="ns-i-role-label">
-                            独立挑错池（默认负责 Checker 异构核查）
-                        </span>
+                    <label className="ns-field-row">
+                        <span>独立挑错池（默认负责 Checker 异构核查）</span>
                         <input
                             type="text"
-                            className="ns-i-input"
+                            className="ns-mono"
                             list={datalistId}
                             aria-label="独立挑错池"
                             disabled={busy || savingRouting}
@@ -500,8 +494,8 @@ export function RoleRoutingEditor({
             </section>
 
             {/* 第二层：按 Agent 单独指定 */}
-            <section className="panel-section ns-i-section" aria-label="按 Agent 单独指定">
-                <div className="sec-head ns-i-card-head">
+            <section className="ns-panel-section" aria-label="按 Agent 单独指定">
+                <div className="ns-sec-head">
                     <span>第二层 · 按 Agent 单独指定</span>
                     {resolvedRoleDefinitions.length > 0 ? (
                         <button
@@ -519,7 +513,7 @@ export function RoleRoutingEditor({
                         等待服务端下发工种配置 (roleDefinitions)...
                     </div>
                 ) : (
-                    <div className="ns-i-role-list">
+                    <div className="ns-role-override-list">
                         {resolvedRoleDefinitions.map((roleDef) => {
                             const draft = draftRoleRouting[roleDef.id];
                             const serverEntry = roleRouting?.[roleDef.id];
@@ -561,13 +555,13 @@ export function RoleRoutingEditor({
                             return (
                                 <div
                                     key={roleDef.id}
-                                    className="ns-i-role-item"
+                                    className="ns-role-row"
                                     data-role-id={roleDef.id}
                                     data-role-overridden={hasOverride ? 'true' : undefined}
                                 >
                                     <button
                                         type="button"
-                                        className="ns-i-acc-head"
+                                        className="ns-role-summary"
                                         aria-expanded={isExpanded}
                                         aria-controls={`ns-role-detail-${roleDef.id}`}
                                         onClick={() =>
@@ -599,6 +593,7 @@ export function RoleRoutingEditor({
                                     </button>
 
                                     <div
+                                        className="ns-role-detail"
                                         id={`ns-role-detail-${roleDef.id}`}
                                         hidden={!isExpanded}
                                     >
@@ -618,10 +613,9 @@ export function RoleRoutingEditor({
                                             </span>
                                         </div>
                                         <div className="ns-i-role-controls">
-                                            <label className="ns-i-role-field">
-                                                <span className="ns-i-role-label">Layer 1 档位</span>
+                                            <label className="ns-field-row">
+                                                <span>Layer 1 档位</span>
                                                 <select
-                                                    className="ns-i-select"
                                                     aria-label={`${roleDef.id} 档位覆盖`}
                                                     disabled={busy || savingRouting}
                                                     value={draft?.tier ?? ''}
@@ -636,10 +630,9 @@ export function RoleRoutingEditor({
                                                     <option value="weak">弱模型 (weak)</option>
                                                 </select>
                                             </label>
-                                            <label className="ns-i-role-field">
-                                                <span className="ns-i-role-label">推理强度</span>
+                                            <label className="ns-field-row">
+                                                <span>推理强度</span>
                                                 <select
-                                                    className="ns-i-select"
                                                     aria-label={`${roleDef.id} 推理强度`}
                                                     disabled={busy || savingRouting}
                                                     value={draft?.reasoning_effort ?? ''}
@@ -657,13 +650,11 @@ export function RoleRoutingEditor({
                                                     ))}
                                                 </select>
                                             </label>
-                                            <label className="ns-i-role-field ns-i-role-field-full">
-                                                <span className="ns-i-role-label">
-                                                    Layer 2 指定模型（留空继承 Layer 1）
-                                                </span>
+                                            <label className="ns-field-row ns-i-role-field-full">
+                                                <span>Layer 2 指定模型（留空继承 Layer 1）</span>
                                                 <input
                                                     type="text"
-                                                    className="ns-i-input"
+                                                    className="ns-mono"
                                                     list={datalistId}
                                                     aria-label={`${roleDef.id} 指定模型`}
                                                     placeholder="留空继承 Layer 1"
