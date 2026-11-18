@@ -756,7 +756,10 @@ describe('ParallelSandbox (PARALLEL 分叉暂存与 3-Way Merge)', () => {
         await writeFile(join(bookRoot, 'entities/cold_archive/char_099.md'), coldChar, 'utf8');
         await system.commitPaths(bookRoot, ['entities/cold_archive/char_099.md'], 'chore: add cold archive entity');
 
-        await sandbox.forkWindow({ windowId: 'w_l2_cold' });
+        await sandbox.forkWindow({
+            windowId: 'w_l2_cold',
+            globalBroadcast: { weather: '台风暴雨', siren: '19:00 警报' }
+        });
 
         // 支线 A：连续无冒号文本 upsert_slot、upsert_ledger，并暂存第 2 章 L2 卡
         await sandbox.appendChapter({
@@ -821,11 +824,15 @@ describe('ParallelSandbox (PARALLEL 分叉暂存与 3-Way Merge)', () => {
         expect((await sandbox.getBranchL2Cards('w_l2_cold', 'branch_a')).map((c) => c.chapterNumber)).toEqual([2]);
         expect((await sandbox.getBranchL2Cards('w_l2_cold', 'branch_b')).map((c) => c.chapterNumber)).toEqual([3]);
 
-        // loadBranchSnapshot 对冷宫角色也必须保留原有 Innate Locks
+        // loadBranchSnapshot 对冷宫角色也必须保留原有 Innate Locks，且不向 summaryMarkdown 硬拼 JSON.stringify 广播（ISS-019）
         const baseSnap = await store.loadSnapshot();
         const branchBSnap = await sandbox.loadBranchSnapshot(baseSnap, 'w_l2_cold', 'branch_b');
         expect(branchBSnap.entities['char_099']?.innateLocks[0]?.text).toBe('已毕业离校');
         expect(branchBSnap.coldArchiveIds).not.toContain('char_099');
+        expect(branchBSnap.worldState.summaryMarkdown).toBe(baseSnap.worldState.summaryMarkdown);
+        expect(branchBSnap.worldState.summaryMarkdown).not.toContain('全局环境广播');
+        expect(branchBSnap.parallelBroadcastEntries).toHaveLength(2);
+        expect(branchBSnap.parallelBroadcastEntries?.map((e) => e.text)).toContain('weather：台风暴雨');
 
         const mergeRes = await sandbox.mergeWindow({ windowId: 'w_l2_cold' });
         expect(mergeRes.updatedL2CardPaths).toEqual(['index/L2_cards/vol_01_cards.md']);

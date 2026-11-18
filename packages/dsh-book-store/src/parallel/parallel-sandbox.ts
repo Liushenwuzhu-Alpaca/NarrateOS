@@ -6,6 +6,7 @@ import {
     BookStore,
     BookSnapshot,
     ENTITY_ID_RE,
+    EntityEntry,
     EntityEntryInput,
     EntityPatch,
     EntityProfile,
@@ -165,6 +166,32 @@ function upsertParallelL2CardContent(rawCardContent: string | null, entry: Paral
         return `${replaced.trimEnd()}\n`;
     }
     return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
+}
+
+function toParallelBroadcastEntries(
+    globalBroadcast: Record<string, unknown>,
+    baseDay: number
+): EntityEntry[] {
+    const entries: EntityEntry[] = [];
+    for (const [key, value] of Object.entries(globalBroadcast)) {
+        const textValue =
+            typeof value === 'string'
+                ? value
+                : value === null || value === undefined
+                  ? ''
+                  : typeof value === 'number' || typeof value === 'boolean'
+                    ? String(value)
+                    : JSON.stringify(value);
+        if (!textValue) continue;
+        entries.push({
+            storyDay: baseDay,
+            visibility: 'PUBLIC',
+            slotKey: key,
+            text: `${key}：${textValue}`,
+            continuationLines: []
+        });
+    }
+    return entries;
 }
 
 function mergeParallelL2Cards(
@@ -442,14 +469,19 @@ export class ParallelSandbox {
             return chapter <= metadata.baseChapter || delta?.chapterNumbers?.includes(chapter);
         });
         const coldArchiveIds = snapshot.coldArchiveIds.filter((id) => !(id in entities));
+        const parallelBroadcastEntries = toParallelBroadcastEntries(
+            metadata.globalBroadcast,
+            metadata.baseDay
+        );
         return {
             ...snapshot,
             entities,
             coldArchiveIds,
             chapterFiles,
+            parallelBroadcastEntries,
             worldState: {
                 ...snapshot.worldState,
-                summaryMarkdown: `${snapshot.worldState.summaryMarkdown}\n\n全局环境广播：${JSON.stringify(metadata.globalBroadcast)}`,
+                summaryMarkdown: snapshot.worldState.summaryMarkdown,
                 frontmatter: { ...snapshot.worldState.frontmatter, story_day: metadata.baseDay + (delta?.daySpan ?? 0) }
             }
         };

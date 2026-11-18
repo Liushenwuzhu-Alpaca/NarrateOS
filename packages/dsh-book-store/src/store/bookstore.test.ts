@@ -1197,7 +1197,7 @@ describe('BookStore', () => {
             store.applyStatePatch(5, [{ entity_id: 'char_new_missing' }])
         ).rejects.toThrow('中文字符');
 
-        // 拦截新建实体第 1 区写入 OMNISCIENT_SECRET（Q7）
+        // 拦截新建实体第 1 区写入 OMNISCIENT_SECRET（含显式字段与内联文本）（Q7）
         await expect(
             store.applyStatePatch(5, [
                 {
@@ -1205,6 +1205,17 @@ describe('BookStore', () => {
                     canonical_name: '暗影',
                     innate_locks_ops: [
                         { op: 'append', entry: { visibility: 'OMNISCIENT_SECRET', text: '真实身份为卧底' } }
+                    ]
+                }
+            ])
+        ).rejects.toThrow(InnateLockViolationError);
+        await expect(
+            store.applyStatePatch(5, [
+                {
+                    entity_id: 'char_new_secret_inline',
+                    canonical_name: '暗影二号',
+                    innate_locks_ops: [
+                        { op: 'append', entry: { text: '[vis: OMNISCIENT_SECRET] 内联底牌' } }
                     ]
                 }
             ])
@@ -1258,6 +1269,22 @@ describe('BookStore', () => {
                     entity_id: 'char_001',
                     acquired_state_ops: [
                         { op: 'upsert_ledger', entries: { '金币[总]': 10 } }
+                    ]
+                }
+            ])
+        ).rejects.toThrow('禁止包含');
+        await expect(
+            store.applyStatePatch(6, [
+                {
+                    entity_id: 'char_001',
+                    acquired_state_ops: [
+                        {
+                            op: 'append',
+                            entry: {
+                                text: '附带非法 extraTags',
+                                extraTags: { note: 'bad|tag' }
+                            }
+                        }
                     ]
                 }
             ])

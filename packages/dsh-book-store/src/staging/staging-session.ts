@@ -13,6 +13,14 @@ const READONLY_OPS_WHITELIST = new Set<string>(['.ops/telemetry.jsonl']);
 /** .ops/ 读写最小白名单：仅开放声纹池与运维信号队列 */
 const READWRITE_OPS_WHITELIST = new Set<string>(['.ops/voice_samples.yaml', '.ops/signals.jsonl']);
 
+/** AI 工种硬只读世界保护集：允许读取，严禁通过暂存区写入或编辑 */
+const READONLY_WORLD_PATHS = [
+    'world/roles',
+    'world/author_charter.md',
+    'world/book_config.yaml',
+    'world/ops_style_amendments.md'
+] as const;
+
 function matchesPathOrSubpath(normalizedPath: string, prefix: string): boolean {
     return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
 }
@@ -33,8 +41,15 @@ function assertAllowedRelativePath(normalized: string, rawRelPath: string, forWr
         }
         throw new Error(`禁止通过暂存区访问未授权的 .ops/ 路径 (${normalized}): ${rawRelPath}`);
     }
-    if (forWrite && matchesPathOrSubpath(normalized, 'manuscripts')) {
-        throw new Error(`禁止通过暂存区修改正稿目录 manuscripts/: ${rawRelPath}`);
+    if (forWrite) {
+        if (matchesPathOrSubpath(normalized, 'manuscripts')) {
+            throw new Error(`禁止通过暂存区修改正稿目录 manuscripts/: ${rawRelPath}`);
+        }
+        for (const readonlyWorldPath of READONLY_WORLD_PATHS) {
+            if (matchesPathOrSubpath(normalized, readonlyWorldPath)) {
+                throw new Error(`禁止通过暂存区修改只读世界契约/配置路径 (${readonlyWorldPath}): ${rawRelPath}`);
+            }
+        }
     }
 }
 

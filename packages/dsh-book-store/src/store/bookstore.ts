@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, link, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -255,10 +255,13 @@ export class BookStore {
             }
 
             if (!this.isLockPayloadStale(movedRaw, movedStat.mtimeMs, staleMs)) {
+                // 使用 POSIX link(2) 原子恢复，目标已存在新锁时严格抛 EEXIST，绝不覆盖活跃锁
                 try {
-                    await rename(staleTempPath, this.txLockPath);
+                    await link(staleTempPath, this.txLockPath);
                 } catch {
                     // 目标已出现新锁时不覆盖
+                } finally {
+                    await unlink(staleTempPath).catch(() => undefined);
                 }
                 return false;
             }

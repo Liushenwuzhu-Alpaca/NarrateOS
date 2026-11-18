@@ -24,15 +24,27 @@ export function assertSafeLedgerValue(value: string): void {
     }
 }
 
-/** 校验单条实体记录的 slotKey、owner 与数值账本键值安全性 */
+/** 校验单条实体记录的 slotKey、owner、rawInvalidVisibility、extraTags 与数值账本键值安全性 */
 export function assertEntryTagsSafe(
-    entry: Pick<EntityEntry, 'slotKey' | 'owner' | 'ledger' | 'isNumericLedger'>
+    entry: Pick<
+        EntityEntry,
+        'slotKey' | 'owner' | 'ledger' | 'isNumericLedger' | 'rawInvalidVisibility' | 'extraTags'
+    >
 ): void {
     if (entry.slotKey !== undefined) {
         assertSafeEntityTagValue('slotKey', entry.slotKey);
     }
     if (entry.owner !== undefined) {
         assertSafeEntityTagValue('owner', entry.owner);
+    }
+    if (entry.rawInvalidVisibility !== undefined) {
+        assertSafeEntityTagValue('visibility', entry.rawInvalidVisibility);
+    }
+    if (entry.extraTags !== undefined) {
+        for (const [k, v] of Object.entries(entry.extraTags)) {
+            assertSafeEntityTagValue('extraTag_key', k);
+            assertSafeEntityTagValue('extraTag_value', v);
+        }
     }
     if (entry.ledger !== undefined) {
         for (const [k, v] of Object.entries(entry.ledger)) {

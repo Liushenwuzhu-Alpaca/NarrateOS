@@ -178,7 +178,11 @@ export function mergeEntityProfilePatch(
         for (const op of patch.innate_locks_ops) {
             if (op.op === 'append') {
                 const visUpper = (op.entry.visibility ?? op.entry.rawInvalidVisibility)?.toUpperCase();
-                if (visUpper === 'OMNISCIENT_SECRET') {
+                const hasInlineOmniscientSecret = [
+                    op.entry.text,
+                    ...(op.entry.continuationLines ?? [])
+                ].some((line) => /\bOMNISCIENT_SECRET\b/i.test(line));
+                if (visUpper === 'OMNISCIENT_SECRET' || hasInlineOmniscientSecret) {
                     throw new InnateLockViolationError(
                         patch.entity_id,
                         `第 1 区 Innate Locks 严禁写入 OMNISCIENT_SECRET（${patch.entity_id}），可揭晓底牌请放入第 2 区 Acquired State 并绑定 slot_key`

@@ -379,6 +379,7 @@ export interface BookSnapshot {
     entities: Record<string, EntityProfile>;
     coldArchiveIds: string[];
     chapterFiles: string[];
+    parallelBroadcastEntries?: EntityEntry[] | undefined;
 }
 
 /** 排他锁冲突异常 */

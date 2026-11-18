@@ -250,4 +250,41 @@ describe('StagingSessionManager', () => {
 
         staging.discard('run-symlink-rw');
     });
+
+    it.skipIf(process.platform === 'win32')('硬只读世界保护集允许只读但拦截直接写与软链写入 world/roles/**、author_charter、book_config 与 ops_style_amendments（ISS-002）', async () => {
+        const bookRoot = await createBookDir();
+        await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
+        await writeFile(join(bookRoot, 'world/roles/planner.yml'), 'maxSteps: 6\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/roles/prompts/planner.md'), '# Planner\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/author_charter.md'), '# 作者契约\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/book_config.yaml'), 'book_slug: demo\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/ops_style_amendments.md'), '# 风格补丁\n', 'utf8');
+
+        await symlink(join(bookRoot, 'world/author_charter.md'), join(bookRoot, 'world/charter_link.md'));
+        await symlink(join(bookRoot, 'world/roles'), join(bookRoot, 'world/roles_link'));
+
+        const staging = new StagingSessionManager();
+        staging.begin('run-readonly-world', bookRoot);
+
+        const protectedPaths = [
+            'world/roles/planner.yml',
+            'world/roles/prompts/planner.md',
+            'world/author_charter.md',
+            'world/book_config.yaml',
+            'world/ops_style_amendments.md'
+        ];
+        for (const p of protectedPaths) {
+            expect(await staging.read('run-readonly-world', p)).toBeTruthy();
+            await expect(staging.edit('run-readonly-world', p, '\n', '\n# tamper')).rejects.toThrow('只读世界契约/配置路径');
+            expect(() => staging.stageWrite('run-readonly-world', p, 'tamper')).toThrow('只读世界契约/配置路径');
+        }
+
+        // 新建未存在角色文件与通过软链写入同样必须拦截
+        expect(() => staging.stageWrite('run-readonly-world', 'world/roles/new_role.yml', 'x: 1')).toThrow('只读世界契约/配置路径');
+        await expect(staging.edit('run-readonly-world', 'world/charter_link.md', '作者契约', '篡改')).rejects.toThrow('只读世界契约/配置路径');
+        expect(() => staging.stageWrite('run-readonly-world', 'world/charter_link.md', 'tamper')).toThrow('只读世界契约/配置路径');
+        expect(() => staging.stageWrite('run-readonly-world', 'world/roles_link/patch.yml', 'cleanroom: true')).toThrow('只读世界契约/配置路径');
+
+        staging.discard('run-readonly-world');
+    });
 });
