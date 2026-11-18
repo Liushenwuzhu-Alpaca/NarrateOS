@@ -60,6 +60,20 @@
           - id: tool-ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
 
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: false
+              edit: false
+              applyPatch: false
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
           - id: skill-filesystem
             name: '@deepseek-ai/dsh-skill-filesystem'
 
@@ -84,11 +98,17 @@
                   headChars: 4096
                   tailChars: 1024
 
-# 显式禁用 dsh-base 宿主层编码/终端/计划向工具行（保留 tool-fs 与 tool-fs-search 供主会话只读参考与本地设定检索，由 main-session-guard 守住 books/<slug>/ 裸写禁区）
+# 显式禁用 dsh-base 宿主层全部 8 个编码/终端/计划向工具行，由 preset-narrateos 内部挂载严格只读的 tool-fs 与 tool-fs-search
 - id: tool-bash
   disabled: true
 
 - id: tool-pwsh
+  disabled: true
+
+- id: tool-fs
+  disabled: true
+
+- id: tool-fs-search
   disabled: true
 
 - id: tool-jobs

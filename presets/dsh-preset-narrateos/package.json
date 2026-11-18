@@ -29,6 +29,8 @@
     "peerDependencies": {
         "@deepseek-ai/dsh-agent-preset": "^0.2.2-rc.1",
         "@deepseek-ai/dsh-persona": "^0.2.2-rc.1",
+        "@deepseek-ai/dsh-tool-fs": "^0.2.2-rc.1",
+        "@deepseek-ai/dsh-tool-fs-search": "^0.2.2-rc.1",
         "@deepseek-ai/dsh-tool-web": "^0.2.2-rc.1",
         "@narrateos/dsh-book-store": "workspace:*",
         "@narrateos/dsh-book-tools": "workspace:*",

@@ -65,6 +65,8 @@ test('package.json 与本地化清单符合 DSH Bundle 规范', () => {
     const requiredPeers = [
         '@deepseek-ai/dsh-agent-preset',
         '@deepseek-ai/dsh-persona',
+        '@deepseek-ai/dsh-tool-fs',
+        '@deepseek-ai/dsh-tool-fs-search',
         '@deepseek-ai/dsh-tool-web',
         '@narrateos/dsh-book-store',
         '@narrateos/dsh-book-tools',
@@ -161,6 +163,8 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
             '@deepseek-ai/dsh-persona',
             '@deepseek-ai/dsh-tool-web',
             '@deepseek-ai/dsh-tool-ask-user',
+            '@deepseek-ai/dsh-tool-fs',
+            '@deepseek-ai/dsh-tool-fs-search',
             '@deepseek-ai/dsh-skill-filesystem',
             '@deepseek-ai/dsh-tool-skill',
             'cordis:group'
@@ -180,6 +184,22 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.equal(web.config?.fetch, true);
     assert.equal(web.config?.searchTimeoutMs, 60000);
 
+    const toolFs = byName.get('@deepseek-ai/dsh-tool-fs');
+    assert.equal(toolFs.id, 'tool-fs');
+    assert.deepEqual(toolFs.config, {
+        read: true,
+        readImage: false,
+        write: false,
+        edit: false,
+        applyPatch: false
+    });
+
+    const toolFsSearch = byName.get('@deepseek-ai/dsh-tool-fs-search');
+    assert.equal(toolFsSearch.id, 'tool-fs-search');
+    assert.deepEqual(toolFsSearch.config, {
+        sampleOverCapGlobResults: false
+    });
+
     const skillFs = byName.get('@deepseek-ai/dsh-skill-filesystem');
     assert.equal(skillFs.config, undefined, 'skill-filesystem 使用默认安全配置，由 dsh-pipeline 动态挂载 narrate-boot');
 
@@ -193,11 +213,13 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.ok(pruner);
     assert.equal(pruner.config?.thresholdChars, 8192);
 
-    // 4. 顶层覆盖仅禁用 dsh-base 真实存在的 6 个编码/终端/计划宿主行（保留 tool-fs 与 tool-fs-search 供只读加载 references 与设定）
+    // 4. 顶层覆盖必须精确禁用 dsh-base 真实存在的全部 8 个编码/终端/计划宿主行（避免主会话泄露全局写工具）
     const overrideRows = parsed.filter((item) => !Array.isArray(item?.insert));
     const expectedDisabledHostIds = [
         'tool-bash',
         'tool-pwsh',
+        'tool-fs',
+        'tool-fs-search',
         'tool-jobs',
         'tool-todo',
         'tool-goal',
@@ -206,7 +228,7 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.deepEqual(
         overrideRows.map((row) => ({ id: row.id, disabled: row.disabled })),
         expectedDisabledHostIds.map((id) => ({ id, disabled: true })),
-        '顶层禁用行应精确覆盖 dsh-base 真实存在的 6 个编码/终端向宿主行（放开 tool-fs 与 tool-fs-search）'
+        '顶层禁用行应精确覆盖 dsh-base 真实存在的全部 8 个编码/终端向宿主行'
     );
 });
 
@@ -236,20 +258,30 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
 
     for (const composed of [composedWithWeb, composedBaseOnly]) {
         const byId = new Map(composed.map((entry) => [entry.id, entry]));
-        for (const hostCodingId of ['tool-bash', 'tool-pwsh', 'tool-jobs', 'tool-todo', 'tool-goal', 'plan-mode']) {
+        for (const hostCodingId of ['tool-bash', 'tool-pwsh', 'tool-fs', 'tool-fs-search', 'tool-jobs', 'tool-todo', 'tool-goal', 'plan-mode']) {
             assert.equal(byId.get(hostCodingId)?.disabled, true, `宿主行 ${hostCodingId} 必须保持 disabled: true`);
         }
         assert.ok(byId.get('narrateos-book-store'), '组合结果缺少 narrateos-book-store');
         assert.ok(byId.get('narrateos-client-ui-studio'), '组合结果缺少 narrateos-client-ui-studio');
-        assert.ok(byId.get('preset-narrateos'), '组合结果缺少 preset-narrateos');
+        const presetEntry = byId.get('preset-narrateos');
+        assert.ok(presetEntry, '组合结果缺少 preset-narrateos');
+
+        const presetPlugins = presetEntry.config?.plugins ?? [];
+        const mountedFs = presetPlugins.find((p) => p.id === 'tool-fs');
+        const mountedFsSearch = presetPlugins.find((p) => p.id === 'tool-fs-search');
+        assert.deepEqual(mountedFs?.config, {
+            read: true,
+            readImage: false,
+            write: false,
+            edit: false,
+            applyPatch: false
+        });
+        assert.deepEqual(mountedFsSearch?.config, {
+            sampleOverCapGlobResults: false
+        });
     }
 
-    // 纯 dsh-base 组合下，tool-fs 与 tool-fs-search 不再被 narrateos 顶层补丁禁用（dsh-web-app 自身会在宿主平面禁用并下放至 preset）
-    const baseOnlyById = new Map(composedBaseOnly.map((entry) => [entry.id, entry]));
-    assert.notEqual(baseOnlyById.get('tool-fs')?.disabled, true, '纯 dsh-base 组合下 tool-fs 不应被禁用');
-    assert.notEqual(baseOnlyById.get('tool-fs-search')?.disabled, true, '纯 dsh-base 组合下 tool-fs-search 不应被禁用');
-
-    // 2. 在真实 Cordis + Loader + AgentPresetRegistry 中挂载，验证 leakedServices 为 [] 且宿主入口可发现
+    // 2. 在真实 Cordis + Loader + AgentPresetRegistry 中挂载，验证 leakedServices 为 []、宿主入口可发现且仅注册只读文件工具
     const ctx = new Context();
     ctx.baseUrl = pathToFileURL(path.join(REPO_ROOT, 'package.json')).href;
     await ctx.plugin(Loader);
@@ -267,15 +299,39 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
         }
     };
 
+    const registeredToolNames = [];
     ctx.provide('sessionProjections', { register: async () => ({ stateOf: () => null }) });
     ctx.provide('agents', { turnBoundaryOf: () => ({ openTurnStartSeq: null, lastTurn: 0 }) });
-    ctx.provide('tools', { register: () => () => {} });
+    ctx.provide('tools', {
+        register: (def) => {
+            if (def?.name) registeredToolNames.push(def.name);
+            return () => {};
+        },
+        get: () => undefined
+    });
     ctx.provide('skills', { registerProvider: () => () => {} });
     ctx.provide('web', { registerSearchProvider: () => {}, registerFetchProvider: () => {} });
     ctx.provide('userQuestions', { ask: async () => ({}) });
     ctx.provide('commands', { register: () => () => {} });
     ctx.provide('tokenMeter', { register: () => () => {}, measure: () => 0, estimateChars: () => 0 });
-    ctx.provide('workingDirectory', { resolve: (p) => p, cwd: REPO_ROOT });
+    ctx.provide('workingDirectory', { resolve: (p) => p, ensure: async () => REPO_ROOT, cwd: REPO_ROOT });
+    ctx.provide('fs', {
+        resolve: async (p) => ({ displayPath: p, targetKey: p }),
+        stat: async () => undefined,
+        readText: async () => '',
+        streamText: async function* () {},
+        processPath: (target) => target.displayPath
+    });
+    ctx.provide('subprocess', {
+        resolveExecutable: async (command) => command,
+        terminalEnvironment: async () => ({ platform: process.platform, shell: '/bin/sh' }),
+        spawn: () => ({
+            done: Promise.resolve({ exitCode: 1, signal: null }),
+            collected: {},
+            terminate: () => {},
+            waitForExit: async () => ({ exitCode: 1, signal: null })
+        })
+    });
     ctx.provide('llm', {});
     ctx.provide('sessions', {});
     await ctx.plugin(SystemPrompt);
@@ -307,6 +363,19 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
         const narrateosRow = roster.find((item) => item.id === 'narrateos');
         assert.ok(narrateosRow, 'agentPresets.list() 应包含 narrateos');
         assert.equal(narrateosRow.broken, undefined, `preset-narrateos 不应存在诊断异常: ${narrateosRow.broken}`);
+
+        for (const expectedReadOnlyTool of ['read', 'glob', 'grep']) {
+            assert.ok(
+                registeredToolNames.includes(expectedReadOnlyTool),
+                `preset-narrateos 必须挂载只读工具 ${expectedReadOnlyTool}，实际已注册: ${registeredToolNames.join(', ')}`
+            );
+        }
+        for (const forbiddenWriteTool of ['write', 'edit', 'apply_patch', 'read_image']) {
+            assert.ok(
+                !registeredToolNames.includes(forbiddenWriteTool),
+                `preset-narrateos 禁止注册写/图像工具 ${forbiddenWriteTool}`
+            );
+        }
     } finally {
         await ctx.fiber.dispose();
     }
