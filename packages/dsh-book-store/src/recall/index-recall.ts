@@ -573,6 +573,10 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
     anchors: string[];
 }> {
     const map = new Map<number, { entries: EntityEntry[]; anchors: string[] }>();
+    if (isWarpedStatus(profile.metadata.status)) {
+        return map;
+    }
+
     const ensure = (ch: number) => {
         let bucket = map.get(ch);
         if (!bucket) {
@@ -591,14 +595,14 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
 
     for (const entries of sections) {
         for (const entry of entries) {
-            if (isWarpedStatus(entry.status)) {
+            const fullText = [entry.text, ...entry.continuationLines].join('\n');
+            if (isWarpedStatus(entry.status) || /\bWARPED\b/i.test(fullText)) {
                 continue;
             }
             const linkedChapters = new Set<number>();
             if (entry.chapter !== undefined && entry.chapter > 0 && entry.chapter <= maxChapter) {
                 linkedChapters.add(entry.chapter);
             }
-            const fullText = [entry.text, ...entry.continuationLines].join('\n');
             const inlineAnchorRe = /\[锚点\s+ch_(\d{4})\]/g;
             let anchorMatch: RegExpExecArray | null = inlineAnchorRe.exec(fullText);
             while (anchorMatch !== null) {
@@ -617,6 +621,7 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
     }
 
     for (const anchor of profile.metadata.historical_anchors) {
+        if (/\bWARPED\b/i.test(anchor)) continue;
         const ch = parseAnchorChapter(anchor);
         if (ch !== null && ch <= maxChapter) {
             ensure(ch).anchors.push(anchor);
@@ -800,7 +805,7 @@ export class IndexRecall {
             ...parsed,
             mtimeMs: fileStat.mtimeMs,
             size: fileStat.size,
-            chapterHash: expectedHash ?? cached?.chapterHash
+            chapterHash: expectedHash
         };
         bookCache.set(normalizedPath, entry);
         return entry;

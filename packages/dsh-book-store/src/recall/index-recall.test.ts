@@ -514,6 +514,48 @@ describe('IndexRecall', () => {
         });
         expect(afterClearA[0]?.text).toContain('AAA');
         expect((await recall.resolveChapterDayMap(bookRootB, ['manuscripts/ch_0001.md'])).get(1)).toBe(4);
+
+        // 5. 带 hash 缓存 -> 改文件后无 hash 读取 -> 同毫秒等长回退并带原 hash 读取时必须穿透刷新，绝不继承旧 hash
+        recall.clearCache(bookRootA);
+        await writeFile(ch1PathA, baseContentA, 'utf8');
+        await utimes(ch1PathA, stInitial.atime, stInitial.mtime);
+        const step5Initial = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            chapterHashes: { ch_0001: 'hash_v1' }
+        });
+        expect(step5Initial[0]?.text).toContain('AAA');
+
+        const changedDiffSize = '<!-- story_day: 6 -->\n# 第一章\n\n神代雪乃在旧校舍门前CHANGED。\n';
+        await writeFile(ch1PathA, changedDiffSize, 'utf8');
+        const stChangedBeforeQ = await stat(ch1PathA);
+        await utimes(ch1PathA, stChangedBeforeQ.atime, stChangedBeforeQ.mtime);
+        const stChanged = await stat(ch1PathA);
+
+        const step5NoHash = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10
+        });
+        expect(step5NoHash[0]?.text).toContain('CHANGED');
+
+        // 同毫秒、同长度写回与 changedDiffSize 相同长度的另一文本并带原 hash_v1 读取，必须穿透刷新
+        const revertedSameLenAsChanged = '<!-- story_day: 2 -->\n# 第一章\n\n神代雪乃在旧校舍门前REVERTD。\n';
+        expect(Buffer.byteLength(revertedSameLenAsChanged, 'utf8')).toBe(
+            Buffer.byteLength(changedDiffSize, 'utf8')
+        );
+        await writeFile(ch1PathA, revertedSameLenAsChanged, 'utf8');
+        await utimes(ch1PathA, stChanged.atime, stChanged.mtime);
+
+        const step5RevertedWithOldHash = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            chapterHashes: { ch_0001: 'hash_v1' }
+        });
+        expect(step5RevertedWithOldHash[0]?.text).toContain('REVERTD');
+        expect(step5RevertedWithOldHash[0]?.chapterDay).toBe(2);
     });
 
     it('段级多词共现打分、focusChapters 第一优先级与 maxSlicesPerEntity / sliceMaxChars 截断', async () => {
@@ -788,5 +830,55 @@ describe('IndexRecall', () => {
         expect(statusByCh.get(2)).toBe('missing_both');
         expect(statusByCh.get(3)).toBe('paired');
         expect(auditRes.unpairedIssues.map((i) => i.chapterNumber)).toEqual([2]);
+
+        // 3. 过滤内联 [WARPED] 文本及整卡 metadata.status === 'WARPED'
+        const inlineWarpedProfile = createSampleProfile({
+            metadata: {
+                entity_id: 'item_001',
+                canonical_name: '波子汽水',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 3
+            },
+            acquiredState: [
+                { chapter: 1, storyDay: 1, text: '出现在活动室桌角 [WARPED]', continuationLines: [] },
+                { chapter: 3, storyDay: 3, text: '再次出现在桌上', continuationLines: ['[warped] 已撤销'] }
+            ]
+        });
+        const inlineWarpedRes = await recall.verifyPairedRecall(bookRoot, {
+            profile: inlineWarpedProfile,
+            targetChapter: 3,
+            targetDay: 3,
+            focusChapters: [1, 3]
+        });
+        expect(inlineWarpedRes.paired).toBe(false);
+        expect(inlineWarpedRes.chapterVerifications.map((v) => v.status)).toEqual([
+            'missing_entity_record',
+            'missing_entity_record'
+        ]);
+
+        const cardWarpedProfile = createSampleProfile({
+            metadata: {
+                entity_id: 'item_001',
+                canonical_name: '波子汽水',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 3,
+                status: 'WARPED'
+            },
+            acquiredState: [
+                { chapter: 1, storyDay: 1, status: 'ACTIVE', text: '出现在活动室桌角', continuationLines: [] }
+            ]
+        });
+        const cardWarpedRes = await recall.verifyPairedRecall(bookRoot, {
+            profile: cardWarpedProfile,
+            targetChapter: 3,
+            targetDay: 3,
+            focusChapters: [1]
+        });
+        expect(cardWarpedRes.paired).toBe(false);
+        expect(cardWarpedRes.chapterVerifications[0]?.status).toBe('missing_entity_record');
     });
 });
