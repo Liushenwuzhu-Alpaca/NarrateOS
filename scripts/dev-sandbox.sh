@@ -61,19 +61,72 @@ cat > "$PROFILE_DIR/cordis.yml" <<'EOF'
 []
 EOF
 
-DEFAULT_AGENT_MODEL="${NARRATEOS_SANDBOX_AGENT_MODEL:-${NARRATEOS_MODEL_STRONG:-}}"
+DEFAULT_PROVIDER="${NARRATEOS_SANDBOX_PROVIDER:-deepseek-official}"
+RAW_DEFAULT_MODEL="${NARRATEOS_SANDBOX_AGENT_MODEL:-${NARRATEOS_MODEL_STRONG:-}}"
+DEFAULT_AGENT_MODEL="${RAW_DEFAULT_MODEL#*:}"
+DEFAULT_EFFORT="${NARRATEOS_SANDBOX_EFFORT:-high}"
+
+# 收集 .env / 环境变量声明的自定义模型（剥离可选 provider: 前缀并去重），注入 llm-deepseek 模型目录以供 DSH 原生对话框选择
+declare -a EXTRA_MODELS=()
+for raw_candidate in \
+    ${NARRATEOS_SANDBOX_MODELS:-} \
+    "${NARRATEOS_SANDBOX_AGENT_MODEL:-}" \
+    "${NARRATEOS_MODEL_STRONG:-}" \
+    "${NARRATEOS_MODEL_FAST:-}" \
+    "${NARRATEOS_MODEL_AUDIT:-}"; do
+    candidate="${raw_candidate//,/ }"
+    for item in $candidate; do
+        model_id="${item#*:}"
+        if [ -z "$model_id" ] || [ "$model_id" = "deepseek-flash" ] || [ "$model_id" = "deepseek-v4-pro" ]; then
+            continue
+        fi
+        already_added=0
+        for existing in "${EXTRA_MODELS[@]}"; do
+            if [ "$existing" = "$model_id" ]; then
+                already_added=1
+                break
+            fi
+        done
+        if [ "$already_added" -eq 0 ]; then
+            EXTRA_MODELS+=("$model_id")
+        fi
+    done
+done
+
 {
     echo "- id: locale"
     echo "  name: \"@deepseek-ai/dsh-client-locale\""
     echo "  config:"
     echo "    preference: zh"
+    if [ "${#EXTRA_MODELS[@]}" -gt 0 ]; then
+        echo "- id: llm-deepseek"
+        echo "  name: \"@deepseek-ai/dsh-llm-deepseek-api-key\""
+        echo "  config:"
+        echo "    models:"
+        for custom_model in "${EXTRA_MODELS[@]}"; do
+            echo "      - id: \"$custom_model\""
+            echo "        name: \"$custom_model\""
+            echo "        contextWindow: 1048576"
+            echo "        inputModalities: [\"text\", \"image\"]"
+        done
+        echo "      - id: \"deepseek-flash\""
+        echo "        name: \"DeepSeek-V4.1-Flash\""
+        echo "        contextWindow: 1048576"
+        echo "        inputModalities: [\"text\", \"image\"]"
+        echo "        systemPromptUpdate: \"in-history\""
+        echo "        toolUpdate: \"addition-only\""
+        echo "      - id: \"deepseek-v4-pro\""
+        echo "        name: \"DeepSeek-V4-Pro\""
+        echo "        description: \"Stronger agentic coding, knowledge, and difficult reasoning; suited to complex or quality-critical tasks at higher cost.\""
+        echo "        contextWindow: 1048576"
+    fi
     if [ -n "$DEFAULT_AGENT_MODEL" ]; then
         echo "- id: agent-default-model"
         echo "  name: \"@deepseek-ai/dsh-agent-default-model\""
         echo "  config:"
-        echo "    provider: \"${NARRATEOS_SANDBOX_PROVIDER:-deepseek-official}\""
+        echo "    provider: \"$DEFAULT_PROVIDER\""
         echo "    model: \"$DEFAULT_AGENT_MODEL\""
-        echo "    reasoningEffort: \"${NARRATEOS_SANDBOX_EFFORT:-medium}\""
+        echo "    reasoningEffort: \"$DEFAULT_EFFORT\""
     fi
 } > "$PROFILE_DIR/cordis.patch.yml"
 
