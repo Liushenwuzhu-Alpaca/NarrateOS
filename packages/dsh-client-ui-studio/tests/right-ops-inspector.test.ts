@@ -378,3 +378,114 @@ describe('卷纲进度诚实呈现', () => {
         expect(text).toContain('0%');
     });
 });
+
+describe('Wave 4A 右栏「运行状态」三段摘要与底层校验明细', () => {
+    it('默认直白展示三段核心摘要且全文本统一使用 Checker 而非 Fact Checker', () => {
+        reactStub.__resetHookSlots();
+        const props = baseProps();
+        props.stageArtifact = {
+            ...props.stageArtifact,
+            staticPrefixTokens: 4120,
+            dynamicTailTokens: 14280,
+            budgetLimitTokens: 32000,
+            degradationLevel: 0,
+            strippedItemsSummary: '已隔离 2 项秘密底牌'
+        };
+        props.selectedVoiceSample = {
+            id: 'v1',
+            tag: '冷峻克制',
+            text: '把门关上。'
+        };
+        props.strippedSecretCount = 2;
+        props.proseGate = {
+            mattr500: 0.79,
+            kontoyiannisEntropy: 4.12,
+            sentenceLengthCv: 0.64,
+            clicheDensityPer1k: 0,
+            recentViolations: []
+        };
+        props.dreamWatermark = {
+            last_dream_ch: 4,
+            accumulated_words_since_dream: 6120,
+            word_threshold: 15000
+        };
+        const tree = RightOpsInspector(props) as unknown as StubElement;
+        const text = visibleText(tree);
+
+        expect(text).toContain('本章给写手装入的资料');
+        expect(text).toContain('文风体检');
+        expect(text).toContain('自动整理进度');
+        expect(text).toContain('词汇丰富度');
+        expect(text).toContain('信息新鲜度');
+        expect(text).toContain('句式长短变化');
+        expect(text).toContain('套话密度');
+        expect(text).toContain('冷峻克制');
+        expect(text).toContain('已屏蔽 2 项');
+        expect(text).toContain('6,120 / 15,000 字');
+        expect(text).not.toContain('Fact Checker');
+        expect(text).not.toContain('Fact Check');
+
+        const lowLevelBody = findElement(
+            tree,
+            (el) => el.props.id === 'ns-i-body-lowlevel'
+        );
+        expect(lowLevelBody).not.toBeNull();
+        expect(lowLevelBody?.props.hidden).toBe(true);
+    });
+
+    it('底层校验与提交明细展示事务锁、双粒度 SHA、Checker 筛除统计与完整双侧冲突诊断', () => {
+        const props = baseProps();
+        props.walLock = {
+            walPhase: 'SAFE_HALT',
+            timelineMode: 'MAINLINE',
+            txLockStatus: 'locked',
+            txLockHolder: 'STEPPING',
+            lastCommittedChapter: 2,
+            featCommitSha: '81c4a9e1234',
+            stateCommitSha: 'f03d72b5678'
+        };
+        props.factChecker = {
+            totalChecked: 8,
+            verifiedPassCount: 6,
+            filteredOutCount: 2,
+            blockedCount: 1
+        };
+        props.haltDiagnostic = {
+            kind: 'SAFE_HALT',
+            reason: '陈砚左腕旧伤设定矛盾',
+            leftRef: 'entities/char_chenyan.md',
+            leftLine: 14,
+            leftExcerpt: '左腕旧骨折未愈，无法单手推举重物',
+            rightRef: 'manuscripts/ch_0002.md',
+            rightLine: 2,
+            rightExcerpt: '陈砚抬起完好无损的左手推开账房木门',
+            affectedChapters: 2,
+            affectedWords: 6120,
+            rollbackThreshold: 3,
+            issues: [
+                {
+                    description: '伤势冲突',
+                    quote_source: '左腕旧骨折未愈',
+                    quote_draft: '完好无损的左手',
+                    source_ref: 'entities/char_chenyan.md#L14'
+                }
+            ]
+        };
+
+        const tree = renderAllOpen(props);
+        const text = visibleText(tree);
+        expect(text).toContain('底层校验与提交明细');
+        expect(text).toContain('LOCKED');
+        expect(text).toContain('81c4a9e');
+        expect(text).toContain('f03d72b');
+        expect(text).toContain('Checker 筛除伪引文');
+        expect(text).toContain('过滤 2');
+        expect(text).toContain('entities/char_chenyan.md:14');
+        expect(text).toContain('manuscripts/ch_0002.md:2');
+        expect(text).toContain('6120 字');
+        expect(text).toContain('左腕旧骨折未愈，无法单手推举重物');
+        expect(text).toContain('陈砚抬起完好无损的左手推开账房木门');
+        expect(text).not.toContain('Fact Checker');
+        expect(text).not.toContain('Fact Check');
+    });
+});

@@ -230,4 +230,33 @@ describe('章节生成累计 Token 分布', () => {
         expect(text).toContain('不含开书、手改同步与整理消耗');
         expect(text).toContain('不是全书总成本');
     });
+
+    it('默认展开三段直白摘要，底层校验与提交明细默认折叠且点击按钮可展开/收起', () => {
+        const props = baseProps();
+        props.dreaming = {
+            dirtyEntityCount: 2,
+            dirtyThreshold: 6,
+            coldArchiveCount: 1,
+            spotlightQueue: [{ entityId: 'char_zhou', label: '周敬山', progressPct: 80, triggered: true }]
+        };
+        const container = mountInspector(props);
+        expect(container.textContent).toContain('本章给写手装入的资料');
+        expect(container.textContent).toContain('文风体检');
+        expect(container.textContent).toContain('自动整理进度');
+
+        const toggleBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+            (btn) => btn.textContent?.includes('底层校验与提交明细')
+        );
+        expect(toggleBtn).toBeDefined();
+        expect(toggleBtn?.getAttribute('aria-expanded')).toBe('false');
+        const panel = container.querySelector<HTMLElement>('#ns-i-body-lowlevel');
+        expect(panel?.hidden).toBe(true);
+
+        act(() => {
+            toggleBtn!.click();
+        });
+        expect(toggleBtn?.getAttribute('aria-expanded')).toBe('true');
+        expect(panel?.hidden).toBe(false);
+        expect(panel?.textContent).toContain('周敬山');
+    });
 });

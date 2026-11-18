@@ -11,9 +11,9 @@ import type {
 
 /** 三池展示名称唯一真相表 */
 export const POOL_LABELS: Record<RolePoolId, string> = {
-    strong_creative: '强创作池',
-    fast_retrieval: '检索快池',
-    audit: '异构核查池'
+    strong_creative: '强模型池',
+    fast_retrieval: '快模型池',
+    audit: '独立挑错池'
 };
 
 /** 推理强度可选值唯一真相表 */
@@ -25,11 +25,35 @@ export const REASONING_EFFORT_OPTIONS: ReadonlyArray<RoleReasoningEffort> = [
     'max'
 ];
 
+const ROLE_DISPLAY_NAMES: Record<string, string> = {
+    librarian: 'Librarian',
+    planner: 'Planner',
+    writer: 'Writer',
+    fact_checker: 'Checker',
+    'fact-checker': 'Checker',
+    extractor: 'Extractor',
+    dreamer: 'Dreamer',
+    patch: 'Patch (局部修补)'
+};
+
+const ROLE_DESCRIPTIONS: Record<string, string> = {
+    librarian: '翻阅前文与设定选页',
+    planner: '规划本章剧情节拍',
+    writer: '纯净环境执笔正文',
+    fact_checker: '独立核对前后设定矛盾',
+    'fact-checker': '独立核对前后设定矛盾',
+    extractor: '章末更新人物与伏笔',
+    dreamer: '跨章阶段整理与归纳',
+    patch: '局部修补套话与瑕疵'
+};
+
 export interface RoleRoutingEditorProps {
     /** 作品根目录切换标识，变更时重置本地未保存草稿与提示状态 */
     resetKey?: string | null | undefined;
     /** 当前三池模型路由（用于推导各池模型与提供商前缀） */
     poolRoutes: Record<RolePoolId, string>;
+    /** 单书覆盖的三池配置（可选，优先用于初始化第一层底座输入框） */
+    modelRouting?: Record<string, string> | null | undefined;
     /** 服务端当前已持久化的分角色覆盖配置 */
     roleRouting?: Record<string, RoleModelOverride> | null | undefined;
     /** 后端下发的工种模型定义清单 */
@@ -53,6 +77,23 @@ function isValidReasoningEffort(value: unknown): value is RoleReasoningEffort {
         typeof value === 'string' &&
         (REASONING_EFFORT_OPTIONS as readonly string[]).includes(value)
     );
+}
+
+/** 格式化 Agent 工种展示名称（fact_checker 统一映射为 Checker） */
+export function formatRoleDisplayLabel(roleId: string): string {
+    const normalized = roleId.trim().toLowerCase();
+    return ROLE_DISPLAY_NAMES[normalized] ?? roleId;
+}
+
+function resolveBaselinePools(
+    poolRoutes: Record<RolePoolId, string>,
+    modelRouting?: Record<string, string> | null
+): Record<RolePoolId, string> {
+    return {
+        strong_creative: modelRouting?.strong_creative ?? poolRoutes.strong_creative ?? '',
+        fast_retrieval: modelRouting?.fast_retrieval ?? poolRoutes.fast_retrieval ?? '',
+        audit: modelRouting?.audit ?? poolRoutes.audit ?? ''
+    };
 }
 
 /** 规范化来自服务端或草稿的分角色覆盖表，保留合法非空字段以匹配 exactOptionalPropertyTypes */
@@ -138,7 +179,8 @@ export function resolveEffectiveRoleModelLabel(
     draftOverride: RoleModelOverride | undefined,
     serverOverride: RoleModelOverride | undefined,
     poolRoutes: Record<RolePoolId, string>,
-    poolProviders: Partial<Record<RolePoolId, string>> = {}
+    poolProviders: Partial<Record<RolePoolId, string>> = {},
+    preferDraftPools = false
 ): string {
     const resolveTargetPool = (tier: RoleTierOverride | undefined): RolePoolId | undefined => {
         if (tier === 'strong') return 'strong_creative';
@@ -182,10 +224,15 @@ export function resolveEffectiveRoleModelLabel(
         return formatPoolRoute('fast_retrieval');
     }
 
-    // 未配置本地覆盖时：若服务端原本也没有覆盖，则直接采用服务端计算后的 effectiveProvider/effectiveModel
+    // 未配置本地覆盖时：若第一层底座未被本地修改，采用服务端解析后的 effectiveProvider/effectiveModel
     const hadServerModelOrTier =
         Boolean(serverOverride?.model?.trim()) || isValidTier(serverOverride?.tier);
-    if (!hadServerModelOrTier && roleDef.effectiveModel && roleDef.effectiveModel !== '--') {
+    if (
+        !preferDraftPools &&
+        !hadServerModelOrTier &&
+        roleDef.effectiveModel &&
+        roleDef.effectiveModel !== '--'
+    ) {
         if (roleDef.effectiveModel.includes(':') || !roleDef.effectiveProvider) {
             return roleDef.effectiveModel;
         }
@@ -196,13 +243,15 @@ export function resolveEffectiveRoleModelLabel(
 }
 
 /**
- * 分角色两层模型覆盖编辑器：
- * - 工种列表完全以后端下发的 roleDefinitions 为准；缺省且 roleRouting 已有键时仅按现有键生成最小配置行
- * - 切书时依据 resetKey 重置未保存草稿与反馈提示，避免跨书串稿
+ * 两层可编辑模型分配编辑器：
+ * - 第一层「全局强弱基础模型底座」：强模型池 / 快模型池 / 独立挑错池直接编辑（关联 datalist）
+ * - 第二层「按 Agent 单独指定」：手风琴按需展开，fact_checker 统一显示为 Checker，覆盖项主色高亮
+ * - 严守唯一实心主按钮规则：!isDirty 时用描边次级态（ns-btn-ghost），isDirty 时点亮主色实心（ns-btn-primary）
  */
 export function RoleRoutingEditor({
     resetKey = null,
     poolRoutes,
+    modelRouting = null,
     roleRouting = null,
     roleDefinitions = null,
     availableModels = null,
@@ -211,16 +260,28 @@ export function RoleRoutingEditor({
 }: RoleRoutingEditorProps): React.ReactElement {
     const [datalistId] = useState<string>(() => `ns-i-available-models-${++roleDatalistSeq}`);
 
+    const baselinePools = useMemo(
+        () => resolveBaselinePools(poolRoutes, modelRouting),
+        [poolRoutes, modelRouting]
+    );
+    const serverPoolsKey = useMemo(() => JSON.stringify(baselinePools), [baselinePools]);
+
     const normalizedResetKey = resetKey ?? null;
     const serverRoleRoutingKey = useMemo(
         () => JSON.stringify(roleRouting ?? {}),
         [roleRouting]
     );
     const [syncedResetKey, setSyncedResetKey] = useState<string | null>(normalizedResetKey);
+    const [syncedPoolsKey, setSyncedPoolsKey] = useState<string>(serverPoolsKey);
     const [syncedRoleRoutingKey, setSyncedRoleRoutingKey] = useState<string>(serverRoleRoutingKey);
+
+    const [draftPoolRoutes, setDraftPoolRoutes] = useState<Record<RolePoolId, string>>(
+        () => ({ ...baselinePools })
+    );
     const [draftRoleRouting, setDraftRoleRouting] = useState<Record<string, RoleModelOverride>>(
         () => normalizeRoleRoutingMap(roleRouting)
     );
+    const [expandedRoles, setExpandedRoles] = useState<Record<string, boolean>>({});
     const [savingRouting, setSavingRouting] = useState<boolean>(false);
     const [saveFeedback, setSaveFeedback] = useState<{
         kind: 'success' | 'error';
@@ -229,15 +290,22 @@ export function RoleRoutingEditor({
 
     if (syncedResetKey !== normalizedResetKey) {
         setSyncedResetKey(normalizedResetKey);
+        setSyncedPoolsKey(serverPoolsKey);
         setSyncedRoleRoutingKey(serverRoleRoutingKey);
+        setDraftPoolRoutes({ ...baselinePools });
         setDraftRoleRouting(normalizeRoleRoutingMap(roleRouting));
         setSaveFeedback(null);
-    } else if (syncedRoleRoutingKey !== serverRoleRoutingKey) {
-        setSyncedRoleRoutingKey(serverRoleRoutingKey);
-        setDraftRoleRouting(normalizeRoleRoutingMap(roleRouting));
+    } else {
+        if (syncedPoolsKey !== serverPoolsKey) {
+            setSyncedPoolsKey(serverPoolsKey);
+            setDraftPoolRoutes({ ...baselinePools });
+        }
+        if (syncedRoleRoutingKey !== serverRoleRoutingKey) {
+            setSyncedRoleRoutingKey(serverRoleRoutingKey);
+            setDraftRoleRouting(normalizeRoleRoutingMap(roleRouting));
+        }
     }
 
-    // 工种列表：完全以后端下发的 roleDefinitions 为准；缺省时仅基于既有 roleRouting 键生成最小配置行
     const resolvedRoleDefinitions = useMemo<RoleDefinitionItem[]>(() => {
         if (roleDefinitions && roleDefinitions.length > 0) {
             return roleDefinitions;
@@ -254,9 +322,37 @@ export function RoleRoutingEditor({
     }, [roleDefinitions, roleRouting]);
 
     const poolProviders = useMemo(
-        () => collectPoolProviders(poolRoutes, resolvedRoleDefinitions, roleRouting),
-        [poolRoutes, resolvedRoleDefinitions, roleRouting]
+        () => collectPoolProviders(draftPoolRoutes, resolvedRoleDefinitions, roleRouting),
+        [draftPoolRoutes, resolvedRoleDefinitions, roleRouting]
     );
+
+    const isPoolDirty = useMemo(
+        () =>
+            (['strong_creative', 'fast_retrieval', 'audit'] as const).some(
+                (poolId) => draftPoolRoutes[poolId].trim() !== baselinePools[poolId].trim()
+            ),
+        [draftPoolRoutes, baselinePools]
+    );
+
+    const isRoleDirty = useMemo(() => {
+        const currentCleaned = normalizeRoleRoutingMap(draftRoleRouting, true);
+        const serverCleaned = normalizeRoleRoutingMap(roleRouting, true);
+        return JSON.stringify(currentCleaned) !== JSON.stringify(serverCleaned);
+    }, [draftRoleRouting, roleRouting]);
+
+    const isDirty = isPoolDirty || isRoleDirty;
+
+    const allExpanded =
+        resolvedRoleDefinitions.length > 0 &&
+        resolvedRoleDefinitions.every((def) => Boolean(expandedRoles[def.id]));
+
+    const updatePoolDraft = (poolId: RolePoolId, value: string): void => {
+        setSaveFeedback(null);
+        setDraftPoolRoutes((prev) => ({
+            ...prev,
+            [poolId]: value
+        }));
+    };
 
     const updateRoleDraft = (
         roleId: string,
@@ -303,13 +399,32 @@ export function RoleRoutingEditor({
         });
     };
 
+    const toggleAllRoles = (): void => {
+        const nextOpen = !allExpanded;
+        const nextMap: Record<string, boolean> = {};
+        for (const def of resolvedRoleDefinitions) {
+            nextMap[def.id] = nextOpen;
+        }
+        setExpandedRoles(nextMap);
+    };
+
     const handleSaveRoleRouting = async (): Promise<void> => {
         if (!onSaveModelRouting || busy || savingRouting) return;
         setSavingRouting(true);
         setSaveFeedback(null);
         try {
-            const cleaned = normalizeRoleRoutingMap(draftRoleRouting, true);
-            await onSaveModelRouting({ role_routing: cleaned });
+            const cleanedRoles = normalizeRoleRoutingMap(draftRoleRouting, true);
+            const payload: SaveModelRoutingRequest = {
+                role_routing: cleanedRoles
+            };
+            if (isPoolDirty) {
+                payload.model_routing = {
+                    strong_creative: draftPoolRoutes.strong_creative.trim(),
+                    fast_retrieval: draftPoolRoutes.fast_retrieval.trim(),
+                    audit: draftPoolRoutes.audit.trim()
+                };
+            }
+            await onSaveModelRouting(payload);
             setSaveFeedback({ kind: 'success', text: '工种模型配置已保存' });
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -320,10 +435,7 @@ export function RoleRoutingEditor({
     };
 
     return (
-        <div className="ns-i-card">
-            <div className="ns-i-card-head">
-                <span>分角色模型覆盖 (Subagent 2-Layer Override)</span>
-            </div>
+        <div className="ns-i-list" aria-label="模型分配">
             <datalist id={datalistId}>
                 {(availableModels ?? []).map((item) => {
                     const val = formatAvailableModelValue(item);
@@ -334,127 +446,254 @@ export function RoleRoutingEditor({
                     );
                 })}
             </datalist>
-            {resolvedRoleDefinitions.length === 0 ? (
-                <div className="ns-i-empty">
-                    等待服务端下发工种配置 (roleDefinitions)...
+
+            {/* 第一层：全局强弱基础模型底座 */}
+            <section className="panel-section ns-i-section" aria-label="全局强弱基础模型底座">
+                <div className="sec-head ns-i-card-head">
+                    <span>第一层 · 全局强弱基础模型底座</span>
+                    <span className="ns-pill ns-pill-muted">可直接修改</span>
                 </div>
-            ) : (
-                <div className="ns-i-role-list">
-                    {resolvedRoleDefinitions.map((roleDef) => {
-                        const draft = draftRoleRouting[roleDef.id];
-                        const serverEntry = roleRouting?.[roleDef.id];
-                        const effectiveLabel = resolveEffectiveRoleModelLabel(
-                            roleDef,
-                            draft,
-                            serverEntry,
-                            poolRoutes,
-                            poolProviders
-                        );
-                        // 当服务端原本存在推理强度覆盖而用户本地将其重置为空时，回退至 defaultReasoningEffort，消除旧值残留
-                        const hadServerEffort = isValidReasoningEffort(serverEntry?.reasoning_effort);
-                        const effectiveEffort =
-                            draft?.reasoning_effort ??
-                            (hadServerEffort
-                                ? roleDef.defaultReasoningEffort
-                                : (roleDef.effectiveReasoningEffort ??
-                                  roleDef.defaultReasoningEffort));
-                        return (
-                            <div
-                                key={roleDef.id}
-                                className="ns-i-role-item"
-                                data-role-id={roleDef.id}
-                            >
-                                <div className="ns-i-role-head">
-                                    <span className="ns-mono ns-i-role-id">{roleDef.id}</span>
-                                    <span
-                                        className="ns-mono ns-i-role-pool"
-                                        title={
-                                            roleDef.defaultPool
-                                                ? POOL_LABELS[roleDef.defaultPool]
-                                                : undefined
+                <div className="ns-i-role-controls">
+                    <label className="ns-i-role-field ns-i-role-field-full">
+                        <span className="ns-i-role-label">
+                            强模型池（默认负责 Planner · Writer · Patch · Dreamer）
+                        </span>
+                        <input
+                            type="text"
+                            className="ns-i-input"
+                            list={datalistId}
+                            aria-label="强模型池"
+                            disabled={busy || savingRouting}
+                            value={draftPoolRoutes.strong_creative}
+                            onChange={(e) => updatePoolDraft('strong_creative', e.target.value)}
+                        />
+                    </label>
+                    <label className="ns-i-role-field ns-i-role-field-full">
+                        <span className="ns-i-role-label">
+                            快模型池（默认负责 Librarian · Extractor）
+                        </span>
+                        <input
+                            type="text"
+                            className="ns-i-input"
+                            list={datalistId}
+                            aria-label="快模型池"
+                            disabled={busy || savingRouting}
+                            value={draftPoolRoutes.fast_retrieval}
+                            onChange={(e) => updatePoolDraft('fast_retrieval', e.target.value)}
+                        />
+                    </label>
+                    <label className="ns-i-role-field ns-i-role-field-full">
+                        <span className="ns-i-role-label">
+                            独立挑错池（默认负责 Checker 异构核查）
+                        </span>
+                        <input
+                            type="text"
+                            className="ns-i-input"
+                            list={datalistId}
+                            aria-label="独立挑错池"
+                            disabled={busy || savingRouting}
+                            value={draftPoolRoutes.audit}
+                            onChange={(e) => updatePoolDraft('audit', e.target.value)}
+                        />
+                    </label>
+                </div>
+            </section>
+
+            {/* 第二层：按 Agent 单独指定 */}
+            <section className="panel-section ns-i-section" aria-label="按 Agent 单独指定">
+                <div className="sec-head ns-i-card-head">
+                    <span>第二层 · 按 Agent 单独指定</span>
+                    {resolvedRoleDefinitions.length > 0 ? (
+                        <button
+                            type="button"
+                            className="ns-btn ns-btn-ghost ns-btn-xs"
+                            onClick={toggleAllRoles}
+                        >
+                            {allExpanded ? '全部收起' : '全部展开'}
+                        </button>
+                    ) : null}
+                </div>
+
+                {resolvedRoleDefinitions.length === 0 ? (
+                    <div className="ns-i-empty">
+                        等待服务端下发工种配置 (roleDefinitions)...
+                    </div>
+                ) : (
+                    <div className="ns-i-role-list">
+                        {resolvedRoleDefinitions.map((roleDef) => {
+                            const draft = draftRoleRouting[roleDef.id];
+                            const serverEntry = roleRouting?.[roleDef.id];
+                            const effectivePool =
+                                draft?.tier === 'strong'
+                                    ? 'strong_creative'
+                                    : draft?.tier === 'weak'
+                                      ? 'fast_retrieval'
+                                      : roleDef.defaultPool;
+                            const poolEditedForRole = Boolean(
+                                effectivePool &&
+                                    draftPoolRoutes[effectivePool].trim() !==
+                                        baselinePools[effectivePool].trim()
+                            );
+                            const effectiveLabel = resolveEffectiveRoleModelLabel(
+                                roleDef,
+                                draft,
+                                serverEntry,
+                                draftPoolRoutes,
+                                poolProviders,
+                                poolEditedForRole
+                            );
+                            const hadServerEffort = isValidReasoningEffort(
+                                serverEntry?.reasoning_effort
+                            );
+                            const effectiveEffort =
+                                draft?.reasoning_effort ??
+                                (hadServerEffort
+                                    ? roleDef.defaultReasoningEffort
+                                    : (roleDef.effectiveReasoningEffort ??
+                                      roleDef.defaultReasoningEffort));
+                            const hasOverride = Boolean(
+                                draft?.tier || draft?.model?.trim() || draft?.reasoning_effort
+                            );
+                            const isExpanded = Boolean(expandedRoles[roleDef.id]);
+                            const displayName = formatRoleDisplayLabel(roleDef.id);
+                            const roleDesc = ROLE_DESCRIPTIONS[roleDef.id.toLowerCase()];
+
+                            return (
+                                <div
+                                    key={roleDef.id}
+                                    className="ns-i-role-item"
+                                    data-role-id={roleDef.id}
+                                    data-role-overridden={hasOverride ? 'true' : undefined}
+                                >
+                                    <button
+                                        type="button"
+                                        className="ns-i-acc-head"
+                                        aria-expanded={isExpanded}
+                                        aria-controls={`ns-role-detail-${roleDef.id}`}
+                                        onClick={() =>
+                                            setExpandedRoles((prev) => ({
+                                                ...prev,
+                                                [roleDef.id]: !prev[roleDef.id]
+                                            }))
                                         }
                                     >
-                                        {roleDef.defaultPool ?? '--'}
-                                    </span>
-                                </div>
-                                <div className="ns-mono ns-i-role-effective" title={effectiveLabel}>
-                                    生效: {effectiveLabel}
-                                    {effectiveEffort ? ` (${effectiveEffort})` : ''}
-                                </div>
-                                <div className="ns-i-role-controls">
-                                    <label className="ns-i-role-field">
-                                        <span className="ns-i-role-label">Layer 1 档位</span>
-                                        <select
-                                            className="ns-i-select"
-                                            aria-label={`${roleDef.id} 档位覆盖`}
-                                            disabled={busy || savingRouting}
-                                            value={draft?.tier ?? ''}
-                                            onChange={(e) =>
-                                                updateRoleDraft(roleDef.id, {
-                                                    tier: e.target.value
-                                                })
-                                            }
+                                        <span
+                                            className={`ns-i-role-id${
+                                                hasOverride ? ' ns-i-route-model-brand' : ''
+                                            }`}
                                         >
-                                            <option value="">继承默认</option>
-                                            <option value="strong">强模型 (strong)</option>
-                                            <option value="weak">弱模型 (weak)</option>
-                                        </select>
-                                    </label>
-                                    <label className="ns-i-role-field">
-                                        <span className="ns-i-role-label">推理强度</span>
-                                        <select
-                                            className="ns-i-select"
-                                            aria-label={`${roleDef.id} 推理强度`}
-                                            disabled={busy || savingRouting}
-                                            value={draft?.reasoning_effort ?? ''}
-                                            onChange={(e) =>
-                                                updateRoleDraft(roleDef.id, {
-                                                    reasoning_effort: e.target.value
-                                                })
-                                            }
-                                        >
-                                            <option value="">继承默认</option>
-                                            {REASONING_EFFORT_OPTIONS.map((effort) => (
-                                                <option key={effort} value={effort}>
-                                                    {effort}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                    <label className="ns-i-role-field ns-i-role-field-full">
-                                        <span className="ns-i-role-label">
-                                            Layer 2 指定模型（留空继承 Layer 1）
+                                            {displayName}
                                         </span>
-                                        <input
-                                            type="text"
-                                            className="ns-i-input"
-                                            list={datalistId}
-                                            aria-label={`${roleDef.id} 指定模型`}
-                                            placeholder="留空继承 Layer 1"
-                                            disabled={busy || savingRouting}
-                                            value={draft?.model ?? ''}
-                                            onChange={(e) =>
-                                                updateRoleDraft(roleDef.id, {
-                                                    model: e.target.value
-                                                })
-                                            }
-                                        />
-                                    </label>
+                                        <span
+                                            className={`ns-mono ns-i-role-effective${
+                                                hasOverride ? ' ns-i-route-model-brand' : ' ns-i-muted'
+                                            }`}
+                                            title={effectiveLabel}
+                                        >
+                                            {effectiveLabel}
+                                            {effectiveEffort ? ` (${effectiveEffort})` : ''}
+                                        </span>
+                                        <span className="ns-i-chevron" aria-hidden="true">
+                                            ›
+                                        </span>
+                                    </button>
+
+                                    <div
+                                        id={`ns-role-detail-${roleDef.id}`}
+                                        hidden={!isExpanded}
+                                    >
+                                        <div className="ns-i-role-head">
+                                            <span className="ns-i-role-label">
+                                                {roleDesc ?? '工种独立覆盖'}
+                                            </span>
+                                            <span
+                                                className="ns-mono ns-i-role-pool"
+                                                title={
+                                                    roleDef.defaultPool
+                                                        ? POOL_LABELS[roleDef.defaultPool]
+                                                        : undefined
+                                                }
+                                            >
+                                                {roleDef.defaultPool ?? '--'}
+                                            </span>
+                                        </div>
+                                        <div className="ns-i-role-controls">
+                                            <label className="ns-i-role-field">
+                                                <span className="ns-i-role-label">Layer 1 档位</span>
+                                                <select
+                                                    className="ns-i-select"
+                                                    aria-label={`${roleDef.id} 档位覆盖`}
+                                                    disabled={busy || savingRouting}
+                                                    value={draft?.tier ?? ''}
+                                                    onChange={(e) =>
+                                                        updateRoleDraft(roleDef.id, {
+                                                            tier: e.target.value
+                                                        })
+                                                    }
+                                                >
+                                                    <option value="">继承默认</option>
+                                                    <option value="strong">强模型 (strong)</option>
+                                                    <option value="weak">弱模型 (weak)</option>
+                                                </select>
+                                            </label>
+                                            <label className="ns-i-role-field">
+                                                <span className="ns-i-role-label">推理强度</span>
+                                                <select
+                                                    className="ns-i-select"
+                                                    aria-label={`${roleDef.id} 推理强度`}
+                                                    disabled={busy || savingRouting}
+                                                    value={draft?.reasoning_effort ?? ''}
+                                                    onChange={(e) =>
+                                                        updateRoleDraft(roleDef.id, {
+                                                            reasoning_effort: e.target.value
+                                                        })
+                                                    }
+                                                >
+                                                    <option value="">继承默认</option>
+                                                    {REASONING_EFFORT_OPTIONS.map((effort) => (
+                                                        <option key={effort} value={effort}>
+                                                            {effort}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </label>
+                                            <label className="ns-i-role-field ns-i-role-field-full">
+                                                <span className="ns-i-role-label">
+                                                    Layer 2 指定模型（留空继承 Layer 1）
+                                                </span>
+                                                <input
+                                                    type="text"
+                                                    className="ns-i-input"
+                                                    list={datalistId}
+                                                    aria-label={`${roleDef.id} 指定模型`}
+                                                    placeholder="留空继承 Layer 1"
+                                                    disabled={busy || savingRouting}
+                                                    value={draft?.model ?? ''}
+                                                    onChange={(e) =>
+                                                        updateRoleDraft(roleDef.id, {
+                                                            model: e.target.value
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
+                            );
+                        })}
+                    </div>
+                )}
+            </section>
+
             <div className="ns-i-role-actions">
                 <button
                     type="button"
-                    className="ns-btn ns-btn-primary ns-btn-sm"
+                    className={`ns-btn ns-btn-sm ${isDirty ? 'ns-btn-primary' : 'ns-btn-ghost'}`}
                     disabled={
                         busy ||
                         savingRouting ||
                         !onSaveModelRouting ||
-                        resolvedRoleDefinitions.length === 0
+                        (resolvedRoleDefinitions.length === 0 && !isPoolDirty)
                     }
                     onClick={() => {
                         void handleSaveRoleRouting();
@@ -462,7 +701,7 @@ export function RoleRoutingEditor({
                 >
                     {savingRouting ? '正在保存配置…' : '保存工种模型配置'}
                 </button>
-                {saveFeedback && (
+                {saveFeedback ? (
                     <span
                         role="status"
                         aria-live="polite"
@@ -472,7 +711,7 @@ export function RoleRoutingEditor({
                     >
                         {saveFeedback.text}
                     </span>
-                )}
+                ) : null}
             </div>
         </div>
     );

@@ -1340,4 +1340,106 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(singleContainer.querySelector('details[data-session-request-input="true"]')).toBeNull();
         expect(singleContainer.textContent).toContain('SUPPLEMENTARY_FROM_TURNS');
     });
+
+    it('去框化顶部抬头展示 ns-trace-lamp/ns-trace-role、4. Checker 规范化、effectiveModelLabel 与多尝试胶囊切换', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        const onSelectAttemptSession = vi.fn();
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'FACT_CHECKER',
+                        stageLabel: 'Fact Check',
+                        sessionId: 'sess-fc-1',
+                        runId: 'run-fc-1',
+                        status: 'active'
+                    },
+                    effectiveModelLabel: 'anthropic:claude-opus-4-6',
+                    attemptSessions: [
+                        { sessionId: 'sess-fc-1', label: '核查第 1 轮', status: 'running', attempt: 1 },
+                        {
+                            sessionId: 'sess-fc-2',
+                            label: '局部润色 Patch #1',
+                            status: 'completed',
+                            attempt: 2,
+                            triggerReason: '套话门禁'
+                        }
+                    ],
+                    onSelectAttemptSession
+                })
+            );
+        });
+
+        const lamp = container.querySelector<HTMLElement>('.ns-trace-lamp');
+        const role = container.querySelector<HTMLElement>('.ns-trace-role');
+        expect(lamp).not.toBeNull();
+        expect(lamp?.style.viewTransitionName).toBe('ns-trace-lamp');
+        expect(role).not.toBeNull();
+        expect(role?.style.viewTransitionName).toBe('ns-trace-role');
+        expect(role?.textContent).toBe('4. Checker');
+        expect(container.textContent).not.toContain('Fact Check');
+        expect(container.textContent).toContain('anthropic:claude-opus-4-6');
+
+        const attemptButtons = Array.from(
+            container.querySelectorAll<HTMLButtonElement>('[aria-label="同阶段尝试切换"] button[data-attempt-session-id]')
+        );
+        expect(attemptButtons.map((b) => b.getAttribute('data-attempt-session-id'))).toEqual([
+            'sess-fc-1',
+            'sess-fc-2'
+        ]);
+        expect(attemptButtons[0]?.getAttribute('aria-pressed')).toBe('true');
+        await click(attemptButtons[1]!);
+        expect(onSelectAttemptSession).toHaveBeenCalledExactlyOnceWith('sess-fc-2');
+    });
+
+    it('无宿主会话服务时合并渲染 stage:event liveEvents 实时思考链与工具调用，并保留原生 SessionProvider 挂载', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'LIBRARIAN',
+                        stageLabel: '1. Librarian',
+                        sessionId: 'sess-live-sse-1',
+                        status: 'active'
+                    },
+                    liveEvents: [
+                        { seq: 0, kind: 'thinking', text: '实时思考：检索三号栈桥历史事件' },
+                        {
+                            seq: 1,
+                            kind: 'tool-call',
+                            toolName: 'book_grep',
+                            callId: 'live-c1',
+                            text: '{"pattern":"三号栈桥"}'
+                        },
+                        {
+                            seq: 2,
+                            kind: 'tool-result',
+                            toolName: 'book_grep',
+                            callId: 'live-c1',
+                            text: '命中 ch_0001.md 第 4 行',
+                            status: 'completed'
+                        },
+                        { seq: 3, kind: 'text', text: '已打包港口相关实体。' }
+                    ]
+                })
+            );
+        });
+
+        const liveDetail = container.querySelector('[data-session-detail="true"]');
+        expect(liveDetail).not.toBeNull();
+        expect(liveDetail?.getAttribute('data-session-live-stream')).toBe('true');
+        expect(liveDetail?.textContent).toContain('实时思考：检索三号栈桥历史事件');
+        expect(liveDetail?.textContent).toContain('book_grep');
+        expect(liveDetail?.textContent).toContain('命中 ch_0001.md 第 4 行');
+        expect(liveDetail?.textContent).toContain('已打包港口相关实体。');
+    });
 });
