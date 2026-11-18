@@ -103,6 +103,7 @@ import type {
     PostSignalRequest,
     RoleDefinitionItem,
     RolePoolId,
+    RuntimeTaskKind,
     SaveModelRoutingRequest,
     SignalsViewPayload,
     SseEventPayload,
@@ -242,6 +243,55 @@ function parseRawGateViolations(rawList: unknown): VerdictGateViolationItem[] {
     return items;
 }
 
+interface ExtractedConflictSideFields {
+    leftRef: string | undefined;
+    rightRef: string | undefined;
+    leftLine: number | undefined;
+    rightLine: number | undefined;
+    leftExcerpt: string | undefined;
+    rightExcerpt: string | undefined;
+    affectedChapters: number | undefined;
+    affectedWords: number | undefined;
+    rollbackThreshold: number | undefined;
+}
+
+function extractConflictSideFields(raw: Record<string, unknown>): ExtractedConflictSideFields {
+    const sideAChapter = asNumber(raw['side_a_chapter']) ?? asNumber(raw['chapterA']);
+    const sideBChapter = asNumber(raw['side_b_chapter']) ?? asNumber(raw['chapterB']);
+    return {
+        leftRef:
+            asString(raw['leftRef']) ??
+            asString(raw['left_ref']) ??
+            formatChapterFileRef(sideAChapter),
+        rightRef:
+            asString(raw['rightRef']) ??
+            asString(raw['right_ref']) ??
+            formatChapterFileRef(sideBChapter),
+        leftLine: asNumber(raw['leftLine']) ?? asNumber(raw['left_line']) ?? asNumber(raw['side_a_line']),
+        rightLine: asNumber(raw['rightLine']) ?? asNumber(raw['right_line']) ?? asNumber(raw['side_b_line']),
+        leftExcerpt:
+            asString(raw['leftExcerpt']) ??
+            asString(raw['left_excerpt']) ??
+            asString(raw['quoteA']) ??
+            asString(raw['quote_a']),
+        rightExcerpt:
+            asString(raw['rightExcerpt']) ??
+            asString(raw['right_excerpt']) ??
+            asString(raw['quoteB']) ??
+            asString(raw['quote_b']),
+        affectedChapters:
+            asNumber(raw['affectedChapters']) ??
+            asNumber(raw['rollback_chapters']) ??
+            asNumber(raw['affected_chapters']),
+        affectedWords:
+            asNumber(raw['affectedWords']) ??
+            asNumber(raw['affected_words']) ??
+            asNumber(raw['rollback_words']),
+        rollbackThreshold:
+            asNumber(raw['rollbackThreshold']) ?? asNumber(raw['rollback_threshold'])
+    };
+}
+
 /** 兼容 snake_case 与 camelCase 解析 SAFE_HALT 载荷 */
 export function mapSafeHaltInfo(raw: Record<string, unknown> | null | undefined): SafeHaltInfo | null {
     if (!raw) return null;
@@ -250,38 +300,7 @@ export function mapSafeHaltInfo(raw: Record<string, unknown> | null | undefined)
         asString(raw['message']) ??
         asString(raw['error']) ??
         '检测到连续性冲突，系统已安全挂起';
-    const sideAChapter = asNumber(raw['side_a_chapter']) ?? asNumber(raw['chapterA']);
-    const sideBChapter = asNumber(raw['side_b_chapter']) ?? asNumber(raw['chapterB']);
-    const leftRef =
-        asString(raw['leftRef']) ??
-        asString(raw['left_ref']) ??
-        formatChapterFileRef(sideAChapter);
-    const rightRef =
-        asString(raw['rightRef']) ??
-        asString(raw['right_ref']) ??
-        formatChapterFileRef(sideBChapter);
-    const leftLine = asNumber(raw['leftLine']) ?? asNumber(raw['left_line']) ?? asNumber(raw['side_a_line']);
-    const rightLine = asNumber(raw['rightLine']) ?? asNumber(raw['right_line']) ?? asNumber(raw['side_b_line']);
-    const leftExcerpt =
-        asString(raw['leftExcerpt']) ??
-        asString(raw['left_excerpt']) ??
-        asString(raw['quoteA']) ??
-        asString(raw['quote_a']);
-    const rightExcerpt =
-        asString(raw['rightExcerpt']) ??
-        asString(raw['right_excerpt']) ??
-        asString(raw['quoteB']) ??
-        asString(raw['quote_b']);
-    const affectedChapters =
-        asNumber(raw['affectedChapters']) ??
-        asNumber(raw['rollback_chapters']) ??
-        asNumber(raw['affected_chapters']);
-    const affectedWords =
-        asNumber(raw['affectedWords']) ??
-        asNumber(raw['affected_words']) ??
-        asNumber(raw['rollback_words']);
-    const rollbackThreshold =
-        asNumber(raw['rollbackThreshold']) ?? asNumber(raw['rollback_threshold']);
+    const fields = extractConflictSideFields(raw);
     const { haltIssues } = parseRawIssues(raw['issues']);
     const gateViolations = parseRawGateViolations(raw['gateViolations'] ?? raw['gate_violations']);
 
@@ -290,15 +309,15 @@ export function mapSafeHaltInfo(raw: Record<string, unknown> | null | undefined)
         stage: asString(raw['stage']),
         chapter: asNumber(raw['chapter']) ?? asNumber(raw['chapterNumber']),
         conflictId: asString(raw['conflictId']) ?? asString(raw['conflict_id']),
-        affectedChapters,
-        affectedWords,
-        rollbackThreshold,
-        leftRef,
-        rightRef,
-        leftLine,
-        rightLine,
-        leftExcerpt,
-        rightExcerpt,
+        affectedChapters: fields.affectedChapters,
+        affectedWords: fields.affectedWords,
+        rollbackThreshold: fields.rollbackThreshold,
+        leftRef: fields.leftRef,
+        rightRef: fields.rightRef,
+        leftLine: fields.leftLine,
+        rightLine: fields.rightLine,
+        leftExcerpt: fields.leftExcerpt,
+        rightExcerpt: fields.rightExcerpt,
         ...(haltIssues.length > 0 ? { issues: haltIssues } : {}),
         ...(gateViolations.length > 0 ? { gateViolations } : {}),
         timestamp: asString(raw['timestamp']),
@@ -321,50 +340,19 @@ export function mapHaltDiagnostic(haltView: HaltViewPayload | null): HaltDiagnos
         kind,
         reason
     };
-    const sideAChapter = asNumber(raw['side_a_chapter']) ?? asNumber(raw['chapterA']);
-    const sideBChapter = asNumber(raw['side_b_chapter']) ?? asNumber(raw['chapterB']);
-    const leftRef =
-        asString(raw['leftRef']) ??
-        asString(raw['left_ref']) ??
-        formatChapterFileRef(sideAChapter);
-    const rightRef =
-        asString(raw['rightRef']) ??
-        asString(raw['right_ref']) ??
-        formatChapterFileRef(sideBChapter);
-    const leftLine = asNumber(raw['leftLine']) ?? asNumber(raw['left_line']) ?? asNumber(raw['side_a_line']);
-    const rightLine = asNumber(raw['rightLine']) ?? asNumber(raw['right_line']) ?? asNumber(raw['side_b_line']);
-    const leftExcerpt =
-        asString(raw['leftExcerpt']) ??
-        asString(raw['left_excerpt']) ??
-        asString(raw['quoteA']) ??
-        asString(raw['quote_a']);
-    const rightExcerpt =
-        asString(raw['rightExcerpt']) ??
-        asString(raw['right_excerpt']) ??
-        asString(raw['quoteB']) ??
-        asString(raw['quote_b']);
-    const affectedChapters =
-        asNumber(raw['affectedChapters']) ??
-        asNumber(raw['rollback_chapters']) ??
-        asNumber(raw['affected_chapters']);
-    const affectedWords =
-        asNumber(raw['affectedWords']) ??
-        asNumber(raw['affected_words']) ??
-        asNumber(raw['rollback_words']);
-    const rollbackThreshold =
-        asNumber(raw['rollbackThreshold']) ?? asNumber(raw['rollback_threshold']);
+    const fields = extractConflictSideFields(raw);
     const timestamp = asString(raw['timestamp']);
     const { diagIssues } = parseRawIssues(raw['issues']);
 
-    if (leftRef !== undefined) result.leftRef = leftRef;
-    if (rightRef !== undefined) result.rightRef = rightRef;
-    if (leftLine !== undefined) result.leftLine = leftLine;
-    if (rightLine !== undefined) result.rightLine = rightLine;
-    if (leftExcerpt !== undefined) result.leftExcerpt = leftExcerpt;
-    if (rightExcerpt !== undefined) result.rightExcerpt = rightExcerpt;
-    if (affectedChapters !== undefined) result.affectedChapters = affectedChapters;
-    if (affectedWords !== undefined) result.affectedWords = affectedWords;
-    if (rollbackThreshold !== undefined) result.rollbackThreshold = rollbackThreshold;
+    if (fields.leftRef !== undefined) result.leftRef = fields.leftRef;
+    if (fields.rightRef !== undefined) result.rightRef = fields.rightRef;
+    if (fields.leftLine !== undefined) result.leftLine = fields.leftLine;
+    if (fields.rightLine !== undefined) result.rightLine = fields.rightLine;
+    if (fields.leftExcerpt !== undefined) result.leftExcerpt = fields.leftExcerpt;
+    if (fields.rightExcerpt !== undefined) result.rightExcerpt = fields.rightExcerpt;
+    if (fields.affectedChapters !== undefined) result.affectedChapters = fields.affectedChapters;
+    if (fields.affectedWords !== undefined) result.affectedWords = fields.affectedWords;
+    if (fields.rollbackThreshold !== undefined) result.rollbackThreshold = fields.rollbackThreshold;
     if (diagIssues.length > 0) result.issues = diagIssues;
     if (timestamp !== undefined) result.timestamp = timestamp;
     return result;
@@ -374,14 +362,12 @@ function mapSyncConflictDiagnostic(
     syncView: SyncConflictsViewPayload | null,
     haltView: HaltViewPayload | null
 ): SyncConflictDiagnostic | null {
-    const rawConflict =
-        (syncView?.conflicts && syncView.conflicts.length > 0 ? syncView.conflicts[0] : null) ??
-        haltView?.quarantineReport ??
-        null;
+    const firstConflict =
+        syncView?.conflicts && syncView.conflicts.length > 0 ? syncView.conflicts[0] : null;
+    const rawConflict = firstConflict ?? haltView?.quarantineReport ?? null;
     if (!rawConflict) return null;
 
-    const sideAChapter = asNumber(rawConflict['side_a_chapter']) ?? asNumber(rawConflict['chapterA']);
-    const sideBChapter = asNumber(rawConflict['side_b_chapter']) ?? asNumber(rawConflict['chapterB']);
+    const fields = extractConflictSideFields(rawConflict);
     const description =
         asString(rawConflict['description']) ??
         asString(rawConflict['reason']) ??
@@ -395,39 +381,23 @@ function mapSyncConflictDiagnostic(
             asString(rawConflict['leftRef']) ??
             asString(rawConflict['left_ref']) ??
             asString(rawConflict['source_ref']) ??
-            formatChapterFileRef(sideAChapter),
-        leftLine:
-            asNumber(rawConflict['leftLine']) ??
-            asNumber(rawConflict['left_line']) ??
-            asNumber(rawConflict['side_a_line']),
+            fields.leftRef,
+        leftLine: fields.leftLine,
         leftExcerpt:
             asString(rawConflict['leftExcerpt']) ??
             asString(rawConflict['quoteA']) ??
             asString(rawConflict['quote_a']) ??
             asString(rawConflict['quote_source']),
-        rightRef:
-            asString(rawConflict['rightRef']) ??
-            asString(rawConflict['right_ref']) ??
-            formatChapterFileRef(sideBChapter),
-        rightLine:
-            asNumber(rawConflict['rightLine']) ??
-            asNumber(rawConflict['right_line']) ??
-            asNumber(rawConflict['side_b_line']),
+        rightRef: fields.rightRef,
+        rightLine: fields.rightLine,
         rightExcerpt:
             asString(rawConflict['rightExcerpt']) ??
             asString(rawConflict['quoteB']) ??
             asString(rawConflict['quote_b']) ??
             asString(rawConflict['quote_draft']),
-        affectedChapters:
-            asNumber(rawConflict['affectedChapters']) ??
-            asNumber(rawConflict['rollback_chapters']) ??
-            asNumber(rawConflict['affected_chapters']),
-        affectedWords:
-            asNumber(rawConflict['affectedWords']) ??
-            asNumber(rawConflict['affected_words']) ??
-            asNumber(rawConflict['rollback_words']),
-        rollbackThreshold:
-            asNumber(rawConflict['rollbackThreshold']) ?? asNumber(rawConflict['rollback_threshold'])
+        affectedChapters: fields.affectedChapters,
+        affectedWords: fields.affectedWords,
+        rollbackThreshold: fields.rollbackThreshold
     };
 }
 
@@ -597,6 +567,33 @@ function updateStageSessionsToTerminal(
     );
 }
 
+function buildStageAttemptEntry(fields: {
+    stage: string;
+    status: string;
+    sessionId: string;
+    runId?: string | undefined;
+    role?: string | undefined;
+    parentSessionId?: string | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
+    mode?: string | undefined;
+    updatedAt?: string | undefined;
+}): StageAttemptSession {
+    const out: StageAttemptSession = {
+        stage: fields.stage,
+        status: fields.status,
+        sessionId: fields.sessionId
+    };
+    if (fields.runId !== undefined) out.runId = fields.runId;
+    if (fields.role !== undefined) out.role = fields.role;
+    if (fields.parentSessionId !== undefined) out.parentSessionId = fields.parentSessionId;
+    if (fields.attempt !== undefined) out.attempt = fields.attempt;
+    if (fields.triggerReason !== undefined) out.triggerReason = fields.triggerReason;
+    if (fields.mode !== undefined) out.mode = fields.mode;
+    if (fields.updatedAt !== undefined) out.updatedAt = fields.updatedAt;
+    return out;
+}
+
 function upsertStageSession(
     list: readonly StageAttemptSession[] | undefined,
     entry: StageAttemptSession
@@ -605,27 +602,19 @@ function upsertStageSession(
     const existingIdx = prev.findIndex((item) => item.sessionId === entry.sessionId);
     if (existingIdx >= 0) {
         const existing = prev[existingIdx]!;
-        const incomingUpper = entry.stage.trim().toUpperCase();
-        const keepExistingStage = incomingUpper === 'PROSE_GATE';
-        prev[existingIdx] = {
-            ...existing,
-            ...entry,
+        const keepExistingStage = entry.stage.trim().toUpperCase() === 'PROSE_GATE';
+        prev[existingIdx] = buildStageAttemptEntry({
             stage: keepExistingStage ? existing.stage : entry.stage,
-            ...(entry.role !== undefined ? { role: entry.role } : existing.role !== undefined ? { role: existing.role } : {}),
-            ...(entry.runId !== undefined ? { runId: entry.runId } : existing.runId !== undefined ? { runId: existing.runId } : {}),
-            ...(entry.parentSessionId !== undefined
-                ? { parentSessionId: entry.parentSessionId }
-                : existing.parentSessionId !== undefined
-                  ? { parentSessionId: existing.parentSessionId }
-                  : {}),
-            ...(entry.attempt !== undefined ? { attempt: entry.attempt } : existing.attempt !== undefined ? { attempt: existing.attempt } : {}),
-            ...(entry.triggerReason !== undefined
-                ? { triggerReason: entry.triggerReason }
-                : existing.triggerReason !== undefined
-                  ? { triggerReason: existing.triggerReason }
-                  : {}),
-            ...(entry.mode !== undefined ? { mode: entry.mode } : existing.mode !== undefined ? { mode: existing.mode } : {})
-        };
+            status: entry.status,
+            sessionId: entry.sessionId,
+            runId: entry.runId ?? existing.runId,
+            role: entry.role ?? existing.role,
+            parentSessionId: entry.parentSessionId ?? existing.parentSessionId,
+            attempt: entry.attempt ?? existing.attempt,
+            triggerReason: entry.triggerReason ?? existing.triggerReason,
+            mode: entry.mode ?? existing.mode,
+            updatedAt: entry.updatedAt ?? existing.updatedAt
+        });
         return prev;
     }
 
@@ -665,46 +654,120 @@ function deriveHistoricalStageOverrides(
         const triggerReason = asString(run.triggerReason);
         const updatedAt = run.finishedAt ?? run.startedAt ?? run.timestamp;
         const badge = resolveRepairBadge(run.stage) ?? existing?.badge;
-        const sessions =
-            sessionId !== undefined
-                ? upsertStageSession(existing?.sessions, {
-                      runId: run.runId,
-                      stage: run.stage,
-                      status: run.status,
-                      sessionId,
-                      ...(role !== undefined ? { role } : {}),
-                      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-                      ...(run.attempt !== undefined ? { attempt: run.attempt } : {}),
-                      ...(triggerReason !== undefined ? { triggerReason } : {}),
-                      ...(mode !== undefined ? { mode } : {}),
-                      ...(updatedAt !== undefined ? { updatedAt } : {})
-                  })
-                : existing?.sessions;
-        mapped[stageId] = {
+        let sessions = existing?.sessions;
+        if (sessionId !== undefined) {
+            sessions = upsertStageSession(
+                existing?.sessions,
+                buildStageAttemptEntry({
+                    runId: run.runId,
+                    stage: run.stage,
+                    status: run.status,
+                    sessionId,
+                    role,
+                    parentSessionId,
+                    attempt: run.attempt,
+                    triggerReason,
+                    mode,
+                    updatedAt
+                })
+            );
+        }
+        const nextNode: StageNodeState = {
             status: mapRunStatusToStageStatus(run.status),
             summary: DEFAULT_STAGE_SUMMARIES[stageId],
             updatedAt: updatedAt ?? existing?.updatedAt,
-            runId: run.runId,
-            ...(badge !== undefined ? { badge } : {}),
-            ...(sessionId !== undefined
-                ? { sessionId }
-                : existing?.sessionId !== undefined
-                  ? { sessionId: existing.sessionId }
-                  : {}),
-            ...(parentSessionId !== undefined
-                ? { parentSessionId }
-                : existing?.parentSessionId !== undefined
-                  ? { parentSessionId: existing.parentSessionId }
-                  : {}),
-            ...(mode !== undefined
-                ? { mode }
-                : existing?.mode !== undefined
-                  ? { mode: existing.mode }
-                  : {}),
-            ...(sessions && sessions.length > 0 ? { sessions } : {})
+            runId: run.runId
         };
+        const mergedSessionId = sessionId ?? existing?.sessionId;
+        const mergedParentSessionId = parentSessionId ?? existing?.parentSessionId;
+        const mergedMode = mode ?? existing?.mode;
+        if (badge !== undefined) nextNode.badge = badge;
+        if (mergedSessionId !== undefined) nextNode.sessionId = mergedSessionId;
+        if (mergedParentSessionId !== undefined) nextNode.parentSessionId = mergedParentSessionId;
+        if (mergedMode !== undefined) nextNode.mode = mergedMode;
+        if (sessions && sessions.length > 0) nextNode.sessions = sessions;
+        mapped[stageId] = nextNode;
     }
     return mapped;
+}
+
+function settleRunningStages(
+    prev: Partial<Record<PipelineStageId, StageNodeState>>,
+    options: {
+        targetNodeStatus: 'done' | 'halt';
+        terminalSessionStatus: 'completed' | 'failed';
+        includeDreaming?: boolean;
+        beforeIndex?: number;
+        skipStageId?: PipelineStageId;
+    }
+): Partial<Record<PipelineStageId, StageNodeState>> {
+    const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
+    for (let i = 0; i < STAGE_SEQUENCE.length; i++) {
+        const id = STAGE_SEQUENCE[i]!;
+        if (!options.includeDreaming && id === 'DREAMING') continue;
+        if (options.skipStageId && id === options.skipStageId) continue;
+        if (options.beforeIndex !== undefined && i >= options.beforeIndex) continue;
+        const cur = next[id];
+        if (!cur || (cur.status !== 'active' && cur.status !== 'healing')) continue;
+        const updatedSessions = updateStageSessionsToTerminal(
+            cur.sessions,
+            options.terminalSessionStatus
+        );
+        const settled: StageNodeState = {
+            ...cur,
+            status: options.targetNodeStatus
+        };
+        if (updatedSessions) {
+            settled.sessions = updatedSessions;
+        }
+        next[id] = settled;
+    }
+    return next;
+}
+
+function resolveIncomingNodeStatus(
+    upperStage: string,
+    rawStatus: string | undefined,
+    existingStatus: StageNodeStatus | undefined
+): StageNodeStatus {
+    const mappedRawStatus = rawStatus ? mapRunStatusToStageStatus(rawStatus) : undefined;
+    if (mappedRawStatus !== undefined && mappedRawStatus !== 'active') {
+        return mappedRawStatus;
+    }
+    if (
+        Boolean(STAGE_REPAIR_META[upperStage]) ||
+        (upperStage === 'PROSE_GATE' && existingStatus === 'healing')
+    ) {
+        return 'healing';
+    }
+    return mappedRawStatus ?? 'active';
+}
+
+function formatVolumeAdvancedToast(
+    completedBook: boolean,
+    sealedVolume: number | undefined
+): string {
+    if (completedBook) return '全书已完结封笔';
+    if (sealedVolume !== undefined) return `第 ${sealedVolume} 卷已封存，已开启新卷`;
+    return '换卷封存完成';
+}
+
+function resolveLayoutClass(isWide: boolean, isCompact: boolean): string {
+    if (isWide) return 'ns-layout-wide';
+    if (isCompact) return 'ns-layout-compact';
+    return 'ns-layout-medium';
+}
+
+function resolveTxLockInfo(
+    txLockHeld: boolean | undefined,
+    activeTask: RuntimeTaskKind
+): { txLockStatus: 'locked' | 'free'; txLockHolder: string | null } {
+    const isLocked = txLockHeld !== undefined ? txLockHeld : activeTask !== 'IDLE';
+    const hasHolder = Boolean(txLockHeld) || activeTask !== 'IDLE';
+    return {
+        txLockStatus: isLocked ? 'locked' : 'free',
+        txLockHolder: hasHolder ? activeTask : null
+    };
 }
 
 function formatAttemptLabel(attempt: StageAttemptSession): string {
@@ -1274,24 +1337,13 @@ export function NarrateStudioRoot({
 
                 if (stageName === 'FAILED') {
                     const errText = asString(data['error']) ?? '章节推进失败';
-                    applyStageOverrides((prev) => {
-                        const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
-                        for (const id of STAGE_SEQUENCE) {
-                            const cur = next[id];
-                            if (cur && (cur.status === 'active' || cur.status === 'healing')) {
-                                const updatedSessions = updateStageSessionsToTerminal(
-                                    cur.sessions,
-                                    'failed'
-                                );
-                                next[id] = {
-                                    ...cur,
-                                    status: 'halt',
-                                    ...(updatedSessions ? { sessions: updatedSessions } : {})
-                                };
-                            }
-                        }
-                        return next;
-                    });
+                    applyStageOverrides((prev) =>
+                        settleRunningStages(prev, {
+                            targetNodeStatus: 'halt',
+                            terminalSessionStatus: 'failed',
+                            includeDreaming: true
+                        })
+                    );
                     setSelectedStageSession((prev) =>
                         prev && (prev.status === 'active' || prev.status === 'healing')
                             ? { ...prev, status: 'halt' }
@@ -1309,76 +1361,54 @@ export function NarrateStudioRoot({
                 if (eventChapter !== undefined) {
                     setLiveRunChapter(eventChapter);
                 }
-                const rawSessionId = asString(data['activeSessionId']) ?? asString(data['sessionId']);
-                const rawParentSessionId = asString(data['parentSessionId']);
-                const rawMode = asString(data['mode']);
+                const sessionId = asString(data['activeSessionId']) ?? asString(data['sessionId']);
+                const parentSessionId = asString(data['parentSessionId']);
+                const mode = asString(data['mode']);
                 const role = asString(data['role']);
                 const attempt = asNumber(data['attempt']);
                 const triggerReason = asString(data['triggerReason']);
                 const rawStatus = asString(data['status']);
                 const runId = asString(data['runId']);
                 const resolvedStage = resolveStageId(stageName);
-                if (resolvedStage && (message || rawSessionId || runId)) {
+                if (resolvedStage && (message || sessionId || runId)) {
                     const upperStage = stageName.trim().toUpperCase();
                     const repairMeta = STAGE_REPAIR_META[upperStage];
                     const repairBadge = repairMeta?.badge;
-                    const isHealing = Boolean(repairMeta);
-                    const mappedRawStatus = rawStatus
-                        ? mapRunStatusToStageStatus(rawStatus)
-                        : undefined;
-                    const isTerminalRawStatus =
-                        mappedRawStatus !== undefined && mappedRawStatus !== 'active';
                     const existingCurrent = stageOverridesRef.current[resolvedStage];
-                    const nodeStatus: StageNodeStatus = isTerminalRawStatus
-                        ? mappedRawStatus
-                        : isHealing ||
-                            (upperStage === 'PROSE_GATE' && existingCurrent?.status === 'healing')
-                          ? 'healing'
-                          : (mappedRawStatus ?? 'active');
+                    const nodeStatus = resolveIncomingNodeStatus(
+                        upperStage,
+                        rawStatus,
+                        existingCurrent?.status
+                    );
                     const sessionStatus = rawStatus ?? 'running';
-                    const sessionId = rawSessionId;
-                    const parentSessionId = rawParentSessionId;
-                    const mode = rawMode;
                     const resolvedIdx = STAGE_SEQUENCE.indexOf(resolvedStage);
 
                     applyStageOverrides((prev) => {
-                        const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
-                        for (let i = 0; i < STAGE_SEQUENCE.length; i++) {
-                            const id = STAGE_SEQUENCE[i]!;
-                            if (id === resolvedStage || id === 'DREAMING') continue;
-                            const existing = next[id];
-                            if (
-                                i < resolvedIdx &&
-                                existing &&
-                                (existing.status === 'active' || existing.status === 'healing')
-                            ) {
-                                const updatedSessions = updateStageSessionsToTerminal(
-                                    existing.sessions,
-                                    'completed'
-                                );
-                                next[id] = {
-                                    ...existing,
-                                    status: 'done',
-                                    ...(updatedSessions ? { sessions: updatedSessions } : {})
-                                };
-                            }
-                        }
+                        const next = settleRunningStages(prev, {
+                            targetNodeStatus: 'done',
+                            terminalSessionStatus: 'completed',
+                            beforeIndex: resolvedIdx,
+                            skipStageId: resolvedStage
+                        });
                         const current = next[resolvedStage];
-                        const nextSessions =
-                            sessionId !== undefined
-                                ? upsertStageSession(current?.sessions, {
-                                      stage: stageName,
-                                      status: sessionStatus,
-                                      sessionId,
-                                      ...(runId !== undefined ? { runId } : {}),
-                                      ...(role !== undefined ? { role } : {}),
-                                      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-                                      ...(attempt !== undefined ? { attempt } : {}),
-                                      ...(triggerReason !== undefined ? { triggerReason } : {}),
-                                      ...(mode !== undefined ? { mode } : {}),
-                                      ...(timestamp !== undefined ? { updatedAt: timestamp } : {})
-                                  })
-                                : current?.sessions;
+                        let nextSessions = current?.sessions;
+                        if (sessionId !== undefined) {
+                            nextSessions = upsertStageSession(
+                                current?.sessions,
+                                buildStageAttemptEntry({
+                                    stage: stageName,
+                                    status: sessionStatus,
+                                    sessionId,
+                                    runId,
+                                    role,
+                                    parentSessionId,
+                                    attempt,
+                                    triggerReason,
+                                    mode,
+                                    updatedAt: timestamp
+                                })
+                            );
+                        }
                         next[resolvedStage] = {
                             ...current,
                             status: nodeStatus,
@@ -1434,25 +1464,12 @@ export function NarrateStudioRoot({
 
                 if (stageName === 'COMMITTED') {
                     const committedCh = asNumber(data['chapterNumber']);
-                    applyStageOverrides((prev) => {
-                        const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
-                        for (const id of STAGE_SEQUENCE) {
-                            if (id === 'DREAMING') continue;
-                            const cur = next[id];
-                            if (cur && (cur.status === 'active' || cur.status === 'healing')) {
-                                const updatedSessions = updateStageSessionsToTerminal(
-                                    cur.sessions,
-                                    'completed'
-                                );
-                                next[id] = {
-                                    ...cur,
-                                    status: 'done',
-                                    ...(updatedSessions ? { sessions: updatedSessions } : {})
-                                };
-                            }
-                        }
-                        return next;
-                    });
+                    applyStageOverrides((prev) =>
+                        settleRunningStages(prev, {
+                            targetNodeStatus: 'done',
+                            terminalSessionStatus: 'completed'
+                        })
+                    );
                     setSelectedStageSession((prev) =>
                         prev &&
                         resolveStageId(prev.stageId) !== 'DREAMING' &&
@@ -1564,13 +1581,7 @@ export function NarrateStudioRoot({
             if (event === 'volume:advanced') {
                 const completedBook = Boolean(data['completedBook']);
                 const sealedVolume = asNumber(data['sealedVolume']);
-                showToast(
-                    completedBook
-                        ? '全书已完结封笔'
-                        : sealedVolume !== undefined
-                          ? `第 ${sealedVolume} 卷已封存，已开启新卷`
-                          : '换卷封存完成'
-                );
+                showToast(formatVolumeAdvancedToast(completedBook, sealedVolume));
                 void refreshAllRef.current(selectedChapterRef.current);
                 return;
             }
@@ -1971,12 +1982,12 @@ export function NarrateStudioRoot({
             if (switchingBookRef.current) return;
             const epoch = workspaceEpochRef.current;
             const bookRoot = currentBookRootRef.current;
-            const targetChapter =
-                targetChapterArg !== undefined && targetChapterArg > 0
-                    ? targetChapterArg
-                    : selectedChapterRef.current !== null && selectedChapterRef.current > 0
-                      ? selectedChapterRef.current
-                      : undefined;
+            let targetChapter: number | undefined;
+            if (targetChapterArg !== undefined && targetChapterArg > 0) {
+                targetChapter = targetChapterArg;
+            } else if (selectedChapterRef.current !== null && selectedChapterRef.current > 0) {
+                targetChapter = selectedChapterRef.current;
+            }
             try {
                 const res = await harvestVoice(targetChapter);
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
@@ -2008,16 +2019,16 @@ export function NarrateStudioRoot({
             try {
                 const res = await saveModelRouting(payload);
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
-                setStatus((prev) =>
-                    prev
-                        ? {
-                              ...prev,
-                              ...(res.modelRouting !== undefined ? { modelRouting: res.modelRouting } : {}),
-                              ...(res.roleRouting !== undefined ? { roleRouting: res.roleRouting } : {}),
-                              ...(res.roleDefinitions !== undefined ? { roleDefinitions: res.roleDefinitions } : {})
-                          }
-                        : prev
-                );
+                setStatus((prev) => {
+                    if (!prev) return prev;
+                    const next = { ...prev };
+                    if (res.modelRouting !== undefined) next.modelRouting = res.modelRouting;
+                    if (res.roleRouting !== undefined) next.roleRouting = res.roleRouting;
+                    if (res.roleDefinitions !== undefined) {
+                        next.roleDefinitions = res.roleDefinitions;
+                    }
+                    return next;
+                });
                 await loadStatus().catch(() => undefined);
                 showToast('工种模型分配已保存');
             } catch (err) {
@@ -2287,58 +2298,59 @@ export function NarrateStudioRoot({
     }, [effectiveStages, selectedStageSession]);
 
     const stageArtifact = useMemo<StageArtifactTelemetry>(() => {
-        const sseResolved = latestSseStage
-            ? latestSseStage === 'COMMITTED'
-                ? 'EXTRACTOR'
-                : resolveStageId(latestSseStage)
-            : null;
+        let sseResolved: PipelineStageId | null = null;
+        if (latestSseStage) {
+            sseResolved =
+                latestSseStage === 'COMMITTED' ? 'EXTRACTOR' : resolveStageId(latestSseStage);
+        }
         const targetStageId = inspectedStageId ?? sseResolved;
         const assembly = status?.writerAssemblyReport;
         const estimated =
             assembly?.estimatedTokens && typeof assembly.estimatedTokens === 'object'
                 ? assembly.estimatedTokens
                 : undefined;
-        const assemblyFields: Partial<StageArtifactTelemetry> = {
-            ...(estimated?.staticPrefixTokens !== undefined
-                ? { staticPrefixTokens: estimated.staticPrefixTokens }
-                : {}),
-            ...(estimated?.dynamicTailTokens !== undefined
-                ? { dynamicTailTokens: estimated.dynamicTailTokens }
-                : {}),
-            ...(assembly?.budget !== undefined && assembly.budget !== null
-                ? { budgetLimitTokens: assembly.budget }
-                : {}),
-            ...(assembly?.evictionLevel !== undefined
-                ? { degradationLevel: assembly.evictionLevel }
-                : {}),
-            ...(assembly?.selectedVoiceSample?.text
-                ? {
-                      voiceLruSummary: `${assembly.selectedVoiceSample.tag ?? '声纹'} · ${assembly.selectedVoiceSample.text.slice(0, 40)}`
-                  }
-                : {}),
-            ...(assembly?.strippedSecretCount !== undefined
-                ? { strippedItemsSummary: `已隔离 ${assembly.strippedSecretCount} 项秘密与废案` }
-                : {})
-        };
+        const assemblyFields: Partial<StageArtifactTelemetry> = {};
+        if (estimated?.staticPrefixTokens !== undefined) {
+            assemblyFields.staticPrefixTokens = estimated.staticPrefixTokens;
+        }
+        if (estimated?.dynamicTailTokens !== undefined) {
+            assemblyFields.dynamicTailTokens = estimated.dynamicTailTokens;
+        }
+        if (assembly?.budget !== undefined && assembly.budget !== null) {
+            assemblyFields.budgetLimitTokens = assembly.budget;
+        }
+        if (assembly?.evictionLevel !== undefined) {
+            assemblyFields.degradationLevel = assembly.evictionLevel;
+        }
+        if (assembly?.selectedVoiceSample?.text) {
+            assemblyFields.voiceLruSummary = `${assembly.selectedVoiceSample.tag ?? '声纹'} · ${assembly.selectedVoiceSample.text.slice(0, 40)}`;
+        }
+        if (assembly?.strippedSecretCount !== undefined) {
+            assemblyFields.strippedItemsSummary = `已隔离 ${assembly.strippedSecretCount} 项秘密与废案`;
+        }
 
         if (targetStageId) {
             const nodeState = effectiveStages[targetStageId];
             const idx = STAGE_SEQUENCE.indexOf(targetStageId);
             const meta = PIPELINE_STAGE_META.find((item) => item.id === targetStageId);
-            const base =
-                !inspectedStageId || inspectedStageId === sseResolved
-                    ? deriveStageArtifact(latestSseStage)
-                    : {
-                          selectedStageIndex: idx >= 0 ? idx : 0,
-                          stageName: meta?.label ?? targetStageId,
-                          stageStatus: nodeState?.badge ?? nodeState?.status ?? '就绪',
-                          stageSummary: nodeState?.summary ?? DEFAULT_STAGE_SUMMARIES[targetStageId]
-                      };
+            let base: StageArtifactTelemetry;
+            if (!inspectedStageId || inspectedStageId === sseResolved) {
+                base = deriveStageArtifact(latestSseStage);
+            } else {
+                base = {
+                    selectedStageIndex: idx >= 0 ? idx : 0,
+                    stageName: meta?.label ?? targetStageId,
+                    stageStatus: nodeState?.badge ?? nodeState?.status ?? '就绪',
+                    stageSummary: nodeState?.summary ?? DEFAULT_STAGE_SUMMARIES[targetStageId]
+                };
+            }
             return {
                 ...base,
                 ...assemblyFields,
                 ...(nodeState?.sessionId ? { sessionId: nodeState.sessionId } : {}),
-                ...(nodeState?.sessions && nodeState.sessions.length > 0 ? { sessions: nodeState.sessions } : {})
+                ...(nodeState?.sessions && nodeState.sessions.length > 0
+                    ? { sessions: nodeState.sessions }
+                    : {})
             };
         }
 
@@ -2363,16 +2375,14 @@ export function NarrateStudioRoot({
             verified: false,
             ...(issue.quote_source !== undefined ? { reason: issue.quote_source } : {})
         }));
+        const recentFindings =
+            statusFindings.length > 0 ? statusFindings : factChecker.recentFindings;
         return {
             totalChecked: Math.max(factChecker.totalChecked, 1),
             verifiedPassCount: Math.max(factChecker.verifiedPassCount, last.passed ? 1 : 0),
             filteredOutCount: Math.max(factChecker.filteredOutCount, last.filteredOutCount ?? 0),
             blockedCount: Math.max(factChecker.blockedCount ?? 0, last.replanCount + last.rewriteCount),
-            ...(statusFindings.length > 0
-                ? { recentFindings: statusFindings }
-                : factChecker.recentFindings
-                  ? { recentFindings: factChecker.recentFindings }
-                  : {})
+            ...(recentFindings ? { recentFindings } : {})
         };
     }, [factChecker, status?.lastCheckerResult]);
 
@@ -2481,11 +2491,7 @@ export function NarrateStudioRoot({
 
     const isWide = containerWidth >= 1200;
     const isCompact = containerWidth < 820;
-    const layoutClass = isWide
-        ? 'ns-layout-wide'
-        : isCompact
-          ? 'ns-layout-compact'
-          : 'ns-layout-medium';
+    const layoutClass = resolveLayoutClass(isWide, isCompact);
     const shellStyle = {
         '--ns-right-w': rightOpen && !isCompact ? '340px' : '0px'
     } as React.CSSProperties;
@@ -2503,6 +2509,128 @@ export function NarrateStudioRoot({
     );
 
     const activeStageAttemptCount = selectedStageSession ? 1 : 0;
+    const txLockInfo = resolveTxLockInfo(status?.txLockHeld, activeTask);
+
+    const renderRightTabContent = (): React.ReactElement | null => {
+        if (rightTab === 'trace') {
+            return (
+                <StageSessionViewer
+                    selection={selectedStageSession}
+                    sessionsService={sessionsService}
+                    SessionProvider={SessionProvider}
+                    renderStageConversation={renderStageConversation}
+                    effectiveModelLabel={selectedStageEffectiveModel}
+                    attemptSessions={selectedStageAttempts}
+                    onSelectAttemptSession={handleInspectStageSessionById}
+                    liveEvents={
+                        selectedStageSession
+                            ? liveSessionEvents[selectedStageSession.sessionId]
+                            : undefined
+                    }
+                    onClose={() => setRightTab('status')}
+                />
+            );
+        }
+        if (rightTab === 'status') {
+            return (
+                <RightOpsInspector
+                    walLock={{
+                        walPhase: status?.walPhase ?? 'IDLE',
+                        timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
+                        txLockStatus: txLockInfo.txLockStatus,
+                        txLockHolder: txLockInfo.txLockHolder,
+                        lastCommittedChapter: status?.lastCommittedChapter ?? 0,
+                        activeChapter: status?.activeChapter ?? null,
+                        featCommitSha:
+                            status?.featCommitSha ??
+                            status?.recentCommits?.featCommitSha ??
+                            centerChapterDetail?.featCommitSha ??
+                            null,
+                        stateCommitSha:
+                            status?.stateCommitSha ??
+                            status?.recentCommits?.stateCommitSha ??
+                            centerChapterDetail?.stateCommitSha ??
+                            null
+                    }}
+                    modelPool={{
+                        fastModel: modelPools.fastModel,
+                        strongModel: modelPools.strongModel,
+                        auditModel: modelPools.auditModel,
+                        inputTokens: aggregateTokens.inputTokens,
+                        cacheReadTokens: aggregateTokens.cacheReadTokens,
+                        cacheWriteTokens: aggregateTokens.cacheWriteTokens,
+                        outputTokens: aggregateTokens.outputTokens
+                    }}
+                    stageArtifact={stageArtifact}
+                    proseGate={{
+                        mattr500: latestMetrics.mattr500,
+                        kontoyiannisEntropy: latestMetrics.kontoyiannisEntropy,
+                        sentenceLengthCv: latestMetrics.sentenceLengthCv,
+                        clicheDensityPer1k: latestMetrics.clicheDensityPer1k,
+                        recentViolations: gateViolations
+                    }}
+                    factChecker={effectiveFactChecker}
+                    dreaming={{
+                        dirtyEntityCount: status?.dirtyEntityCount ?? null,
+                        dirtyThreshold: status?.dirtyEntityThreshold ?? null,
+                        coldArchiveCount:
+                            entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
+                        spotlightQueue: effectiveSpotlightQueue,
+                        accumulatedWords: status?.dreamWatermark?.accumulated_words_since_dream
+                    }}
+                    dreamWatermark={status?.dreamWatermark ?? null}
+                    selectedVoiceSample={status?.writerAssemblyReport?.selectedVoiceSample ?? null}
+                    strippedSecretCount={status?.writerAssemblyReport?.strippedSecretCount}
+                    haltDiagnostic={haltDiagnostic}
+                    modelRouting={status?.modelRouting ?? null}
+                    entities={inspectorEntities}
+                    openThreads={inspectorOpenThreads}
+                    volumeProgress={inspectorVolumeProgress}
+                    busy={isBusy}
+                    onSelectEntity={() => {
+                        handleOpenView('entities');
+                        if (isCompact) setRightOpen(false);
+                    }}
+                    onSelectChapter={(ch) => {
+                        handleSelectChapter(ch);
+                        if (isCompact) setRightOpen(false);
+                    }}
+                    onTriggerDreaming={() => {
+                        void handleDream().catch((err) => {
+                            showToast(err instanceof Error ? err.message : String(err), 'error');
+                        });
+                    }}
+                    onInspectHalt={() => {
+                        const epoch = workspaceEpochRef.current;
+                        void fetchViewHalt().then((nextHalt) => {
+                            if (!isCurrentWorkspace(epoch)) return;
+                            setHaltView(nextHalt);
+                            const diag = mapHaltDiagnostic(nextHalt);
+                            if (diag) {
+                                showToast(`${diag.kind}: ${diag.reason}`, 'error');
+                            }
+                        });
+                    }}
+                    onInspectStageSession={handleInspectStageSessionById}
+                />
+            );
+        }
+        if (rightTab === 'routing') {
+            return (
+                <RoleRoutingEditor
+                    resetKey={status?.bookRoot ?? null}
+                    poolRoutes={effectivePoolRoutes}
+                    modelRouting={status?.modelRouting ?? null}
+                    roleRouting={status?.roleRouting ?? null}
+                    roleDefinitions={status?.roleDefinitions ?? null}
+                    availableModels={status?.availableModels ?? null}
+                    busy={isBusy}
+                    onSaveModelRouting={handleSaveModelRouting}
+                />
+            );
+        }
+        return null;
+    };
 
     return (
         <div
@@ -2510,7 +2638,7 @@ export function NarrateStudioRoot({
             className={`ns-studio-shell ${layoutClass} ${rightOpen ? 'ns-right-open' : 'ns-right-closed'}`}
             style={shellStyle}
         >
-            {isWide ? (
+            {isWide && (
                 <LeftBookNav
                     currentBookRoot={currentBookRoot}
                     currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
@@ -2534,7 +2662,7 @@ export function NarrateStudioRoot({
                     onSelectChapter={handleSelectChapter}
                     onOpenView={handleOpenView}
                 />
-            ) : null}
+            )}
 
             <CenterWorkbench
                 bookTitle={status?.title ?? activeBookSummary?.title}
@@ -2650,15 +2778,15 @@ export function NarrateStudioRoot({
                 onSelectStageSession={handleSelectStageSession}
             />
 
-            {isCompact && rightOpen ? (
+            {isCompact && rightOpen && (
                 <div
                     className="ns-drawer-backdrop"
                     aria-hidden="true"
                     onClick={() => setRightOpen(false)}
                 />
-            ) : null}
+            )}
 
-            {rightOpen ? (
+            {rightOpen && (
                 <aside
                     className={`ns-right-pane${isCompact ? ' ns-right-drawer' : ''}`}
                     aria-label="右侧状态与配置栏"
@@ -2681,9 +2809,9 @@ export function NarrateStudioRoot({
                                 onClick={() => setRightTab('trace')}
                             >
                                 思考过程
-                                {activeStageAttemptCount > 0 && selectedStageSession?.status === 'active' ? (
+                                {activeStageAttemptCount > 0 && selectedStageSession?.status === 'active' && (
                                     <span className="ns-right-tab-dot ns-dot-live" aria-hidden="true" />
-                                ) : null}
+                                )}
                             </button>
                             <button
                                 type="button"
@@ -2696,9 +2824,9 @@ export function NarrateStudioRoot({
                                 onClick={() => setRightTab('status')}
                             >
                                 运行状态
-                                {safeHaltInfo || syncConflictInfo ? (
+                                {(safeHaltInfo || syncConflictInfo) && (
                                     <span className="ns-right-tab-dot" aria-hidden="true" />
-                                ) : null}
+                                )}
                             </button>
                             <button
                                 type="button"
@@ -2713,7 +2841,7 @@ export function NarrateStudioRoot({
                                 模型分配
                             </button>
                         </div>
-                        {isCompact ? (
+                        {isCompact && (
                             <button
                                 type="button"
                                 className="ns-btn ns-btn-icon-only"
@@ -2722,7 +2850,7 @@ export function NarrateStudioRoot({
                             >
                                 ×
                             </button>
-                        ) : null}
+                        )}
                     </div>
 
                     <div
@@ -2732,137 +2860,10 @@ export function NarrateStudioRoot({
                         aria-labelledby={`ns-right-tab-${rightTab}`}
                         tabIndex={0}
                     >
-                        {rightTab === 'trace' ? (
-                            <StageSessionViewer
-                                selection={selectedStageSession}
-                                sessionsService={sessionsService}
-                                SessionProvider={SessionProvider}
-                                renderStageConversation={renderStageConversation}
-                                effectiveModelLabel={selectedStageEffectiveModel}
-                                attemptSessions={selectedStageAttempts}
-                                onSelectAttemptSession={handleInspectStageSessionById}
-                                liveEvents={
-                                    selectedStageSession
-                                        ? liveSessionEvents[selectedStageSession.sessionId]
-                                        : undefined
-                                }
-                                onClose={() => setRightTab('status')}
-                            />
-                        ) : null}
-
-                        {rightTab === 'status' ? (
-                            <RightOpsInspector
-                                walLock={{
-                                    walPhase: status?.walPhase ?? 'IDLE',
-                                    timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
-                                    txLockStatus:
-                                        status?.txLockHeld !== undefined
-                                            ? status.txLockHeld
-                                                ? 'locked'
-                                                : 'free'
-                                            : activeTask !== 'IDLE'
-                                              ? 'locked'
-                                              : 'free',
-                                    txLockHolder:
-                                        status?.txLockHeld || activeTask !== 'IDLE'
-                                            ? activeTask
-                                            : null,
-                                    lastCommittedChapter: status?.lastCommittedChapter ?? 0,
-                                    activeChapter: status?.activeChapter ?? null,
-                                    featCommitSha:
-                                        status?.featCommitSha ??
-                                        status?.recentCommits?.featCommitSha ??
-                                        centerChapterDetail?.featCommitSha ??
-                                        null,
-                                    stateCommitSha:
-                                        status?.stateCommitSha ??
-                                        status?.recentCommits?.stateCommitSha ??
-                                        centerChapterDetail?.stateCommitSha ??
-                                        null
-                                }}
-                                modelPool={{
-                                    fastModel: modelPools.fastModel,
-                                    strongModel: modelPools.strongModel,
-                                    auditModel: modelPools.auditModel,
-                                    inputTokens: aggregateTokens.inputTokens,
-                                    cacheReadTokens: aggregateTokens.cacheReadTokens,
-                                    cacheWriteTokens: aggregateTokens.cacheWriteTokens,
-                                    outputTokens: aggregateTokens.outputTokens
-                                }}
-                                stageArtifact={stageArtifact}
-                                proseGate={{
-                                    mattr500: latestMetrics.mattr500,
-                                    kontoyiannisEntropy: latestMetrics.kontoyiannisEntropy,
-                                    sentenceLengthCv: latestMetrics.sentenceLengthCv,
-                                    clicheDensityPer1k: latestMetrics.clicheDensityPer1k,
-                                    recentViolations: gateViolations
-                                }}
-                                factChecker={effectiveFactChecker}
-                                dreaming={{
-                                    dirtyEntityCount: status?.dirtyEntityCount ?? null,
-                                    dirtyThreshold: status?.dirtyEntityThreshold ?? null,
-                                    coldArchiveCount:
-                                        entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
-                                    spotlightQueue: effectiveSpotlightQueue,
-                                    accumulatedWords:
-                                        status?.dreamWatermark?.accumulated_words_since_dream
-                                }}
-                                dreamWatermark={status?.dreamWatermark ?? null}
-                                selectedVoiceSample={
-                                    status?.writerAssemblyReport?.selectedVoiceSample ?? null
-                                }
-                                strippedSecretCount={
-                                    status?.writerAssemblyReport?.strippedSecretCount
-                                }
-                                haltDiagnostic={haltDiagnostic}
-                                modelRouting={status?.modelRouting ?? null}
-                                entities={inspectorEntities}
-                                openThreads={inspectorOpenThreads}
-                                volumeProgress={inspectorVolumeProgress}
-                                busy={isBusy}
-                                onSelectEntity={() => {
-                                    handleOpenView('entities');
-                                    if (isCompact) setRightOpen(false);
-                                }}
-                                onSelectChapter={(ch) => {
-                                    handleSelectChapter(ch);
-                                    if (isCompact) setRightOpen(false);
-                                }}
-                                onTriggerDreaming={() => {
-                                    void handleDream().catch((err) => {
-                                        showToast(err instanceof Error ? err.message : String(err), 'error');
-                                    });
-                                }}
-                                onInspectHalt={() => {
-                                    const epoch = workspaceEpochRef.current;
-                                    void fetchViewHalt().then((nextHalt) => {
-                                        if (!isCurrentWorkspace(epoch)) return;
-                                        setHaltView(nextHalt);
-                                        const diag = mapHaltDiagnostic(nextHalt);
-                                        if (diag) {
-                                            showToast(`${diag.kind}: ${diag.reason}`, 'error');
-                                        }
-                                    });
-                                }}
-                                onInspectStageSession={handleInspectStageSessionById}
-                            />
-                        ) : null}
-
-                        {rightTab === 'routing' ? (
-                            <RoleRoutingEditor
-                                resetKey={status?.bookRoot ?? null}
-                                poolRoutes={effectivePoolRoutes}
-                                modelRouting={status?.modelRouting ?? null}
-                                roleRouting={status?.roleRouting ?? null}
-                                roleDefinitions={status?.roleDefinitions ?? null}
-                                availableModels={status?.availableModels ?? null}
-                                busy={isBusy}
-                                onSaveModelRouting={handleSaveModelRouting}
-                            />
-                        ) : null}
+                        {renderRightTabContent()}
                     </div>
                 </aside>
-            ) : null}
+            )}
 
             <BootBookModal
                 open={bootModalOpen}
@@ -3070,6 +3071,46 @@ export interface StageConversationSlotPanelProps {
     renderFactorySlot?: StageRenderFactorySlot | undefined;
 }
 
+function resolveConversationSlotPhase(params: {
+    activeTargetsSize: number;
+    session: {
+        blank?: boolean;
+        awaitingFirstTurn?: boolean;
+        running?: boolean;
+        promptAttempted?: boolean;
+        openState?: string;
+        subagent?: { address: { mode: string }; parentAvailable?: boolean } | null;
+    };
+    summaryBlank: boolean | undefined;
+}): { phase: 'settling' | 'hero' | 'active'; hero: boolean } {
+    const { activeTargetsSize, session, summaryBlank } = params;
+    let shellPhase: 'active' | 'engaging' | 'blank' = 'blank';
+    if (
+        activeTargetsSize > 0 ||
+        (!session?.blank && !session?.awaitingFirstTurn) ||
+        session?.running
+    ) {
+        shellPhase = 'active';
+    } else if (session?.promptAttempted) {
+        shellPhase = 'engaging';
+    }
+    const parentAvailabilityPending =
+        session?.subagent?.address?.mode === 'continuable' &&
+        session.subagent.parentAvailable === undefined;
+    const settling =
+        (shellPhase === 'blank' && session?.openState === 'loading' && summaryBlank !== true) ||
+        parentAvailabilityPending;
+    const hero =
+        shellPhase === 'blank' && (session?.openState === 'open' || summaryBlank === true);
+    let phase: 'settling' | 'hero' | 'active' = 'active';
+    if (settling) {
+        phase = 'settling';
+    } else if (hero) {
+        phase = 'hero';
+    }
+    return { phase, hero };
+}
+
 function StageConversationSlotBody({
     sessionId,
     view = 'chat',
@@ -3089,22 +3130,11 @@ function StageConversationSlotBody({
     const conversation = useConversation((value) => value);
     const summaryBlank = useSessions((state) => state?.byId?.[sessionId]?.blank);
     const activeTargetsSize = conversation?.activeTargets?.size ?? 0;
-    const shellPhase =
-        activeTargetsSize > 0 ||
-        (!session?.blank && !session?.awaitingFirstTurn) ||
-        session?.running
-            ? 'active'
-            : session?.promptAttempted
-              ? 'engaging'
-              : 'blank';
-    const parentAvailabilityPending =
-        session?.subagent?.address?.mode === 'continuable' &&
-        session.subagent.parentAvailable === undefined;
-    const settling =
-        (shellPhase === 'blank' && session?.openState === 'loading' && summaryBlank !== true) ||
-        parentAvailabilityPending;
-    const hero =
-        shellPhase === 'blank' && (session?.openState === 'open' || summaryBlank === true);
+    const { phase, hero } = resolveConversationSlotPhase({
+        activeTargetsSize,
+        session,
+        summaryBlank
+    });
 
     return (
         <StageViewModeContext.Provider value={view}>
@@ -3112,7 +3142,7 @@ function StageConversationSlotBody({
                 'conversation.content',
                 {
                     variant: 'embedded',
-                    phase: settling ? 'settling' : hero ? 'hero' : 'active',
+                    phase,
                     hero
                 },
                 {
@@ -3301,26 +3331,26 @@ export function apply(ctx: Context): void {
     const registerMainSlots = (withSessionUi: boolean): (() => void) => {
         const disposers: Array<() => void> = [];
 
+        const mainMeta: Record<string, unknown> = {
+            name: 'main',
+            key: PANEL_ID,
+            inject: () => ({ title: 'NarrateOS 创作室' })
+        };
+        if (withSessionUi) {
+            mainMeta['children'] = {
+                [STAGE_CONVERSATION_SLOT]: {
+                    kind: 'single',
+                    scope: 'session'
+                }
+            };
+        }
+
         const disposeMain = injectSlot(
             'main',
             registerSlot
                 ? () =>
                       registerSlot(
-                          {
-                              name: 'main',
-                              key: PANEL_ID,
-                              ...(withSessionUi
-                                  ? {
-                                        children: {
-                                            [STAGE_CONVERSATION_SLOT]: {
-                                                kind: 'single',
-                                                scope: 'session'
-                                            }
-                                        }
-                                    }
-                                  : {}),
-                              inject: () => ({ title: 'NarrateOS 创作室' })
-                          },
+                          mainMeta,
                           NarrateStudioPanel as React.FC<Record<string, unknown>>
                       )
                 : {
