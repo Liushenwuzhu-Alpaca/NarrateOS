@@ -889,6 +889,39 @@ export function registerNarrateRoutes(
         }
     };
 
+    const handleVoiceHarvest = async (req: IncomingMessage, res: ServerResponse) => {
+        if (!assertMethod(req, res, 'POST')) return;
+        let body: Record<string, unknown>;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        let chapterNumber = 1;
+        if (body['chapterNumber'] !== undefined) {
+            const chNum = body['chapterNumber'];
+            if (
+                typeof chNum !== 'number' ||
+                !Number.isInteger(chNum) ||
+                chNum <= 0 ||
+                chNum > 9999
+            ) {
+                sendJson(res, 400, { error: 'chapterNumber 必须为 1 到 9999 的正整数' });
+                return;
+            }
+            chapterNumber = chNum;
+        }
+
+        try {
+            const result = await controller.harvestVoiceFromChapter(chapterNumber);
+            sendJson(res, 200, result);
+        } catch (err) {
+            sendErrorResponse(res, err);
+        }
+    };
+
     const handleAdvanceVolume = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
         let body: Record<string, unknown>;
@@ -1050,6 +1083,11 @@ export function registerNarrateRoutes(
         }),
         webServer.register({ kind: 'exact', path: '/api/narrate/sync', handler: handleSync }),
         webServer.register({ kind: 'exact', path: '/api/narrate/dream', handler: handleDream }),
+        webServer.register({
+            kind: 'exact',
+            path: '/api/narrate/voice-harvest',
+            handler: handleVoiceHarvest
+        }),
         webServer.register({
             kind: 'exact',
             path: '/api/narrate/volume/advance',

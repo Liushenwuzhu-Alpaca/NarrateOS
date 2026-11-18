@@ -16,7 +16,8 @@ export const ControlledBookToolNameSchema = z.enum([
     'book_read',
     'book_grep',
     'book_glob',
-    'book_edit'
+    'book_edit',
+    'patch_paragraphs'
 ]);
 
 /** 支持的终态门禁工具名 */
@@ -26,7 +27,8 @@ export const YieldToolNameSchema = z.enum([
     'yield_verdict',
     'yield_state_patch',
     'yield_dream_commit',
-    'yield_boot_bundle'
+    'yield_boot_bundle',
+    'yield_patched_draft'
 ]);
 
 /** 外部化角色配置 YAML Schema (roles/*.yml) */

@@ -17,4 +17,4 @@
 - **引擎与作品物理隔离**：根仓库仅承载通用插件源码、模式配置与测试夹具，不续写任何具体小说；每部作品独立存放于各自的 `books/<slug>/` Git 子仓库；[`manuscript/vol-01/ch-01.md`](manuscript/vol-01/ch-01.md) 保持只读原样。
 - **扎根 DSH 插件生态与配置解耦**：业务规范（`ARCHITECTURE.md` / `WRITING-CRAFT.md`）保持纯领域表达；工程实现扎根 `@deepseek-ai/dsh` Cordis 插件与顶层创作模式（`dsh-preset-narrateos`），Host 后端包与浏览器 `dsh-client-ui-*` 前端包物理分离；各工种的模型池、工具白名单、调用配额与系统提示词外置为声明式配置文件（`roles/*.yml` 与 `prompts/*.md`），不在代码中硬编码。
 - **常量机制与配置变量分离**：存储与规则层仅固化槽位结构、因果偏序、排他锁与确定性门禁；写手窗口预算（`writer_token_budget`）、自动回滚章数（`max_auto_rollback_chapters`）、叙述人称主观度、声纹标签集合、焦点角色人数与外置认知插件（`craft_plugins`）均留作可配变量或模型自决项，零先验文学分类枚举。
-- **净室写手与正向槽位表达**：执笔写手（`Writer`）与局部修补（`Patch`）保持零工具单轮净室调用，物理剥离 `OMNISCIENT_SECRET`、`WARPED`、作者契约（`world/author_charter.md`）与导演禁区（`world/arc_director_plan.md`）；提示词与上下文装配件统一陈述排他的正向具象目标状态。
+- **净室写手与内存修补隔离**：执笔写手（`Writer`，含 `WRITER` / `REWRITE`）保持零工具单轮净室调用（`REWRITE` 仅接收经正向转写且脱敏的 `rewriteFeedback`）；局部修补（`Patch`）运行于净室内存段落编辑闭环（仅配纯内存 `patch_paragraphs` 与 `yield_patched_draft`，`maxReadCalls: 0`、零磁盘读写）。二者均物理剥离 `OMNISCIENT_SECRET`、`WARPED`、作者契约（`world/author_charter.md`）、导演禁区（`world/arc_director_plan.md`）与宿主 `AGENTS.md`；提示词与上下文装配件统一陈述排他的正向具象目标状态。

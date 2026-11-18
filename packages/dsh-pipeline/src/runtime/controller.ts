@@ -154,7 +154,7 @@ function extractToolResultTextPreview(content: unknown): string | undefined {
         }
     }
     if (parts.length === 0) return undefined;
-    return parts.join('\n').slice(0, 800);
+    return parts.join('\n').slice(0, 32_000);
 }
 
 /** 将 DSH SessionEvent[] (tool/call, tool/result 等) 映射为 StageSessionEventItem[] */
@@ -666,6 +666,8 @@ export class NarrateRuntimeController {
                         ? { parentSessionId: matched.parentSessionId }
                         : {}),
                     ...(matched.mode ? { mode: matched.mode } : {}),
+                    ...(matched.attempt !== undefined ? { attempt: matched.attempt } : {}),
+                    ...(matched.triggerReason ? { triggerReason: matched.triggerReason } : {}),
                     live: matched.status === 'running',
                     events
                 };
@@ -721,6 +723,8 @@ export class NarrateRuntimeController {
             activeSessionId: evt.sessionId,
             sessionId: evt.sessionId,
             runId: evt.runId,
+            ...(evt.attempt !== undefined ? { attempt: evt.attempt } : {}),
+            ...(evt.triggerReason ? { triggerReason: evt.triggerReason } : {}),
             message: `${evt.role} 运行中`,
             timestamp: now
         });
