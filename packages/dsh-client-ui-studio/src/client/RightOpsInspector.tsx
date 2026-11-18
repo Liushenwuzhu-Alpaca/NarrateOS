@@ -520,8 +520,8 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
 
             <div className="ns-i-list">
                 {/* 1. 本章给写手装入的资料 */}
-                <section className="panel-section ns-i-section" aria-label="本章给写手装入的资料">
-                    <div className="sec-head ns-i-card-head">
+                <section className="ns-panel-section" aria-label="本章给写手装入的资料">
+                    <div className="ns-sec-head">
                         <span>本章给写手装入的资料</span>
                         <span className="ns-pill ns-pill-brand ns-mono">
                             {hasAssemblyStats
@@ -534,15 +534,15 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
 
                     {hasAssemblyStats ? (
                         <>
-                            <div className="stat-row ns-i-card-head">
+                            <div className="ns-stat-row">
                                 <span>固定背景与人物声纹</span>
                                 <span className="ns-mono">{formatTokenCount(staticTokens)} Token</span>
                             </div>
-                            <div className="stat-row ns-i-card-head">
+                            <div className="ns-stat-row">
                                 <span>前文片段与本章细纲</span>
                                 <span className="ns-mono">{formatTokenCount(dynamicTokens)} Token</span>
                             </div>
-                            <div className="stat-row ns-i-card-head">
+                            <div className="ns-stat-row">
                                 <span>预算上限与总装配</span>
                                 <span className="ns-mono">
                                     {budgetLimit > 0
@@ -571,7 +571,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         </div>
                     )}
 
-                    <div className="stat-row ns-i-card-head">
+                    <div className="ns-stat-row">
                         <span>窗口降级等级</span>
                         <span
                             className={
@@ -668,8 +668,8 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                 </section>
 
                 {/* 2. 文风体检 */}
-                <section className="panel-section ns-i-section" aria-label="文风体检">
-                    <div className="sec-head ns-i-card-head">
+                <section className="ns-panel-section" aria-label="文风体检">
+                    <div className="ns-sec-head">
                         <span>文风体检</span>
                         <span
                             className={
@@ -814,13 +814,13 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                 </section>
 
                 {/* 3. 自动整理进度 */}
-                <section className="panel-section ns-i-section" aria-label="自动整理进度">
-                    <div className="sec-head ns-i-card-head">
+                <section className="ns-panel-section" aria-label="自动整理进度">
+                    <div className="ns-sec-head">
                         <span>自动整理进度</span>
                         <span className="ns-pill ns-pill-muted ns-mono">{wordWatermarkLabel}</span>
                     </div>
 
-                    <div className="stat-row ns-i-card-head">
+                    <div className="ns-stat-row">
                         <span>待整理变动人物</span>
                         <span className={hasDirtyWatermark ? 'ns-mono' : 'ns-mono ns-i-muted'}>
                             {hasDirtyWatermark
@@ -841,7 +841,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         </div>
                     )}
 
-                    <div className="stat-row ns-i-card-head">
+                    <div className="ns-stat-row">
                         <span>冷宫归档数</span>
                         <span className="ns-mono">{dreaming.coldArchiveCount} 冷归档</span>
                     </div>
@@ -970,7 +970,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                 </section>
 
                 {/* 4. 底层校验与提交明细（默认折叠） */}
-                <section className="ns-i-acc" aria-label="底层校验与提交明细">
+                <section className="ns-panel-section" aria-label="底层校验与提交明细">
                     <button
                         type="button"
                         className="ns-i-acc-head"

@@ -131,9 +131,11 @@ function normalizeSubagentMode(mode: string | undefined): StageSessionSubagentMo
 
 /** 规范化阶段工种展示名称：第 4 步核查统一显示为 4. Checker / Checker */
 function normalizeStageRoleDisplayLabel(stageId: string, stageLabel: string): string {
+    const upperId = stageId.trim().toUpperCase();
     const trimmed = stageLabel.trim();
     if (
-        stageId.toUpperCase() === 'FACT_CHECKER' ||
+        upperId === 'FACT_CHECK' ||
+        upperId === 'FACT_CHECKER' ||
         /^(?:4\.\s*)?fact[\s_-]*check(?:er)?$/i.test(trimmed)
     ) {
         return '4. Checker';
@@ -141,37 +143,104 @@ function normalizeStageRoleDisplayLabel(stageId: string, stageLabel: string): st
     return trimmed.replace(/fact[\s_-]*checker/gi, 'Checker').replace(/fact[\s_-]*check/gi, 'Checker');
 }
 
+function eventContentSignature(ev: StageSessionDetailEvent): string {
+    return `${ev.kind}|${ev.callId ?? ''}|${ev.toolName ?? ''}|${ev.status ?? ''}|${ev.text ?? ''}`;
+}
+
+function isContiguousSubsequence(
+    haystack: readonly string[],
+    needle: readonly string[]
+): boolean {
+    if (needle.length === 0) return true;
+    if (needle.length > haystack.length) return false;
+    for (let start = 0; start <= haystack.length - needle.length; start += 1) {
+        let matched = true;
+        for (let offset = 0; offset < needle.length; offset += 1) {
+            if (haystack[start + offset] !== needle[offset]) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
 /** 合并已落盘归档事件与实时 stage:event SSE 增量事件，避免重复条目 */
 function mergeSessionEvents(
     archived: readonly StageSessionDetailEvent[] | undefined,
-    live: readonly StageSessionDetailEvent[] | undefined
+    live: readonly StageSessionDetailEvent[] | undefined,
+    isTerminal = false
 ): StageSessionDetailEvent[] {
     const archivedList = Array.isArray(archived) ? archived : [];
     const liveList = Array.isArray(live) ? live : [];
+    if (isTerminal && archivedList.length > 0) return [...archivedList];
     if (archivedList.length === 0) return [...liveList];
     if (liveList.length === 0) return [...archivedList];
 
-    const seen = new Set<string>();
-    const merged: StageSessionDetailEvent[] = [];
-    const keyOf = (ev: StageSessionDetailEvent, fallbackIndex: number): string => {
-        if (typeof ev.seq === 'number') {
-            return `seq:${ev.seq}:${ev.kind}:${ev.callId ?? ''}`;
+    const bothHaveSeq =
+        archivedList.every((ev) => typeof ev.seq === 'number') &&
+        liveList.every((ev) => typeof ev.seq === 'number');
+    if (bothHaveSeq) {
+        const seenSeq = new Set<string>();
+        const merged: StageSessionDetailEvent[] = [];
+        for (const ev of [...archivedList, ...liveList]) {
+            const key = `seq:${ev.seq}:${ev.kind}:${ev.callId ?? ''}`;
+            if (!seenSeq.has(key)) {
+                seenSeq.add(key);
+                merged.push(ev);
+            }
         }
-        return `raw:${fallbackIndex}:${ev.kind}:${ev.callId ?? ''}:${ev.toolName ?? ''}:${ev.text ?? ''}`;
-    };
-
-    for (let i = 0; i < archivedList.length; i += 1) {
-        const ev = archivedList[i]!;
-        seen.add(keyOf(ev, i));
-        merged.push(ev);
+        return merged;
     }
-    for (let i = 0; i < liveList.length; i += 1) {
-        const ev = liveList[i]!;
-        const key = keyOf(ev, i);
-        if (!seen.has(key)) {
-            seen.add(key);
-            merged.push(ev);
+
+    const archivedSigs = archivedList.map(eventContentSignature);
+    const liveSigs = liveList.map(eventContentSignature);
+    if (isContiguousSubsequence(archivedSigs, liveSigs)) {
+        return [...archivedList];
+    }
+
+    // 计算归档尾部与实时流头部的最大重叠长度
+    let overlap = 0;
+    const maxOverlap = Math.min(archivedSigs.length, liveSigs.length);
+    for (let len = maxOverlap; len >= 1; len -= 1) {
+        let allMatch = true;
+        for (let i = 0; i < len; i += 1) {
+            if (archivedSigs[archivedSigs.length - len + i] !== liveSigs[i]) {
+                allMatch = false;
+                break;
+            }
         }
+        if (allMatch) {
+            overlap = len;
+            break;
+        }
+    }
+
+    const seenCallKeys = new Set<string>();
+    const seenSeq = new Set<string>();
+    for (const ev of archivedList) {
+        if (typeof ev.seq === 'number') {
+            seenSeq.add(`seq:${ev.seq}:${ev.kind}:${ev.callId ?? ''}`);
+        }
+        if ((ev.kind === 'tool-call' || ev.kind === 'tool-result') && ev.callId) {
+            seenCallKeys.add(`${ev.kind}:${ev.callId}`);
+        }
+    }
+
+    const merged = [...archivedList];
+    for (const ev of liveList.slice(overlap)) {
+        if (typeof ev.seq === 'number') {
+            const seqKey = `seq:${ev.seq}:${ev.kind}:${ev.callId ?? ''}`;
+            if (seenSeq.has(seqKey)) continue;
+            seenSeq.add(seqKey);
+        }
+        if ((ev.kind === 'tool-call' || ev.kind === 'tool-result') && ev.callId) {
+            const callKey = `${ev.kind}:${ev.callId}`;
+            if (seenCallKeys.has(callKey)) continue;
+            seenCallKeys.add(callKey);
+        }
+        merged.push(ev);
     }
     return merged;
 }
@@ -368,18 +437,68 @@ function normalizeEventsPayload(events: readonly StageSessionDetailEvent[] | und
     if (!events || events.length === 0) {
         return { thinking: undefined, toolCalls: [], output: undefined };
     }
-    const thinkingParts: string[] = [];
-    const outputParts: string[] = [];
+    let thinkingBuffer = '';
+    let thinkingSeparated = false;
+    let outputBuffer = '';
+    let outputSeparated = false;
     const toolCalls: RunDetailToolCall[] = [];
     const callById = new Map<string, RunDetailToolCall>();
 
     for (const ev of events) {
         if (!ev || typeof ev !== 'object') continue;
-        if (ev.kind === 'thinking' && ev.text) {
-            thinkingParts.push(ev.text);
-        } else if ((ev.kind === 'text' || ev.kind === 'error') && ev.text) {
-            outputParts.push(ev.kind === 'error' ? `[ERROR] ${ev.text}` : ev.text);
-        } else if (ev.kind === 'tool-call') {
+        if (ev.kind === 'thinking') {
+            if (typeof ev.text === 'string' && ev.text.length > 0) {
+                if (
+                    thinkingBuffer.length > 0 &&
+                    thinkingSeparated &&
+                    !thinkingBuffer.endsWith('\n') &&
+                    !ev.text.startsWith('\n')
+                ) {
+                    thinkingBuffer += '\n';
+                }
+                thinkingBuffer += ev.text;
+                thinkingSeparated = false;
+            }
+            if (outputBuffer.length > 0) outputSeparated = true;
+            continue;
+        }
+
+        if (thinkingBuffer.length > 0) {
+            thinkingSeparated = true;
+        }
+
+        if (ev.kind === 'text') {
+            if (typeof ev.text === 'string' && ev.text.length > 0) {
+                if (
+                    outputBuffer.length > 0 &&
+                    outputSeparated &&
+                    !outputBuffer.endsWith('\n') &&
+                    !ev.text.startsWith('\n')
+                ) {
+                    outputBuffer += '\n';
+                }
+                outputBuffer += ev.text;
+                outputSeparated = false;
+            }
+            continue;
+        }
+
+        if (ev.kind === 'error') {
+            if (typeof ev.text === 'string' && ev.text.length > 0) {
+                if (outputBuffer.length > 0 && !outputBuffer.endsWith('\n')) {
+                    outputBuffer += '\n';
+                }
+                outputBuffer += `[ERROR] ${ev.text}`;
+                outputSeparated = true;
+            }
+            continue;
+        }
+
+        if (outputBuffer.length > 0) {
+            outputSeparated = true;
+        }
+
+        if (ev.kind === 'tool-call') {
             let parsedArgs: unknown = ev.text;
             if (typeof ev.text === 'string' && ev.text.trim().length > 0) {
                 try {
@@ -415,9 +534,9 @@ function normalizeEventsPayload(events: readonly StageSessionDetailEvent[] | und
     }
 
     return {
-        thinking: thinkingParts.length > 0 ? thinkingParts.join('\n') : undefined,
+        thinking: thinkingBuffer.length > 0 ? thinkingBuffer : undefined,
         toolCalls,
-        output: outputParts.length > 0 ? outputParts.join('\n') : undefined
+        output: outputBuffer.length > 0 ? outputBuffer : undefined
     };
 }
 
@@ -651,7 +770,13 @@ export function StageSessionViewer({
             !retainError
     );
 
-    const mergedEvents = mergeSessionEvents(runDetail?.events, liveEvents);
+    const isTerminalDetail = Boolean(
+        runDetail &&
+            (Boolean(runDetail.finishedAt) ||
+                runDetail.status === 'completed' ||
+                runDetail.status === 'failed')
+    );
+    const mergedEvents = mergeSessionEvents(runDetail?.events, liveEvents, isTerminalDetail);
     const hasLiveEvents = Boolean(liveEvents && liveEvents.length > 0);
     const normalizedEvents = normalizeEventsPayload(mergedEvents);
     const topLevelThinking =
