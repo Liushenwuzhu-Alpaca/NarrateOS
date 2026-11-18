@@ -18,6 +18,7 @@ import {
     renderRecallSlice,
     resolveCraftPluginsSection,
     sampleVoiceLru,
+    sanitizePositiveText,
     saveVoiceSamples,
     serializeVoiceSamplesYaml,
     type CraftPluginDefinition,
@@ -1089,5 +1090,89 @@ samples:
     it('resolveCraftPluginsSection 对未知插件 ID 返回空且不输出占位文本', () => {
         expect(resolveCraftPluginsSection(['nonexistent-plugin'], 'planner')).toBe('');
         expect(resolveCraftPluginsSection(['nonexistent-plugin'], 'writer', {})).toBe('');
+    });
+
+    it('cleanroomDisplay 对续行含机密或未知 visibility/rawInvalidVisibility 整条丢弃，sanitizePositiveText 整块剥离续行，且支持可配 fallbackTailChars', () => {
+        const dirtyProfile = createHeroProfile();
+        dirtyProfile.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'PUBLIC',
+                text: '看似正常的行动主行',
+                continuationLines: [
+                    '  > [OMNISCIENT_SECRET] 首条秘密续行',
+                    '  > 次条无标签秘密正文：地下室开关在书架后'
+                ]
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'UNKNOWN_TIER' as unknown as 'PUBLIC',
+                text: '枚举外非法 visibility 条目',
+                continuationLines: ['  > 不应保留的续行']
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '带 rawInvalidVisibility 标记的条目',
+                continuationLines: [],
+                rawInvalidVisibility: 'bad_vis'
+            } as unknown as typeof dirtyProfile.acquiredState[number]
+        );
+
+        const rendered = renderEntityProfile(dirtyProfile, {
+            compactCard: false,
+            stripWarped: true,
+            cleanroomDisplay: true
+        });
+        expect(rendered).not.toContain('看似正常的行动主行');
+        expect(rendered).not.toContain('次条无标签秘密正文');
+        expect(rendered).not.toContain('枚举外非法 visibility 条目');
+        expect(rendered).not.toContain('不应保留的续行');
+        expect(rendered).not.toContain('rawInvalidVisibility');
+
+        const cleanedOutline = sanitizePositiveText(
+            [
+                '- 保留的正向节拍',
+                '- [WARPED] 已废止的码头交火方案',
+                ' 单空格续行：不应残留',
+                '> 顶格引用续行：同样不应残留',
+                '- 后续正常动作'
+            ].join('\n')
+        );
+        expect(cleanedOutline).toContain('保留的正向节拍');
+        expect(cleanedOutline).toContain('后续正常动作');
+        expect(cleanedOutline).not.toContain('已废止的码头交火方案');
+        expect(cleanedOutline).not.toContain('单空格续行');
+        expect(cleanedOutline).not.toContain('顶格引用续行');
+
+        const longPrev = '甲乙丙丁'.repeat(200);
+        const tailEvicted = evictDynamicTailToBudget(
+            ['静态前缀'],
+            {
+                opsStyleAmendments: '',
+                craftPluginsSection: '',
+                taskSection: '## 任务\n正文',
+                voiceSampleSection: '',
+                futureHorizonSection: '',
+                focusCast: [],
+                backgroundCast: [],
+                dramaticIronyLines: [],
+                memoryWakeupLines: [],
+                parallelBroadcastLines: [],
+                recallSlices: [],
+                loreEntries: [],
+                previousChapter: { chapterNumber: 44, fullText: longPrev },
+                fallbackTailChars: 40,
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            0.6,
+            100
+        );
+        expect(tailEvicted.evictionLevel).toBe(1);
+        expect(tailEvicted.dynamicTail).toContain(`...${longPrev.slice(-40)}`);
+        expect(tailEvicted.dynamicTail).not.toContain(longPrev.slice(-80));
     });
 });

@@ -719,6 +719,74 @@ describe('sliceWorldDocuments', () => {
         expect(plannerTexts).toContain('来自 extraTags 的未知可见性机密');
     });
 
+    it('内联 [vis: public] / 归属 POV 的 [vis: SELF_ONLY] / [vis: READER_KNOWN] 不误杀，且兼容 rawInvalidVisibility 跨切片字段', () => {
+        const snapshot = createTestSnapshot();
+        const hero = snapshot.entities['char_001']!;
+        hero.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '[vis: public] 小写公开内联条目',
+                continuationLines: []
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '[vis: SELF_ONLY] 归属当前 POV 的内联自知状态',
+                continuationLines: []
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '普通条目正文',
+                continuationLines: ['  > [vis: OMNISCIENT_SECRET] 续行内联全知底牌']
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '来自 entity-parser 的 rawInvalidVisibility 脏条目',
+                continuationLines: [],
+                rawInvalidVisibility: 'secret_tier'
+            } as unknown as typeof hero.acquiredState[number]
+        );
+        const heroine = snapshot.entities['char_002']!;
+        heroine.acquiredState.push({
+            storyDay: 12,
+            chapter: 44,
+            text: '[vis: READER_KNOWN] 内联读者已知张力点',
+            continuationLines: []
+        });
+
+        const slicer = new ViewSlicer();
+        const writerView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+
+        const heroTexts = writerView.entities['char_001']?.acquiredState.map((e) => e.text) ?? [];
+        expect(heroTexts).toContain('[vis: public] 小写公开内联条目');
+        expect(heroTexts).toContain('[vis: SELF_ONLY] 归属当前 POV 的内联自知状态');
+        expect(heroTexts).not.toContain('普通条目正文');
+        expect(heroTexts).not.toContain('来自 entity-parser 的 rawInvalidVisibility 脏条目');
+
+        expect(
+            writerView.dramaticIronyHints.some((h) => h.text.includes('内联读者已知张力点'))
+        ).toBe(true);
+
+        const plannerView = slicer.sliceForPlanner(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        const clonedInvalid = plannerView.entities['char_001']?.acquiredState.find((e) =>
+            e.text.includes('rawInvalidVisibility')
+        ) as { rawInvalidVisibility?: string } | undefined;
+        expect(clonedInvalid?.rawInvalidVisibility).toBe('secret_tier');
+    });
+
     it('isWarpedEntry 大小写不敏感并检查 continuationLines，整条剥离废止条目', () => {
         const snapshot = createTestSnapshot();
         snapshot.entities['char_001']!.acquiredState.push(

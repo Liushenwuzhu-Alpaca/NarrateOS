@@ -1,5 +1,8 @@
 import type { RecallSlice } from '../recall/index-recall.js';
-import { sanitizeLoreForWriter } from '../slicer/view-slicer.js';
+import {
+    sanitizeLoreForWriter,
+    stripWriterRestrictedDirectives
+} from '../slicer/view-slicer.js';
 import type { EntityEntry, EntityProfile } from '../store/schemas.js';
 import type { EvictionLevel, PreviousChapterContext } from './types.js';
 
@@ -9,7 +12,22 @@ const RECALL_RESTRICTED_RE =
     /\b(?:WARPED|OMNISCIENT_SECRET|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 const CLEANROOM_ENTRY_RESTRICTED_RE =
     /\b(?:WARPED|OMNISCIENT_SECRET)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
-const UNKNOWN_VIS_TAG_KEY_RE = /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis)$/i;
+const VALID_VISIBILITIES = new Set(['PUBLIC', 'SELF_ONLY', 'OMNISCIENT_SECRET', 'READER_KNOWN']);
+const UNKNOWN_VIS_TAG_KEY_RE =
+    /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis|rawinvalidvisibility|raw_invalid_visibility)$/i;
+const INLINE_VIS_TAG_RE = /(?:^|[\[\s|])(?:vis|visibility)\s*:\s*([^\s|\]]+)/gi;
+
+function hasRestrictedInlineCleanroomVis(line: string): boolean {
+    INLINE_VIS_TAG_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = INLINE_VIS_TAG_RE.exec(line)) !== null) {
+        const val = (match[1] ?? '').trim().toUpperCase();
+        if (!VALID_VISIBILITIES.has(val) || val === 'OMNISCIENT_SECRET') {
+            return true;
+        }
+    }
+    return false;
+}
 
 /** 基于 tokens_per_char 估算文本 Token 数 */
 export function estimateTokens(text: string, tokensPerChar: number): number {
@@ -17,11 +35,9 @@ export function estimateTokens(text: string, tokensPerChar: number): number {
     return Math.ceil(text.length * tokensPerChar);
 }
 
-/** 剥离可能残留的 WARPED 废止词条与标记，确保正向槽位表达 */
+/** 整块剥离可能残留的 WARPED / Stage Ceiling 导演禁区及其缩进与引用续行，确保正向槽位表达 */
 export function sanitizePositiveText(text: string): string {
-    const lines = text.split('\n');
-    const kept = lines.filter((line) => !WARPED_LINE_RE.test(line));
-    return kept.join('\n').trim();
+    return stripWriterRestrictedDirectives(text) ?? '';
 }
 
 function renderLedgerBody(entry: EntityEntry, cleanroomDisplay: boolean): string {
@@ -34,23 +50,10 @@ function renderLedgerBody(entry: EntityEntry, cleanroomDisplay: boolean): string
     return cleanroomDisplay ? entry.text : `[Tracked Numeric Ledger] ${entry.text}`.trim();
 }
 
-function filterEntryContinuations(
-    entry: EntityEntry,
-    stripWarped: boolean,
-    cleanroomDisplay: boolean
-): string[] {
-    return entry.continuationLines.filter((line) => {
-        if (stripWarped && WARPED_LINE_RE.test(line)) return false;
-        if (cleanroomDisplay && CLEANROOM_ENTRY_RESTRICTED_RE.test(line)) return false;
-        return true;
-    });
-}
-
 /** 格式化单条实体记录 */
 export function formatEntryLine(
     entry: EntityEntry,
-    cleanroomDisplay = false,
-    stripWarped = false
+    cleanroomDisplay = false
 ): string {
     const bodyText = entry.isNumericLedger
         ? renderLedgerBody(entry, cleanroomDisplay)
@@ -73,8 +76,8 @@ export function formatEntryLine(
         prefix = tags.length > 0 ? `[${tags.join(' | ')}] ` : '';
     }
 
-    const continuations = filterEntryContinuations(entry, stripWarped, cleanroomDisplay);
-    const extra = continuations.length > 0 ? `\n  ${continuations.join('\n  ')}` : '';
+    const extra =
+        entry.continuationLines.length > 0 ? `\n  ${entry.continuationLines.join('\n  ')}` : '';
     return `- ${prefix}${bodyText}${extra}`;
 }
 
@@ -96,20 +99,47 @@ export function renderEntityProfile(
 
     const filterEntries = (entries: EntityEntry[]): EntityEntry[] =>
         entries.filter((entry) => {
+            const allLines = [entry.text, ...entry.continuationLines];
             if (options.stripWarped) {
                 if (entry.status === 'WARPED') return false;
-                if (WARPED_LINE_RE.test(entry.text)) return false;
-                if (entry.continuationLines.some((line) => WARPED_LINE_RE.test(line))) return false;
+                if (allLines.some((line) => WARPED_LINE_RE.test(line))) return false;
+                if (
+                    entry.extraTags &&
+                    Object.entries(entry.extraTags).some(
+                        ([k, v]) => WARPED_LINE_RE.test(k) || WARPED_LINE_RE.test(v)
+                    )
+                ) {
+                    return false;
+                }
             }
             if (cleanroomDisplay) {
-                if (entry.visibility === 'OMNISCIENT_SECRET') return false;
+                if (Boolean((entry as { rawInvalidVisibility?: unknown }).rawInvalidVisibility)) {
+                    return false;
+                }
+                if (
+                    entry.visibility !== undefined &&
+                    !VALID_VISIBILITIES.has(entry.visibility.toUpperCase())
+                ) {
+                    return false;
+                }
+                if (entry.visibility?.toUpperCase() === 'OMNISCIENT_SECRET') {
+                    return false;
+                }
                 if (
                     entry.extraTags &&
                     Object.keys(entry.extraTags).some((k) => UNKNOWN_VIS_TAG_KEY_RE.test(k.trim()))
                 ) {
                     return false;
                 }
-                if (CLEANROOM_ENTRY_RESTRICTED_RE.test(entry.text)) return false;
+                if (
+                    allLines.some(
+                        (line) =>
+                            CLEANROOM_ENTRY_RESTRICTED_RE.test(line) ||
+                            hasRestrictedInlineCleanroomVis(line)
+                    )
+                ) {
+                    return false;
+                }
             }
             return true;
         });
@@ -125,9 +155,7 @@ export function renderEntityProfile(
             const baseText = item.isNumericLedger
                 ? renderLedgerBody(item, cleanroomDisplay)
                 : item.text;
-            const cont = filterEntryContinuations(item, options.stripWarped, cleanroomDisplay)
-                .map((line) => line.trim())
-                .filter(Boolean);
+            const cont = item.continuationLines.map((line) => line.trim()).filter(Boolean);
             return cont.length > 0 ? `${baseText} ${cont.join(' ')}` : baseText;
         };
 
@@ -150,14 +178,14 @@ export function renderEntityProfile(
     if (innate.length > 0) {
         lines.push(profile.sectionHeadings.innateLocks || '#### 1. Innate Locks');
         for (const item of innate) {
-            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+            lines.push(formatEntryLine(item, cleanroomDisplay));
         }
     }
 
     if (acquired.length > 0) {
         lines.push(profile.sectionHeadings.acquiredState || '#### 2. Acquired State');
         for (const item of acquired) {
-            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+            lines.push(formatEntryLine(item, cleanroomDisplay));
         }
     }
 
@@ -166,7 +194,7 @@ export function renderEntityProfile(
             profile.sectionHeadings.irreversibleTrajectory || '#### 3. Irreversible Trajectory'
         );
         for (const item of trajectory) {
-            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+            lines.push(formatEntryLine(item, cleanroomDisplay));
         }
     }
 
@@ -180,7 +208,7 @@ export function renderEntityProfile(
     if (recentSlice.length > 0) {
         lines.push(profile.sectionHeadings.recentBuffer || '#### 4. Recent Buffer');
         for (const item of recentSlice) {
-            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+            lines.push(formatEntryLine(item, cleanroomDisplay));
         }
     }
 
@@ -224,6 +252,7 @@ export interface DynamicTailDraft {
     recallSlices: RecallSlice[];
     loreEntries: string[];
     previousChapter?: PreviousChapterContext | undefined;
+    fallbackTailChars?: number | undefined;
     stripWarped: boolean;
     cleanroomDisplay?: boolean | undefined;
 }
@@ -262,10 +291,15 @@ interface RenderState {
 function renderPreviousChapter(
     prev: PreviousChapterContext | undefined,
     useWindow: boolean,
-    stripWarped: boolean
+    stripWarped: boolean,
+    fallbackTailChars?: number
 ): string {
     if (!prev) return '';
     const sanitize = (s: string) => (stripWarped ? sanitizePositiveText(s) : s.trim());
+    const tailLimit =
+        fallbackTailChars !== undefined && fallbackTailChars > 0
+            ? fallbackTailChars
+            : DEFAULT_FALLBACK_TAIL_CHARS;
 
     if (!useWindow && prev.fullText) {
         const clean = sanitize(prev.fullText);
@@ -286,8 +320,8 @@ function renderPreviousChapter(
         const cleanFull = sanitize(prev.fullText);
         if (cleanFull) {
             const tail =
-                cleanFull.length > DEFAULT_FALLBACK_TAIL_CHARS
-                    ? `...${cleanFull.slice(-DEFAULT_FALLBACK_TAIL_CHARS)}`
+                cleanFull.length > tailLimit
+                    ? `...${cleanFull.slice(-tailLimit)}`
                     : cleanFull;
             parts.push(`尾窗: ${tail}`);
         }
@@ -413,7 +447,8 @@ function renderDynamicTail(
     const prevBlock = renderPreviousChapter(
         draft.previousChapter,
         state.useWindowForPrevChapter,
-        draft.stripWarped
+        draft.stripWarped,
+        draft.fallbackTailChars
     );
     if (prevBlock) {
         blocks.push(prevBlock);

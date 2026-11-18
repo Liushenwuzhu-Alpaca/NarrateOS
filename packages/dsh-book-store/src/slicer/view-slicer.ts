@@ -3,6 +3,7 @@ import type {
     BookSnapshot,
     EntityEntry,
     EntityProfile,
+    EntryVisibility,
     TimelineMode
 } from '../store/schemas.js';
 
@@ -94,7 +95,8 @@ const WRITER_RESTRICTED_DIRECTIVE_RE = /\bWARPED\b|Stage\s*Ceiling|阶段天花�
 const CLEANROOM_LORE_RESTRICTED_RE =
     /\bWARPED\b|\bOMNISCIENT_SECRET\b|\bSELF_ONLY\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 const VALID_VISIBILITIES = new Set(['PUBLIC', 'SELF_ONLY', 'OMNISCIENT_SECRET', 'READER_KNOWN']);
-const UNKNOWN_VIS_TAG_KEY_RE = /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis)$/i;
+const UNKNOWN_VIS_TAG_KEY_RE =
+    /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis|rawinvalidvisibility|raw_invalid_visibility)$/i;
 const INLINE_VIS_TAG_RE = /(?:^|[\[\s|])(?:vis|visibility)\s*:\s*([^\s|\]]+)/gi;
 const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const LIST_ITEM_START_RE = /^\s*(?:[-*+]|\d+\.)\s/;
@@ -113,8 +115,27 @@ function hasRestrictedInlineVis(text: string): boolean {
     return false;
 }
 
+function extractInlineVisibilities(entry: EntityEntry): EntryVisibility[] {
+    const found: EntryVisibility[] = [];
+    const allLines = [entry.text, ...entry.continuationLines];
+    for (const line of allLines) {
+        INLINE_VIS_TAG_RE.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = INLINE_VIS_TAG_RE.exec(line)) !== null) {
+            const upper = (match[1] ?? '').trim().toUpperCase();
+            if (VALID_VISIBILITIES.has(upper)) {
+                found.push(upper as EntryVisibility);
+            }
+        }
+    }
+    return found;
+}
+
 function hasUnknownVisibilityTag(entry: EntityEntry): boolean {
-    if (entry.visibility !== undefined && !VALID_VISIBILITIES.has(entry.visibility)) {
+    if (Boolean((entry as { rawInvalidVisibility?: unknown }).rawInvalidVisibility)) {
+        return true;
+    }
+    if (entry.visibility !== undefined && !VALID_VISIBILITIES.has(entry.visibility.toUpperCase())) {
         return true;
     }
     if (entry.extraTags) {
@@ -129,8 +150,8 @@ function hasUnknownVisibilityTag(entry: EntityEntry): boolean {
         INLINE_VIS_TAG_RE.lastIndex = 0;
         let match: RegExpExecArray | null;
         while ((match = INLINE_VIS_TAG_RE.exec(line)) !== null) {
-            const val = (match[1] ?? '').trim();
-            if (val !== 'PUBLIC') {
+            const upper = (match[1] ?? '').trim().toUpperCase();
+            if (!VALID_VISIBILITIES.has(upper)) {
                 return true;
             }
         }
@@ -293,6 +314,10 @@ function cloneEntry(entry: EntityEntry): EntityEntry {
     if (entry.isNumericLedger !== undefined) cloned.isNumericLedger = entry.isNumericLedger;
     if (entry.extraTags) cloned.extraTags = { ...entry.extraTags };
     if (entry.ledger) cloned.ledger = { ...entry.ledger };
+    const rawInvalidVisibility = (entry as { rawInvalidVisibility?: unknown }).rawInvalidVisibility;
+    if (rawInvalidVisibility !== undefined) {
+        (cloned as { rawInvalidVisibility?: unknown }).rawInvalidVisibility = rawInvalidVisibility;
+    }
     return cloned;
 }
 
@@ -571,22 +596,27 @@ export class ViewSlicer {
             return 'DROP';
         }
 
-        const visibility = entry.visibility ?? 'PUBLIC';
+        const inlineVisibilities = extractInlineVisibilities(entry);
+        const rawVis = entry.visibility?.toUpperCase() as EntryVisibility | undefined;
+        const effectiveVisibilities: EntryVisibility[] =
+            rawVis !== undefined ? [rawVis, ...inlineVisibilities] : inlineVisibilities;
+
         const effectiveOwner = entry.owner ?? entityId;
         const isOwnedByPov = povSet.has(effectiveOwner);
 
-        switch (visibility) {
-            case 'PUBLIC':
-                return 'KEEP';
-            case 'SELF_ONLY':
-                return isOwnedByPov ? 'KEEP' : 'DROP';
-            case 'OMNISCIENT_SECRET':
-                return 'DROP';
-            case 'READER_KNOWN':
-                return isOwnedByPov ? 'KEEP' : 'CONVERT_TO_IRONY';
-            default:
-                return 'DROP';
+        if (effectiveVisibilities.length === 0) {
+            return 'KEEP';
         }
+        if (effectiveVisibilities.includes('OMNISCIENT_SECRET')) {
+            return 'DROP';
+        }
+        if (effectiveVisibilities.includes('SELF_ONLY') && !isOwnedByPov) {
+            return 'DROP';
+        }
+        if (effectiveVisibilities.includes('READER_KNOWN') && !isOwnedByPov) {
+            return 'CONVERT_TO_IRONY';
+        }
+        return 'KEEP';
     }
 
     /** 过滤 PARALLEL 模式下的全局只读广播条目 */
@@ -650,7 +680,9 @@ export class ViewSlicer {
     /** 从已裁剪的实体视图中提取感官记忆唤醒半句提示 */
     private pickSensoryCue(slicedProfile: EntityProfile): string {
         const isPublic = (e: EntityEntry): boolean =>
-            !hasUnknownVisibilityTag(e) && (e.visibility ?? 'PUBLIC') === 'PUBLIC';
+            !hasUnknownVisibilityTag(e) &&
+            !extractInlineVisibilities(e).some((v) => v !== 'PUBLIC') &&
+            (e.visibility?.toUpperCase() ?? 'PUBLIC') === 'PUBLIC';
         const publicLock = slicedProfile.innateLocks.find(isPublic);
         if (publicLock) {
             return extractFirstSentence(publicLock.text);

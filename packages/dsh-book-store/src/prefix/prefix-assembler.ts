@@ -1,6 +1,6 @@
 import { hashStaticPrefix, type CleanroomRequest } from '../ports/llm.js';
 import { sanitizeLoreForWriter, type SlicedView } from '../slicer/view-slicer.js';
-import type { EntityProfile } from '../store/schemas.js';
+import type { BookConfig, EntityProfile } from '../store/schemas.js';
 import {
     evictDynamicTailToBudget,
     sanitizePositiveText,
@@ -154,6 +154,10 @@ export class PrefixAssembler {
             ? `## 远景地平线 (future_horizon)\n${input.futureHorizon.trim()}`
             : '';
 
+        const fallbackTailChars = (
+            input.config as BookConfig & { context_assembly?: { fallback_tail_chars?: number } }
+        ).context_assembly?.fallback_tail_chars;
+
         const draft: DynamicTailDraft = {
             opsStyleAmendments: input.opsStyleAmendments?.trim() ?? '',
             craftPluginsSection,
@@ -168,6 +172,7 @@ export class PrefixAssembler {
             recallSlices: input.recallSlices ?? [],
             loreEntries: input.loreEntries ?? [],
             previousChapter: input.previousChapter,
+            fallbackTailChars,
             stripWarped: false,
             cleanroomDisplay: false
         };
@@ -248,6 +253,10 @@ export class PrefixAssembler {
             .map((entry) => sanitizeLoreForWriter(entry))
             .filter((entry) => entry.length > 0);
 
+        const fallbackTailChars = (
+            input.config as BookConfig & { context_assembly?: { fallback_tail_chars?: number } }
+        ).context_assembly?.fallback_tail_chars;
+
         const draft: DynamicTailDraft = {
             opsStyleAmendments: input.opsStyleAmendments?.trim() ?? '',
             craftPluginsSection,
@@ -262,6 +271,7 @@ export class PrefixAssembler {
             recallSlices: input.recallSlices ?? [],
             loreEntries: cleanLoreEntries,
             previousChapter: input.previousChapter,
+            fallbackTailChars,
             stripWarped: true,
             cleanroomDisplay: true
         };
