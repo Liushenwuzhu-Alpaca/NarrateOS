@@ -14,55 +14,68 @@ export const STUDIO_STYLE_ELEMENT_ID = 'narrateos-studio-styles';
 export const STUDIO_CSS = `
 .ns-studio-shell {
     color-scheme: dark;
-    --ns-bg-base: #151517;
-    --ns-bg-panel: #18181a;
-    --ns-bg-card: #232324;
-    --ns-bg-surface-2: #2c2c2e;
-    --ns-bg-hover: rgba(255, 255, 255, 0.05);
+    --ns-bg-outer: #0c0d0f;
+    --ns-bg-host: #121316;
+    --ns-bg-side: #16171a;
+    --ns-bg-stage: #1a1b1e;
+    --ns-bg-sheet: #1f2024;
+    --ns-bg-elevated: #26282d;
+    --ns-bg-base: var(--ns-bg-stage);
+    --ns-bg-panel: var(--ns-bg-side);
+    --ns-bg-card: var(--ns-bg-sheet);
+    --ns-bg-surface-2: var(--ns-bg-elevated);
+    --ns-bg-hover: rgba(255, 255, 255, 0.052);
     --ns-bg-press: rgba(255, 255, 255, 0.09);
-    --ns-border-1: rgba(255, 255, 255, 0.06);
-    --ns-border-2: rgba(255, 255, 255, 0.12);
-    --ns-border-3: rgba(255, 255, 255, 0.2);
-    --ns-text-1: #f9fafb;
-    --ns-text-2: #cfd3d6;
-    --ns-text-3: #adb2b8;
-    --ns-text-4: #8c9199;
-    --ns-numeral: #5a5f68;
-    --ns-prose: #e6e3dc;
-    --ns-brand: #5686fe;
-    --ns-brand-ink: #86a8ff;
-    --ns-brand-soft: rgba(86, 134, 254, 0.14);
-    --ns-brand-line: rgba(86, 134, 254, 0.42);
-    /* 实心主按钮专用填充: 白字基态与悬停均 >= 4.5:1, 不动 --ns-brand 焦点主蓝 */
-    --ns-brand-fill: #3560d2;
-    --ns-brand-fill-hover: #456dd6;
-    --ns-green: #4ed17e;
-    --ns-green-ink: #4ed17e;
-    --ns-green-soft: rgba(78, 209, 126, 0.12);
-    --ns-amber: #f7ad31;
-    --ns-amber-ink: #f7ad31;
-    --ns-amber-soft: rgba(247, 173, 49, 0.12);
-    --ns-amber-line: rgba(247, 173, 49, 0.4);
-    --ns-red: #f26d6d;
-    --ns-red-ink: #f26d6d;
-    --ns-red-soft: rgba(242, 109, 109, 0.12);
-    --ns-red-line: rgba(242, 109, 109, 0.42);
-    --ns-violet: #a78bfa;
-    --ns-violet-soft: rgba(167, 139, 250, 0.13);
-    /* 品牌朱印仅用于 NarrateOS 标识与「定稿」钤印，不承担告警语义 */
-    --ns-seal: #e0664a;
-    --ns-seal-soft: rgba(224, 102, 74, 0.12);
-    --ns-pop-shadow: 0 18px 48px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--ns-border-2);
-    --ns-col: 660px;
-    --ns-r-sm: 6px;
-    --ns-r-md: 10px;
-    --ns-r-lg: 14px;
-    --ns-r-xl: 18px;
-    --ns-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-    --ns-font-sans: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
-    --ns-font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "Noto Serif SC", "Songti SC", serif;
+    --ns-border-1: rgba(255, 255, 255, 0.068);
+    --ns-border-2: rgba(255, 255, 255, 0.125);
+    --ns-border-3: rgba(255, 255, 255, 0.22);
+    --ns-text-1: #f3f2ee;
+    --ns-text-2: #c8c6bf;
+    --ns-text-3: #98968f;
+    --ns-text-4: #98968f;
+    --ns-numeral: #575853;
+    --ns-prose: #e6e2d8;
+    --ns-brand: #4c7cf0;
+    --ns-brand-ink: #96b6ff;
+    --ns-brand-soft: rgba(76, 124, 240, 0.14);
+    --ns-brand-line: rgba(76, 124, 240, 0.4);
+    --ns-brand-fill: #3762cc;
+    --ns-brand-fill-hover: #436fd9;
+    --ns-green: #46c978;
+    --ns-green-ink: #6ee098;
+    --ns-green-soft: rgba(70, 201, 120, 0.14);
+    --ns-amber: #eba434;
+    --ns-amber-ink: #f5be62;
+    --ns-amber-soft: rgba(235, 164, 52, 0.13);
+    --ns-amber-line: rgba(235, 164, 52, 0.38);
+    --ns-red: #e86565;
+    --ns-red-ink: #f59393;
+    --ns-red-soft: rgba(232, 101, 101, 0.12);
+    --ns-red-line: rgba(232, 101, 101, 0.38);
+    --ns-violet: #96b6ff;
+    --ns-violet-soft: rgba(76, 124, 240, 0.14);
+    /* 品牌朱砂印仅用于书稿「定稿」钤印与顶部阅读进度丝带，不承担告警语义 */
+    --ns-seal: #df6447;
+    --ns-seal-soft: rgba(223, 100, 71, 0.11);
+    --ns-scrim: rgba(0, 0, 0, 0.44);
+    --ns-shadow-sheet: 0 6px 24px rgba(0, 0, 0, 0.14);
+    --ns-shadow-float: 0 16px 40px rgba(0, 0, 0, 0.44), 0 2px 8px rgba(0, 0, 0, 0.24);
+    --ns-shadow-dock: 0 10px 30px rgba(0, 0, 0, 0.34);
+    --ns-pop-shadow: var(--ns-shadow-float);
+    --ns-col: 672px;
+    --ns-r-xs: 5px;
+    --ns-r-sm: 7px;
+    --ns-r-md: 9px;
+    --ns-r-lg: 11px;
+    --ns-r-sheet: 12px;
+    --ns-r-xl: 12px;
+    --ns-r-pill: 999px;
+    --ns-ease: cubic-bezier(0.16, 1, 0.3, 1);
+    --ns-ease-layout: cubic-bezier(0.2, 0.7, 0.2, 1);
+    --ns-font-sans: Inter, "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+    --ns-font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif;
     --ns-font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-    --ns-font-display: "Inter Display", Inter, system-ui, sans-serif;
+    --ns-font-display: Inter, "PingFang SC", system-ui, sans-serif;
 
     font-family: var(--ns-font-sans);
     background: var(--ns-bg-base);
@@ -98,44 +111,52 @@ export const STUDIO_CSS = `
 .ns-studio-shell[data-theme="light"],
 body:not([data-ds-dark-theme]) .ns-studio-shell {
     color-scheme: light;
-    --ns-bg-base: #faf8f4;
-    --ns-bg-panel: #f3efe7;
-    --ns-bg-card: #fffdf9;
-    --ns-bg-surface-2: #fffefb;
-    --ns-bg-hover: rgba(28, 25, 21, 0.05);
-    --ns-bg-press: rgba(28, 25, 21, 0.09);
-    --ns-border-1: rgba(28, 25, 21, 0.1);
-    --ns-border-2: rgba(28, 25, 21, 0.18);
-    --ns-border-3: rgba(28, 25, 21, 0.3);
-    --ns-text-1: #1c1a17;
-    --ns-text-2: #45413b;
-    --ns-text-3: #625e57;
-    --ns-text-4: #6b665e;
-    --ns-numeral: #b3ada2;
-    --ns-prose: #262420;
-    --ns-brand: #3b6fe0;
-    --ns-brand-ink: #2b5cc9;
-    --ns-brand-soft: rgba(59, 111, 224, 0.1);
-    --ns-brand-line: rgba(59, 111, 224, 0.4);
-    /* 浅色实心填充保持基态白字 >= 4.5:1, 悬停改为加深而非提亮 */
-    --ns-brand-fill: #3b6fe0;
-    --ns-brand-fill-hover: #3866cc;
-    --ns-green: #1f9d55;
-    --ns-green-ink: #15703c;
-    --ns-green-soft: rgba(31, 157, 85, 0.1);
-    --ns-amber: #d97706;
-    --ns-amber-ink: #8a4a05;
-    --ns-amber-soft: rgba(217, 119, 6, 0.1);
-    --ns-amber-line: rgba(217, 119, 6, 0.45);
-    --ns-red: #d64545;
-    --ns-red-ink: #b02a2a;
-    --ns-red-soft: rgba(214, 69, 69, 0.09);
-    --ns-red-line: rgba(214, 69, 69, 0.38);
-    --ns-violet: #6d4bd0;
-    --ns-violet-soft: rgba(109, 75, 208, 0.09);
-    --ns-seal: #c0492f;
-    --ns-seal-soft: rgba(192, 73, 47, 0.08);
-    --ns-pop-shadow: 0 18px 48px rgba(40, 36, 30, 0.18), 0 0 0 1px var(--ns-border-2);
+    --ns-bg-outer: #e4dfd5;
+    --ns-bg-host: #ece8df;
+    --ns-bg-side: #f2efe7;
+    --ns-bg-stage: #f8f5ee;
+    --ns-bg-sheet: #fcfbf7;
+    --ns-bg-elevated: #ffffff;
+    --ns-bg-base: var(--ns-bg-stage);
+    --ns-bg-panel: var(--ns-bg-side);
+    --ns-bg-card: var(--ns-bg-sheet);
+    --ns-bg-surface-2: var(--ns-bg-elevated);
+    --ns-bg-hover: rgba(32, 28, 22, 0.048);
+    --ns-bg-press: rgba(32, 28, 22, 0.085);
+    --ns-border-1: rgba(32, 28, 22, 0.08);
+    --ns-border-2: rgba(32, 28, 22, 0.14);
+    --ns-border-3: rgba(32, 28, 22, 0.24);
+    --ns-text-1: #1e1c18;
+    --ns-text-2: #48443d;
+    --ns-text-3: #68635a;
+    --ns-text-4: #68635a;
+    --ns-numeral: #bdb5a7;
+    --ns-prose: #26231e;
+    --ns-brand: #3566d6;
+    --ns-brand-ink: #2450b5;
+    --ns-brand-soft: rgba(53, 102, 214, 0.11);
+    --ns-brand-line: rgba(53, 102, 214, 0.36);
+    --ns-brand-fill: #2f5ec9;
+    --ns-brand-fill-hover: #2650b2;
+    --ns-green: #1f9952;
+    --ns-green-ink: #16703b;
+    --ns-green-soft: rgba(31, 153, 82, 0.12);
+    --ns-amber: #cc7408;
+    --ns-amber-ink: #8a4b03;
+    --ns-amber-soft: rgba(204, 116, 8, 0.11);
+    --ns-amber-line: rgba(204, 116, 8, 0.36);
+    --ns-red: #cf4242;
+    --ns-red-ink: #a12525;
+    --ns-red-soft: rgba(207, 66, 66, 0.09);
+    --ns-red-line: rgba(207, 66, 66, 0.35);
+    --ns-violet: #2450b5;
+    --ns-violet-soft: rgba(53, 102, 214, 0.11);
+    --ns-seal: #c4452b;
+    --ns-seal-soft: rgba(196, 69, 43, 0.08);
+    --ns-shadow-sheet: 0 6px 22px rgba(36, 30, 20, 0.06);
+    --ns-shadow-float: 0 16px 38px rgba(36, 30, 20, 0.13), 0 2px 8px rgba(36, 30, 20, 0.06);
+    --ns-shadow-dock: 0 8px 26px rgba(36, 30, 20, 0.08);
+    --ns-pop-shadow: var(--ns-shadow-float);
 }
 
 /* 亮色下阶段点链与连线加重,避免浅底上几乎不可见 */
@@ -181,7 +202,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-studio-shell ::-webkit-scrollbar-thumb {
     background: var(--ns-border-2);
-    border-radius: 8px;
+    border-radius: var(--ns-r-sm);
     border: 2px solid transparent;
     background-clip: content-box;
 }
@@ -221,7 +242,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 .ns-r-body::-webkit-scrollbar-thumb,
 .ns-right-scroll::-webkit-scrollbar-thumb {
     background: var(--ns-border-2);
-    border-radius: 8px;
+    border-radius: var(--ns-r-sm);
     border: 1px solid transparent;
     background-clip: content-box;
 }
@@ -330,7 +351,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 12.5px;
+    font-size: 13px;
     transition: background 0.12s ease, color 0.12s ease;
 }
 
@@ -343,9 +364,9 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 .ns-seal-xs {
     width: 16px;
     height: 16px;
-    border-radius: 4px;
+    border-radius: var(--ns-r-xs);
     background: var(--ns-seal);
-    color: #fff;
+    color: #ffffff;
     display: inline-grid;
     place-items: center;
     font: 500 9.5px/1 var(--ns-font-serif);
@@ -414,7 +435,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     border: 1px solid transparent;
     background: transparent;
     color: var(--ns-text-1);
-    font-size: 13.5px;
+    font-size: 14px;
     font-weight: 500;
     cursor: pointer;
     outline: none;
@@ -465,20 +486,22 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     height: 14px;
     padding: 0 3px;
     border-radius: 999px;
-    font: 500 9px/14px var(--ns-font-sans);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 14px;
     text-align: center;
     background: var(--ns-amber);
-    color: #1a1200;
+    color: var(--ns-bg-outer);
 }
 
 .ns-badge-dot.ns-badge-red {
     background: var(--ns-red);
-    color: #fff;
+    color: #ffffff;
 }
 
 .ns-chapter-badge {
     font-family: var(--ns-font-mono);
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--ns-text-1);
     white-space: nowrap;
     flex-shrink: 0;
@@ -497,7 +520,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 .ns-book-slug {
     white-space: nowrap;
     flex-shrink: 0;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
 }
 
@@ -583,7 +606,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     right: 4px;
     bottom: 0;
     height: 2px;
-    border-radius: 2px;
+    border-radius: var(--ns-r-xs);
     background: var(--ns-brand);
 }
 
@@ -613,7 +636,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     border-radius: var(--ns-r-sm);
     border: 0;
     background: transparent;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
     white-space: nowrap;
     cursor: pointer;
@@ -698,7 +721,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     align-items: center;
     justify-content: center;
     gap: 5px;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     white-space: nowrap;
     flex-shrink: 0;
@@ -725,9 +748,9 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     height: 30px;
     background: var(--ns-brand-fill);
     border: 1px solid transparent;
-    color: #fff;
+    color: #ffffff;
     padding: 0 11px;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     border-radius: var(--ns-r-md);
@@ -754,7 +777,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     background: var(--ns-brand-fill);
     border: 1px solid transparent;
     box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.24);
-    color: #fff;
+    color: #ffffff;
     padding: 0 9px;
     font-size: 12px;
     font-weight: 500;
@@ -775,7 +798,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     color: var(--ns-text-1);
     border-radius: var(--ns-r-md);
     padding: 0 10px;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     display: inline-flex;
@@ -911,7 +934,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-1);
     color: var(--ns-text-2);
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 500;
     display: inline-flex;
     align-items: center;
@@ -994,7 +1017,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-stage-status {
-    font-size: 10.5px;
+    font-size: 11px;
     padding: 1px 6px;
     border-radius: 999px;
     line-height: 1.3;
@@ -1038,7 +1061,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     border: 1px solid var(--ns-border-1);
     border-radius: var(--ns-r-sm);
     padding: 8px 12px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
 }
 
@@ -1166,7 +1189,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-chap-kick {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
     letter-spacing: 0.04em;
 }
@@ -1248,7 +1271,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 .ns-stamp {
     width: 56px;
     height: 56px;
-    border-radius: 8px;
+    border-radius: var(--ns-r-sm);
     display: grid;
     place-items: center;
     transform: rotate(-4deg);
@@ -1275,17 +1298,6 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-1);
     overflow: hidden;
-}
-
-.ns-verdict::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 20px;
-    bottom: 20px;
-    width: 3px;
-    border-radius: 0 3px 3px 0;
-    background: var(--ns-v, var(--ns-red));
 }
 
 .ns-verdict-red {
@@ -1390,7 +1402,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     color: inherit;
     box-shadow: 0 1.5px 0 var(--ns-v);
     padding: 0 2px;
-    border-radius: 2px;
+    border-radius: var(--ns-r-xs);
 }
 
 .ns-v-ev mark.ns-add {
@@ -1462,7 +1474,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-v-opt small {
     display: block;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
     margin-top: 2px;
     line-height: 1.45;
@@ -1482,7 +1494,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 /* 填充底上的图标与副文案用纯白: 0.96 透明度在浅色基态不足 4.5:1, 层级改由字号承担 */
 .ns-studio-shell .ns-v-opt.ns-go .ns-v-opt-ico,
 .ns-studio-shell .ns-v-opt.ns-go small {
-    color: #fff;
+    color: #ffffff;
 }
 
 .ns-v-more {
@@ -1490,7 +1502,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     display: flex;
     align-items: center;
     gap: 14px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
 }
 
@@ -1568,7 +1580,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     position: relative;
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-1);
-    border-left: 3px solid var(--ns-red);
+    border-color: var(--ns-red-line);
     border-radius: var(--ns-r-xl);
     padding: 20px 24px;
     display: flex;
@@ -1577,11 +1589,11 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-alert-box.warn {
-    border-left-color: var(--ns-amber);
+    border-color: var(--ns-amber-line);
 }
 
 .ns-alert-box.boot {
-    border-left-color: var(--ns-brand);
+    border-color: var(--ns-brand-line);
 }
 
 .ns-choice-btn {
@@ -1592,7 +1604,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     padding: 10px 13px;
     border-radius: var(--ns-r-lg);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 13px;
     transition: border-color 0.15s ease, background 0.15s ease;
 }
 
@@ -1662,21 +1674,21 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     background: linear-gradient(transparent 64%, var(--ns-amber-soft) 64%);
     box-shadow: 0 1.5px 0 0 var(--ns-amber-line);
     padding: 1px 2px;
-    border-radius: 2px;
+    border-radius: var(--ns-r-xs);
 }
 
 .ns-err-mark {
     background: var(--ns-red-soft);
     box-shadow: 0 1.5px 0 0 var(--ns-red);
     padding: 1px 2px;
-    border-radius: 2px;
+    border-radius: var(--ns-r-xs);
 }
 
 .ns-diff-add {
     background: var(--ns-green-soft);
     color: var(--ns-green-ink);
     padding: 3px 10px;
-    border-radius: 4px;
+    border-radius: var(--ns-r-xs);
     display: block;
 }
 
@@ -1684,7 +1696,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     background: var(--ns-red-soft);
     color: var(--ns-red-ink);
     padding: 3px 10px;
-    border-radius: 4px;
+    border-radius: var(--ns-r-xs);
     display: block;
     text-decoration: line-through;
 }
@@ -1717,7 +1729,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     height: 24px;
     padding: 0 4px 0 9px;
     border-radius: 999px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-2);
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-2);
@@ -1751,7 +1763,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-composer-box {
     position: relative;
-    border-radius: 16px;
+    border-radius: var(--ns-r-sheet);
     background: var(--ns-bg-card);
     border: 1px solid var(--ns-border-2);
     padding: 10px 10px 8px 14px;
@@ -1769,7 +1781,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     outline: none;
     background: transparent;
     color: var(--ns-text-1);
-    font-size: 13.5px;
+    font-size: 14px;
     padding: 2px 0 10px;
 }
 
@@ -1789,7 +1801,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 /* 左下角极简提示与已选指令胶囊 */
 .ns-composer-hint {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
     white-space: nowrap;
     overflow: hidden;
@@ -1806,7 +1818,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     background: var(--ns-brand-soft);
     border: 1px solid var(--ns-brand-line);
     color: var(--ns-brand-ink);
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 500;
     white-space: nowrap;
 }
@@ -1857,7 +1869,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     border-radius: var(--ns-r-sm);
     background: transparent;
     color: var(--ns-text-2);
-    font-size: 12.5px;
+    font-size: 13px;
     text-align: left;
     cursor: pointer;
     transition: background 0.12s ease, color 0.12s ease;
@@ -1916,7 +1928,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     border-radius: 50%;
     border: 0;
     background: var(--ns-brand-fill);
-    color: #fff;
+    color: #ffffff;
     font-size: 14px;
     font-weight: 500;
     display: grid;
@@ -2018,7 +2030,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--ns-text-3);
     white-space: nowrap;
     cursor: pointer;
@@ -2140,7 +2152,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     height: 24px;
     display: grid;
     place-items: center;
-    font-size: 15px;
+    font-size: 14px;
     color: var(--ns-brand-ink);
     flex-shrink: 0;
 }
@@ -2169,7 +2181,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 }
 
 .ns-pool-card-title {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 500;
     color: var(--ns-text-3);
 }
@@ -2190,7 +2202,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
 
 .ns-pool-item small {
     display: block;
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
 }
 
@@ -2208,7 +2220,7 @@ body:not([data-ds-dark-theme]) .ns-studio-shell .ns-ln.on {
     align-items: center;
     justify-content: space-between;
     font-weight: 500;
-    font-size: 12.5px;
+    font-size: 13px;
     flex-shrink: 0;
 }
 
@@ -2311,7 +2323,7 @@ details.ns-acc[open] summary {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 11.5px;
+    font-size: 12px;
 }
 
 /* 正文阅读：章节快捷导航 */
@@ -2382,7 +2394,7 @@ details.ns-acc[open] summary {
 .ns-plan-kv dt {
     padding: 14px 12px 14px 0;
     border-top: 1px solid var(--ns-border-1);
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--ns-text-3);
 }
 
@@ -2459,7 +2471,7 @@ details.ns-acc[open] summary {
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    color: #fff;
+    color: #ffffff;
     font-size: 11px;
     font-weight: 500;
     font-style: normal;
@@ -2505,7 +2517,7 @@ details.ns-acc[open] summary {
     flex-wrap: wrap;
     gap: 12px;
     padding: 9px 14px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
     border-top: 1px solid var(--ns-border-1);
 }
@@ -2597,7 +2609,7 @@ details.ns-acc[open] summary {
     gap: 10px;
     padding-top: 10px;
     border-top: 1px solid var(--ns-border-1);
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-4);
 }
 
@@ -2621,7 +2633,7 @@ details.ns-acc[open] summary {
     margin: 0 24px 8px;
     padding: 6px 12px;
     border-radius: var(--ns-r-sm);
-    font-size: 11.5px;
+    font-size: 12px;
     line-height: 1.5;
     flex-shrink: 0;
 }
@@ -2659,7 +2671,7 @@ details.ns-acc[open] summary {
     flex-wrap: wrap;
     gap: 8px;
     color: var(--ns-red-ink);
-    font-size: 12.5px;
+    font-size: 13px;
 }
 
 .ns-safe-halt-head strong {
@@ -2686,7 +2698,7 @@ details.ns-acc[open] summary {
 .ns-skel,
 .ns-skel-line {
     display: block;
-    border-radius: 4px;
+    border-radius: var(--ns-r-xs);
     background: color-mix(in srgb, var(--ns-text-4) 14%, transparent);
     animation: ns-skel-pulse 1.4s ease-in-out infinite;
 }
@@ -2765,7 +2777,7 @@ details.ns-acc[open] summary {
 
     .ns-composer-box {
         padding: 8px 8px 6px 10px;
-        border-radius: 14px;
+        border-radius: var(--ns-r-lg);
     }
 
     .ns-stage-strip {
@@ -2959,7 +2971,7 @@ details.ns-acc[open] summary {
     .ns-send-circle {
         width: 40px;
         height: 40px;
-        font-size: 16px;
+        font-size: 17px;
     }
 
     .ns-group-title .ns-link-btn {
@@ -2993,7 +3005,7 @@ details.ns-acc[open] summary {
 }
 
 .ns-book-path {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     margin-top: 4px;
     overflow: hidden;
@@ -3069,7 +3081,7 @@ details.ns-acc[open] summary {
     /* 命中区至少 24px 高, 视觉字级保持不变 */
     min-height: 24px;
     padding: 0 4px;
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     cursor: pointer;
 }
@@ -3088,10 +3100,10 @@ details.ns-acc[open] summary {
 }
 
 .ns-view-badge {
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     border: 1px solid var(--ns-border-1);
-    border-radius: 4px;
+    border-radius: var(--ns-r-xs);
     padding: 1px 5px;
     flex-shrink: 0;
 }
@@ -3113,7 +3125,7 @@ details.ns-acc[open] summary {
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    font-size: 11.5px;
+    font-size: 12px;
 }
 
 /* ---- YOLO 模式弹层 ---- */
@@ -3146,7 +3158,7 @@ details.ns-acc[open] summary {
 }
 
 .ns-popover-item-title {
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--ns-text-1);
 }
@@ -3159,7 +3171,7 @@ details.ns-acc[open] summary {
 
 /* ---- 顶栏状态与呼吸提示 ---- */
 .ns-thread-label {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
     white-space: nowrap;
 }
@@ -3209,7 +3221,7 @@ details.ns-acc[open] summary {
     justify-content: space-between;
     gap: 10px;
     padding: 9px 12px;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--ns-text-1);
     cursor: pointer;
     list-style: none;
@@ -3258,7 +3270,7 @@ details.ns-acc[open] summary {
 
 .ns-guard-hint {
     margin: 0;
-    font-size: 12.5px;
+    font-size: 13px;
     line-height: 1.7;
     color: var(--ns-text-3);
     overflow-wrap: break-word;
@@ -3296,7 +3308,7 @@ details.ns-acc[open] summary {
     gap: 4px;
     padding: 1px 6px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: 11px;
     line-height: 1.3;
     white-space: nowrap;
 }
@@ -3431,7 +3443,7 @@ details.ns-acc[open] summary {
 }
 
 .ns-session-run-row {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3443,7 +3455,7 @@ details.ns-acc[open] summary {
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
-    font-size: 10.5px;
+    font-size: 11px;
 }
 
 .ns-session-view-ring {
@@ -3461,7 +3473,7 @@ details.ns-acc[open] summary {
     border-radius: var(--ns-r-sm);
     background: transparent;
     color: var(--ns-text-3);
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 500;
     padding: 5px 8px;
     cursor: pointer;
@@ -3519,7 +3531,7 @@ details.ns-acc[open] summary {
 }
 
 .ns-session-request-label {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 500;
     color: var(--ns-text-3);
 }
@@ -3598,7 +3610,7 @@ details.ns-acc[open] summary {
 }
 
 .ns-session-turn-thinking {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
 }
 
@@ -3644,7 +3656,7 @@ details.ns-acc[open] summary {
 }
 
 .ns-session-pre-result {
-    border-left: 2px solid var(--ns-border-3);
+    border-left: 1px solid var(--ns-border-3);
 }
 
 .ns-session-turn-output {
@@ -3653,6 +3665,1238 @@ details.ns-acc[open] summary {
     color: var(--ns-text-1);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+}
+
+/* =====================================================================
+ * Wave 4 东方清样校勘室（Overdrive A+B）：
+ * - 容器感知三栏布局（>=1200px 三栏常驻，820~1200px 收左栏，<820px 右栏抽屉）
+ * - 左栏：卷信息 + 正文目录 + 底部全书设定集三入口
+ * - 中栏：672px 清样纸面、68px 超细刊头、P01 悬停段号、-4deg 朱砂定稿印
+ * - Overdrive：@property 流光边、scroll() 进度丝带、View Transitions、reduced-motion 降级
+ * ===================================================================== */
+
+@property --ns-beam-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+}
+
+@keyframes ns-beam-spin {
+    to {
+        --ns-beam-angle: 360deg;
+    }
+}
+
+@keyframes ns-lamp-breathe {
+    0%, 100% {
+        box-shadow: 0 0 0 2px var(--ns-brand-soft);
+    }
+    50% {
+        box-shadow: 0 0 0 5px var(--ns-brand-soft);
+    }
+}
+
+@keyframes ns-seal-impress {
+    0% {
+        opacity: 0;
+        transform: scale(1.38) rotate(-10deg);
+    }
+    68% {
+        opacity: 1;
+        transform: scale(0.96) rotate(-3deg);
+    }
+    100% {
+        opacity: 1;
+        transform: scale(1) rotate(-4deg);
+    }
+}
+
+@keyframes ns-ribbon-progress {
+    from {
+        transform: scaleX(0);
+    }
+    to {
+        transform: scaleX(1);
+    }
+}
+
+/* 原生 View Transitions 共享元素流转 */
+::view-transition-old(ns-studio-sheet),
+::view-transition-new(ns-studio-sheet) {
+    animation-duration: 210ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+::view-transition-group(ns-trace-lamp),
+::view-transition-group(ns-trace-role) {
+    animation-duration: 260ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 容器感知三栏布局（由 .ns-studio-shell ResizeObserver 实测宽度驱动） */
+.ns-studio-shell.ns-layout-wide {
+    grid-template-columns: 224px minmax(0, 1fr) var(--ns-right-w, 340px);
+}
+
+.ns-studio-shell.ns-layout-medium {
+    grid-template-columns: minmax(0, 1fr) var(--ns-right-w, 340px);
+}
+
+.ns-studio-shell.ns-layout-compact {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.ns-studio-shell.ns-right-closed {
+    --ns-right-w: 0px;
+}
+
+.ns-num {
+    font-variant-numeric: tabular-nums;
+}
+
+/* 通用按钮与胶囊徽标 */
+.ns-btn {
+    height: 30px;
+    padding: 0 11px;
+    border-radius: var(--ns-r-sm);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.ns-btn:hover:not(:disabled) {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-1);
+}
+
+.ns-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.ns-btn-subtle {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-1);
+}
+
+.ns-btn-subtle:hover:not(:disabled) {
+    background: var(--ns-bg-press);
+}
+
+.ns-btn-outline {
+    border-color: var(--ns-border-2);
+    background: var(--ns-bg-sheet);
+    color: var(--ns-text-1);
+}
+
+.ns-btn-outline:hover:not(:disabled) {
+    border-color: var(--ns-border-3);
+    background: var(--ns-bg-elevated);
+}
+
+.ns-btn-primary {
+    background: var(--ns-brand-fill);
+    color: #ffffff;
+}
+
+.ns-btn-primary:hover:not(:disabled) {
+    background: var(--ns-brand-fill-hover);
+    color: #ffffff;
+}
+
+.ns-btn-warn {
+    background: var(--ns-amber-soft);
+    border-color: var(--ns-amber-line);
+    color: var(--ns-amber-ink);
+}
+
+.ns-btn-warn:hover:not(:disabled) {
+    background: var(--ns-bg-press);
+}
+
+.ns-btn-danger {
+    background: var(--ns-red-soft);
+    border-color: var(--ns-red-line);
+    color: var(--ns-red-ink);
+}
+
+.ns-btn-icon-only {
+    width: 30px;
+    padding: 0;
+    justify-content: center;
+}
+
+.ns-btn-xs {
+    height: 24px;
+    padding: 0 8px;
+    font-size: 11px;
+}
+
+.ns-split-action {
+    display: inline-flex;
+    align-items: center;
+    border-radius: var(--ns-r-sm);
+    position: relative;
+}
+
+.ns-split-action > .ns-btn:first-child {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+.ns-split-action > .ns-btn:nth-child(2) {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.22);
+    padding: 0 9px;
+}
+
+.ns-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: var(--ns-r-pill);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.ns-badge-ok {
+    background: var(--ns-green-soft);
+    color: var(--ns-green-ink);
+}
+
+.ns-badge-accent {
+    background: var(--ns-brand-soft);
+    color: var(--ns-brand-ink);
+}
+
+.ns-badge-warn {
+    background: var(--ns-amber-soft);
+    color: var(--ns-amber-ink);
+}
+
+.ns-badge-danger {
+    background: var(--ns-red-soft);
+    color: var(--ns-red-ink);
+}
+
+.ns-badge-neutral {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-3);
+}
+
+/* 浮层菜单 */
+.ns-menu-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 244px;
+    background: var(--ns-bg-elevated);
+    border: 1px solid var(--ns-border-2);
+    border-radius: var(--ns-r-lg);
+    box-shadow: var(--ns-shadow-float);
+    padding: 5px;
+    z-index: 80;
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    transition: opacity 0.14s var(--ns-ease), transform 0.14s var(--ns-ease);
+}
+
+@starting-style {
+    .ns-menu-pop {
+        opacity: 0;
+        transform: translateY(-4px) scale(0.98);
+    }
+}
+
+.ns-menu-pop.ns-left {
+    right: auto;
+    left: 0;
+}
+
+.ns-menu-row {
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: var(--ns-r-sm);
+    background: transparent;
+    color: var(--ns-text-1);
+    font-family: inherit;
+    font-size: 13px;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    cursor: pointer;
+}
+
+.ns-menu-row:hover {
+    background: var(--ns-bg-hover);
+}
+
+.ns-menu-row span {
+    font-size: 11px;
+    color: var(--ns-text-3);
+}
+
+.ns-menu-row.ns-danger {
+    color: var(--ns-red-ink);
+}
+
+.ns-menu-divider {
+    height: 1px;
+    background: var(--ns-border-1);
+    margin: 4px;
+}
+
+/* Wave 4 左栏（224px 常驻：卷与天数 / 正文目录 / 底部全书设定集三入口） */
+.ns-left-pane {
+    background: var(--ns-bg-side);
+    border-right: 1px solid var(--ns-border-1);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.ns-left-vol-bar {
+    height: 46px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--ns-border-1);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--ns-text-2);
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.ns-left-vol-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-left-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px 8px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--ns-border-2) transparent;
+}
+
+.ns-left-group-label {
+    padding: 4px 10px 6px;
+    font-size: 11px;
+    color: var(--ns-text-3);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+}
+
+.ns-ch-item {
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: var(--ns-r-sm);
+    background: transparent;
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+    margin-bottom: 2px;
+}
+
+.ns-ch-item:hover {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-1);
+}
+
+.ns-ch-item.ns-active {
+    background: var(--ns-bg-press);
+    color: var(--ns-text-1);
+    font-weight: 500;
+}
+
+.ns-ch-title-wrap {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-ch-no {
+    color: var(--ns-text-3);
+    margin-right: 4px;
+    font-size: 12px;
+}
+
+.ns-ch-chars {
+    font-size: 11px;
+    color: var(--ns-text-3);
+    flex-shrink: 0;
+}
+
+.ns-left-codex {
+    padding: 10px 8px 12px;
+    border-top: 1px solid var(--ns-border-1);
+    flex-shrink: 0;
+}
+
+.ns-codex-row {
+    width: 100%;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: var(--ns-r-sm);
+    background: transparent;
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    cursor: pointer;
+    text-align: left;
+}
+
+.ns-codex-row:hover {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-1);
+}
+
+.ns-codex-row.ns-active {
+    background: var(--ns-brand-soft);
+    color: var(--ns-brand-ink);
+    font-weight: 500;
+}
+
+/* 中栏舞台与顶栏 */
+.ns-center-pane {
+    background: var(--ns-bg-stage);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+}
+
+.ns-center-header {
+    height: 46px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--ns-border-1);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.ns-book-switcher {
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-1);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 4px 8px;
+    margin-left: -8px;
+    border-radius: var(--ns-r-sm);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.ns-book-switcher:hover {
+    background: var(--ns-bg-hover);
+}
+
+/* 阅读工具栏 + 672px 版心光学对齐的 3x2 Agent 工序矩阵 */
+.ns-reader-toolbar-wrap {
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 10px 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.ns-reader-bar {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.ns-seg-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--ns-bg-side);
+    padding: 3px;
+    border-radius: var(--ns-r-md);
+    border: 1px solid var(--ns-border-1);
+}
+
+.ns-seg-tab {
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-3);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 11px;
+    border-radius: var(--ns-r-sm);
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
+}
+
+.ns-seg-tab:hover {
+    color: var(--ns-text-1);
+}
+
+.ns-seg-tab.ns-active {
+    background: var(--ns-bg-sheet);
+    color: var(--ns-text-1);
+    font-weight: 500;
+}
+
+.ns-pipeline-toggle-btn {
+    height: 30px;
+    padding: 0 11px;
+    border-radius: var(--ns-r-md);
+    border: 1px solid var(--ns-border-2);
+    background: var(--ns-bg-sheet);
+    color: var(--ns-text-1);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.ns-pipeline-toggle-btn:hover {
+    border-color: var(--ns-border-3);
+    background: var(--ns-bg-elevated);
+}
+
+.ns-pipeline-toggle-btn.ns-open {
+    border-color: var(--ns-brand-line);
+    background: var(--ns-bg-elevated);
+}
+
+.ns-lamp-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ns-lamp {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1px solid var(--ns-border-3);
+    display: inline-block;
+    flex-shrink: 0;
+    transition: background 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.ns-lamp.ns-done {
+    background: var(--ns-green);
+    border-color: var(--ns-green);
+    box-shadow: 0 0 0 2px var(--ns-green-soft);
+}
+
+.ns-lamp.ns-active {
+    background: var(--ns-brand);
+    border-color: var(--ns-brand);
+    box-shadow: 0 0 0 3px var(--ns-brand-soft);
+    animation: ns-lamp-breathe 1.8s ease-in-out infinite;
+}
+
+.ns-lamp.ns-halt {
+    background: var(--ns-red);
+    border-color: var(--ns-red);
+    border-radius: var(--ns-r-xs);
+    transform: rotate(45deg) scale(0.88);
+    box-shadow: 0 0 0 3px var(--ns-red-soft);
+}
+
+.ns-pipeline-drawer {
+    width: 100%;
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-border-2);
+    border-radius: var(--ns-r-lg);
+    padding: 9px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+
+.ns-pipe-card {
+    padding: 9px 11px;
+    border-radius: var(--ns-r-md);
+    border: 1px solid var(--ns-border-1);
+    background: var(--ns-bg-side);
+    color: var(--ns-text-1);
+    font-family: inherit;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: pointer;
+    position: relative;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s var(--ns-ease);
+}
+
+.ns-pipe-card:hover {
+    background: var(--ns-bg-hover);
+    border-color: var(--ns-border-2);
+}
+
+.ns-pipe-card.ns-selected {
+    background: var(--ns-brand-soft);
+    border-color: var(--ns-brand-line);
+}
+
+.ns-pipe-card.ns-running-live {
+    background:
+        linear-gradient(var(--ns-bg-sheet), var(--ns-bg-sheet)) padding-box,
+        conic-gradient(from var(--ns-beam-angle), var(--ns-brand-line), rgba(76, 124, 240, 0.08) 42%, var(--ns-brand) 78%, var(--ns-brand-line)) border-box;
+    border: 1px solid transparent;
+    animation: ns-beam-spin 3.6s linear infinite;
+}
+
+.ns-pipe-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.ns-pipe-step-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ns-text-1);
+}
+
+.ns-pipe-step-state {
+    font-size: 11px;
+    color: var(--ns-text-3);
+}
+
+.ns-pipe-card.ns-running-live .ns-pipe-step-state {
+    color: var(--ns-brand-ink);
+    font-weight: 500;
+}
+
+.ns-pipe-live-note {
+    font-size: 11px;
+    color: var(--ns-text-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-pipe-card.ns-running-live .ns-pipe-live-note {
+    color: var(--ns-text-2);
+}
+
+.ns-pipe-model-tag {
+    font-family: var(--ns-font-mono);
+    font-size: 11px;
+    color: var(--ns-text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-pipe-card.ns-selected .ns-pipe-model-tag {
+    color: var(--ns-brand-ink);
+}
+
+/* 书稿滚动区 + 672px 清样画布 + scroll() 进度丝带 */
+.ns-stage-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    scroll-timeline-name: --ns-manuscript-scroll;
+    scroll-timeline-axis: block;
+    scrollbar-width: thin;
+    scrollbar-color: var(--ns-border-2) transparent;
+}
+
+.ns-manuscript-sheet {
+    width: 100%;
+    max-width: 672px;
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-border-1);
+    border-radius: var(--ns-r-sheet);
+    padding: 36px 44px 44px;
+    box-shadow: var(--ns-shadow-sheet);
+    position: relative;
+    overflow: hidden;
+    view-transition-name: ns-studio-sheet;
+}
+
+.ns-reading-ribbon {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--ns-seal);
+    transform-origin: 0 50%;
+    transform: scaleX(var(--ns-scroll-fallback, 0));
+    opacity: 0.88;
+    pointer-events: none;
+}
+
+@supports (animation-timeline: scroll()) {
+    .ns-reading-ribbon {
+        transform: scaleX(0);
+        animation: ns-ribbon-progress linear both;
+        animation-timeline: --ns-manuscript-scroll;
+    }
+}
+
+.ns-editorial-masthead {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 22px;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--ns-border-1);
+}
+
+.ns-editorial-numeral {
+    font-family: var(--ns-font-display);
+    font-weight: 200;
+    font-size: 68px;
+    line-height: 0.86;
+    letter-spacing: -0.04em;
+    color: var(--ns-numeral);
+    padding-right: 20px;
+    border-right: 1px solid var(--ns-border-2);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
+
+.ns-manuscript-sheet h1 {
+    font-family: var(--ns-font-serif);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.38;
+    color: var(--ns-text-1);
+    margin: 0;
+    letter-spacing: 0.02em;
+    text-wrap: balance;
+}
+
+.ns-ch-meta-line {
+    font-size: 12px;
+    color: var(--ns-text-3);
+    margin-top: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.ns-patch-colophon-bar {
+    margin: -8px 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 11px;
+    border-radius: var(--ns-r-md);
+    background: var(--ns-amber-soft);
+    border: 1px solid var(--ns-amber-line);
+    color: var(--ns-amber-ink);
+    font-size: 12px;
+}
+
+.ns-patch-colophon-bar button {
+    border: 0;
+    background: transparent;
+    color: var(--ns-amber-ink);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+    padding: 0;
+}
+
+.ns-prose-body {
+    font-family: var(--ns-font-serif);
+    font-size: 17px;
+    line-height: 1.98;
+    color: var(--ns-prose);
+    letter-spacing: 0.012em;
+}
+
+.ns-prose-para-wrap {
+    position: relative;
+}
+
+.ns-prose-folio {
+    position: absolute;
+    left: -36px;
+    top: 6px;
+    font-family: var(--ns-font-mono);
+    font-size: 11px;
+    color: var(--ns-text-3);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    user-select: none;
+}
+
+.ns-prose-para-wrap:hover .ns-prose-folio {
+    opacity: 0.9;
+}
+
+.ns-prose-body p {
+    margin: 0 0 16px;
+    text-indent: 2em;
+    border-radius: var(--ns-r-xs);
+}
+
+.ns-prose-body p.ns-conflict-highlight {
+    background: var(--ns-red-soft);
+    outline: 1px solid var(--ns-red-line);
+    padding: 6px 10px;
+    margin-left: -10px;
+    margin-right: -10px;
+}
+
+.ns-editorial-endmark {
+    margin-top: 36px;
+    padding-top: 24px;
+    border-top: 1px dashed var(--ns-border-1);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 9px;
+}
+
+.ns-seal-stamp {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--ns-r-sm);
+    border: 1px solid var(--ns-seal);
+    background: var(--ns-seal-soft);
+    color: var(--ns-seal);
+    font-family: var(--ns-font-serif);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    display: grid;
+    place-items: center;
+    transform: rotate(-4deg);
+    filter: url(#ns-cinnabar-grain);
+    user-select: none;
+    transition: transform 0.25s var(--ns-ease);
+}
+
+.ns-seal-stamp:hover {
+    transform: rotate(0deg) scale(1.04);
+}
+
+.ns-seal-stamp.ns-stamping {
+    animation: ns-seal-impress 0.36s var(--ns-ease) both;
+}
+
+/* 双模式设定冲突裁决卡 */
+.ns-conflict-card {
+    width: 100%;
+    max-width: 672px;
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-red-line);
+    border-radius: var(--ns-r-sheet);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.ns-conflict-head {
+    padding: 10px 16px;
+    background: var(--ns-red-soft);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.ns-conflict-body {
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ns-conflict-compare {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+}
+
+.ns-compare-pane {
+    padding: 10px 12px;
+    border-radius: var(--ns-r-md);
+    background: var(--ns-bg-side);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ns-text-2);
+}
+
+.ns-compare-caption {
+    font-size: 11px;
+    color: var(--ns-text-3);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+}
+
+/* 暂存草稿恢复提示条 */
+.ns-stash-restore-bar {
+    width: 100%;
+    max-width: 672px;
+    padding: 8px 14px;
+    border-radius: var(--ns-r-lg);
+    background: var(--ns-amber-soft);
+    border: 1px solid var(--ns-amber-line);
+    color: var(--ns-amber-ink);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+/* 底部走向建议与一体式便签舱 */
+.ns-director-footer {
+    padding: 6px 24px 16px;
+    display: flex;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.ns-director-wrap {
+    width: 100%;
+    max-width: 672px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ns-next-ideas-panel {
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-border-2);
+    border-radius: var(--ns-r-lg);
+    overflow: hidden;
+}
+
+.ns-next-ideas-header {
+    width: 100%;
+    padding: 6px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+}
+
+.ns-next-ideas-header:hover {
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-1);
+}
+
+.ns-next-idea-list {
+    border-top: 1px solid var(--ns-border-1);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ns-next-idea-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 5px 8px;
+    border-radius: var(--ns-r-sm);
+}
+
+.ns-next-idea-row:hover {
+    background: var(--ns-bg-hover);
+}
+
+.ns-next-idea-text {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1.45;
+}
+
+.ns-next-idea-row:hover .ns-next-idea-text {
+    color: var(--ns-text-1);
+}
+
+.ns-next-idea-go {
+    border: 0;
+    background: transparent;
+    color: var(--ns-brand-ink);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: var(--ns-r-xs);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ns-next-idea-row:hover .ns-next-idea-go {
+    background: var(--ns-brand-soft);
+}
+
+.ns-queued-notes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ns-note-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: var(--ns-r-pill);
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-border-2);
+    font-size: 12px;
+    color: var(--ns-text-2);
+}
+
+.ns-note-tag button {
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-3);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.ns-note-dock {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 10px;
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-border-2);
+    border-radius: var(--ns-r-lg);
+    box-shadow: var(--ns-shadow-dock);
+    position: relative;
+    transition: border-color 0.15s ease;
+}
+
+.ns-note-dock:focus-within {
+    border-color: var(--ns-brand-line);
+}
+
+.ns-note-kind-btn {
+    height: 26px;
+    padding: 0 9px;
+    border-radius: var(--ns-r-sm);
+    border: 0;
+    background: var(--ns-bg-hover);
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ns-spotlight-select {
+    height: 25px;
+    border-radius: var(--ns-r-sm);
+    border: 1px solid var(--ns-brand-line);
+    background: var(--ns-brand-soft);
+    color: var(--ns-brand-ink);
+    padding: 0 6px;
+    font-size: 12px;
+    font-family: inherit;
+}
+
+.ns-note-input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-1);
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+}
+
+.ns-note-input::placeholder {
+    color: var(--ns-text-3);
+}
+
+/* 右栏（支持 <820px 自动浮层抽屉） */
+.ns-right-pane {
+    background: var(--ns-bg-side);
+    border-left: 1px solid var(--ns-border-1);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+.ns-right-pane.ns-right-drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(352px, 90%);
+    z-index: 65;
+    box-shadow: var(--ns-shadow-float);
+}
+
+.ns-right-top {
+    height: 46px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--ns-border-1);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.ns-right-tab {
+    height: 30px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--ns-r-sm);
+    background: transparent;
+    color: var(--ns-text-3);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ns-right-tab:hover {
+    color: var(--ns-text-1);
+    background: var(--ns-bg-hover);
+}
+
+.ns-right-tab.ns-active {
+    color: var(--ns-text-1);
+    background: var(--ns-bg-press);
+    font-weight: 500;
+}
+
+.ns-right-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.ns-toast-banner {
+    position: fixed;
+    top: 48px;
+    right: 20px;
+    padding: 8px 14px;
+    border-radius: var(--ns-r-md);
+    background: var(--ns-bg-elevated);
+    border: 1px solid var(--ns-border-2);
+    box-shadow: var(--ns-shadow-float);
+    color: var(--ns-text-1);
+    font-size: 12px;
+    z-index: 140;
+}
+
+/* 无障碍：系统减弱动态效果时移除位移、旋转循环与脉冲，保留色彩与状态反馈 */
+@media (prefers-reduced-motion: reduce) {
+    .ns-studio-shell *,
+    .ns-studio-shell *::before,
+    .ns-studio-shell *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+
+    ::view-transition-old(ns-studio-sheet),
+    ::view-transition-new(ns-studio-sheet),
+    ::view-transition-group(ns-trace-lamp),
+    ::view-transition-group(ns-trace-role) {
+        animation: none !important;
+    }
 }
 `;
 

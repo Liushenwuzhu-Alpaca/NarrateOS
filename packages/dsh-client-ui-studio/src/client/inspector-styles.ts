@@ -193,7 +193,7 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-text-3 {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
     overflow-wrap: anywhere;
 }
@@ -229,7 +229,7 @@ export const INSPECTOR_CSS = `
 
 .ns-i-big {
     font-family: var(--ns-font-display);
-    font-size: 28px;
+    font-size: 26px;
     font-weight: 300;
     line-height: 1.1;
     color: var(--ns-text-1);
@@ -274,7 +274,7 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-metric-note {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
 }
 
@@ -283,7 +283,7 @@ export const INSPECTOR_CSS = `
     display: flex;
     gap: 2px;
     height: 8px;
-    border-radius: 4px;
+    border-radius: var(--ns-r-xs);
     overflow: hidden;
     background: var(--ns-bg-hover);
 }
@@ -319,13 +319,13 @@ export const INSPECTOR_CSS = `
 /* Token 统计范围辅助说明：口径边界常驻可见 */
 .ns-i-scope-note {
     margin-top: 4px;
-    font-size: 10.5px;
+    font-size: 11px;
     line-height: 1.5;
     color: var(--ns-text-4);
 }
 
 .ns-i-budget-total {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-2);
 }
 
@@ -388,7 +388,7 @@ export const INSPECTOR_CSS = `
 
 .ns-i-route-role {
     grid-column: 1 / -1;
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     overflow-wrap: anywhere;
 }
@@ -440,7 +440,7 @@ export const INSPECTOR_CSS = `
     flex-shrink: 0;
     border-radius: 50%;
     background: var(--ns-brand-fill);
-    color: #fff;
+    color: #ffffff;
     font-size: 12px;
     font-weight: 500;
 }
@@ -459,7 +459,7 @@ export const INSPECTOR_CSS = `
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--ns-text-1);
 }
@@ -469,13 +469,13 @@ export const INSPECTOR_CSS = `
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
 }
 
 .ns-i-entity-brief {
     padding: 0 10px 8px 44px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
     overflow-wrap: anywhere;
 }
@@ -541,7 +541,7 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-thread-hint {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     overflow-wrap: anywhere;
 }
@@ -559,7 +559,7 @@ export const INSPECTOR_CSS = `
     border-radius: var(--ns-r-sm);
     background: var(--ns-bg-hover);
     color: var(--ns-text-4);
-    font-size: 9.5px;
+    font-size: 11px;
     text-align: center;
     overflow-wrap: anywhere;
 }
@@ -589,7 +589,7 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-lock-holder {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-amber-ink);
     overflow-wrap: anywhere;
 }
@@ -648,7 +648,7 @@ export const INSPECTOR_CSS = `
     padding: 8px 10px;
     border-radius: var(--ns-r-md);
     background: var(--ns-bg-hover);
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ns-text-3);
     overflow-wrap: anywhere;
 }
@@ -682,13 +682,13 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-rule-label {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     overflow-wrap: anywhere;
 }
 
 .ns-i-rule-count {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--ns-text-4);
     white-space: nowrap;
 }
@@ -725,7 +725,7 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-role-id {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 500;
     color: var(--ns-text-1);
     overflow: hidden;
@@ -735,7 +735,7 @@ export const INSPECTOR_CSS = `
 
 .ns-i-role-pool {
     flex-shrink: 0;
-    font-size: 10px;
+    font-size: 11px;
     color: var(--ns-text-4);
     white-space: nowrap;
 }
@@ -767,7 +767,7 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-role-label {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--ns-text-4);
 }
 
@@ -892,7 +892,137 @@ export const INSPECTOR_CSS = `
 }
 
 .ns-i-stage-session-id {
-    font-size: 10.5px;
+    font-size: 11px;
     word-break: break-all;
+}
+
+/* Wave 4 去框化右栏检查器与两层模型分配样式 */
+.ns-panel-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--ns-border-1);
+}
+
+.ns-panel-section:last-child {
+    border-bottom: 0;
+}
+
+.ns-sec-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ns-text-1);
+}
+
+.ns-stat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+    color: var(--ns-text-2);
+}
+
+.ns-stat-row > span:first-child {
+    color: var(--ns-text-3);
+}
+
+.ns-trace-turn {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--ns-border-1);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ns-text-2);
+}
+
+.ns-trace-turn:last-child {
+    border-bottom: 0;
+}
+
+.ns-trace-tool-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 9px;
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-sheet);
+    border: 1px solid var(--ns-border-1);
+    font-family: var(--ns-font-mono);
+    font-size: 11px;
+    color: var(--ns-text-2);
+}
+
+.ns-pool-edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+}
+
+.ns-role-override-list {
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--ns-border-1);
+}
+
+.ns-role-row {
+    border-bottom: 1px solid var(--ns-border-1);
+}
+
+.ns-role-summary {
+    width: 100%;
+    padding: 8px 5px;
+    border: 0;
+    background: transparent;
+    color: var(--ns-text-1);
+    font-family: inherit;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+    border-radius: var(--ns-r-sm);
+}
+
+.ns-role-summary:hover {
+    background: var(--ns-bg-hover);
+}
+
+.ns-role-detail {
+    padding: 8px 5px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ns-field-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--ns-text-3);
+}
+
+.ns-field-row select,
+.ns-field-row input {
+    height: 28px;
+    padding: 0 8px;
+    border-radius: var(--ns-r-sm);
+    border: 1px solid var(--ns-border-2);
+    background: var(--ns-bg-sheet);
+    color: var(--ns-text-1);
+    font-family: inherit;
+    font-size: 12px;
 }
 `;
