@@ -1,10 +1,15 @@
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
+    parseL2CardSections,
     serializeEntityMarkdown,
     type BookConfig,
+    type BookSnapshot,
+    type BookStore,
+    type EntityPatch,
+    type EntityProfile,
     type PreviousChapterContext,
     type RecallSlice,
     type SlicedView,
@@ -204,6 +209,7 @@ export async function writeNextChapterOptions(
 }
 
 export const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
+export const VOLUME_CARD_FILE_RE = /^vol_(\d+)_cards\.md$/;
 
 export function formatChapterKey(chapterNumber: number): string {
     return `ch_${String(chapterNumber).padStart(4, '0')}`;
@@ -211,6 +217,51 @@ export function formatChapterKey(chapterNumber: number): string {
 
 export function formatChapterTag(chapterNumber: number): string {
     return `ch-${String(chapterNumber).padStart(4, '0')}`;
+}
+
+/** 格式化 L2 卷级章卡相对路径 */
+export function formatVolumeCardRelPath(volumeNumber: number): string {
+    return `index/L2_cards/vol_${String(volumeNumber).padStart(2, '0')}_cards.md`;
+}
+
+/** 拆分并过滤空行 */
+export function splitNonEmptyLines(raw: string): string[] {
+    return raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+}
+
+/** 解析 JSONL 文本，损坏行保留为 { raw } 对象 */
+export function parseJsonLines(raw: string | null): unknown[] {
+    if (raw === null) return [];
+    const results: unknown[] = [];
+    for (const trimmed of splitNonEmptyLines(raw)) {
+        try {
+            results.push(JSON.parse(trimmed));
+        } catch {
+            results.push({ raw: trimmed });
+        }
+    }
+    return results;
+}
+
+/** 判断异常是否源于取消或停机中止信号 */
+export function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+    if (signal?.aborted) {
+        return true;
+    }
+    if (err instanceof Error) {
+        if (err.name === 'AbortError') return true;
+        const code = (err as { code?: unknown }).code;
+        if (code === 'ABORT_ERR' || code === 'ABORTED') return true;
+        if (err.message === 'SAFE_HALT_REQUESTED' || err.message === 'Aborted') return true;
+        return false;
+    }
+    if (typeof err === 'object' && err !== null) {
+        return (err as { name?: unknown }).name === 'AbortError';
+    }
+    return false;
 }
 
 export function sha256Hex(content: string): string {
@@ -351,4 +402,226 @@ export function buildVerificationCorpus(
         parts.push(`## 当前卷包络与阶段禁区 (current_arc_envelope.md)\n${currentArcEnvelope.trim()}`);
     }
     return parts.join('\n\n');
+}
+
+/** 剥离已知实体增量补丁中冗余的 canonical_name 覆写字段 */
+export function sanitizeExtractorPatches(
+    snapshot: BookSnapshot,
+    patches: EntityPatch[]
+): EntityPatch[] {
+    return patches.map((patch) => {
+        if (snapshot.entities[patch.entity_id] && patch.canonical_name !== undefined) {
+            const { canonical_name: _ignored, ...rest } = patch;
+            return rest;
+        }
+        return patch;
+    });
+}
+
+/** 收集活跃实体主名与唯一别名集合（供脱专名或声纹过滤使用） */
+export function collectEntityDisplayNames(
+    entities: Readonly<Record<string, EntityProfile>>
+): string[] {
+    return Array.from(
+        new Set(
+            Object.values(entities).flatMap((profile) => [
+                profile.metadata.canonical_name,
+                ...profile.metadata.unique_aliases
+            ])
+        )
+    );
+}
+
+/** 结合游标状态与 JSONL 原文还原已消费信号 ID 集合（兼容仅写 consumedLines 的旧游标） */
+export function resolveConsumedSignalIds(
+    cursorState: SignalsCursorState,
+    nonEmptyLines: readonly string[]
+): Set<string> {
+    const consumedIds = new Set<string>(cursorState.consumedIds);
+    if (
+        consumedIds.size === 0 &&
+        cursorState.consumedLines > 0 &&
+        cursorState.consumedLines <= nonEmptyLines.length
+    ) {
+        for (let idx = 0; idx < cursorState.consumedLines; idx += 1) {
+            try {
+                const obj = JSON.parse(nonEmptyLines[idx]!) as Record<string, unknown>;
+                consumedIds.add(resolveSignalId(obj));
+            } catch {
+                // 忽略损坏行
+            }
+        }
+    }
+    return consumedIds;
+}
+
+/** 从 L2 章卡的 dayLabel（如 day:3）解析故事日，失败时回退默认值 */
+export function parseStoryDayLabel(dayLabel: string | undefined, fallbackDay: number): number {
+    if (!dayLabel) return fallbackDay;
+    const match = /^day:(-?\d+)$/i.exec(dayLabel.trim());
+    if (!match?.[1]) return fallbackDay;
+    const day = Number(match[1]);
+    return Number.isInteger(day) ? day : fallbackDay;
+}
+
+export interface LocatedChapterL2Card {
+    cardRelPath: string;
+    cardVolume: number;
+    cardRaw: string | null;
+    section: ReturnType<typeof parseL2CardSections>['sections'][number] | undefined;
+}
+
+/** 定位指定章节所属的 L2 卷级章卡文件与对应章节分段 */
+export async function locateChapterL2Card(
+    bookRoot: string,
+    chapterNumber: number,
+    defaultVolume: number
+): Promise<LocatedChapterL2Card> {
+    const defaultRel = formatVolumeCardRelPath(defaultVolume);
+    const defaultRaw = await readOptionalText(join(bookRoot, defaultRel));
+    const defaultSec = defaultRaw
+        ? parseL2CardSections(defaultRaw).sections.find((s) => s.chapterNumber === chapterNumber)
+        : undefined;
+    if (defaultSec) {
+        return {
+            cardRelPath: defaultRel,
+            cardVolume: defaultVolume,
+            cardRaw: defaultRaw,
+            section: defaultSec
+        };
+    }
+
+    const l2Dir = join(bookRoot, 'index/L2_cards');
+    try {
+        const files = (await readdir(l2Dir)).filter((f) => VOLUME_CARD_FILE_RE.test(f)).sort();
+        for (const file of files) {
+            const rel = `index/L2_cards/${file}`;
+            const raw = await readOptionalText(join(bookRoot, rel));
+            if (!raw) continue;
+            const sec = parseL2CardSections(raw).sections.find(
+                (s) => s.chapterNumber === chapterNumber
+            );
+            if (sec) {
+                const parsedVol = Number(VOLUME_CARD_FILE_RE.exec(file)?.[1] ?? defaultVolume);
+                return {
+                    cardRelPath: rel,
+                    cardVolume: Number.isFinite(parsedVol) ? parsedVol : defaultVolume,
+                    cardRaw: raw,
+                    section: sec
+                };
+            }
+        }
+    } catch {
+        // index/L2_cards 目录尚未建立时回退当前卷文件
+    }
+
+    return {
+        cardRelPath: defaultRel,
+        cardVolume: defaultVolume,
+        cardRaw: defaultRaw,
+        section: undefined
+    };
+}
+
+/** 将冷宫休眠实体按需临时加载入内存快照（不物理迁回主线 entities/） */
+export async function wakeColdArchiveEntitiesInMemory(
+    store: BookStore,
+    snapshot: BookSnapshot,
+    candidateIds: readonly string[],
+    wokenColdIds?: Set<string>
+): Promise<BookSnapshot> {
+    if (snapshot.coldArchiveIds.length === 0 || candidateIds.length === 0) {
+        return snapshot;
+    }
+    const coldSet = new Set(snapshot.coldArchiveIds);
+    const toLoad = Array.from(
+        new Set(candidateIds.filter((id) => coldSet.has(id) && !snapshot.entities[id]))
+    );
+    if (toLoad.length === 0) {
+        return snapshot;
+    }
+    const loaded = await store.readColdArchivedEntities(toLoad);
+    if (Object.keys(loaded).length === 0) {
+        return snapshot;
+    }
+    if (wokenColdIds) {
+        for (const id of Object.keys(loaded)) {
+            wokenColdIds.add(id);
+        }
+    }
+    return {
+        ...snapshot,
+        entities: {
+            ...snapshot.entities,
+            ...loaded
+        }
+    };
+}
+
+/** 扫描 .ops/parallel_deltas 下仍处于 OPEN 状态的并行时间线窗口 */
+export async function listOpenParallelWindows(
+    bookRoot: string
+): Promise<Array<{ windowId: string; baseChapter: number }>> {
+    const deltasDir = join(bookRoot, '.ops/parallel_deltas');
+    let entries;
+    try {
+        entries = await readdir(deltasDir, { withFileTypes: true });
+    } catch (err: unknown) {
+        if ((err as { code?: string }).code === 'ENOENT') {
+            return [];
+        }
+        throw err;
+    }
+
+    const openWindows: Array<{ windowId: string; baseChapter: number }> = [];
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const raw = await readOptionalText(join(deltasDir, entry.name, 'window.json'));
+        if (!raw) continue;
+        try {
+            const parsed = JSON.parse(raw) as { status?: unknown; baseChapter?: unknown };
+            if (parsed.status === 'OPEN') {
+                const baseChapter = typeof parsed.baseChapter === 'number' ? parsed.baseChapter : 0;
+                openWindows.push({ windowId: entry.name, baseChapter });
+            }
+        } catch {
+            // 忽略损坏窗口元数据
+        }
+    }
+    return openWindows;
+}
+
+/** 读取并合并 world/ops_style_amendments.md 与 .ops/style_amendments.md 中的有效风格修订 */
+export async function readCombinedStyleAmendments(
+    bookRoot: string,
+    options?: {
+        readWorldAmendments?: (() => Promise<string | null>) | undefined;
+        order?: 'world-first' | 'ops-first' | undefined;
+        dedupe?: boolean | undefined;
+    }
+): Promise<{
+    combined: string | undefined;
+    opsRaw: string | null;
+    worldRaw: string | null;
+}> {
+    const readWorldAmendments = options?.readWorldAmendments;
+    const order = options?.order ?? 'world-first';
+    const dedupe = options?.dedupe ?? true;
+    const [worldRaw, opsRaw] = await Promise.all([
+        readWorldAmendments
+            ? readWorldAmendments()
+            : readOptionalText(join(bookRoot, 'world/ops_style_amendments.md')),
+        readOptionalText(join(bookRoot, '.ops/style_amendments.md'))
+    ]);
+    const worldAmendment = normalizeOpsStyleAmendments(worldRaw);
+    const opsAmendment = normalizeOpsStyleAmendments(opsRaw);
+    const ordered =
+        order === 'ops-first' ? [opsAmendment, worldAmendment] : [worldAmendment, opsAmendment];
+    const nonEmpty = ordered.filter((s): s is string => Boolean(s));
+    const parts = dedupe ? Array.from(new Set(nonEmpty)) : nonEmpty;
+    return {
+        combined: parts.length > 0 ? parts.join('\n\n') : undefined,
+        opsRaw,
+        worldRaw
+    };
 }

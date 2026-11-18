@@ -135,6 +135,36 @@ function parseHealCommandArgs(rawInput: string): { maxAutoRollbackChapters?: num
     };
 }
 
+function dispatchBackgroundCommand(
+    controller: NarrateRuntimeController,
+    busyText: (activeTask: string) => string,
+    runTask: () => { task: Promise<unknown>; successText: string }
+): CommandResult {
+    try {
+        controller.assertAdmissionOpen();
+        controller.requireBookStore();
+        const rt = controller.runtimeStatus;
+        if (rt.yolo.running || rt.activeTask !== 'IDLE') {
+            return {
+                kind: 'error',
+                text: busyText(rt.activeTask)
+            };
+        }
+        const { task, successText } = runTask();
+        void controller.trackBackgroundTask(
+            task.catch((err) => {
+                controller.emitEvent('chapter:phase', {
+                    phase: 'FAILED',
+                    error: formatErr(err)
+                });
+            })
+        );
+        return { kind: 'success', text: successText };
+    } catch (err) {
+        return { kind: 'error', text: formatErr(err) };
+    }
+}
+
 /**
  * 注册 NarrateOS 聊天栏零开销斜杠命令：
  * - /narrate-status
@@ -186,49 +216,31 @@ export function registerNarrateCommands(
             input: {
                 hint: '[--mode MAINLINE|PARALLEL|FLASHBACK] [--day <N>] [--pov <id1,id2>] [--window <id>] [--branch <id>] [目标]'
             },
-            handler: (inv): CommandResult => {
-                try {
-                    controller.assertAdmissionOpen();
-                    controller.requireBookStore();
-                    const rt = controller.runtimeStatus;
-                    if (rt.yolo.running || rt.activeTask !== 'IDLE') {
+            handler: (inv): CommandResult =>
+                dispatchBackgroundCommand(
+                    controller,
+                    (activeTask) =>
+                        `当前正在执行任务 (${activeTask})，请等待完成后再触发单章推进。`,
+                    () => {
+                        const stepOptions = parseStepCommandArgs(inv.rawInput);
+                        const summaryParts = [
+                            `目标：${stepOptions.chapterGoal ?? '自动沿用下一章候选方向'}`
+                        ];
+                        if (stepOptions.timelineMode) {
+                            summaryParts.push(`mode=${stepOptions.timelineMode}`);
+                        }
+                        if (stepOptions.targetDay !== undefined) {
+                            summaryParts.push(`day=${stepOptions.targetDay}`);
+                        }
+                        if (stepOptions.povCharIds) {
+                            summaryParts.push(`pov=${stepOptions.povCharIds.join(',')}`);
+                        }
                         return {
-                            kind: 'error',
-                            text: `当前正在执行任务 (${rt.activeTask})，请等待完成后再触发单章推进。`
+                            task: controller.stepChapter(stepOptions),
+                            successText: `已异步启动下一章生成管线（${summaryParts.join(' | ')}）。`
                         };
                     }
-
-                    const stepOptions = parseStepCommandArgs(inv.rawInput);
-                    void controller.trackBackgroundTask(
-                        controller
-                            .stepChapter(stepOptions)
-                            .catch((err) => {
-                                controller.emitEvent('chapter:phase', {
-                                    phase: 'FAILED',
-                                    error: formatErr(err)
-                                });
-                            })
-                    );
-                    const summaryParts = [
-                        `目标：${stepOptions.chapterGoal ?? '自动沿用下一章候选方向'}`
-                    ];
-                    if (stepOptions.timelineMode) {
-                        summaryParts.push(`mode=${stepOptions.timelineMode}`);
-                    }
-                    if (stepOptions.targetDay !== undefined) {
-                        summaryParts.push(`day=${stepOptions.targetDay}`);
-                    }
-                    if (stepOptions.povCharIds) {
-                        summaryParts.push(`pov=${stepOptions.povCharIds.join(',')}`);
-                    }
-                    return {
-                        kind: 'success',
-                        text: `已异步启动下一章生成管线（${summaryParts.join(' | ')}）。`
-                    };
-                } catch (err) {
-                    return { kind: 'error', text: formatErr(err) };
-                }
-            }
+                )
         },
         {
             name: 'narrate-yolo',
@@ -281,104 +293,51 @@ export function registerNarrateCommands(
             name: 'narrate-dream',
             description: '后台异步启动多轮 Dreaming 整理与资产维护（支持 --force）',
             input: { hint: '[--force]' },
-            handler: (inv): CommandResult => {
-                try {
-                    controller.assertAdmissionOpen();
-                    controller.requireBookStore();
-                    const rt = controller.runtimeStatus;
-                    if (rt.yolo.running || rt.activeTask !== 'IDLE') {
+            handler: (inv): CommandResult =>
+                dispatchBackgroundCommand(
+                    controller,
+                    (activeTask) =>
+                        `当前正在执行任务 (${activeTask})，禁止并发启动 Dreaming。`,
+                    () => {
+                        const force = inv.rawInput.includes('--force');
                         return {
-                            kind: 'error',
-                            text: `当前正在执行任务 (${rt.activeTask})，禁止并发启动 Dreaming。`
+                            task: controller.runDreaming({ force }),
+                            successText: `已异步启动多轮 Dreaming 整理任务${force ? ' (force=true)' : ''}。`
                         };
                     }
-                    const force = inv.rawInput.includes('--force');
-                    void controller.trackBackgroundTask(
-                        controller
-                            .runDreaming({ force })
-                            .catch((err) => {
-                                controller.emitEvent('chapter:phase', {
-                                    phase: 'FAILED',
-                                    error: formatErr(err)
-                                });
-                            })
-                    );
-                    return {
-                        kind: 'success',
-                        text: `已异步启动多轮 Dreaming 整理任务${force ? ' (force=true)' : ''}。`
-                    };
-                } catch (err) {
-                    return { kind: 'error', text: formatErr(err) };
-                }
-            }
+                )
         },
         {
             name: 'narrate-sync',
             description: '后台异步执行手稿真源 SHA-256 对账同步 (Sync)',
-            handler: (): CommandResult => {
-                try {
-                    controller.assertAdmissionOpen();
-                    controller.requireBookStore();
-                    const rt = controller.runtimeStatus;
-                    if (rt.yolo.running || rt.activeTask !== 'IDLE') {
-                        return {
-                            kind: 'error',
-                            text: `当前正在执行任务 (${rt.activeTask})，禁止并发执行 Sync。`
-                        };
-                    }
-                    void controller.trackBackgroundTask(
-                        controller
-                            .syncManuscripts()
-                            .catch((err) => {
-                                controller.emitEvent('chapter:phase', {
-                                    phase: 'FAILED',
-                                    error: formatErr(err)
-                                });
-                            })
-                    );
-                    return {
-                        kind: 'success',
-                        text: '已异步启动手稿增量同步 (Sync)。'
-                    };
-                } catch (err) {
-                    return { kind: 'error', text: formatErr(err) };
-                }
-            }
+            handler: (): CommandResult =>
+                dispatchBackgroundCommand(
+                    controller,
+                    (activeTask) =>
+                        `当前正在执行任务 (${activeTask})，禁止并发执行 Sync。`,
+                    () => ({
+                        task: controller.syncManuscripts(),
+                        successText: '已异步启动手稿增量同步 (Sync)。'
+                    })
+                )
         },
         {
             name: 'narrate-heal',
             description: '后台异步执行跨章冲突自愈分级修复与回滚重跑',
             input: { hint: '[--max-rollback <N>]' },
-            handler: (inv): CommandResult => {
-                try {
-                    controller.assertAdmissionOpen();
-                    controller.requireBookStore();
-                    const rt = controller.runtimeStatus;
-                    if (rt.yolo.running || rt.activeTask !== 'IDLE') {
+            handler: (inv): CommandResult =>
+                dispatchBackgroundCommand(
+                    controller,
+                    (activeTask) =>
+                        `当前正在执行任务 (${activeTask})，禁止并发执行自愈。`,
+                    () => {
+                        const healArgs = parseHealCommandArgs(inv.rawInput);
                         return {
-                            kind: 'error',
-                            text: `当前正在执行任务 (${rt.activeTask})，禁止并发执行自愈。`
+                            task: controller.healFromSyncConflicts(healArgs),
+                            successText: `已异步启动跨章冲突自愈流程${healArgs.maxAutoRollbackChapters !== undefined ? ` (maxRollback=${healArgs.maxAutoRollbackChapters})` : ''}。`
                         };
                     }
-                    const healArgs = parseHealCommandArgs(inv.rawInput);
-                    void controller.trackBackgroundTask(
-                        controller
-                            .healFromSyncConflicts(healArgs)
-                            .catch((err) => {
-                                controller.emitEvent('chapter:phase', {
-                                    phase: 'FAILED',
-                                    error: formatErr(err)
-                                });
-                            })
-                    );
-                    return {
-                        kind: 'success',
-                        text: `已异步启动跨章冲突自愈流程${healArgs.maxAutoRollbackChapters !== undefined ? ` (maxRollback=${healArgs.maxAutoRollbackChapters})` : ''}。`
-                    };
-                } catch (err) {
-                    return { kind: 'error', text: formatErr(err) };
-                }
-            }
+                )
         },
         {
             name: 'narrate-signal',

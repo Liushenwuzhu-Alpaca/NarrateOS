@@ -19,6 +19,7 @@ import {
     type EntityProfile,
     type LlmPort,
     type ProseGateOptions,
+    type StructuredRetryOptions,
     type SystemPort,
     type TxState
 } from '@narrateos/dsh-book-store';
@@ -51,11 +52,18 @@ import {
     createEmptyUsage,
     formatChapterKey,
     formatChapterTag,
+    formatVolumeCardRelPath,
+    isAbortError,
+    locateChapterL2Card,
+    parseStoryDayLabel,
     readOptionalText,
     readSignalsCursorState,
     resolveSignalId,
     sha256Hex,
+    splitNonEmptyLines,
     upsertVolumeCardEntry,
+    VOLUME_CARD_FILE_RE,
+    wakeColdArchiveEntitiesInMemory,
     writeHealPlan,
     writeSignalsCursorState
 } from './helpers.js';
@@ -67,17 +75,6 @@ const DEFAULT_DREAM_BUFFER_LIMIT = 6;
 const DEFAULT_WARPED_ARCHIVE_AFTER_DAYS = 3;
 const DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS = 2;
 const DEFAULT_HEAL_GIT_LOG_MAX_COUNT = 2000;
-
-function isAbortError(err: unknown): boolean {
-    if (err instanceof Error && err.name === 'AbortError') {
-        return true;
-    }
-    return (
-        typeof err === 'object' &&
-        err !== null &&
-        (err as { name?: unknown }).name === 'AbortError'
-    );
-}
 
 export interface DreamingPipelineDeps {
     store: BookStore;
@@ -183,7 +180,7 @@ function scanOffscreenEntityNotes(
             merged.push({
                 entityId,
                 pendingGoal: '伏笔/未来线存在关联未结动态',
-                progressNote: `距上次出场 (ch_${String(profile.metadata.last_seen_ch).padStart(4, '0')}) 已间隔 ${currentChapter - profile.metadata.last_seen_ch} 章`
+                progressNote: `距上次出场 (${formatChapterKey(profile.metadata.last_seen_ch)}) 已间隔 ${currentChapter - profile.metadata.last_seen_ch} 章`
             });
         }
     }
@@ -214,7 +211,7 @@ async function scanRecurringProseAnchors(
     const l2Dir = join(bookRoot, 'index/L2_cards');
     let cardFiles: string[] = [];
     try {
-        cardFiles = (await readdir(l2Dir)).filter((f) => /^vol_\d+_cards\.md$/.test(f)).sort();
+        cardFiles = (await readdir(l2Dir)).filter((f) => VOLUME_CARD_FILE_RE.test(f)).sort();
     } catch {
         cardFiles = [`vol_${String(currentVolume).padStart(2, '0')}_cards.md`];
     }
@@ -365,34 +362,29 @@ export class DreamingPipeline {
 
             const dirtyEntityNotes: string[] = [];
             const dirtyEntityIds: string[] = [];
+            const allCandidateNotes: string[] = [];
+            const allCandidateIds: string[] = [];
+            const activeOverrideSet = new Set(options.activeEntityIds ?? []);
             for (const entityId of candidateIds) {
                 const profile = snapshot.entities[entityId];
                 if (!profile) continue;
                 const eventBufferCount = profile.recentBuffer.filter(
                     (e) => !isVoiceSpecimenEntry(e.text, e.continuationLines)
                 ).length;
-                if (eventBufferCount >= bufferLimit || options.activeEntityIds?.includes(entityId)) {
+                const note = `- ${entityId} (${profile.metadata.canonical_name}): last_seen_ch=${profile.metadata.last_seen_ch}, 第4区缓冲条数=${eventBufferCount}`;
+                allCandidateIds.push(entityId);
+                allCandidateNotes.push(note);
+                if (eventBufferCount >= bufferLimit || activeOverrideSet.has(entityId)) {
                     dirtyEntityIds.push(entityId);
-                    dirtyEntityNotes.push(
-                        `- ${entityId} (${profile.metadata.canonical_name}): last_seen_ch=${profile.metadata.last_seen_ch}, 第4区缓冲条数=${eventBufferCount}`
-                    );
+                    dirtyEntityNotes.push(note);
                 }
             }
 
             const wordTriggered = recentWordDelta >= wordThreshold;
             // 若仅由字数达标或强制触发且无实体达到 bufferLimit，仍把水位以来出场实体纳入脏清单避免空转
             if ((wordTriggered || options.force) && dirtyEntityIds.length === 0) {
-                for (const entityId of candidateIds) {
-                    const profile = snapshot.entities[entityId];
-                    if (!profile) continue;
-                    const eventBufferCount = profile.recentBuffer.filter(
-                        (e) => !isVoiceSpecimenEntry(e.text, e.continuationLines)
-                    ).length;
-                    dirtyEntityIds.push(entityId);
-                    dirtyEntityNotes.push(
-                        `- ${entityId} (${profile.metadata.canonical_name}): last_seen_ch=${profile.metadata.last_seen_ch}, 第4区缓冲条数=${eventBufferCount}`
-                    );
-                }
+                dirtyEntityIds.push(...allCandidateIds);
+                dirtyEntityNotes.push(...allCandidateNotes);
             }
 
             const openThreadsRaw = await readOptionalText(
@@ -439,14 +431,16 @@ export class DreamingPipeline {
                 };
             }
 
-            const volPad = String(snapshot.worldState.frontmatter.current_volume).padStart(2, '0');
             const l2Raw = await readOptionalText(
-                join(this.store.bookRoot, `index/L2_cards/vol_${volPad}_cards.md`)
+                join(
+                    this.store.bookRoot,
+                    formatVolumeCardRelPath(snapshot.worldState.frontmatter.current_volume)
+                )
             );
             const recentL2Text = extractRecentL2Cards(l2Raw, watermarkCh, options.currentChapter);
 
             const taskPrompt = [
-                `## 本轮睡眠整理任务 (ch_${String(options.currentChapter).padStart(4, '0')} | story_day=${currentStoryDay})`,
+                `## 本轮睡眠整理任务 (${formatChapterKey(options.currentChapter)} | story_day=${currentStoryDay})`,
                 `- 上次 Dreaming 水位章号: ${watermarkCh}`,
                 `- 水位以来累计新增字数: ${recentWordDelta}`,
                 `- 建议校验/整理的脏实体范围（其余未出场干净实体严禁读取或修改）:`,
@@ -582,68 +576,18 @@ export class DreamingPipeline {
                     continue;
                 }
 
-                let severity: ConflictSeverity;
-                let reason = conflict.description;
-
-                if (conflict.severityHint && conflict.severityHint !== 'SINGLE_POINT_HARD') {
-                    severity = conflict.severityHint;
-                } else {
-                    const classifyPrompt = [
-                        `冲突 ID: ${conflict.conflictId}`,
-                        `描述: ${conflict.description}`,
-                        `前文 (${formatChapterKey(conflict.chapterA)} 第 ${verification.sideA.lineNumber ?? '?'} 行): ${conflict.quoteA}`,
-                        `后文 (${formatChapterKey(conflict.chapterB)} 第 ${verification.sideB.lineNumber ?? '?'} 行): ${conflict.quoteB}`,
-                        `后文完整上下文:\n${textB}`,
-                        '',
-                        '请判定冲突级别：',
-                        '- SOFT_MINOR: 天气体感口误、次要环境微差，投递 RETCON 信号由下章圆回',
-                        '- SINGLE_POINT_HARD: 生死/唯一物/地理硬冲突，但下游未依赖',
-                        '- CASCADING_HARD: 下游章节已建立在该错误事实之上'
-                    ].join('\n');
-
-                    const classified = await generateStructuredJson(
-                        this.llm,
-                        {
-                            pool: 'audit',
-                            traceStage: 'heal.classify',
-                            staticPrefixBlocks: [
-                                '你是长篇小说跨章连续性自愈裁判。仅输出合法 JSON。'
-                            ],
-                            dynamicTail: classifyPrompt
-                        },
-                        ConflictClassificationOutputSchema,
-                        retryOptions,
-                        options.signal
-                    );
-                    addUsage(usage, classified.totalUsage);
-
-                    severity = conflict.severityHint ?? classified.data.severity;
-                    reason = classified.data.reason;
-                }
+                const { severity, reason } = await this.classifyConflictSeverity(
+                    conflict,
+                    textB,
+                    verification,
+                    retryOptions,
+                    usage,
+                    options.signal
+                );
 
                 // 级别 1：软微瑕 -> 短锁内投递 RETCON 信号
                 if (severity === 'SOFT_MINOR') {
-                    await this.store.withTxLock(async () => {
-                        const sigRelPath = '.ops/signals.jsonl';
-                        await this.store.recordPendingWrites([sigRelPath]);
-                        const sigPath = await appendSignalJsonl(this.store.bookRoot, {
-                            type: 'RETCON',
-                            created_at: new Date().toISOString(),
-                            chapter: conflict.chapterB,
-                            conflict_id: conflict.conflictId,
-                            chapter_a: conflict.chapterA,
-                            chapter_b: conflict.chapterB,
-                            reason
-                        });
-                        await this.system.commitPaths(
-                            this.store.bookRoot,
-                            [sigPath],
-                            `fix(${formatChapterTag(conflict.chapterB)}): emit RETCON signal for ${conflict.conflictId}`
-                        );
-                        await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), {
-                            force: true
-                        });
-                    });
+                    await this.handleSoftMinorConflict(conflict, reason);
                     results.push({
                         conflictId: conflict.conflictId,
                         action: 'RETCON_SIGNAL',
@@ -655,429 +599,33 @@ export class DreamingPipeline {
 
                 // 级别 2：单点硬穿帮 -> 单把 tx.lock 内完成净室 RoleRunner('patch') + StaticProseGate + WAL + L2/hash 原子提交
                 if (severity === 'SINGLE_POINT_HARD') {
-                    const relChapterPath = `manuscripts/${formatChapterKey(conflict.chapterB)}.md`;
-                    const patchOutcome = await this.store.withTxLock(async () => {
-                        const currentTextB = await readOptionalText(pathB);
-                        if (currentTextB === null) {
-                            return { missing: true as const };
-                        }
-                        const liveVerify = verifyDualQuotes(
-                            conflict.quoteA,
-                            textA,
-                            conflict.quoteB,
-                            currentTextB
-                        );
-                        if (!liveVerify.passed) {
-                            return { stale: true as const };
-                        }
-
-                        const patchRoleCfg = await this.roleRunner.loadRoleConfig(
-                            'patch',
-                            this.store.bookRoot
-                        );
-                        if (patchRoleCfg.cleanroom || patchRoleCfg.maxReadCalls > 0) {
-                            throw new ValidationError(
-                                `Patch 角色配置违规：必须保持 cleanroom=false 且 maxReadCalls=0（当前 cleanroom=${String(patchRoleCfg.cleanroom)}, maxReadCalls=${patchRoleCfg.maxReadCalls}）`
-                            );
-                        }
-
-                        let snapshot = await this.store.loadSnapshot();
-                        const { cardRelPath, cardVolume, cardRaw, section } =
-                            await this.locateChapterL2Card(
-                                conflict.chapterB,
-                                snapshot.worldState.frontmatter.current_volume
-                            );
-                        const chapterStoryDay = this.resolveChapterStoryDay(
-                            section?.dayLabel,
-                            snapshot.worldState.frontmatter.story_day
-                        );
-
-                        // 为净室 Patch 装配正向文风锁与出场实体卡片（若出场含冷宫归档角色则先唤醒载入，严禁暴露全知禁区与 WARPED）
-                        const staticVoiceRaw = await readOptionalText(
-                            join(this.store.bookRoot, 'world/static_base_and_voice.md')
-                        );
-                        const staticVoiceClean = staticVoiceRaw
-                            ? stripWriterRestrictedDirectives(staticVoiceRaw) ?? ''
-                            : '';
-                        const slicer = new ViewSlicer();
-                        const focusEntityIds =
-                            section && section.appearedEntityIds.length > 0
-                                ? section.appearedEntityIds
-                                : Object.keys(snapshot.entities);
-                        const coldSet = new Set(snapshot.coldArchiveIds);
-                        const missingColdIds = focusEntityIds.filter(
-                            (id) => coldSet.has(id) && !snapshot.entities[id]
-                        );
-                        if (missingColdIds.length > 0) {
-                            const wokenCold = await this.store.readColdArchivedEntities(missingColdIds);
-                            if (Object.keys(wokenCold).length > 0) {
-                                snapshot = {
-                                    ...snapshot,
-                                    entities: {
-                                        ...snapshot.entities,
-                                        ...wokenCold
-                                    }
-                                };
-                            }
-                        }
-                        const writerView = slicer.slice({
-                            snapshot,
-                            forRole: 'writer',
-                            currentCh: conflict.chapterB,
-                            targetDay: chapterStoryDay,
-                            timelineMode: 'MAINLINE',
-                            entityIds: focusEntityIds
-                        });
-                        const entityCardsText = Object.values(writerView.entities)
-                            .map((profile) =>
-                                renderEntityProfile(profile, {
-                                    compactCard: false,
-                                    stripWarped: true,
-                                    cleanroomDisplay: true
-                                })
-                            )
-                            .filter((block) => block.trim().length > 0)
-                            .join('\n\n');
-
-                        const { paragraphs } = analyzeParagraphs(currentTextB);
-                        const targetParagraphIndices = this.resolveTargetParagraphIndices(
-                            paragraphs,
-                            conflict.quoteB,
-                            liveVerify.sideB.startLine,
-                            liveVerify.sideB.endLine
-                        );
-                        const numberedParagraphs = paragraphs
-                            .map((p, idx) => `[${idx}] ${p}`)
-                            .join('\n\n');
-
-                        const cleanReason =
-                            sanitizeTextForCleanroomWriter(reason) || CLEANROOM_PATCH_FALLBACK_REASON;
-                        const cleanQuoteA = sanitizeTextForCleanroomWriter(conflict.quoteA);
-                        const proseGateOptions = buildDreamProseGateOptions(snapshot.config);
-
-                        const taskPrompt = [
-                            staticVoiceClean ? `## 抽象文风纪律锁\n${staticVoiceClean}` : '',
-                            entityCardsText ? `## 相关出场实体基准（净室脱敏）\n${entityCardsText}` : '',
-                            `## 跨章单点硬穿帮修补目标\n${cleanReason}`,
-                            cleanQuoteA
-                                ? `## 前文锚点基准 (${formatChapterKey(conflict.chapterA)})\n${cleanQuoteA}`
-                                : '',
-                            `## 待修补段落索引 (0-based)\n[${targetParagraphIndices.join(', ')}]`,
-                            `## 需改写的后文原句 (${formatChapterKey(conflict.chapterB)})\n${conflict.quoteB}`,
-                            `## 当前待修补正文（0-based 段落索引）\n${numberedParagraphs}`,
-                            '请对照 0-based 段落索引调用 `patch_paragraphs` 精准修改目标段落消除事实穿帮，保持人称、语气与前后文连贯，确认通过后调用 `yield_patched_draft` 提交定稿。'
-                        ]
-                            .filter(Boolean)
-                            .join('\n\n');
-
-                        const runRes = await this.roleRunner.runMultiTurn<YieldPatchedDraftResult>({
-                            roleId: patchRoleCfg.id,
-                            stage: 'HEAL_PATCH',
-                            chapterNumber: conflict.chapterB,
-                            bookRoot: this.store.bookRoot,
-                            bookConfig: snapshot.config,
-                            draftText: currentTextB,
-                            proseGateOptions,
-                            enforceProseGateOnYield: true,
-                            taskPrompt,
-                            signal: options.signal
-                        });
-                        addUsage(usage, runRes.usage);
-
-                        const patchedText = runRes.yieldResult.patchedProse;
-                        const gateResult = this.gate.evaluate(patchedText, proseGateOptions);
-                        if (!gateResult.passed) {
-                            throw new ValidationError(
-                                `Tier 2 跨章修补未通过静态文风门禁 (${gateResult.violations.map((v) => v.ruleId).join(', ')})`
-                            );
-                        }
-
-                        // 同一把锁内登记 WAL、写回手稿、刷新双轨 L2 卡与 chapter_hashes 后单次原子提交
-                        const normPatched = normalizeForQuoteMatch(patchedText);
-                        const preservedAnchors = (section?.anomalyAnchors ?? []).filter(
-                            (anchor) => {
-                                const trimmed = anchor.trim();
-                                return (
-                                    trimmed.length > 0 &&
-                                    trimmed !== '无' &&
-                                    normPatched.includes(normalizeForQuoteMatch(trimmed))
-                                );
-                            }
-                        );
-                        const plotSummary =
-                            section?.plotSummary?.trim() ||
-                            cleanReason ||
-                            formatChapterKey(conflict.chapterB);
-                        const nextCardContent = upsertVolumeCardEntry(
-                            cardRaw,
-                            cardVolume,
-                            conflict.chapterB,
-                            chapterStoryDay,
-                            plotSummary,
-                            section?.appearedEntityIds ?? [],
-                            preservedAnchors
-                        );
-
-                        const chKey = formatChapterKey(conflict.chapterB);
-                        const currentTx = await this.store.readTxState();
-                        const nextTx: TxState = {
-                            ...currentTx,
-                            chapter_hashes: {
-                                ...currentTx.chapter_hashes,
-                                [chKey]: sha256Hex(patchedText)
-                            },
-                            updated_at: new Date().toISOString()
-                        };
-
-                        await this.store.recordPendingWrites([relChapterPath, cardRelPath]);
-                        await writeFile(pathB, patchedText, 'utf8');
-                        await mkdir(join(this.store.bookRoot, 'index/L2_cards'), {
-                            recursive: true
-                        });
-                        await writeFile(join(this.store.bookRoot, cardRelPath), nextCardContent, 'utf8');
-                        await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-                        await writeFile(
-                            join(this.store.bookRoot, '.ops/tx_state.json'),
-                            `${JSON.stringify(nextTx, null, 4)}\n`,
-                            'utf8'
-                        );
-                        await this.system.commitPaths(
-                            this.store.bookRoot,
-                            [relChapterPath, cardRelPath, '.ops/tx_state.json'],
-                            `fix(${formatChapterTag(conflict.chapterB)}): cleanroom patch single-point conflict & refresh L2/hash`
-                        );
-                        await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), {
-                            force: true
-                        });
-
-                        return {
-                            missing: false as const,
-                            stale: false as const,
-                            sideALine: verification.sideA.lineNumber,
-                            sideBLine: liveVerify.sideB.lineNumber
-                        };
+                    const patchResult = await this.handleSinglePointHardConflict({
+                        conflict,
+                        reason,
+                        textA,
+                        pathB,
+                        verification,
+                        usage,
+                        options
                     });
-
-                    if ('missing' in patchOutcome && patchOutcome.missing) {
-                        results.push({
-                            conflictId: conflict.conflictId,
-                            action: 'DISCARDED_HALLUCINATION'
-                        });
-                        continue;
-                    }
-                    if ('stale' in patchOutcome && patchOutcome.stale) {
-                        results.push({
-                            conflictId: conflict.conflictId,
-                            action: 'DISCARDED_HALLUCINATION'
-                        });
-                        continue;
-                    }
-
-                    // Sync 回调在释放 tx.lock 之后执行，彻底避免不可重入锁死锁
-                    if (options.onSyncAfterPatch) {
-                        await options.onSyncAfterPatch(conflict.chapterB);
-                    }
-
-                    results.push({
-                        conflictId: conflict.conflictId,
-                        action: 'PATCHED_IN_PLACE',
-                        sideALine: patchOutcome.sideALine,
-                        sideBLine: patchOutcome.sideBLine
-                    });
+                    results.push(patchResult);
                     continue;
                 }
 
                 // 级别 3：连带支线硬穿帮 -> 短锁内快照+回滚+写断点 -> 释放 tx.lock 后无锁重跑 -> 失败熔断 QUARANTINED / SAFE_HALT
-                const maxAutoRollback =
-                    options.maxAutoRollbackChapters ?? config.max_auto_rollback_chapters;
-                const healGitLogMaxCount =
-                    config.ops_and_sync?.heal_git_log_max_count ?? DEFAULT_HEAL_GIT_LOG_MAX_COUNT;
-                const txStateBefore = await this.store.readTxState();
-                const affectedChapters = this.collectAffectedChapters(
-                    conflict.chapterB,
-                    txStateBefore.last_committed_ch,
-                    conflict.downstreamDependentChapters
-                );
-                const rollbackChapters = affectedChapters.length;
-                const rollbackWords = await this.sumChaptersWords(affectedChapters);
-
-                let rerunDeadlocked = false;
-                let backupTag: string | undefined;
-                const targetChapter = Math.max(0, conflict.chapterB - 1);
-
-                if (maxAutoRollback > 0 && rollbackChapters <= maxAutoRollback) {
-                    const prepared = await this.store.withTxLock(async () => {
-                        const txState = await this.store.readTxState();
-                        const signalsRaw = await readOptionalText(
-                            join(this.store.bookRoot, '.ops/signals.jsonl')
-                        );
-                        const cursorState = await readSignalsCursorState(this.store.bookRoot);
-                        const voiceSamplesRaw = await readOptionalText(
-                            join(this.store.bookRoot, '.ops/voice_samples.yaml')
-                        );
-                        const lockPath = join(this.store.bookRoot, '.ops/tx.lock');
-                        const currentLockContent = await readOptionalText(lockPath);
-
-                        const tag = `backup/pre-heal-${formatChapterTag(conflict.chapterB)}-${Date.now()}`;
-                        await this.system.createTag(
-                            this.store.bookRoot,
-                            tag,
-                            `Backup before auto-rollback for ${conflict.conflictId}`
-                        );
-
-                        const rollbackRef = options.resolveRollbackRef
-                            ? await options.resolveRollbackRef(targetChapter)
-                            : await this.findRollbackRef(targetChapter, healGitLogMaxCount);
-
-                        await this.system.resetHard(this.store.bookRoot, rollbackRef);
-                        // 立即清除或还原被历史提交误带出的 .ops/tx.lock，保证退出短锁时锁文件被干净释放
-                        if (currentLockContent !== null) {
-                            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-                            await writeFile(lockPath, currentLockContent, 'utf8');
-                        } else {
-                            await rm(lockPath, { force: true });
-                        }
-                        await this.system.cleanUntracked(this.store.bookRoot, ['.ops/**']);
-
-                        // 合并写回保留的信号队列与声纹池，并追加本次正向重跑修正信号
-                        await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-                        const preservedLines = (signalsRaw ?? '')
-                            .split(/\r?\n/)
-                            .map((line) => line.trim())
-                            .filter((line) => line.length > 0);
-                        const rerunSignal: OpsSignal = {
-                            type: 'RETCON',
-                            created_at: new Date().toISOString(),
-                            chapter: conflict.chapterB,
-                            conflict_id: conflict.conflictId,
-                            chapter_a: conflict.chapterA,
-                            chapter_b: conflict.chapterB,
-                            reason: `[HEAL_ROLLBACK_CONSTRAINT] ${reason}`
-                        };
-                        await writeFile(
-                            join(this.store.bookRoot, '.ops/signals.jsonl'),
-                            `${[...preservedLines, JSON.stringify(rerunSignal)].join('\n')}\n`,
-                            'utf8'
-                        );
-                        const parsedPreserved = preservedLines.flatMap((line) => {
-                            try {
-                                const obj = JSON.parse(line) as Record<string, unknown>;
-                                return [obj];
-                            } catch {
-                                return [];
-                            }
-                        });
-                        const rollbackSignalIds = new Set<string>();
-                        for (const sigObj of parsedPreserved) {
-                            const sigChapter =
-                                typeof sigObj['chapter'] === 'number' ? sigObj['chapter'] : 0;
-                            if (sigChapter >= conflict.chapterB) {
-                                rollbackSignalIds.add(resolveSignalId(sigObj));
-                            }
-                        }
-                        const filteredConsumedIds = cursorState.consumedIds.filter(
-                            (id) => !rollbackSignalIds.has(id)
-                        );
-                        await writeSignalsCursorState(this.store.bookRoot, {
-                            consumedLines: Math.min(
-                                cursorState.consumedLines,
-                                Math.max(0, preservedLines.length - rollbackSignalIds.size)
-                            ),
-                            consumedIds: filteredConsumedIds
-                        });
-                        if (voiceSamplesRaw !== null) {
-                            await writeFile(
-                                join(this.store.bookRoot, '.ops/voice_samples.yaml'),
-                                voiceSamplesRaw,
-                                'utf8'
-                            );
-                        }
-
-                        await writeHealPlan(this.store.bookRoot, {
-                            conflictId: conflict.conflictId,
-                            backupTag: tag,
-                            fromChapter: conflict.chapterB,
-                            toChapter: Math.max(conflict.chapterB, txState.last_committed_ch),
-                            nextChapter: conflict.chapterB,
-                            constraint: reason
-                        });
-
-                        return { backupTag: tag };
-                    });
-
-                    backupTag = prepared.backupTag;
-
-                    // 严格在释放 tx.lock 后执行重跑回调（内部 stepChapter 可安全独立取锁）
-                    if (options.onAutoRerun) {
-                        try {
-                            const rerunOutcome = await options.onAutoRerun({
-                                conflict,
-                                rollbackToChapter: targetChapter,
-                                backupTag,
-                                constraint: reason
-                            });
-                            if (!rerunOutcome.success || rerunOutcome.stillConflicting) {
-                                rerunDeadlocked = true;
-                            }
-                        } catch (err) {
-                            if (options.signal?.aborted || isAbortError(err)) {
-                                throw err;
-                            }
-                            rerunDeadlocked = true;
-                        }
-                    }
-
-                    if (!rerunDeadlocked) {
-                        await clearHealPlan(this.store.bookRoot);
-                        results.push({
-                            conflictId: conflict.conflictId,
-                            action: 'AUTO_ROLLED_BACK_AND_RERUN',
-                            sideALine: verification.sideA.lineNumber,
-                            sideBLine: verification.sideB.lineNumber,
-                            backupTag
-                        });
-                        continue;
-                    }
+                const tier3 = await this.handleCascadingHardConflict({
+                    conflict,
+                    reason,
+                    config,
+                    verification,
+                    options
+                });
+                results.push(tier3.itemResult);
+                if (tier3.quarantineReport) {
+                    quarantined = true;
+                    quarantineReport = tier3.quarantineReport;
+                    break;
                 }
-
-                const report = QuarantineReportSchema.parse({
-                    status: 'QUARANTINED',
-                    conflict_id: conflict.conflictId,
-                    side_a_chapter: conflict.chapterA,
-                    side_a_line: verification.sideA.lineNumber,
-                    side_b_chapter: conflict.chapterB,
-                    side_b_line: verification.sideB.lineNumber,
-                    rollback_chapters: rollbackChapters,
-                    rollback_words: rollbackWords,
-                    reason: rerunDeadlocked ? `${reason}（自动重跑 1 次仍死锁）` : reason,
-                    created_at: new Date().toISOString()
-                });
-
-                await this.store.withTxLock(async () => {
-                    await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-                    await writeFile(
-                        join(this.store.bookRoot, '.ops/quarantine_report.json'),
-                        `${JSON.stringify(report, null, 4)}\n`,
-                        'utf8'
-                    );
-                    await writeFile(
-                        join(this.store.bookRoot, '.ops/safe_halt.json'),
-                        `${JSON.stringify({ ...report, status: 'SAFE_HALT' }, null, 4)}\n`,
-                        'utf8'
-                    );
-                });
-
-                quarantined = true;
-                quarantineReport = report;
-                results.push({
-                    conflictId: conflict.conflictId,
-                    action: 'QUARANTINED',
-                    sideALine: verification.sideA.lineNumber,
-                    sideBLine: verification.sideB.lineNumber,
-                    ...(backupTag ? { backupTag } : {}),
-                    quarantineReport: report
-                });
-                break;
             }
 
             return {
@@ -1089,68 +637,491 @@ export class DreamingPipeline {
         });
     }
 
-    private async locateChapterL2Card(
-        chapterNumber: number,
-        defaultVolume: number
-    ): Promise<{
-        cardRelPath: string;
-        cardVolume: number;
-        cardRaw: string | null;
-        section: ReturnType<typeof parseL2CardSections>['sections'][number] | undefined;
-    }> {
-        const defaultVolPad = String(defaultVolume).padStart(2, '0');
-        const defaultRel = `index/L2_cards/vol_${defaultVolPad}_cards.md`;
-        const defaultRaw = await readOptionalText(join(this.store.bookRoot, defaultRel));
-        const defaultSec = defaultRaw
-            ? parseL2CardSections(defaultRaw).sections.find((s) => s.chapterNumber === chapterNumber)
-            : undefined;
-        if (defaultSec) {
-            return {
-                cardRelPath: defaultRel,
-                cardVolume: defaultVolume,
-                cardRaw: defaultRaw,
-                section: defaultSec
-            };
+    private async classifyConflictSeverity(
+        conflict: SuspectedConflict,
+        textB: string,
+        verification: ReturnType<typeof verifyDualQuotes>,
+        retryOptions: StructuredRetryOptions,
+        usage: ReturnType<typeof createEmptyUsage>,
+        signal?: AbortSignal
+    ): Promise<{ severity: ConflictSeverity; reason: string }> {
+        if (conflict.severityHint && conflict.severityHint !== 'SINGLE_POINT_HARD') {
+            return { severity: conflict.severityHint, reason: conflict.description };
         }
+        const classifyPrompt = [
+            `冲突 ID: ${conflict.conflictId}`,
+            `描述: ${conflict.description}`,
+            `前文 (${formatChapterKey(conflict.chapterA)} 第 ${verification.sideA.lineNumber ?? '?'} 行): ${conflict.quoteA}`,
+            `后文 (${formatChapterKey(conflict.chapterB)} 第 ${verification.sideB.lineNumber ?? '?'} 行): ${conflict.quoteB}`,
+            `后文完整上下文:\n${textB}`,
+            '',
+            '请判定冲突级别：',
+            '- SOFT_MINOR: 天气体感口误、次要环境微差，投递 RETCON 信号由下章圆回',
+            '- SINGLE_POINT_HARD: 生死/唯一物/地理硬冲突，但下游未依赖',
+            '- CASCADING_HARD: 下游章节已建立在该错误事实之上'
+        ].join('\n');
 
-        const l2Dir = join(this.store.bookRoot, 'index/L2_cards');
-        try {
-            const files = (await readdir(l2Dir)).filter((f) => /^vol_(\d+)_cards\.md$/.test(f)).sort();
-            for (const file of files) {
-                const rel = `index/L2_cards/${file}`;
-                const raw = await readOptionalText(join(this.store.bookRoot, rel));
-                if (!raw) continue;
-                const sec = parseL2CardSections(raw).sections.find(
-                    (s) => s.chapterNumber === chapterNumber
-                );
-                if (sec) {
-                    const parsedVol = Number(/^vol_(\d+)_cards\.md$/.exec(file)?.[1] ?? defaultVolume);
-                    return {
-                        cardRelPath: rel,
-                        cardVolume: Number.isFinite(parsedVol) ? parsedVol : defaultVolume,
-                        cardRaw: raw,
-                        section: sec
-                    };
-                }
-            }
-        } catch {
-            // index/L2_cards 目录尚未建立时回退当前卷文件
-        }
+        const classified = await generateStructuredJson(
+            this.llm,
+            {
+                pool: 'audit',
+                traceStage: 'heal.classify',
+                staticPrefixBlocks: ['你是长篇小说跨章连续性自愈裁判。仅输出合法 JSON。'],
+                dynamicTail: classifyPrompt
+            },
+            ConflictClassificationOutputSchema,
+            retryOptions,
+            signal
+        );
+        addUsage(usage, classified.totalUsage);
 
         return {
-            cardRelPath: defaultRel,
-            cardVolume: defaultVolume,
-            cardRaw: defaultRaw,
-            section: undefined
+            severity: conflict.severityHint ?? classified.data.severity,
+            reason: classified.data.reason
         };
     }
 
-    private resolveChapterStoryDay(dayLabel: string | undefined, fallbackStoryDay: number): number {
-        if (!dayLabel) return fallbackStoryDay;
-        const m = /^day:(-?\d+)$/i.exec(dayLabel.trim());
-        if (!m?.[1]) return fallbackStoryDay;
-        const n = Number(m[1]);
-        return Number.isFinite(n) ? n : fallbackStoryDay;
+    private async handleSoftMinorConflict(
+        conflict: SuspectedConflict,
+        reason: string
+    ): Promise<void> {
+        await this.store.withTxLock(async () => {
+            const sigRelPath = '.ops/signals.jsonl';
+            await this.store.recordPendingWrites([sigRelPath]);
+            const sigPath = await appendSignalJsonl(this.store.bookRoot, {
+                type: 'RETCON',
+                created_at: new Date().toISOString(),
+                chapter: conflict.chapterB,
+                conflict_id: conflict.conflictId,
+                chapter_a: conflict.chapterA,
+                chapter_b: conflict.chapterB,
+                reason
+            });
+            await this.system.commitPaths(
+                this.store.bookRoot,
+                [sigPath],
+                `fix(${formatChapterTag(conflict.chapterB)}): emit RETCON signal for ${conflict.conflictId}`
+            );
+            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), {
+                force: true
+            });
+        });
+    }
+
+    private async handleSinglePointHardConflict(params: {
+        conflict: SuspectedConflict;
+        reason: string;
+        textA: string;
+        pathB: string;
+        verification: ReturnType<typeof verifyDualQuotes>;
+        usage: ReturnType<typeof createEmptyUsage>;
+        options: HealConflictsOptions;
+    }): Promise<HealConflictItemResult> {
+        const { conflict, reason, textA, pathB, verification, usage, options } = params;
+        const relChapterPath = `manuscripts/${formatChapterKey(conflict.chapterB)}.md`;
+        const patchOutcome = await this.store.withTxLock(async () => {
+            const currentTextB = await readOptionalText(pathB);
+            if (currentTextB === null) {
+                return { missing: true as const };
+            }
+            const liveVerify = verifyDualQuotes(
+                conflict.quoteA,
+                textA,
+                conflict.quoteB,
+                currentTextB
+            );
+            if (!liveVerify.passed) {
+                return { stale: true as const };
+            }
+
+            const patchRoleCfg = await this.roleRunner.loadRoleConfig('patch', this.store.bookRoot);
+            if (patchRoleCfg.cleanroom || patchRoleCfg.maxReadCalls > 0) {
+                throw new ValidationError(
+                    `Patch 角色配置违规：必须保持 cleanroom=false 且 maxReadCalls=0（当前 cleanroom=${String(patchRoleCfg.cleanroom)}, maxReadCalls=${patchRoleCfg.maxReadCalls}）`
+                );
+            }
+
+            let snapshot = await this.store.loadSnapshot();
+            const { cardRelPath, cardVolume, cardRaw, section } = await locateChapterL2Card(
+                this.store.bookRoot,
+                conflict.chapterB,
+                snapshot.worldState.frontmatter.current_volume
+            );
+            const chapterStoryDay = parseStoryDayLabel(
+                section?.dayLabel,
+                snapshot.worldState.frontmatter.story_day
+            );
+
+            // 为净室 Patch 装配正向文风锁与出场实体卡片（若出场含冷宫归档角色则先唤醒载入，严禁暴露全知禁区与 WARPED）
+            const staticVoiceRaw = await readOptionalText(
+                join(this.store.bookRoot, 'world/static_base_and_voice.md')
+            );
+            const staticVoiceClean = staticVoiceRaw
+                ? stripWriterRestrictedDirectives(staticVoiceRaw) ?? ''
+                : '';
+            const slicer = new ViewSlicer();
+            const focusEntityIds =
+                section && section.appearedEntityIds.length > 0
+                    ? section.appearedEntityIds
+                    : Object.keys(snapshot.entities);
+            snapshot = await wakeColdArchiveEntitiesInMemory(
+                this.store,
+                snapshot,
+                focusEntityIds
+            );
+            const writerView = slicer.slice({
+                snapshot,
+                forRole: 'writer',
+                currentCh: conflict.chapterB,
+                targetDay: chapterStoryDay,
+                timelineMode: 'MAINLINE',
+                entityIds: focusEntityIds
+            });
+            const entityCardsText = Object.values(writerView.entities)
+                .map((profile) =>
+                    renderEntityProfile(profile, {
+                        compactCard: false,
+                        stripWarped: true,
+                        cleanroomDisplay: true
+                    })
+                )
+                .filter((block) => block.trim().length > 0)
+                .join('\n\n');
+
+            const { paragraphs } = analyzeParagraphs(currentTextB);
+            const targetParagraphIndices = this.resolveTargetParagraphIndices(
+                paragraphs,
+                conflict.quoteB,
+                liveVerify.sideB.startLine,
+                liveVerify.sideB.endLine
+            );
+            const numberedParagraphs = paragraphs
+                .map((p, idx) => `[${idx}] ${p}`)
+                .join('\n\n');
+
+            const cleanReason =
+                sanitizeTextForCleanroomWriter(reason) || CLEANROOM_PATCH_FALLBACK_REASON;
+            const cleanQuoteA = sanitizeTextForCleanroomWriter(conflict.quoteA);
+            const proseGateOptions = buildDreamProseGateOptions(snapshot.config);
+
+            const taskPrompt = [
+                staticVoiceClean ? `## 抽象文风纪律锁\n${staticVoiceClean}` : '',
+                entityCardsText ? `## 相关出场实体基准（净室脱敏）\n${entityCardsText}` : '',
+                `## 跨章单点硬穿帮修补目标\n${cleanReason}`,
+                cleanQuoteA
+                    ? `## 前文锚点基准 (${formatChapterKey(conflict.chapterA)})\n${cleanQuoteA}`
+                    : '',
+                `## 待修补段落索引 (0-based)\n[${targetParagraphIndices.join(', ')}]`,
+                `## 需改写的后文原句 (${formatChapterKey(conflict.chapterB)})\n${conflict.quoteB}`,
+                `## 当前待修补正文（0-based 段落索引）\n${numberedParagraphs}`,
+                '请对照 0-based 段落索引调用 `patch_paragraphs` 精准修改目标段落消除事实穿帮，保持人称、语气与前后文连贯，确认通过后调用 `yield_patched_draft` 提交定稿。'
+            ]
+                .filter(Boolean)
+                .join('\n\n');
+
+            const runRes = await this.roleRunner.runMultiTurn<YieldPatchedDraftResult>({
+                roleId: patchRoleCfg.id,
+                stage: 'HEAL_PATCH',
+                chapterNumber: conflict.chapterB,
+                bookRoot: this.store.bookRoot,
+                bookConfig: snapshot.config,
+                draftText: currentTextB,
+                proseGateOptions,
+                enforceProseGateOnYield: true,
+                taskPrompt,
+                signal: options.signal
+            });
+            addUsage(usage, runRes.usage);
+
+            const patchedText = runRes.yieldResult.patchedProse;
+            const gateResult = this.gate.evaluate(patchedText, proseGateOptions);
+            if (!gateResult.passed) {
+                throw new ValidationError(
+                    `Tier 2 跨章修补未通过静态文风门禁 (${gateResult.violations.map((v) => v.ruleId).join(', ')})`
+                );
+            }
+
+            // 同一把锁内登记 WAL、写回手稿、刷新双轨 L2 卡与 chapter_hashes 后单次原子提交
+            const normPatched = normalizeForQuoteMatch(patchedText);
+            const preservedAnchors = (section?.anomalyAnchors ?? []).filter((anchor) => {
+                const trimmed = anchor.trim();
+                return (
+                    trimmed.length > 0 &&
+                    trimmed !== '无' &&
+                    normPatched.includes(normalizeForQuoteMatch(trimmed))
+                );
+            });
+            const plotSummary =
+                section?.plotSummary?.trim() ||
+                cleanReason ||
+                formatChapterKey(conflict.chapterB);
+            const nextCardContent = upsertVolumeCardEntry(
+                cardRaw,
+                cardVolume,
+                conflict.chapterB,
+                chapterStoryDay,
+                plotSummary,
+                section?.appearedEntityIds ?? [],
+                preservedAnchors
+            );
+
+            const chKey = formatChapterKey(conflict.chapterB);
+            const currentTx = await this.store.readTxState();
+            const nextTx: TxState = {
+                ...currentTx,
+                chapter_hashes: {
+                    ...currentTx.chapter_hashes,
+                    [chKey]: sha256Hex(patchedText)
+                },
+                updated_at: new Date().toISOString()
+            };
+
+            await this.store.recordPendingWrites([relChapterPath, cardRelPath]);
+            await writeFile(pathB, patchedText, 'utf8');
+            await mkdir(join(this.store.bookRoot, 'index/L2_cards'), {
+                recursive: true
+            });
+            await writeFile(join(this.store.bookRoot, cardRelPath), nextCardContent, 'utf8');
+            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+            await writeFile(
+                join(this.store.bookRoot, '.ops/tx_state.json'),
+                `${JSON.stringify(nextTx, null, 4)}\n`,
+                'utf8'
+            );
+            await this.system.commitPaths(
+                this.store.bookRoot,
+                [relChapterPath, cardRelPath, '.ops/tx_state.json'],
+                `fix(${formatChapterTag(conflict.chapterB)}): cleanroom patch single-point conflict & refresh L2/hash`
+            );
+            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), {
+                force: true
+            });
+
+            return {
+                missing: false as const,
+                stale: false as const,
+                sideALine: verification.sideA.lineNumber,
+                sideBLine: liveVerify.sideB.lineNumber
+            };
+        });
+
+        if (patchOutcome.missing || patchOutcome.stale) {
+            return {
+                conflictId: conflict.conflictId,
+                action: 'DISCARDED_HALLUCINATION'
+            };
+        }
+
+        // Sync 回调在释放 tx.lock 之后执行，彻底避免不可重入锁死锁
+        if (options.onSyncAfterPatch) {
+            await options.onSyncAfterPatch(conflict.chapterB);
+        }
+
+        return {
+            conflictId: conflict.conflictId,
+            action: 'PATCHED_IN_PLACE',
+            sideALine: patchOutcome.sideALine,
+            sideBLine: patchOutcome.sideBLine
+        };
+    }
+
+    private async handleCascadingHardConflict(params: {
+        conflict: SuspectedConflict;
+        reason: string;
+        config: BookConfig;
+        verification: ReturnType<typeof verifyDualQuotes>;
+        options: HealConflictsOptions;
+    }): Promise<{
+        itemResult: HealConflictItemResult;
+        quarantineReport: QuarantineReport | null;
+    }> {
+        const { conflict, reason, config, verification, options } = params;
+        const maxAutoRollback =
+            options.maxAutoRollbackChapters ?? config.max_auto_rollback_chapters;
+        const healGitLogMaxCount =
+            config.ops_and_sync?.heal_git_log_max_count ?? DEFAULT_HEAL_GIT_LOG_MAX_COUNT;
+        const txStateBefore = await this.store.readTxState();
+        const affectedChapters = this.collectAffectedChapters(
+            conflict.chapterB,
+            txStateBefore.last_committed_ch,
+            conflict.downstreamDependentChapters
+        );
+        const rollbackChapters = affectedChapters.length;
+        const rollbackWords = await this.sumChaptersWords(affectedChapters);
+
+        let rerunDeadlocked = false;
+        let backupTag: string | undefined;
+        const targetChapter = Math.max(0, conflict.chapterB - 1);
+
+        if (maxAutoRollback > 0 && rollbackChapters <= maxAutoRollback) {
+            const prepared = await this.store.withTxLock(async () => {
+                const txState = await this.store.readTxState();
+                const signalsRaw = await readOptionalText(
+                    join(this.store.bookRoot, '.ops/signals.jsonl')
+                );
+                const cursorState = await readSignalsCursorState(this.store.bookRoot);
+                const voiceSamplesRaw = await readOptionalText(
+                    join(this.store.bookRoot, '.ops/voice_samples.yaml')
+                );
+                const lockPath = join(this.store.bookRoot, '.ops/tx.lock');
+                const currentLockContent = await readOptionalText(lockPath);
+
+                const tag = `backup/pre-heal-${formatChapterTag(conflict.chapterB)}-${Date.now()}`;
+                await this.system.createTag(
+                    this.store.bookRoot,
+                    tag,
+                    `Backup before auto-rollback for ${conflict.conflictId}`
+                );
+
+                const rollbackRef = options.resolveRollbackRef
+                    ? await options.resolveRollbackRef(targetChapter)
+                    : await this.findRollbackRef(targetChapter, healGitLogMaxCount);
+
+                await this.system.resetHard(this.store.bookRoot, rollbackRef);
+                // 立即清除或还原被历史提交误带出的 .ops/tx.lock，保证退出短锁时锁文件被干净释放
+                if (currentLockContent !== null) {
+                    await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+                    await writeFile(lockPath, currentLockContent, 'utf8');
+                } else {
+                    await rm(lockPath, { force: true });
+                }
+                await this.system.cleanUntracked(this.store.bookRoot, ['.ops/**']);
+
+                // 合并写回保留的信号队列与声纹池，并追加本次正向重跑修正信号
+                await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+                const preservedLines = signalsRaw ? splitNonEmptyLines(signalsRaw) : [];
+                const rerunSignal: OpsSignal = {
+                    type: 'RETCON',
+                    created_at: new Date().toISOString(),
+                    chapter: conflict.chapterB,
+                    conflict_id: conflict.conflictId,
+                    chapter_a: conflict.chapterA,
+                    chapter_b: conflict.chapterB,
+                    reason: `[HEAL_ROLLBACK_CONSTRAINT] ${reason}`
+                };
+                await writeFile(
+                    join(this.store.bookRoot, '.ops/signals.jsonl'),
+                    `${[...preservedLines, JSON.stringify(rerunSignal)].join('\n')}\n`,
+                    'utf8'
+                );
+                const rollbackSignalIds = new Set<string>();
+                for (const line of preservedLines) {
+                    try {
+                        const obj = JSON.parse(line) as Record<string, unknown>;
+                        const sigChapter =
+                            typeof obj['chapter'] === 'number' ? obj['chapter'] : 0;
+                        if (sigChapter >= conflict.chapterB) {
+                            rollbackSignalIds.add(resolveSignalId(obj));
+                        }
+                    } catch {
+                        // 忽略损坏信号行
+                    }
+                }
+                const filteredConsumedIds = cursorState.consumedIds.filter(
+                    (id) => !rollbackSignalIds.has(id)
+                );
+                await writeSignalsCursorState(this.store.bookRoot, {
+                    consumedLines: Math.min(
+                        cursorState.consumedLines,
+                        Math.max(0, preservedLines.length - rollbackSignalIds.size)
+                    ),
+                    consumedIds: filteredConsumedIds
+                });
+                if (voiceSamplesRaw !== null) {
+                    await writeFile(
+                        join(this.store.bookRoot, '.ops/voice_samples.yaml'),
+                        voiceSamplesRaw,
+                        'utf8'
+                    );
+                }
+
+                await writeHealPlan(this.store.bookRoot, {
+                    conflictId: conflict.conflictId,
+                    backupTag: tag,
+                    fromChapter: conflict.chapterB,
+                    toChapter: Math.max(conflict.chapterB, txState.last_committed_ch),
+                    nextChapter: conflict.chapterB,
+                    constraint: reason
+                });
+
+                return { backupTag: tag };
+            });
+
+            backupTag = prepared.backupTag;
+
+            // 严格在释放 tx.lock 后执行重跑回调（内部 stepChapter 可安全独立取锁）
+            if (options.onAutoRerun) {
+                try {
+                    const rerunOutcome = await options.onAutoRerun({
+                        conflict,
+                        rollbackToChapter: targetChapter,
+                        backupTag,
+                        constraint: reason
+                    });
+                    if (!rerunOutcome.success || rerunOutcome.stillConflicting) {
+                        rerunDeadlocked = true;
+                    }
+                } catch (err) {
+                    if (options.signal?.aborted || isAbortError(err)) {
+                        throw err;
+                    }
+                    rerunDeadlocked = true;
+                }
+            }
+
+            if (!rerunDeadlocked) {
+                await clearHealPlan(this.store.bookRoot);
+                return {
+                    itemResult: {
+                        conflictId: conflict.conflictId,
+                        action: 'AUTO_ROLLED_BACK_AND_RERUN',
+                        sideALine: verification.sideA.lineNumber,
+                        sideBLine: verification.sideB.lineNumber,
+                        backupTag
+                    },
+                    quarantineReport: null
+                };
+            }
+        }
+
+        const report = QuarantineReportSchema.parse({
+            status: 'QUARANTINED',
+            conflict_id: conflict.conflictId,
+            side_a_chapter: conflict.chapterA,
+            side_a_line: verification.sideA.lineNumber,
+            side_b_chapter: conflict.chapterB,
+            side_b_line: verification.sideB.lineNumber,
+            rollback_chapters: rollbackChapters,
+            rollback_words: rollbackWords,
+            reason: rerunDeadlocked ? `${reason}（自动重跑 1 次仍死锁）` : reason,
+            created_at: new Date().toISOString()
+        });
+
+        await this.store.withTxLock(async () => {
+            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+            await writeFile(
+                join(this.store.bookRoot, '.ops/quarantine_report.json'),
+                `${JSON.stringify(report, null, 4)}\n`,
+                'utf8'
+            );
+            await writeFile(
+                join(this.store.bookRoot, '.ops/safe_halt.json'),
+                `${JSON.stringify({ ...report, status: 'SAFE_HALT' }, null, 4)}\n`,
+                'utf8'
+            );
+        });
+
+        return {
+            itemResult: {
+                conflictId: conflict.conflictId,
+                action: 'QUARANTINED',
+                sideALine: verification.sideA.lineNumber,
+                sideBLine: verification.sideB.lineNumber,
+                ...(backupTag ? { backupTag } : {}),
+                quarantineReport: report
+            },
+            quarantineReport: report
+        };
     }
 
     private resolveTargetParagraphIndices(

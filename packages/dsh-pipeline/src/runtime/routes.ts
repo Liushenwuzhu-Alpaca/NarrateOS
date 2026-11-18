@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -21,7 +20,13 @@ import {
     TaskConflictError,
     ValidationError
 } from '../errors.js';
-import { CHAPTER_FILE_RE, readOptionalText } from '../pipeline/helpers.js';
+import {
+    CHAPTER_FILE_RE,
+    formatChapterKey,
+    parseJsonLines,
+    readOptionalText,
+    sha256Hex
+} from '../pipeline/helpers.js';
 import {
     SuspectedConflictSchema,
     type AdvanceVolumeOptions,
@@ -99,19 +104,56 @@ function safeParseJson(raw: string | null): unknown {
     }
 }
 
-function parseJsonLines(raw: string | null): unknown[] {
-    if (raw === null) return [];
-    const results: unknown[] = [];
-    for (const line of raw.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed.length === 0) continue;
-        try {
-            results.push(JSON.parse(trimmed));
-        } catch {
-            results.push({ raw: trimmed });
+async function readJsonBodyOrSend400(
+    req: IncomingMessage,
+    res: ServerResponse
+): Promise<Record<string, unknown> | null> {
+    try {
+        return await readJsonBody(req);
+    } catch (err) {
+        sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        return null;
+    }
+}
+
+async function readValidatedJsonBody<TSchema extends z.ZodTypeAny>(
+    req: IncomingMessage,
+    res: ServerResponse,
+    schema: TSchema,
+    label: string
+): Promise<z.infer<TSchema> | null> {
+    const rawBody = await readJsonBodyOrSend400(req, res);
+    if (rawBody === null) return null;
+    try {
+        return parseWithSchema(schema, rawBody, label);
+    } catch (err) {
+        sendErrorResponse(res, err);
+        return null;
+    }
+}
+
+function pickFirstNumber(
+    obj: Record<string, unknown>,
+    keys: readonly string[]
+): number | undefined {
+    for (const key of keys) {
+        if (typeof obj[key] === 'number') {
+            return obj[key] as number;
         }
     }
-    return results;
+    return undefined;
+}
+
+function pickFirstString(
+    obj: Record<string, unknown>,
+    keys: readonly string[]
+): string | undefined {
+    for (const key of keys) {
+        if (typeof obj[key] === 'string') {
+            return obj[key] as string;
+        }
+    }
+    return undefined;
 }
 
 async function runGitCommand(bookRoot: string, args: string[]): Promise<string | null> {
@@ -229,21 +271,6 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
     return result;
 }
 
-function parsePositiveChapterNumber(
-    raw: unknown,
-    fieldName = 'chapterNumber'
-): number {
-    if (
-        typeof raw !== 'number' ||
-        !Number.isInteger(raw) ||
-        raw <= 0 ||
-        raw > 9999
-    ) {
-        throw new PathValidationError(`${fieldName} 必须为 1 到 9999 的正整数`);
-    }
-    return raw;
-}
-
 function parseWithSchema<TSchema extends z.ZodTypeAny>(
     schema: TSchema,
     body: unknown,
@@ -355,84 +382,50 @@ function normalizeHaltPayload(
         return obj;
     }
 
-    const chapterVal =
-        typeof obj['chapterNumber'] === 'number'
-            ? obj['chapterNumber']
-            : typeof obj['chapter'] === 'number'
-              ? obj['chapter']
-              : typeof obj['side_b_chapter'] === 'number'
-                ? obj['side_b_chapter']
-                : undefined;
+    const chapterVal = pickFirstNumber(obj, ['chapterNumber', 'chapter', 'side_b_chapter']);
     if (chapterVal !== undefined) {
         obj['chapterNumber'] ??= chapterVal;
         obj['chapter'] ??= chapterVal;
         obj['chapter_number'] ??= chapterVal;
     }
 
-    const reasonVal =
-        typeof obj['reason'] === 'string'
-            ? obj['reason']
-            : typeof obj['halt_reason'] === 'string'
-              ? obj['halt_reason']
-              : typeof obj['message'] === 'string'
-                ? obj['message']
-                : undefined;
+    const reasonVal = pickFirstString(obj, ['reason', 'halt_reason', 'message']);
     if (reasonVal !== undefined) {
         obj['reason'] ??= reasonVal;
         obj['halt_reason'] ??= reasonVal;
     }
 
-    const conflictIdVal =
-        typeof obj['conflictId'] === 'string'
-            ? obj['conflictId']
-            : typeof obj['conflict_id'] === 'string'
-              ? obj['conflict_id']
-              : undefined;
+    const conflictIdVal = pickFirstString(obj, ['conflictId', 'conflict_id']);
     if (conflictIdVal !== undefined) {
         obj['conflictId'] ??= conflictIdVal;
         obj['conflict_id'] ??= conflictIdVal;
     }
 
-    const affectedVal =
-        typeof obj['affectedChapters'] === 'number'
-            ? obj['affectedChapters']
-            : typeof obj['rollback_chapters'] === 'number'
-              ? obj['rollback_chapters']
-              : undefined;
+    const affectedVal = pickFirstNumber(obj, ['affectedChapters', 'rollback_chapters']);
     if (affectedVal !== undefined) {
         obj['affectedChapters'] ??= affectedVal;
         obj['rollback_chapters'] ??= affectedVal;
     }
 
-    const rollbackWordsVal =
-        typeof obj['rollbackWords'] === 'number'
-            ? obj['rollbackWords']
-            : typeof obj['rollback_words'] === 'number'
-              ? obj['rollback_words']
-              : undefined;
+    const rollbackWordsVal = pickFirstNumber(obj, ['rollbackWords', 'rollback_words']);
     if (rollbackWordsVal !== undefined) {
         obj['rollbackWords'] ??= rollbackWordsVal;
         obj['rollback_words'] ??= rollbackWordsVal;
     }
 
-    const tsVal =
-        typeof obj['timestamp'] === 'string'
-            ? obj['timestamp']
-            : typeof obj['created_at'] === 'string'
-              ? obj['created_at']
-              : undefined;
+    const tsVal = pickFirstString(obj, ['timestamp', 'created_at']);
     if (tsVal !== undefined) {
         obj['timestamp'] ??= tsVal;
         obj['created_at'] ??= tsVal;
     }
 
     if (typeof obj['side_a_chapter'] === 'number') {
-        const chA = `ch_${String(obj['side_a_chapter']).padStart(4, '0')}`;
+        const chA = formatChapterKey(obj['side_a_chapter']);
         const lineA = typeof obj['side_a_line'] === 'number' ? `:${obj['side_a_line']}` : '';
         obj['leftRef'] ??= `${chA}${lineA}`;
     }
     if (typeof obj['side_b_chapter'] === 'number') {
-        const chB = `ch_${String(obj['side_b_chapter']).padStart(4, '0')}`;
+        const chB = formatChapterKey(obj['side_b_chapter']);
         const lineB = typeof obj['side_b_line'] === 'number' ? `:${obj['side_b_line']}` : '';
         obj['rightRef'] ??= `${chB}${lineB}`;
     }
@@ -450,7 +443,7 @@ function normalizeHaltPayload(
             obj['rightExcerpt'] ??= first['quote_draft'];
         }
         if (chapterVal !== undefined) {
-            obj['rightRef'] ??= `ch_${String(chapterVal).padStart(4, '0')}`;
+            obj['rightRef'] ??= formatChapterKey(chapterVal);
         }
     }
 
@@ -540,21 +533,8 @@ export function registerNarrateRoutes(
 
     const handleBookSelect = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof BookSelectRequestSchema>;
-        try {
-            body = parseWithSchema(BookSelectRequestSchema, rawBody, 'book/select');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, BookSelectRequestSchema, 'book/select');
+        if (!body) return;
 
         let targetRoot: string;
         if (body.bookRoot) {
@@ -593,21 +573,8 @@ export function registerNarrateRoutes(
 
     const handleBoot = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof BootBookRequestSchema>;
-        try {
-            body = parseWithSchema(BootBookRequestSchema, rawBody, 'boot');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, BootBookRequestSchema, 'boot');
+        if (!body) return;
 
         const t0Anchor = body.t0Anchor ?? body.t0_anchor;
         const excludedCliches = body.excludedCliches ?? body.excluded_cliches;
@@ -713,13 +680,8 @@ export function registerNarrateRoutes(
 
     const handleModelRouting = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'PUT')) return;
-        let body: Record<string, unknown>;
-        try {
-            body = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
+        const body = await readJsonBodyOrSend400(req, res);
+        if (!body) return;
 
         let parsed: ReturnType<typeof parseModelRoutingRequest>;
         try {
@@ -767,7 +729,7 @@ export function registerNarrateRoutes(
             try {
                 const store = controller.requireBookStore();
                 const bookRoot = store.bookRoot;
-                const fileName = `ch_${String(chNum).padStart(4, '0')}.md`;
+                const fileName = `${formatChapterKey(chNum)}.md`;
                 const relPath = `manuscripts/${fileName}`;
                 const fullPath = resolve(bookRoot, relPath);
                 if (!isSubPath(bookRoot, fullPath)) {
@@ -782,7 +744,7 @@ export function registerNarrateRoutes(
                 }
 
                 const txState = await store.readTxState();
-                const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+                const sha256 = sha256Hex(content);
                 const recordedHash =
                     txState.chapter_hashes[fileName.replace(/\.md$/, '')] ?? null;
                 const dirty = recordedHash === null || recordedHash !== sha256;
@@ -809,13 +771,8 @@ export function registerNarrateRoutes(
             return;
         }
 
-        let body: Record<string, unknown>;
-        try {
-            body = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
+        const body = await readJsonBodyOrSend400(req, res);
+        if (!body) return;
 
         const chNum = body['chapterNumber'];
         const content = body['content'];
@@ -999,21 +956,8 @@ export function registerNarrateRoutes(
         action: 'fork' | 'merge'
     ) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof ParallelWindowRequestSchema>;
-        try {
-            body = parseWithSchema(ParallelWindowRequestSchema, rawBody, 'parallel');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, ParallelWindowRequestSchema, 'parallel');
+        if (!body) return;
 
         try {
             const result =
@@ -1038,21 +982,8 @@ export function registerNarrateRoutes(
 
     const handleStep = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof StepChapterRequestSchema>;
-        try {
-            body = parseWithSchema(StepChapterRequestSchema, rawBody, 'step');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, StepChapterRequestSchema, 'step');
+        if (!body) return;
 
         try {
             const stepOptions: StepChapterInputOptions = {
@@ -1078,21 +1009,8 @@ export function registerNarrateRoutes(
 
     const handleYoloStart = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof YoloStartRequestSchema>;
-        try {
-            body = parseWithSchema(YoloStartRequestSchema, rawBody, 'yolo/start');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, YoloStartRequestSchema, 'yolo/start');
+        if (!body) return;
 
         const targetChapters = body.targetChapters ?? body.maxChapters;
         try {
@@ -1123,21 +1041,8 @@ export function registerNarrateRoutes(
 
     const handleDream = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof DreamRequestSchema>;
-        try {
-            body = parseWithSchema(DreamRequestSchema, rawBody, 'dream');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, DreamRequestSchema, 'dream');
+        if (!body) return;
 
         const dreamOptions: Partial<RunDreamingOptions> = {
             ...(body.currentChapter !== undefined ? { currentChapter: body.currentChapter } : {}),
@@ -1158,21 +1063,8 @@ export function registerNarrateRoutes(
 
     const handleHeal = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof HealRequestSchema>;
-        try {
-            body = parseWithSchema(HealRequestSchema, rawBody, 'heal');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, HealRequestSchema, 'heal');
+        if (!body) return;
 
         try {
             const healOptions =
@@ -1191,21 +1083,13 @@ export function registerNarrateRoutes(
 
     const handleVoiceHarvest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof VoiceHarvestRequestSchema>;
-        try {
-            body = parseWithSchema(VoiceHarvestRequestSchema, rawBody, 'voice-harvest');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(
+            req,
+            res,
+            VoiceHarvestRequestSchema,
+            'voice-harvest'
+        );
+        if (!body) return;
 
         try {
             const result = await controller.harvestVoiceFromChapter(body.chapterNumber ?? 1);
@@ -1217,21 +1101,13 @@ export function registerNarrateRoutes(
 
     const handleAdvanceVolume = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof AdvanceVolumeRequestSchema>;
-        try {
-            body = parseWithSchema(AdvanceVolumeRequestSchema, rawBody, 'volume/advance');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(
+            req,
+            res,
+            AdvanceVolumeRequestSchema,
+            'volume/advance'
+        );
+        if (!body) return;
 
         const advanceOptions: AdvanceVolumeOptions = {
             ...(body.companionEntityIds !== undefined
@@ -1250,13 +1126,8 @@ export function registerNarrateRoutes(
 
     const handleSignals = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
-        try {
-            body = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
+        const body = await readJsonBodyOrSend400(req, res);
+        if (!body) return;
 
         try {
             const signalRecord = await controller.enqueueSignal(body);
@@ -1268,21 +1139,13 @@ export function registerNarrateRoutes(
 
     const handleSignalDelete = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'DELETE')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof SignalDeleteRequestSchema>;
-        try {
-            body = parseWithSchema(SignalDeleteRequestSchema, rawBody, 'signals/delete');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(
+            req,
+            res,
+            SignalDeleteRequestSchema,
+            'signals/delete'
+        );
+        if (!body) return;
 
         try {
             const deleted = await controller.deleteSignal(body.created_at, body.reason);
@@ -1300,21 +1163,8 @@ export function registerNarrateRoutes(
 
     const handleHalt = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let rawBody: Record<string, unknown>;
-        try {
-            rawBody = await readJsonBody(req);
-        } catch (err) {
-            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
-            return;
-        }
-
-        let body: z.infer<typeof HaltRequestSchema>;
-        try {
-            body = parseWithSchema(HaltRequestSchema, rawBody, 'halt');
-        } catch (err) {
-            sendErrorResponse(res, err);
-            return;
-        }
+        const body = await readValidatedJsonBody(req, res, HaltRequestSchema, 'halt');
+        if (!body) return;
 
         sendJson(res, 202, controller.requestHalt({ force: body.force }));
     };
