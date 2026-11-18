@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ToolExecution, ToolsService } from '@deepseek-ai/dsh-tools';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { escapeRegExp } from '../tools/shared.js';
 
 const ALLOWED_BOOK_TOOL_PREFIXES = ['book_', 'yield_'] as const;
 const ALLOWED_EXACT_BOOK_TOOLS = new Set<string>(['lock_charter_and_boot']);
@@ -78,9 +79,19 @@ const GIT_ALLOWED_GLOBAL_NOARG_FLAGS = new Set<string>([
 const GIT_UNSAFE_SUBCOMMAND_FLAG_RE = /^--(?:ext-diff|exec|output)(?:=|$)/i;
 const SEARCH_UNSAFE_FLAG_RE = /^--(?:pre|exec)(?:=|$)/i;
 
-function escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+const GIT_ESCAPE_BYTE_MAP: Readonly<Record<string, number>> = {
+    a: 0x07,
+    b: 0x08,
+    t: 0x09,
+    n: 0x0a,
+    v: 0x0b,
+    f: 0x0c,
+    r: 0x0d,
+    '"': 0x22,
+    '\\': 0x5c
+};
+
+const DANGEROUS_UNQUOTED_SHELL_CHARS = new Set<string>(['`', '>', '<', '(', ')', '{', '}']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -167,37 +178,11 @@ function decodeGitQuotedPath(rawValue: string): string {
             i += 1;
             continue;
         }
-        switch (esc) {
-            case 'a':
-                bytes.push(0x07);
-                break;
-            case 'b':
-                bytes.push(0x08);
-                break;
-            case 't':
-                bytes.push(0x09);
-                break;
-            case 'n':
-                bytes.push(0x0a);
-                break;
-            case 'v':
-                bytes.push(0x0b);
-                break;
-            case 'f':
-                bytes.push(0x0c);
-                break;
-            case 'r':
-                bytes.push(0x0d);
-                break;
-            case '"':
-                bytes.push(0x22);
-                break;
-            case '\\':
-                bytes.push(0x5c);
-                break;
-            default:
-                bytes.push(...Buffer.from(esc, 'utf8'));
-                break;
+        const mappedByte = GIT_ESCAPE_BYTE_MAP[esc];
+        if (mappedByte !== undefined) {
+            bytes.push(mappedByte);
+        } else {
+            bytes.push(...Buffer.from(esc, 'utf8'));
         }
         i += 1;
     }
@@ -239,21 +224,21 @@ function tokenizeShellSegments(command: string): string[][] | null {
     let hasToken = false;
     let quote: "'" | '"' | null = null;
 
-    const flushToken = () => {
+    function flushToken(): void {
         if (hasToken) {
             currentSegment.push(currentToken);
             currentToken = '';
             hasToken = false;
         }
-    };
+    }
 
-    const flushSegment = () => {
+    function flushSegment(): void {
         flushToken();
         if (currentSegment.length > 0) {
             segments.push(currentSegment);
             currentSegment = [];
         }
-    };
+    }
 
     for (let i = 0; i < command.length; i += 1) {
         const ch = command[i]!;
@@ -313,16 +298,7 @@ function tokenizeShellSegments(command: string): string[][] | null {
             continue;
         }
 
-        if (
-            ch === '`' ||
-            ch === '>' ||
-            ch === '<' ||
-            ch === '(' ||
-            ch === ')' ||
-            ch === '{' ||
-            ch === '}' ||
-            (ch === '$' && next === '(')
-        ) {
+        if (DANGEROUS_UNQUOTED_SHELL_CHARS.has(ch) || (ch === '$' && next === '(')) {
             return null;
         }
 
@@ -498,6 +474,76 @@ function resolveSessionCwd(exec: Readonly<ToolExecution>): string {
     return process.cwd();
 }
 
+function evaluateRawFileWriteGuard(
+    exec: Readonly<ToolExecution>,
+    protectedRoots: readonly string[],
+    sessionCwd: string
+): string | undefined {
+    const candidates = extractFileWriteCandidates(exec.arguments);
+    for (const candidate of candidates) {
+        for (const protectedRoot of protectedRoots) {
+            const rootParentDir = dirname(protectedRoot);
+            for (const absCandidate of resolveCandidateTargets(candidate, sessionCwd, rootParentDir)) {
+                if (isPathInsideDir(absCandidate, protectedRoot)) {
+                    return `主会话写保护拦截：禁止使用裸工具 ${exec.name} 直接写入 ${candidate}。请改用 lock_charter_and_boot 或右侧 Studio 工作台操作。`;
+                }
+            }
+        }
+    }
+    return undefined;
+}
+
+function doesShellCommandTargetRoot(
+    command: string,
+    shellTokens: readonly string[],
+    protectedRoot: string,
+    sessionCwd: string
+): boolean {
+    if (isPathInsideDir(sessionCwd, protectedRoot) || command.includes(protectedRoot)) {
+        return true;
+    }
+    const rootParentDir = dirname(protectedRoot);
+    const rootDirName = protectedRoot.split(sep).filter(Boolean).pop() ?? 'books';
+    const relativeRootRefRe = new RegExp(
+        `(?:^|[\\s"'\`=;(&|<>]|\\.\\.?[/\\\\])${escapeRegExp(rootDirName)}(?:[/\\\\]|$)`
+    );
+    if (relativeRootRefRe.test(command)) {
+        return true;
+    }
+    return shellTokens.some((token) =>
+        resolveCandidateTargets(token, sessionCwd, rootParentDir).some((abs) =>
+            isPathInsideDir(abs, protectedRoot)
+        )
+    );
+}
+
+function evaluateRawShellGuard(
+    exec: Readonly<ToolExecution>,
+    protectedRoots: readonly string[],
+    sessionCwd: string
+): string | undefined {
+    const { command, cwd } = extractShellCommandText(exec.arguments);
+    if (cwd) {
+        for (const protectedRoot of protectedRoots) {
+            for (const absCwd of resolveCandidateTargets(cwd, sessionCwd, dirname(protectedRoot))) {
+                if (isPathInsideDir(absCwd, protectedRoot)) {
+                    return `主会话写保护拦截：禁止在受保护作品目录 ${protectedRoot} 内执行裸终端命令 (${exec.name})。`;
+                }
+            }
+        }
+    }
+
+    const shellTokens = extractShellPathTokens(command);
+    const matchedRoot = protectedRoots.find((protectedRoot) =>
+        doesShellCommandTargetRoot(command, shellTokens, protectedRoot, sessionCwd)
+    );
+    if (matchedRoot !== undefined && !isPureReadOnlyShellCommand(command)) {
+        const matchedDirName = matchedRoot.split(sep).filter(Boolean).pop() ?? 'books';
+        return `主会话写保护拦截：检测到 ${exec.name} 命令企图在受保护作品目录 ${matchedDirName}/ 上执行非纯只读操作，请改用 NarrateOS 受控工具或工作台同步流程。`;
+    }
+    return undefined;
+}
+
 /** 检测工具调用是否企图越过 NarrateOS 受控工具直接修改 books/<slug>/ 或当前激活外部 bookRoot */
 export function evaluateMainSessionWriteGuard(
     exec: Readonly<ToolExecution>,
@@ -512,58 +558,11 @@ export function evaluateMainSessionWriteGuard(
     const sessionCwd = resolveSessionCwd(exec);
 
     if (RAW_FILE_WRITE_TOOLS.has(exec.name)) {
-        const candidates = extractFileWriteCandidates(exec.arguments);
-        for (const candidate of candidates) {
-            for (const protectedRoot of protectedRoots) {
-                const rootParentDir = dirname(protectedRoot);
-                for (const absCandidate of resolveCandidateTargets(candidate, sessionCwd, rootParentDir)) {
-                    if (isPathInsideDir(absCandidate, protectedRoot)) {
-                        return `主会话写保护拦截：禁止使用裸工具 ${exec.name} 直接写入 ${candidate}。请改用 lock_charter_and_boot 或右侧 Studio 工作台操作。`;
-                    }
-                }
-            }
-        }
+        return evaluateRawFileWriteGuard(exec, protectedRoots, sessionCwd);
     }
 
     if (RAW_SHELL_TOOLS.has(exec.name)) {
-        const { command, cwd } = extractShellCommandText(exec.arguments);
-        if (cwd) {
-            for (const protectedRoot of protectedRoots) {
-                for (const absCwd of resolveCandidateTargets(cwd, sessionCwd, dirname(protectedRoot))) {
-                    if (isPathInsideDir(absCwd, protectedRoot)) {
-                        return `主会话写保护拦截：禁止在受保护作品目录 ${protectedRoot} 内执行裸终端命令 (${exec.name})。`;
-                    }
-                }
-            }
-        }
-
-        const shellTokens = extractShellPathTokens(command);
-        const matchedRoot = protectedRoots.find((protectedRoot) => {
-            if (isPathInsideDir(sessionCwd, protectedRoot)) {
-                return true;
-            }
-            if (command.includes(protectedRoot)) {
-                return true;
-            }
-            const rootParentDir = dirname(protectedRoot);
-            const rootDirName = protectedRoot.split(sep).filter(Boolean).pop() ?? 'books';
-            const relativeRootRefRe = new RegExp(
-                `(?:^|[\\s"'\`=;(&|<>]|\\.\\.?[/\\\\])${escapeRegExp(rootDirName)}(?:[/\\\\]|$)`
-            );
-            if (relativeRootRefRe.test(command)) {
-                return true;
-            }
-            return shellTokens.some((token) =>
-                resolveCandidateTargets(token, sessionCwd, rootParentDir).some((abs) =>
-                    isPathInsideDir(abs, protectedRoot)
-                )
-            );
-        });
-
-        if (matchedRoot !== undefined && !isPureReadOnlyShellCommand(command)) {
-            const matchedDirName = matchedRoot.split(sep).filter(Boolean).pop() ?? 'books';
-            return `主会话写保护拦截：检测到 ${exec.name} 命令企图在受保护作品目录 ${matchedDirName}/ 上执行非纯只读操作，请改用 NarrateOS 受控工具或工作台同步流程。`;
-        }
+        return evaluateRawShellGuard(exec, protectedRoots, sessionCwd);
     }
 
     return undefined;
@@ -581,14 +580,14 @@ export function registerMainSessionWriteGuard(
 ): () => void {
     const resolvedBooksRoot = resolve(booksRoot);
     const targetCtx = ctx ?? (toolsService as unknown as { ctx?: Context }).ctx;
-    const getExtraProtectedRoots = (): string[] => {
+    function getExtraProtectedRoots(): string[] {
         const activeBookRoot = (
             targetCtx as { narrateStore?: { bookRoot?: string | null } } | undefined
         )?.narrateStore?.bookRoot;
         return typeof activeBookRoot === 'string' && activeBookRoot.trim().length > 0
             ? [activeBookRoot]
             : [];
-    };
+    }
 
     const disposeGuard = toolsService.guard((exec) =>
         evaluateMainSessionWriteGuard(exec, resolvedBooksRoot, getExtraProtectedRoots())

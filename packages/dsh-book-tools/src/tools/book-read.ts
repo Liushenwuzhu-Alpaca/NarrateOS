@@ -1,8 +1,8 @@
-import { readFile } from 'node:fs/promises';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
+import { readContentWithStagingPriority } from './shared.js';
 
 const MAX_BATCH_READ_PATHS = 8;
 
@@ -37,6 +37,34 @@ function dedupeStringsPreserveOrder(values: readonly string[]): string[] {
     return result;
 }
 
+function sliceLinesByOffsetLimit(
+    rawText: string,
+    offset?: number,
+    limit?: number
+): { content: string; totalLines: number; startLine: number; endLine: number } {
+    const allLines = rawText.split(/\r?\n/);
+    const totalLines = allLines.length;
+    const startLine = offset ?? 1;
+
+    if (offset === undefined && limit === undefined) {
+        return {
+            content: rawText,
+            totalLines,
+            startLine,
+            endLine: Math.max(startLine - 1, totalLines)
+        };
+    }
+
+    const sliceEnd = limit !== undefined ? startLine - 1 + limit : undefined;
+    const endLine = Math.min(totalLines, startLine - 1 + (limit ?? totalLines));
+    return {
+        content: allLines.slice(startLine - 1, sliceEnd).join('\n'),
+        totalLines,
+        startLine,
+        endLine: Math.max(startLine - 1, endLine)
+    };
+}
+
 /** 读取单个已通过 PathFence 校验的目标文件并按 offset/limit 切片 */
 async function readSingleTarget(
     store: NarrateStoreService,
@@ -46,47 +74,22 @@ async function readSingleTarget(
     limit?: number,
     stagingOverlay?: ReadonlyMap<string, string | null>
 ): Promise<BookReadItem> {
-    let rawText: string;
-    let fromStaging = false;
-    const hasRunWrite =
-        store.staging.has(runId) && store.staging.getPendingWrites(runId).has(target.normalized);
-
-    if (hasRunWrite) {
-        fromStaging = true;
-        rawText = await store.staging.read(runId, target.normalized);
-    } else if (stagingOverlay?.has(target.normalized)) {
-        const overlayVal = stagingOverlay.get(target.normalized);
-        if (overlayVal === null || overlayVal === undefined) {
-            throw new Error(`文件在当前分支视图中不存在或不可见: ${target.normalized}`);
-        }
-        fromStaging = true;
-        rawText = overlayVal;
-    } else if (store.staging.has(runId)) {
-        rawText = await store.staging.read(runId, target.normalized);
-    } else {
-        rawText = await readFile(target.absPath, 'utf8');
-    }
-
-    const allLines = rawText.split(/\r?\n/);
-    const totalLines = allLines.length;
-    const startLine = offset ?? 1;
-    const sliced =
-        offset === undefined && limit === undefined
-            ? rawText
-            : allLines
-                  .slice(startLine - 1, limit !== undefined ? startLine - 1 + limit : undefined)
-                  .join('\n');
-    const endLine =
-        offset === undefined && limit === undefined
-            ? totalLines
-            : Math.min(totalLines, startLine - 1 + (limit ?? totalLines));
+    const { content: rawText, fromStaging } = await readContentWithStagingPriority({
+        store,
+        runId,
+        normalizedPath: target.normalized,
+        absPath: target.absPath,
+        stagingOverlay,
+        missingInOverlayMessage: `文件在当前分支视图中不存在或不可见: ${target.normalized}`
+    });
+    const sliced = sliceLinesByOffsetLimit(rawText, offset, limit);
 
     return {
         path: target.normalized,
-        content: sliced,
-        totalLines,
-        startLine,
-        endLine: Math.max(startLine - 1, endLine),
+        content: sliced.content,
+        totalLines: sliced.totalLines,
+        startLine: sliced.startLine,
+        endLine: sliced.endLine,
         fromStaging
     };
 }

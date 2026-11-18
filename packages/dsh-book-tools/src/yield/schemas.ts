@@ -6,6 +6,7 @@ import {
     PlannerOutlineSchema,
     VoiceSampleSourceSchema
 } from '@narrateos/dsh-book-store';
+import { collectEntityRefs, extractActiveOpenThreadLines } from './shared.js';
 
 export { PlannerOutlineSchema };
 
@@ -79,64 +80,17 @@ export function hasChineseCharacter(value: string): boolean {
 
 /** 统计 world/open_threads.md 中处于活跃状态的伏笔条目数 */
 export function countActiveOpenThreads(markdown: string): number {
-    const normalized = markdown.replace(/\r\n/g, '\n');
-    let inArchiveSection = false;
-    let activeCount = 0;
-
-    for (const rawLine of normalized.split('\n')) {
-        const trimmed = rawLine.trim();
-        if (/^##\s+.*(已回收|已解决|已兑现|Resolved|Archive)/i.test(trimmed)) {
-            inArchiveSection = true;
-            continue;
-        }
-        if (/^##\s+/.test(trimmed)) {
-            inArchiveSection = false;
-            continue;
-        }
-        if (!trimmed.startsWith('- ')) {
-            continue;
-        }
-        if (inArchiveSection) {
-            continue;
-        }
-        if (/\bstatus:\s*RESOLVED\b/i.test(trimmed) || /\[RESOLVED\]/i.test(trimmed)) {
-            continue;
-        }
-        activeCount += 1;
-    }
-
-    return activeCount;
+    return extractActiveOpenThreadLines(markdown).length;
 }
 
 /** 从 open_threads.md 活跃条目中提取引用的实体 ID (char_* / item_*) */
 export function extractActiveThreadEntityRefs(markdown: string): Set<string> {
     const refs = new Set<string>();
-    const normalized = markdown.replace(/\r\n/g, '\n');
-    let inArchiveSection = false;
-
-    for (const rawLine of normalized.split('\n')) {
-        const trimmed = rawLine.trim();
-        if (/^##\s+.*(已回收|已解决|已兑现|Resolved|Archive)/i.test(trimmed)) {
-            inArchiveSection = true;
-            continue;
-        }
-        if (/^##\s+/.test(trimmed)) {
-            inArchiveSection = false;
-            continue;
-        }
-        if (!trimmed.startsWith('- ') || inArchiveSection) {
-            continue;
-        }
-        if (/\bstatus:\s*RESOLVED\b/i.test(trimmed) || /\[RESOLVED\]/i.test(trimmed)) {
-            continue;
-        }
-        for (const match of trimmed.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+)\b/g)) {
-            if (match[1]) {
-                refs.add(match[1]);
-            }
+    for (const line of extractActiveOpenThreadLines(markdown)) {
+        for (const entityId of collectEntityRefs(line)) {
+            refs.add(entityId);
         }
     }
-
     return refs;
 }
 

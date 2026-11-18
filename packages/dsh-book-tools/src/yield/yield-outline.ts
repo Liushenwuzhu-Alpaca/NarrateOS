@@ -10,10 +10,11 @@ import {
     type PlannerOutline
 } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
+import { isEnoentError, readOptionalBookConfig } from '../tools/shared.js';
 import { PlannerOutlineSchema } from './schemas.js';
+import { ENTITY_FILENAME_RE, toVisibleEntityMap } from './shared.js';
 
 const DEFAULT_FIRST_CHAPTER_MAX_BEATS = BookOpeningConfigSchema.parse({}).first_chapter_max_beats;
-const ENTITY_FILENAME_RE = /^((?:char|item)_[a-zA-Z0-9_]+)\.md$/;
 const OUTLINE_RESTRICTED_RE =
     /\b(?:OMNISCIENT_SECRET|WARPED|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 const OUTLINE_NEGATIVE_PROHIBITION_RE =
@@ -69,22 +70,119 @@ async function loadKnownEntityProfiles(
                     }
                 }
             } catch (err: unknown) {
-                if ((err as { code?: string }).code !== 'ENOENT') {
+                if (!isEnoentError(err)) {
                     throw err;
                 }
             }
         }
     }
-    if (visibleEntities instanceof Map) {
-        for (const [id, profile] of visibleEntities.entries()) {
-            profiles.set(id, profile);
-        }
-    } else if (visibleEntities) {
-        for (const [id, profile] of Object.entries(visibleEntities)) {
-            profiles.set(id, profile);
-        }
+    for (const [id, profile] of toVisibleEntityMap(visibleEntities).entries()) {
+        profiles.set(id, profile);
     }
     return profiles;
+}
+
+function assertOutlineCleanroomIsolation(
+    outline: PlannerOutline,
+    knownProfiles: ReadonlyMap<string, EntityProfile>
+): void {
+    const rationaleTrimmed = outline.director_rationale.trim();
+    if (rationaleTrimmed.length >= 20 && outline.outline_text.includes(rationaleTrimmed)) {
+        throw new GateValidationError(
+            'yield_outline',
+            '里表分流校验失败：outline_text 不得直接包含 director_rationale 全知内参原文'
+        );
+    }
+
+    const spoilerHit = OUTLINE_RESTRICTED_RE.exec(outline.outline_text);
+    if (spoilerHit) {
+        throw new GateValidationError(
+            'yield_outline',
+            `outline_text 禁止包含全知或导演禁区标签「${spoilerHit[0]}」`
+        );
+    }
+    const negativeHit = OUTLINE_NEGATIVE_PROHIBITION_RE.exec(outline.outline_text);
+    if (negativeHit) {
+        throw new GateValidationError(
+            'yield_outline',
+            `outline_text 禁止包含写手受限否定禁令「${negativeHit[0]}」，请改写为正向动作/镜头指令`
+        );
+    }
+
+    const normalizedOutline = normalizeForQuoteMatch(outline.outline_text);
+    if (normalizedOutline.length === 0) {
+        return;
+    }
+
+    for (const clauseNorm of extractSubstantiveNormalizedClauses(rationaleTrimmed)) {
+        if (normalizedOutline.includes(clauseNorm)) {
+            throw new GateValidationError(
+                'yield_outline',
+                '里表分流校验失败：outline_text 命中 director_rationale 全知内参实质子句，请改写为净室镜头表现'
+            );
+        }
+    }
+
+    for (const profile of knownProfiles.values()) {
+        const secretEntries = [
+            ...profile.innateLocks,
+            ...profile.acquiredState,
+            ...profile.irreversibleTrajectory,
+            ...profile.recentBuffer
+        ].filter((entry) => entry.visibility === 'OMNISCIENT_SECRET');
+        for (const entry of secretEntries) {
+            const fullEntryText = [entry.text, ...entry.continuationLines].join('\n');
+            for (const secretClause of extractSubstantiveNormalizedClauses(fullEntryText)) {
+                if (normalizedOutline.includes(secretClause)) {
+                    throw new GateValidationError(
+                        'yield_outline',
+                        `里表分流校验失败：outline_text 疑似泄露实体 ${profile.metadata.entity_id} 的 OMNISCIENT_SECRET 未揭底牌`
+                    );
+                }
+            }
+        }
+    }
+}
+
+async function resolveOutlineMaxBeats(
+    store: NarrateStoreService | undefined,
+    bookRoot: string | undefined,
+    targetChapter: number | undefined
+): Promise<number> {
+    if (targetChapter !== 1) {
+        return 2;
+    }
+    if (!store || !bookRoot) {
+        return DEFAULT_FIRST_CHAPTER_MAX_BEATS;
+    }
+    const cfg = await readOptionalBookConfig(store, bookRoot);
+    return cfg?.opening?.first_chapter_max_beats ?? DEFAULT_FIRST_CHAPTER_MAX_BEATS;
+}
+
+async function assertPreferredVoiceTagValid(
+    store: NarrateStoreService | undefined,
+    bookRoot: string | undefined,
+    preferredVoiceTag: string | undefined
+): Promise<void> {
+    if (preferredVoiceTag === undefined || !store || !bookRoot) {
+        return;
+    }
+    try {
+        const pool = await store.openStore(bookRoot).readVoiceSamples();
+        if (
+            pool.samples.length > 0 &&
+            !pool.samples.some((sample) => sample.tag === preferredVoiceTag)
+        ) {
+            throw new GateValidationError(
+                'yield_outline',
+                `preferred_voice_tag (${preferredVoiceTag}) 不在当前声纹池已有标签集内`
+            );
+        }
+    } catch (err: unknown) {
+        if (err instanceof GateValidationError) {
+            throw err;
+        }
+    }
 }
 
 /** 创建 Planner 终态门禁工具 yield_outline（校验里表分流、合法 entity_id、节拍与戏眼上限） */
@@ -169,60 +267,8 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
             exec.signal.throwIfAborted();
             const outline = PlannerOutlineSchema.parse(args);
 
-            const rationaleTrimmed = outline.director_rationale.trim();
-            if (rationaleTrimmed.length >= 20 && outline.outline_text.includes(rationaleTrimmed)) {
-                throw new GateValidationError(
-                    'yield_outline',
-                    '里表分流校验失败：outline_text 不得直接包含 director_rationale 全知内参原文'
-                );
-            }
-
-            const spoilerHit = OUTLINE_RESTRICTED_RE.exec(outline.outline_text);
-            if (spoilerHit) {
-                throw new GateValidationError(
-                    'yield_outline',
-                    `outline_text 禁止包含全知或导演禁区标签「${spoilerHit[0]}」`
-                );
-            }
-            const negativeHit = OUTLINE_NEGATIVE_PROHIBITION_RE.exec(outline.outline_text);
-            if (negativeHit) {
-                throw new GateValidationError(
-                    'yield_outline',
-                    `outline_text 禁止包含写手受限否定禁令「${negativeHit[0]}」，请改写为正向动作/镜头指令`
-                );
-            }
-
             const knownProfiles = await loadKnownEntityProfiles(bookRoot, visibleEntities);
-            const normalizedOutline = normalizeForQuoteMatch(outline.outline_text);
-            if (normalizedOutline.length > 0) {
-                for (const clauseNorm of extractSubstantiveNormalizedClauses(rationaleTrimmed)) {
-                    if (normalizedOutline.includes(clauseNorm)) {
-                        throw new GateValidationError(
-                            'yield_outline',
-                            '里表分流校验失败：outline_text 命中 director_rationale 全知内参实质子句，请改写为净室镜头表现'
-                        );
-                    }
-                }
-                for (const profile of knownProfiles.values()) {
-                    const secretEntries = [
-                        ...profile.innateLocks,
-                        ...profile.acquiredState,
-                        ...profile.irreversibleTrajectory,
-                        ...profile.recentBuffer
-                    ].filter((entry) => entry.visibility === 'OMNISCIENT_SECRET');
-                    for (const entry of secretEntries) {
-                        const fullEntryText = [entry.text, ...entry.continuationLines].join('\n');
-                        for (const secretClause of extractSubstantiveNormalizedClauses(fullEntryText)) {
-                            if (normalizedOutline.includes(secretClause)) {
-                                throw new GateValidationError(
-                                    'yield_outline',
-                                    `里表分流校验失败：outline_text 疑似泄露实体 ${profile.metadata.entity_id} 的 OMNISCIENT_SECRET 未揭底牌`
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            assertOutlineCleanroomIsolation(outline, knownProfiles);
 
             if (knownProfiles.size > 0) {
                 for (const id of [...outline.focus_cast, ...outline.background_cast]) {
@@ -235,18 +281,7 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
                 }
             }
 
-            let maxBeats = 2;
-            if (targetChapter === 1) {
-                maxBeats = DEFAULT_FIRST_CHAPTER_MAX_BEATS;
-                if (store && bookRoot) {
-                    try {
-                        const cfg = await store.openStore(bookRoot).readBookConfig();
-                        maxBeats = cfg.opening?.first_chapter_max_beats ?? DEFAULT_FIRST_CHAPTER_MAX_BEATS;
-                    } catch {
-                        // 缺少配置时使用默认值 1
-                    }
-                }
-            }
+            const maxBeats = await resolveOutlineMaxBeats(store, bookRoot, targetChapter);
             if (outline.scene_plan.length < 1 || outline.scene_plan.length > maxBeats) {
                 throw new GateValidationError(
                     'yield_outline',
@@ -262,24 +297,7 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
                 );
             }
 
-            if (outline.preferred_voice_tag !== undefined && store && bookRoot) {
-                try {
-                    const pool = await store.openStore(bookRoot).readVoiceSamples();
-                    if (
-                        pool.samples.length > 0 &&
-                        !pool.samples.some((sample) => sample.tag === outline.preferred_voice_tag)
-                    ) {
-                        throw new GateValidationError(
-                            'yield_outline',
-                            `preferred_voice_tag (${outline.preferred_voice_tag}) 不在当前声纹池已有标签集内`
-                        );
-                    }
-                } catch (err: unknown) {
-                    if (err instanceof GateValidationError) {
-                        throw err;
-                    }
-                }
-            }
+            await assertPreferredVoiceTagValid(store, bookRoot, outline.preferred_voice_tag);
 
             onYield?.(outline);
             exec.concludeTurn();

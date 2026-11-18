@@ -2,7 +2,6 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
-    ForeignKeyError,
     InnateLockViolationError,
     normalizeForQuoteMatch,
     parseEntityMarkdown,
@@ -15,9 +14,16 @@ import {
     type TxState
 } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
+import { isEnoentError, readOptionalDiskText } from '../tools/shared.js';
 import { ExtractorOutputSchema, hasChineseCharacter, type ExtractorOutput } from './schemas.js';
-
-const ENTITY_FILENAME_RE = /^((?:char|item)_[a-zA-Z0-9_]+)\.md$/;
+import {
+    assertTextForeignKeys,
+    collectReachableKeysFromBookDirs,
+    ENTITY_FILENAME_RE,
+    ENTITY_ID_PATTERN_RE,
+    hasOmniscientSecretMarker,
+    toVisibleEntityMap
+} from './shared.js';
 
 export interface YieldStatePatchResult {
     output: ExtractorOutput;
@@ -43,25 +49,16 @@ export interface YieldStatePatchOptions {
     onYield?: ((result: YieldStatePatchResult) => void) | undefined;
 }
 
-function toVisibleEntityMap(
-    input: YieldStatePatchOptions['visibleEntities']
-): ReadonlyMap<string, EntityProfile> {
-    if (!input) {
-        return new Map();
-    }
-    if (input instanceof Map) {
-        return input;
-    }
-    return new Map(Object.entries(input as Record<string, EntityProfile>));
-}
-
 async function buildReachableSetForValidation(
     bookRoot: string,
     newEntityIds: Set<string>,
     visibleEntityMap: ReadonlyMap<string, EntityProfile>,
     extraReachableIds?: ReadonlySet<string> | readonly string[]
 ): Promise<Set<string>> {
-    const keys = new Set<string>(newEntityIds);
+    const keys = await collectReachableKeysFromBookDirs(bookRoot);
+    for (const id of newEntityIds) {
+        keys.add(id);
+    }
     for (const id of visibleEntityMap.keys()) {
         keys.add(id);
     }
@@ -70,31 +67,6 @@ async function buildReachableSetForValidation(
             keys.add(id);
         }
     }
-    const collect = async (dirPath: string, entityOnly: boolean) => {
-        try {
-            const files = await readdir(dirPath);
-            for (const file of files) {
-                if (!file.endsWith('.md')) continue;
-                const base = file.slice(0, -3);
-                if (!entityOnly || /^(?:char|item)_[a-zA-Z0-9_]+$/.test(base)) {
-                    keys.add(base);
-                }
-                const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
-                if (sagaMatch?.[1]) {
-                    keys.add(sagaMatch[1]);
-                }
-            }
-        } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') {
-                throw err;
-            }
-        }
-    };
-    await Promise.all([
-        collect(join(bookRoot, 'entities'), true),
-        collect(join(bookRoot, 'entities/cold_archive'), true),
-        collect(join(bookRoot, 'manuscripts'), false)
-    ]);
     return keys;
 }
 
@@ -110,7 +82,7 @@ async function collectKnownEntityIdsForAppeared(
     }
     if (extraReachableIds) {
         for (const id of extraReachableIds) {
-            if (/^(?:char|item)_[a-zA-Z0-9_]+$/.test(id)) {
+            if (ENTITY_ID_PATTERN_RE.test(id)) {
                 ids.add(id);
             }
         }
@@ -125,7 +97,7 @@ async function collectKnownEntityIdsForAppeared(
                 }
             }
         } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') {
+            if (!isEnoentError(err)) {
                 throw err;
             }
         }
@@ -153,17 +125,102 @@ async function resolveDraftTextForAnchorCheck(
     }
 }
 
-function assertTextForeignKeys(sourceId: string, text: string, reachable: Set<string>): void {
-    const missing = new Set<string>();
-    for (const match of text.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
-        const refId = match[1];
-        if (refId && !reachable.has(refId)) {
-            missing.add(refId);
+function assertTimelineStatePatchConstraints(
+    parsed: ExtractorOutput,
+    timelineMode?: TimelineMode
+): void {
+    if ((timelineMode === 'PARALLEL' || timelineMode === 'FLASHBACK') && parsed.story_day_delta > 0) {
+        throw new GateValidationError(
+            'yield_state_patch',
+            `${timelineMode} 模式下严禁推进主线 story_day（story_day_delta 必须为 0，收到 ${parsed.story_day_delta}）`
+        );
+    }
+
+    if (timelineMode !== 'FLASHBACK') {
+        return;
+    }
+    for (const patch of parsed.entity_patches) {
+        if (
+            (patch.acquired_state_ops && patch.acquired_state_ops.length > 0) ||
+            (patch.buffer_ops && patch.buffer_ops.length > 0)
+        ) {
+            throw new GateValidationError(
+                'yield_state_patch',
+                `FLASHBACK 插叙模式下严禁修改实体 ${patch.entity_id} 的 2. Acquired State 或 4. Recent Buffer`
+            );
         }
     }
-    if (missing.size > 0) {
-        throw new ForeignKeyError([...missing], sourceId);
+}
+
+async function inspectAndValidateEntityPatches(params: {
+    bookRoot: string;
+    bookStore: ReturnType<NarrateStoreService['openStore']>;
+    patches: ExtractorOutput['entity_patches'];
+    visibleEntityMap: ReadonlyMap<string, EntityProfile>;
+    allowInnateMutation: boolean;
+}): Promise<{ newEntityIds: Set<string>; existingProfiles: Map<string, EntityProfile> }> {
+    const { bookRoot, bookStore, patches, visibleEntityMap, allowInnateMutation } = params;
+    const newEntityIds = new Set<string>();
+    const existingProfiles = new Map<string, EntityProfile>();
+
+    for (const patch of patches) {
+        if (patch.innate_locks_ops) {
+            for (const op of patch.innate_locks_ops) {
+                if (op.op === 'append' && hasOmniscientSecretMarker(op.entry)) {
+                    throw new GateValidationError(
+                        'yield_state_patch',
+                        `第 1 区 Innate Locks (${patch.entity_id}) 严禁新增 OMNISCIENT_SECRET，请放入第 2 区 Acquired State 并绑定 slot_key`
+                    );
+                }
+            }
+        }
+
+        let existing: EntityProfile | null =
+            existingProfiles.get(patch.entity_id) ??
+            visibleEntityMap.get(patch.entity_id) ??
+            null;
+
+        if (!existing) {
+            const diskRaw = await readOptionalDiskText(
+                join(bookRoot, 'entities', `${patch.entity_id}.md`)
+            );
+            existing =
+                diskRaw !== null
+                    ? parseEntityMarkdown(diskRaw)
+                    : await bookStore.readColdArchivedEntity(patch.entity_id);
+        }
+
+        if (existing === null) {
+            newEntityIds.add(patch.entity_id);
+            if (!patch.canonical_name || !hasChineseCharacter(patch.canonical_name)) {
+                throw new GateValidationError(
+                    'yield_state_patch',
+                    `新建实体 ${patch.entity_id} 必须提供包含中文字符的标准名称 canonical_name`
+                );
+            }
+            continue;
+        }
+
+        existingProfiles.set(patch.entity_id, existing);
+        if (
+            !allowInnateMutation &&
+            patch.canonical_name !== undefined &&
+            patch.canonical_name !== existing.metadata.canonical_name
+        ) {
+            throw new InnateLockViolationError(
+                patch.entity_id,
+                `禁止篡改既有实体 ${patch.entity_id} 的 canonical_name`
+            );
+        }
+        if (!allowInnateMutation && patch.innate_locks_ops && patch.innate_locks_ops.length > 0) {
+            throw new InnateLockViolationError(
+                patch.entity_id,
+                `禁止篡改既有实体 ${patch.entity_id} 的 1. Innate Locks`
+            );
+        }
     }
+
+    return { newEntityIds, existingProfiles };
 }
 
 /** 创建 Extractor 终态门禁工具 yield_state_patch（校验中文标准名、固有锁、1ms 外键可达性与 state 原子提交） */
@@ -264,26 +321,7 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             exec.signal.throwIfAborted();
             const parsed = ExtractorOutputSchema.parse(args);
 
-            if ((timelineMode === 'PARALLEL' || timelineMode === 'FLASHBACK') && parsed.story_day_delta > 0) {
-                throw new GateValidationError(
-                    'yield_state_patch',
-                    `${timelineMode} 模式下严禁推进主线 story_day（story_day_delta 必须为 0，收到 ${parsed.story_day_delta}）`
-                );
-            }
-
-            if (timelineMode === 'FLASHBACK') {
-                for (const patch of parsed.entity_patches) {
-                    if (
-                        (patch.acquired_state_ops && patch.acquired_state_ops.length > 0) ||
-                        (patch.buffer_ops && patch.buffer_ops.length > 0)
-                    ) {
-                        throw new GateValidationError(
-                            'yield_state_patch',
-                            `FLASHBACK 插叙模式下严禁修改实体 ${patch.entity_id} 的 2. Acquired State 或 4. Recent Buffer`
-                        );
-                    }
-                }
-            }
+            assertTimelineStatePatchConstraints(parsed, timelineMode);
 
             // Q1 防死锁原稿锚点验真：首次全 0 命中打回重提；第 2 次或部分命中则自动过滤未命中词放行
             if (parsed.prose_anchors.length > 0) {
@@ -315,80 +353,14 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             }
 
             const bookStore = store.openStore(bookRoot);
-            const newEntityIds = new Set<string>();
-            const existingProfiles = new Map<string, EntityProfile>();
-
             // 预检新建实体中文 canonical_name、Q7 第1区禁 OMNISCIENT_SECRET 与既有/冷宫实体 Innate Locks
-            for (const patch of parsed.entity_patches) {
-                if (patch.innate_locks_ops) {
-                    for (const op of patch.innate_locks_ops) {
-                        if (op.op !== 'append') continue;
-                        const hasInlineOmniscient =
-                            op.entry.visibility === 'OMNISCIENT_SECRET' ||
-                            /\bOMNISCIENT_SECRET\b/i.test(op.entry.text) ||
-                            (op.entry.continuationLines?.some((line) =>
-                                /\bOMNISCIENT_SECRET\b/i.test(line)
-                            ) ??
-                                false);
-                        if (hasInlineOmniscient) {
-                            throw new GateValidationError(
-                                'yield_state_patch',
-                                `第 1 区 Innate Locks (${patch.entity_id}) 严禁新增 OMNISCIENT_SECRET，请放入第 2 区 Acquired State 并绑定 slot_key`
-                            );
-                        }
-                    }
-                }
-
-                let existing: EntityProfile | null =
-                    existingProfiles.get(patch.entity_id) ??
-                    visibleEntityMap.get(patch.entity_id) ??
-                    null;
-
-                if (!existing) {
-                    const entityPath = join(bookRoot, 'entities', `${patch.entity_id}.md`);
-                    let diskRaw: string | null = null;
-                    try {
-                        diskRaw = await readFile(entityPath, 'utf8');
-                    } catch (err: unknown) {
-                        if ((err as { code?: string }).code !== 'ENOENT') {
-                            throw err;
-                        }
-                    }
-                    if (diskRaw !== null) {
-                        existing = parseEntityMarkdown(diskRaw);
-                    } else {
-                        existing = await bookStore.readColdArchivedEntity(patch.entity_id);
-                    }
-                }
-
-                if (existing === null) {
-                    newEntityIds.add(patch.entity_id);
-                    if (!patch.canonical_name || !hasChineseCharacter(patch.canonical_name)) {
-                        throw new GateValidationError(
-                            'yield_state_patch',
-                            `新建实体 ${patch.entity_id} 必须提供包含中文字符的标准名称 canonical_name`
-                        );
-                    }
-                } else {
-                    existingProfiles.set(patch.entity_id, existing);
-                    if (
-                        !allowInnateMutation &&
-                        patch.canonical_name !== undefined &&
-                        patch.canonical_name !== existing.metadata.canonical_name
-                    ) {
-                        throw new InnateLockViolationError(
-                            patch.entity_id,
-                            `禁止篡改既有实体 ${patch.entity_id} 的 canonical_name`
-                        );
-                    }
-                    if (!allowInnateMutation && patch.innate_locks_ops && patch.innate_locks_ops.length > 0) {
-                        throw new InnateLockViolationError(
-                            patch.entity_id,
-                            `禁止篡改既有实体 ${patch.entity_id} 的 1. Innate Locks`
-                        );
-                    }
-                }
-            }
+            const { newEntityIds, existingProfiles } = await inspectAndValidateEntityPatches({
+                bookRoot,
+                bookStore,
+                patches: parsed.entity_patches,
+                visibleEntityMap,
+                allowInnateMutation
+            });
 
             if (parsed.appeared_entity_ids.length > 0) {
                 const validAppearedSet = await collectKnownEntityIdsForAppeared(

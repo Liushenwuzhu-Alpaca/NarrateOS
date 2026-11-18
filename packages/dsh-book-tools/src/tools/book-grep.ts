@@ -6,6 +6,13 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { BookRetrievalConfigSchema, type NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
+import {
+    buildCombinedStagingOverlay,
+    escapeRegExp,
+    isEnoentError,
+    matchesAnyPathPrefix,
+    readOptionalBookConfig
+} from './shared.js';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_RETRIEVAL_CONFIG = BookRetrievalConfigSchema.parse({});
@@ -29,10 +36,6 @@ interface GrepMatchItem {
     text: string;
     contextBefore: string[];
     contextAfter: string[];
-}
-
-function escapeRegExp(input: string): string {
-    return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function compileSearchRegExp(pattern: string, fixedStrings: boolean): RegExp {
@@ -81,10 +84,6 @@ function grepTextInMemory(
     return matches;
 }
 
-function matchesSearchScope(relPath: string, allowedDirs: string[]): boolean {
-    return allowedDirs.some((scope) => relPath === scope || relPath.startsWith(`${scope}/`));
-}
-
 function estimateMatchChars(match: GrepMatchItem): number {
     const contextChars =
         match.contextBefore.reduce((sum, line) => sum + line.length + 1, 0) +
@@ -101,18 +100,196 @@ async function resolveGrepLimits(
     let defaultMaxMatches = optionMaxMatches;
     let maxOutputChars = optionMaxChars;
     if (defaultMaxMatches === undefined || maxOutputChars === undefined) {
-        try {
-            const config = await store.openStore(bookRoot).readBookConfig();
-            defaultMaxMatches ??=
-                config.retrieval?.grep_default_max_matches ?? DEFAULT_RETRIEVAL_CONFIG.grep_default_max_matches;
-            maxOutputChars ??=
-                config.retrieval?.grep_max_output_chars ?? DEFAULT_RETRIEVAL_CONFIG.grep_max_output_chars;
-        } catch {
-            defaultMaxMatches ??= DEFAULT_RETRIEVAL_CONFIG.grep_default_max_matches;
-            maxOutputChars ??= DEFAULT_RETRIEVAL_CONFIG.grep_max_output_chars;
-        }
+        const config = await readOptionalBookConfig(store, bookRoot);
+        defaultMaxMatches ??=
+            config?.retrieval?.grep_default_max_matches ?? DEFAULT_RETRIEVAL_CONFIG.grep_default_max_matches;
+        maxOutputChars ??=
+            config?.retrieval?.grep_max_output_chars ?? DEFAULT_RETRIEVAL_CONFIG.grep_max_output_chars;
     }
     return { defaultMaxMatches, maxOutputChars };
+}
+
+async function isExistingFenceTarget(
+    fence: PathFence,
+    relTarget: string,
+    mode: 'read' | 'searchScope'
+): Promise<boolean> {
+    try {
+        await lstat(join(fence.bookRoot, relTarget));
+        return await fence.isRealPathInsideRoot(relTarget, mode);
+    } catch (err: unknown) {
+        if (isEnoentError(err)) {
+            return false;
+        }
+        throw err;
+    }
+}
+
+async function collectExistingGrepTargets(
+    fence: PathFence,
+    allowedDirs: readonly string[]
+): Promise<string[]> {
+    const existingTargets: string[] = [];
+    for (const dir of allowedDirs) {
+        if (dir === 'manuscripts' && fence.allowedChapterFileSet !== null) {
+            for (const allowedCh of fence.allowedChapterFileSet) {
+                if (await isExistingFenceTarget(fence, allowedCh, 'read')) {
+                    existingTargets.push(allowedCh);
+                }
+            }
+            continue;
+        }
+        if (await isExistingFenceTarget(fence, dir, 'searchScope')) {
+            existingTargets.push(dir);
+        }
+    }
+    return existingTargets;
+}
+
+function parseRipgrepJsonOutput(stdout: string): GrepMatchItem[] {
+    if (stdout.length === 0) {
+        return [];
+    }
+    const matches: GrepMatchItem[] = [];
+    let pendingBefore: string[] = [];
+    let activeMatch: GrepMatchItem | null = null;
+
+    function flushActiveMatch(): void {
+        if (activeMatch) {
+            matches.push(activeMatch);
+            activeMatch = null;
+        }
+    }
+
+    for (const rawLine of stdout.split('\n')) {
+        if (!rawLine.trim()) continue;
+        const evt = JSON.parse(rawLine) as {
+            type: string;
+            data?: {
+                path?: { text?: string };
+                line_number?: number;
+                lines?: { text?: string };
+            };
+        };
+        if (evt.type === 'begin' || evt.type === 'end') {
+            flushActiveMatch();
+            pendingBefore = [];
+            continue;
+        }
+        const lineText = (evt.data?.lines?.text ?? '').replace(/\r?\n$/, '');
+        if (evt.type === 'context') {
+            if (activeMatch) {
+                activeMatch.contextAfter.push(lineText);
+            } else {
+                pendingBefore.push(lineText);
+            }
+        } else if (evt.type === 'match') {
+            flushActiveMatch();
+            activeMatch = {
+                file: (evt.data?.path?.text ?? '').replace(/\\/g, '/'),
+                line: evt.data?.line_number ?? 0,
+                text: lineText,
+                contextBefore: pendingBefore,
+                contextAfter: []
+            };
+            pendingBefore = [];
+        }
+    }
+    flushActiveMatch();
+    return matches;
+}
+
+async function runRipgrepSearch(params: {
+    pattern: string;
+    targets: readonly string[];
+    fence: PathFence;
+    fixedStrings: boolean;
+    contextLines: number;
+    maxMatches: number;
+    signal: AbortSignal;
+}): Promise<GrepMatchItem[]> {
+    const { pattern, targets, fence, fixedStrings, contextLines, maxMatches, signal } = params;
+    if (targets.length === 0) {
+        return [];
+    }
+
+    const rgArgs = [
+        '--json',
+        '--no-follow',
+        '--max-count',
+        String(maxMatches + 1),
+        '-C',
+        String(contextLines),
+        '--glob',
+        '!.git/**'
+    ];
+    for (const blockedPath of fence.blockedReadPaths) {
+        rgArgs.push('--glob', `!${blockedPath}`, '--glob', `!${blockedPath}/**`);
+    }
+    if (fixedStrings) {
+        rgArgs.push('-F');
+    }
+    rgArgs.push('--', pattern, ...targets);
+
+    let stdout = '';
+    try {
+        const res = await execFileAsync('rg', rgArgs, {
+            cwd: fence.bookRoot,
+            encoding: 'utf8',
+            maxBuffer: 16 * 1024 * 1024,
+            signal
+        });
+        stdout = res.stdout;
+    } catch (err: unknown) {
+        const execErr = err as { code?: number | string; stderr?: string };
+        if (execErr.code === 2) {
+            const detail =
+                typeof execErr.stderr === 'string' && execErr.stderr.trim().length > 0
+                    ? execErr.stderr.trim()
+                    : '正则表达式语法错误或参数非法';
+            throw new Error(
+                `book_grep 正则表达式参数无效 (${pattern}): ${detail}。若需按字面量匹配请设置 fixed_strings=true`
+            );
+        }
+        if (execErr.code !== 1) {
+            throw err;
+        }
+    }
+
+    return parseRipgrepJsonOutput(stdout);
+}
+
+function applyGrepOutputBudget(
+    combined: readonly GrepMatchItem[],
+    maxMatches: number,
+    maxOutputChars: number
+): { kept: GrepMatchItem[]; truncated: boolean } {
+    let truncated = combined.length > maxMatches;
+    const matchLimited = truncated ? combined.slice(0, maxMatches) : combined;
+
+    const kept: GrepMatchItem[] = [];
+    let usedChars = 0;
+    for (const item of matchLimited) {
+        const cost = estimateMatchChars(item);
+        if (usedChars + cost > maxOutputChars) {
+            truncated = true;
+            if (kept.length === 0) {
+                const available = Math.max(40, maxOutputChars - item.file.length - 24);
+                kept.push({
+                    file: item.file,
+                    line: item.line,
+                    text: item.text.slice(0, available),
+                    contextBefore: [],
+                    contextAfter: []
+                });
+            }
+            break;
+        }
+        kept.push(item);
+        usedChars += cost;
+    }
+
+    return { kept, truncated };
 }
 
 /** 创建受控全文检索工具 book_grep（底层调用 rg 且锁死于允许目录内，统一限流截断） */
@@ -214,140 +391,19 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
             const maxMatches = args.max_matches ?? limits.defaultMaxMatches;
             const maxOutputChars = limits.maxOutputChars;
 
-            const existingTargets: string[] = [];
-            for (const dir of scope.allowedDirs) {
-                if (dir === 'manuscripts' && fence.allowedChapterFileSet !== null) {
-                    for (const allowedCh of fence.allowedChapterFileSet) {
-                        try {
-                            await lstat(join(fence.bookRoot, allowedCh));
-                            if (await fence.isRealPathInsideRoot(allowedCh, 'read')) {
-                                existingTargets.push(allowedCh);
-                            }
-                        } catch (err: unknown) {
-                            if ((err as { code?: string }).code !== 'ENOENT') {
-                                throw err;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                try {
-                    await lstat(join(fence.bookRoot, dir));
-                    if (await fence.isRealPathInsideRoot(dir, 'searchScope')) {
-                        existingTargets.push(dir);
-                    }
-                } catch (err: unknown) {
-                    if ((err as { code?: string }).code !== 'ENOENT') {
-                        throw err;
-                    }
-                }
-            }
-
-            const diskMatches: GrepMatchItem[] = [];
-            if (existingTargets.length > 0) {
-                const rgArgs = [
-                    '--json',
-                    '--no-follow',
-                    '--max-count',
-                    String(maxMatches + 1),
-                    '-C',
-                    String(contextLines),
-                    '--glob',
-                    '!.git/**'
-                ];
-                for (const blockedPath of fence.blockedReadPaths) {
-                    rgArgs.push('--glob', `!${blockedPath}`, '--glob', `!${blockedPath}/**`);
-                }
-                if (fixedStrings) {
-                    rgArgs.push('-F');
-                }
-                rgArgs.push('--', args.pattern, ...existingTargets);
-
-                let stdout = '';
-                try {
-                    const res = await execFileAsync('rg', rgArgs, {
-                        cwd: fence.bookRoot,
-                        encoding: 'utf8',
-                        maxBuffer: 16 * 1024 * 1024,
-                        signal: exec.signal
-                    });
-                    stdout = res.stdout;
-                } catch (err: unknown) {
-                    const execErr = err as { code?: number | string; stderr?: string };
-                    if (execErr.code === 2) {
-                        const detail =
-                            typeof execErr.stderr === 'string' && execErr.stderr.trim().length > 0
-                                ? execErr.stderr.trim()
-                                : '正则表达式语法错误或参数非法';
-                        throw new Error(
-                            `book_grep 正则表达式参数无效 (${args.pattern}): ${detail}。若需按字面量匹配请设置 fixed_strings=true`
-                        );
-                    }
-                    if (execErr.code !== 1) {
-                        throw err;
-                    }
-                }
-
-                if (stdout.length > 0) {
-                    let pendingBefore: string[] = [];
-                    let activeMatch: GrepMatchItem | null = null;
-                    const flush = () => {
-                        if (activeMatch) {
-                            diskMatches.push(activeMatch);
-                            activeMatch = null;
-                        }
-                    };
-
-                    for (const rawLine of stdout.split('\n')) {
-                        if (!rawLine.trim()) continue;
-                        const evt = JSON.parse(rawLine) as {
-                            type: string;
-                            data?: {
-                                path?: { text?: string };
-                                line_number?: number;
-                                lines?: { text?: string };
-                            };
-                        };
-                        if (evt.type === 'begin' || evt.type === 'end') {
-                            flush();
-                            pendingBefore = [];
-                            continue;
-                        }
-                        const lineText = (evt.data?.lines?.text ?? '').replace(/\r?\n$/, '');
-                        if (evt.type === 'context') {
-                            if (activeMatch) {
-                                activeMatch.contextAfter.push(lineText);
-                            } else {
-                                pendingBefore.push(lineText);
-                            }
-                        } else if (evt.type === 'match') {
-                            flush();
-                            activeMatch = {
-                                file: (evt.data?.path?.text ?? '').replace(/\\/g, '/'),
-                                line: evt.data?.line_number ?? 0,
-                                text: lineText,
-                                contextBefore: pendingBefore,
-                                contextAfter: []
-                            };
-                            pendingBefore = [];
-                        }
-                    }
-                    flush();
-                }
-            }
+            const existingTargets = await collectExistingGrepTargets(fence, scope.allowedDirs);
+            const diskMatches = await runRipgrepSearch({
+                pattern: args.pattern,
+                targets: existingTargets,
+                fence,
+                fixedStrings,
+                contextLines,
+                maxMatches,
+                signal: exec.signal
+            });
 
             // 合并分支覆盖层与当前 runId 暂存覆盖层，保障 Read-Your-Own-Writes 与支线视角一致
-            const mergedOverlay = new Map<string, string | null>();
-            if (stagingOverlay) {
-                for (const [relPath, content] of stagingOverlay.entries()) {
-                    mergedOverlay.set(relPath, content);
-                }
-            }
-            if (store.staging.has(runId)) {
-                for (const [relPath, content] of store.staging.getPendingWrites(runId).entries()) {
-                    mergedOverlay.set(relPath, content);
-                }
-            }
+            const mergedOverlay = buildCombinedStagingOverlay(store, runId, stagingOverlay);
 
             const filteredDisk = diskMatches.filter(
                 (m) => !mergedOverlay.has(m.file) && fence.isReadPathAllowed(m.file)
@@ -357,7 +413,7 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 if (content === null) {
                     continue;
                 }
-                if (!matchesSearchScope(relPath, scope.allowedDirs) || !fence.isReadPathAllowed(relPath)) {
+                if (!matchesAnyPathPrefix(relPath, scope.allowedDirs) || !fence.isReadPathAllowed(relPath)) {
                     continue;
                 }
                 stagedMatches.push(
@@ -377,30 +433,7 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 return cmp !== 0 ? cmp : a.line - b.line;
             });
 
-            let truncated = combined.length > maxMatches;
-            const matchLimited = truncated ? combined.slice(0, maxMatches) : combined;
-
-            const kept: GrepMatchItem[] = [];
-            let usedChars = 0;
-            for (const item of matchLimited) {
-                const cost = estimateMatchChars(item);
-                if (usedChars + cost > maxOutputChars) {
-                    truncated = true;
-                    if (kept.length === 0) {
-                        const available = Math.max(40, maxOutputChars - item.file.length - 24);
-                        kept.push({
-                            file: item.file,
-                            line: item.line,
-                            text: item.text.slice(0, available),
-                            contextBefore: [],
-                            contextAfter: []
-                        });
-                    }
-                    break;
-                }
-                kept.push(item);
-                usedChars += cost;
-            }
+            const { kept, truncated } = applyGrepOutputBudget(combined, maxMatches, maxOutputChars);
 
             const hint = truncated
                 ? `检索结果已截断（最多返回 ${maxMatches} 条且总字符上限 ${maxOutputChars}），请通过 path 限定子目录、增加 max_matches 或使用更精确的 pattern 缩小检索范围。`

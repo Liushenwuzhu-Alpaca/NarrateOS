@@ -11,6 +11,7 @@ import {
     type CompiledEntity,
     type CompiledLoreEntry
 } from '../yield/schemas.js';
+import { collectEntityRefs, hasOmniscientSecretMarker } from '../yield/shared.js';
 
 const DEFAULT_STATIC_BASE_MAX_CHARS = BookContextAssemblyConfigSchema.parse({}).static_base_max_chars;
 const DEFAULT_MAX_ACTIVE_OPEN_THREADS = BookDreamingConfigSchema.parse({}).max_active_open_threads;
@@ -19,7 +20,6 @@ const NEGATIVE_PROHIBITION_RE =
     /(?:禁止|严禁|禁用|不要|不得|切忌|绝不|决不|不能|不可|切勿|莫要)/;
 const WRITER_SPOILER_DIRECTIVE_RE =
     /\b(?:OMNISCIENT_SECRET|WARPED|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
-const ENTITY_REF_RE = /\b((?:char|item)_[a-zA-Z0-9_]+)\b/g;
 
 /** 开书声纹样本输入项 */
 export interface BootVoiceSampleInput {
@@ -95,36 +95,32 @@ export function countVolumesInMarkdown(markdown: string): number {
     return Math.max(volIds.size, cnVolIds.size);
 }
 
-function collectEntityRefs(text: string): string[] {
-    const refs: string[] = [];
-    for (const match of text.matchAll(ENTITY_REF_RE)) {
-        if (match[1]) {
-            refs.push(match[1]);
-        }
+function pushSafeEntityTagIssue(label: string, value: string, issues: string[]): void {
+    try {
+        assertSafeEntityTagValue(label, value);
+    } catch (err: unknown) {
+        issues.push(err instanceof Error ? err.message : String(err));
     }
-    return refs;
 }
 
-/**
- * 统一执行开书确定性门禁校验（卷数、伏笔上限、实体中文名、T0 防泄露、Q2 声纹种子、Q7 分区与 StaticProseGate 全覆盖）
- */
-export function validateBootBundle(
+function assertRefsInEntityIds(
+    sourceLabel: string,
+    text: string,
+    entityIds: ReadonlySet<string>,
+    issues: string[]
+): void {
+    for (const ref of collectEntityRefs(text)) {
+        if (!entityIds.has(ref)) {
+            issues.push(`${sourceLabel} 引用了不存在的实体: ${ref}`);
+        }
+    }
+}
+
+function validateCleanroomNarrativeFields(
     payload: BootValidationPayload,
-    options: BootValidationOptions
-): BootValidationOutcome {
-    const issues: string[] = [];
-    const staticBaseMaxChars = options.staticBaseMaxChars ?? DEFAULT_STATIC_BASE_MAX_CHARS;
-    const maxActiveOpenThreads = options.maxActiveOpenThreads ?? DEFAULT_MAX_ACTIVE_OPEN_THREADS;
-
-    if (countVolumesInMarkdown(payload.l1_volumes_markdown) < 1) {
-        issues.push('L1 卷级总表 (l1_volumes_markdown) 至少需包含 1 卷规划');
-    }
-    if (payload.open_threads.length > maxActiveOpenThreads) {
-        issues.push(
-            `初始活跃伏笔数量 (${payload.open_threads.length}) 超过上限 ${maxActiveOpenThreads} 条`
-        );
-    }
-
+    staticBaseMaxChars: number,
+    issues: string[]
+): void {
     if (payload.static_base_and_voice.trim().length > staticBaseMaxChars) {
         issues.push(
             `static_base_and_voice 长度 (${payload.static_base_and_voice.trim().length}) 超过上限 ${staticBaseMaxChars} 字`
@@ -148,16 +144,18 @@ export function validateBootBundle(
             );
         }
     }
+}
 
+function validateBootEntities(
+    entities: ReadonlyArray<CompiledEntity>,
+    povCharacter: string | undefined,
+    issues: string[]
+): { entityIds: Set<string>; canonicalNames: string[] } {
     const entityIds = new Set<string>();
     const canonicalNames: string[] = [];
-    for (const entity of payload.entities) {
-        try {
-            assertSafeEntityTagValue('entityId', entity.entityId);
-        } catch (err: unknown) {
-            issues.push(err instanceof Error ? err.message : String(err));
-        }
 
+    for (const entity of entities) {
+        pushSafeEntityTagIssue('entityId', entity.entityId, issues);
         if (entityIds.has(entity.entityId)) {
             issues.push(`entities 中存在重复 entityId: ${entity.entityId}`);
         }
@@ -172,10 +170,7 @@ export function validateBootBundle(
         }
 
         for (const lockItem of entity.innateLocks) {
-            if (
-                lockItem.visibility === 'OMNISCIENT_SECRET' ||
-                /\bOMNISCIENT_SECRET\b/i.test(lockItem.text)
-            ) {
+            if (hasOmniscientSecretMarker(lockItem)) {
                 issues.push(
                     `第 1 区 innateLocks (${entity.entityId}) 严禁包含 OMNISCIENT_SECRET，请改放第 2 区 acquiredState 并绑定 slotKey`
                 );
@@ -199,20 +194,13 @@ export function validateBootBundle(
                 }
             }
             if (item.slotKey !== undefined) {
-                try {
-                    assertSafeEntityTagValue('slotKey', item.slotKey);
-                } catch (err: unknown) {
-                    issues.push(err instanceof Error ? err.message : String(err));
-                }
+                pushSafeEntityTagIssue('slotKey', item.slotKey, issues);
             }
             if (item.owner !== undefined) {
-                try {
-                    assertSafeEntityTagValue('owner', item.owner);
-                } catch (err: unknown) {
-                    issues.push(err instanceof Error ? err.message : String(err));
-                }
+                pushSafeEntityTagIssue('owner', item.owner, issues);
             }
         }
+
         for (const item of entity.irreversibleTrajectory) {
             if (item.storyDay > 0) {
                 issues.push(
@@ -229,10 +217,18 @@ export function validateBootBundle(
         }
     }
 
-    if (payload.pov_character !== undefined && !entityIds.has(payload.pov_character)) {
-        issues.push(`pov_character (${payload.pov_character}) 在 entities 中不存在`);
+    if (povCharacter !== undefined && !entityIds.has(povCharacter)) {
+        issues.push(`pov_character (${povCharacter}) 在 entities 中不存在`);
     }
 
+    return { entityIds, canonicalNames };
+}
+
+function validateBootEntityAndCollectionRefs(
+    payload: BootValidationPayload,
+    entityIds: ReadonlySet<string>,
+    issues: string[]
+): void {
     for (const entity of payload.entities) {
         for (const item of entity.acquiredState) {
             if (item.owner !== undefined && !entityIds.has(item.owner)) {
@@ -240,62 +236,47 @@ export function validateBootBundle(
                     `实体 ${entity.entityId} 的 acquiredState.owner (${item.owner}) 在 entities 中不存在`
                 );
             }
-            for (const ref of collectEntityRefs(item.text)) {
-                if (!entityIds.has(ref)) {
-                    issues.push(`实体 ${entity.entityId}.acquiredState 引用了不存在的实体: ${ref}`);
-                }
-            }
+            assertRefsInEntityIds(`实体 ${entity.entityId}.acquiredState`, item.text, entityIds, issues);
         }
         for (const item of entity.innateLocks) {
-            for (const ref of collectEntityRefs(item.text)) {
-                if (!entityIds.has(ref)) {
-                    issues.push(`实体 ${entity.entityId}.innateLocks 引用了不存在的实体: ${ref}`);
-                }
-            }
+            assertRefsInEntityIds(`实体 ${entity.entityId}.innateLocks`, item.text, entityIds, issues);
         }
         for (const item of entity.irreversibleTrajectory) {
-            for (const ref of collectEntityRefs(item.text)) {
-                if (!entityIds.has(ref)) {
-                    issues.push(
-                        `实体 ${entity.entityId}.irreversibleTrajectory 引用了不存在的实体: ${ref}`
-                    );
-                }
-            }
+            assertRefsInEntityIds(
+                `实体 ${entity.entityId}.irreversibleTrajectory`,
+                item.text,
+                entityIds,
+                issues
+            );
         }
         for (const item of entity.recentBuffer) {
-            for (const ref of collectEntityRefs(item.text)) {
-                if (!entityIds.has(ref)) {
-                    issues.push(`实体 ${entity.entityId}.recentBuffer 引用了不存在的实体: ${ref}`);
-                }
-            }
+            assertRefsInEntityIds(`实体 ${entity.entityId}.recentBuffer`, item.text, entityIds, issues);
         }
     }
 
     const threadIds = new Set<string>();
     for (const rawThread of payload.open_threads) {
-        if (rawThread !== null && typeof rawThread === 'object') {
-            const thread = rawThread as Partial<BootOpenThreadInput>;
-            if (typeof thread.thread_id === 'string') {
-                if (threadIds.has(thread.thread_id)) {
-                    issues.push(`open_threads 中存在重复 thread_id: ${thread.thread_id}`);
-                }
-                threadIds.add(thread.thread_id);
+        if (rawThread === null || typeof rawThread !== 'object') continue;
+        const thread = rawThread as Partial<BootOpenThreadInput>;
+        if (typeof thread.thread_id === 'string') {
+            if (threadIds.has(thread.thread_id)) {
+                issues.push(`open_threads 中存在重复 thread_id: ${thread.thread_id}`);
             }
-            const combinedText = `${thread.title ?? ''} ${thread.wakeup_condition ?? ''}`;
-            const spoilerMatch = /\b(?:OMNISCIENT_SECRET|WARPED|SELF_ONLY)\b/i.exec(combinedText);
-            if (spoilerMatch) {
-                issues.push(
-                    `open_threads (${thread.thread_id ?? 'unknown'}) 禁止包含剧透标签「${spoilerMatch[0]}」`
-                );
-            }
-            for (const ref of collectEntityRefs(combinedText)) {
-                if (!entityIds.has(ref)) {
-                    issues.push(
-                        `open_threads (${thread.thread_id ?? 'unknown'}) 引用了不存在的实体: ${ref}`
-                    );
-                }
-            }
+            threadIds.add(thread.thread_id);
         }
+        const combinedText = `${thread.title ?? ''} ${thread.wakeup_condition ?? ''}`;
+        const spoilerMatch = /\b(?:OMNISCIENT_SECRET|WARPED|SELF_ONLY)\b/i.exec(combinedText);
+        if (spoilerMatch) {
+            issues.push(
+                `open_threads (${thread.thread_id ?? 'unknown'}) 禁止包含剧透标签「${spoilerMatch[0]}」`
+            );
+        }
+        assertRefsInEntityIds(
+            `open_threads (${thread.thread_id ?? 'unknown'})`,
+            combinedText,
+            entityIds,
+            issues
+        );
     }
 
     if (payload.future_horizon_events) {
@@ -305,13 +286,12 @@ export function validateBootBundle(
                 issues.push(`future_horizon_events 中存在重复 event_id: ${evt.event_id}`);
             }
             eventIds.add(evt.event_id);
-            for (const ref of collectEntityRefs(`${evt.premise} ${evt.description}`)) {
-                if (!entityIds.has(ref)) {
-                    issues.push(
-                        `future_horizon_events (${evt.event_id}) 引用了不存在的实体: ${ref}`
-                    );
-                }
-            }
+            assertRefsInEntityIds(
+                `future_horizon_events (${evt.event_id})`,
+                `${evt.premise} ${evt.description}`,
+                entityIds,
+                issues
+            );
         }
     }
 
@@ -322,8 +302,14 @@ export function validateBootBundle(
         }
         loreIds.add(lore.id);
     }
+}
 
-    const proseGate = new StaticProseGate();
+function validateBootNarrativeProseGate(
+    payload: BootValidationPayload,
+    narrationSubjectivity: NarrationSubjectivity,
+    proseGate: StaticProseGate,
+    issues: string[]
+): void {
     const gateChecks: Array<{ label: string; text: string }> = [
         { label: 'worldSummary', text: payload.world_summary },
         { label: 'staticBaseAndVoice', text: payload.static_base_and_voice },
@@ -345,25 +331,27 @@ export function validateBootBundle(
     }
 
     for (const check of gateChecks) {
-        const res = proseGate.evaluate(check.text, {
-            narrationSubjectivity: options.narrationSubjectivity
-        });
+        const res = proseGate.evaluate(check.text, { narrationSubjectivity });
         if (!res.passed) {
             issues.push(
                 `StaticProseGate 未通过 (${check.label}): ${res.violations.map((v) => v.message).join('; ')}`
             );
         }
     }
+}
 
+function validateBootVoiceSamples(
+    voiceSamples: ReadonlyArray<BootVoiceSampleInput>,
+    canonicalNames: readonly string[],
+    options: BootValidationOptions,
+    proseGate: StaticProseGate,
+    issues: string[]
+): { cleanVoiceSamples: BootVoiceSampleInput[]; filteredVoiceSampleCount: number } {
     const cleanVoiceSamples: BootVoiceSampleInput[] = [];
     let filteredVoiceSampleCount = 0;
-    for (const sample of payload.voice_samples) {
-        try {
-            assertSafeEntityTagValue('voice_tag', sample.tag);
-        } catch (err: unknown) {
-            issues.push(err instanceof Error ? err.message : String(err));
-        }
 
+    for (const sample of voiceSamples) {
+        pushSafeEntityTagIssue('voice_tag', sample.tag, issues);
         const res = proseGate.evaluate(sample.sample, {
             narrationSubjectivity: options.narrationSubjectivity
         });
@@ -413,12 +401,53 @@ export function validateBootBundle(
 
     if (
         options.voiceSampleMode === 'filter' &&
-        payload.voice_samples.length > 0 &&
+        voiceSamples.length > 0 &&
         cleanVoiceSamples.length === 0 &&
-        !payload.voice_samples.every((s) => s.source === 'boot_seed')
+        !voiceSamples.every((s) => s.source === 'boot_seed')
     ) {
         issues.push('作者提供的声纹样本全部未通过 StaticProseGate 静态文风门禁');
     }
+
+    return { cleanVoiceSamples, filteredVoiceSampleCount };
+}
+
+/**
+ * 统一执行开书确定性门禁校验（卷数、伏笔上限、实体中文名、T0 防泄露、Q2 声纹种子、Q7 分区与 StaticProseGate 全覆盖）
+ */
+export function validateBootBundle(
+    payload: BootValidationPayload,
+    options: BootValidationOptions
+): BootValidationOutcome {
+    const issues: string[] = [];
+    const staticBaseMaxChars = options.staticBaseMaxChars ?? DEFAULT_STATIC_BASE_MAX_CHARS;
+    const maxActiveOpenThreads = options.maxActiveOpenThreads ?? DEFAULT_MAX_ACTIVE_OPEN_THREADS;
+
+    if (countVolumesInMarkdown(payload.l1_volumes_markdown) < 1) {
+        issues.push('L1 卷级总表 (l1_volumes_markdown) 至少需包含 1 卷规划');
+    }
+    if (payload.open_threads.length > maxActiveOpenThreads) {
+        issues.push(
+            `初始活跃伏笔数量 (${payload.open_threads.length}) 超过上限 ${maxActiveOpenThreads} 条`
+        );
+    }
+
+    validateCleanroomNarrativeFields(payload, staticBaseMaxChars, issues);
+    const { entityIds, canonicalNames } = validateBootEntities(
+        payload.entities,
+        payload.pov_character,
+        issues
+    );
+    validateBootEntityAndCollectionRefs(payload, entityIds, issues);
+
+    const proseGate = new StaticProseGate();
+    validateBootNarrativeProseGate(payload, options.narrationSubjectivity, proseGate, issues);
+    const { cleanVoiceSamples, filteredVoiceSampleCount } = validateBootVoiceSamples(
+        payload.voice_samples,
+        canonicalNames,
+        options,
+        proseGate,
+        issues
+    );
 
     return {
         issues,
