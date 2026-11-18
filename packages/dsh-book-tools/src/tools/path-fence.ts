@@ -19,69 +19,123 @@ export const ALLOWED_WRITE_DIRS = [
     'entities'
 ] as const;
 
-/** 永久禁止工种工具访问的 .ops 内部事务/日志路径前缀 */
-const HARD_BLOCKED_OPS_PATHS = [
-    '.ops/tx.lock',
-    '.ops/tx_state.json',
-    '.ops/runs.jsonl',
-    '.ops/pending_writes.json',
-    '.ops/dream_watermark.json',
-    '.ops/safe_halt.json',
-    '.ops/recovery',
-    '.ops/traces',
-    '.ops/parallel_deltas',
-    '.ops/chapter_outlines'
+/** .ops/ 只读最小白名单上限（超出范围一律物理拒止，单书角色配置亦不可越界） */
+export const OPS_READ_WHITELIST_MAX = new Set<string>([
+    '.ops/telemetry.jsonl',
+    '.ops/voice_samples.yaml',
+    '.ops/signals.jsonl'
+]);
+
+/** .ops/ 读写最小白名单上限（仅开放声纹池与信号队列） */
+export const OPS_WRITE_WHITELIST_MAX = new Set<string>([
+    '.ops/voice_samples.yaml',
+    '.ops/signals.jsonl'
+]);
+
+/** AI 工种硬只读世界保护集：禁止通过 book_edit 或暂存区写入/篡改 */
+export const READONLY_WORLD_PATHS = [
+    'world/roles',
+    'world/author_charter.md',
+    'world/book_config.yaml',
+    'world/ops_style_amendments.md'
 ] as const;
 
 const ALLOWED_READ_DIR_SET = new Set<string>(ALLOWED_READ_DIRS);
 const ALLOWED_WRITE_DIR_SET = new Set<string>(ALLOWED_WRITE_DIRS);
+
+export type PathFenceAccessMode = 'read' | 'write' | 'searchScope';
+
+function matchesPathOrSubpath(normalizedPath: string, prefix: string): boolean {
+    return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
+}
 
 function isInsideRealRoot(realRoot: string, realCandidate: string): boolean {
     const rel = relative(realRoot, realCandidate);
     return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-function isHardBlockedOpsPath(normalized: string): boolean {
-    return HARD_BLOCKED_OPS_PATHS.some(
-        (blocked) => normalized === blocked || normalized.startsWith(`${blocked}/`)
-    );
-}
-
-function normalizeOpsWhitelistEntry(raw: string): string {
+function normalizeRelativeWhitelistItem(raw: string, label: string): string {
     const slash = raw.replace(/\\/g, '/').trim();
     if (
         slash.length === 0 ||
         slash.includes('\0') ||
         isAbsolute(slash) ||
+        /^[a-zA-Z]:[\\/]/.test(slash) ||
         slash.split('/').includes('..')
     ) {
-        throw new PathFenceError(raw, `非法的 .ops 白名单条目: ${raw}`);
+        throw new PathFenceError(raw, `非法的 ${label} 条目: ${raw}`);
     }
     const normalized = posix.normalize(slash).replace(/^\.\//, '').replace(/\/+$/, '');
-    if (!normalized.startsWith('.ops/')) {
-        throw new PathFenceError(raw, `allowedOpsPaths 条目必须以 .ops/ 开头: ${raw}`);
-    }
-    if (isHardBlockedOpsPath(normalized)) {
-        throw new PathFenceError(raw, `禁止将事务核心路径加入白名单: ${raw}`);
+    if (normalized.length === 0 || normalized === '.' || normalized.startsWith('../')) {
+        throw new PathFenceError(raw, `非法的 ${label} 条目: ${raw}`);
     }
     return normalized;
 }
 
-async function nearestExistingPath(targetPath: string): Promise<string> {
-    let current = targetPath;
+function normalizeOpsWhitelistEntry(raw: string, forWrite: boolean): string {
+    const normalized = normalizeRelativeWhitelistItem(raw, '.ops 白名单');
+    if (!normalized.startsWith('.ops/')) {
+        throw new PathFenceError(raw, `allowedOpsPaths 条目必须以 .ops/ 开头: ${raw}`);
+    }
+    const allowedSet = forWrite ? OPS_WRITE_WHITELIST_MAX : OPS_READ_WHITELIST_MAX;
+    if (!allowedSet.has(normalized)) {
+        throw new PathFenceError(raw, `禁止将未授权的 .ops 路径加入白名单: ${raw}`);
+    }
+    return normalized;
+}
+
+function normalizeChapterWhitelistEntry(raw: string): string {
+    const normalized = normalizeRelativeWhitelistItem(raw, 'allowedChapterFiles');
+    if (!normalized.includes('/')) {
+        return `manuscripts/${normalized}`;
+    }
+    return normalized;
+}
+
+async function resolveTargetRealPath(absPath: string, requestedPath: string): Promise<string> {
+    try {
+        const st = await lstat(absPath);
+        if (st.isSymbolicLink()) {
+            try {
+                return await realpath(absPath);
+            } catch {
+                throw new PathFenceError(requestedPath, `符号链接目标不存在或无法解析: ${requestedPath}`);
+            }
+        }
+        return await realpath(absPath);
+    } catch (err: unknown) {
+        if ((err as { code?: string }).code !== 'ENOENT') {
+            throw err;
+        }
+    }
+
+    const suffixSegments: string[] = [];
+    let probe = absPath;
     while (true) {
+        suffixSegments.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]/, ''));
+        const parent = dirname(probe);
+        if (parent === probe) {
+            throw new PathFenceError(requestedPath, `无法定位路径的已存在父目录: ${requestedPath}`);
+        }
+        probe = parent;
         try {
-            await lstat(current);
-            return current;
+            const st = await lstat(probe);
+            let realAncestor: string;
+            try {
+                realAncestor = await realpath(probe);
+            } catch {
+                throw new PathFenceError(
+                    requestedPath,
+                    st.isSymbolicLink()
+                        ? `父目录符号链接目标不存在或无法解析: ${requestedPath}`
+                        : `无法解析父目录真实路径: ${requestedPath}`
+                );
+            }
+            return resolve(realAncestor, ...suffixSegments);
         } catch (err: unknown) {
             if ((err as { code?: string }).code !== 'ENOENT') {
                 throw err;
             }
-            const parent = dirname(current);
-            if (parent === current) {
-                return current;
-            }
-            current = parent;
         }
     }
 }
@@ -92,18 +146,24 @@ export interface PathFenceOptions {
     allowedOpsPaths?: string[] | undefined;
     /** 显式放行暂存编辑的 .ops/ 具体文件路径白名单（默认空，全面屏蔽 .ops/） */
     allowedOpsWritePaths?: string[] | undefined;
+    /** 按角色注入的禁读路径清单（如 world/author_charter.md、world/arc_director_plan.md） */
+    blockedReadPaths?: string[] | undefined;
+    /** 限定 manuscripts/** 仅允许读取/检索该集合内的章节文件（用于 PARALLEL 支线隔离） */
+    allowedChapterFiles?: string[] | undefined;
 }
 
 /**
  * 作品路径围栏（PathFence）
  * - 将所有读写检索严格锁死在当前 bookRoot 允许目录内；
  * - 默认物理拦截 ../、跨书路径、.ops/、.git/ 及越界符号链接；
- * - 仅当调用方显式授予 allowedOpsPaths 白名单时，才放行特定非事务 .ops 文件。
+ * - 解析 realpath 后对真实相对路径二次复核白名单、.ops 最小集与只读世界保护集。
  */
 export class PathFence {
     public readonly bookRoot: string;
     public readonly allowedOpsReadSet: ReadonlySet<string>;
     public readonly allowedOpsWriteSet: ReadonlySet<string>;
+    public readonly blockedReadPaths: readonly string[];
+    public readonly allowedChapterFileSet: ReadonlySet<string> | null;
 
     constructor(bookRoot: string, options: PathFenceOptions = {}) {
         if (typeof bookRoot !== 'string' || bookRoot.trim().length === 0) {
@@ -111,11 +171,134 @@ export class PathFence {
         }
         this.bookRoot = resolve(bookRoot);
         this.allowedOpsReadSet = new Set(
-            (options.allowedOpsPaths ?? []).map(normalizeOpsWhitelistEntry)
+            (options.allowedOpsPaths ?? []).map((entry) => normalizeOpsWhitelistEntry(entry, false))
         );
         this.allowedOpsWriteSet = new Set(
-            (options.allowedOpsWritePaths ?? []).map(normalizeOpsWhitelistEntry)
+            (options.allowedOpsWritePaths ?? []).map((entry) => normalizeOpsWhitelistEntry(entry, true))
         );
+        this.blockedReadPaths = (options.blockedReadPaths ?? []).map((entry) =>
+            normalizeRelativeWhitelistItem(entry, 'blockedReadPaths')
+        );
+        this.allowedChapterFileSet =
+            options.allowedChapterFiles !== undefined
+                ? new Set(options.allowedChapterFiles.map(normalizeChapterWhitelistEntry))
+                : null;
+    }
+
+    /** 判断归一化相对路径是否命中角色级禁读列表 */
+    isBlockedReadPath(normalizedPath: string): boolean {
+        const normalized = posix.normalize(normalizedPath.replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/+$/, '');
+        return this.blockedReadPaths.some((blocked) => matchesPathOrSubpath(normalized, blocked));
+    }
+
+    /** 判断章节路径是否位于 allowedChapterFiles 白名单内（未配置白名单时恒为 true） */
+    isChapterFileAllowed(normalizedPath: string): boolean {
+        if (this.allowedChapterFileSet === null) {
+            return true;
+        }
+        const normalized = posix.normalize(normalizedPath.replace(/\\/g, '/')).replace(/^\.\//, '').replace(/\/+$/, '');
+        if (!matchesPathOrSubpath(normalized, 'manuscripts') || normalized === 'manuscripts') {
+            return true;
+        }
+        return this.allowedChapterFileSet.has(normalized);
+    }
+
+    /** 判断相对路径是否对当前角色可读/可检索（供 book_grep / book_glob 过滤） */
+    isReadPathAllowed(relPath: string): boolean {
+        try {
+            const normalized = this.normalizeRelPath(relPath);
+            this.assertNormalizedAllowed(normalized, relPath, 'read');
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    private assertNormalizedAllowed(
+        normalized: string,
+        requestedPath: string,
+        mode: PathFenceAccessMode
+    ): void {
+        const slashIdx = normalized.indexOf('/');
+        const topDir = slashIdx === -1 ? normalized : normalized.slice(0, slashIdx);
+
+        if (topDir === '.git' || normalized.split('/').includes('.git')) {
+            throw new PathFenceError(requestedPath, `禁止访问内部目录 .git/: ${requestedPath}`);
+        }
+
+        if (mode === 'write') {
+            if (matchesPathOrSubpath(normalized, 'manuscripts')) {
+                throw new PathFenceError(
+                    requestedPath,
+                    `禁止通过 book_edit 修改定稿正稿目录 manuscripts/: ${requestedPath}`
+                );
+            }
+            for (const readonlyPath of READONLY_WORLD_PATHS) {
+                if (matchesPathOrSubpath(normalized, readonlyPath)) {
+                    throw new PathFenceError(
+                        requestedPath,
+                        `禁止修改只读世界契约/角色配置路径 (${readonlyPath}): ${requestedPath}`
+                    );
+                }
+            }
+            if (topDir === '.ops') {
+                if (!this.allowedOpsWriteSet.has(normalized)) {
+                    throw new PathFenceError(
+                        requestedPath,
+                        `禁止通过 book_edit 修改未授权 .ops 路径: ${requestedPath}`
+                    );
+                }
+                return;
+            }
+            if (!ALLOWED_WRITE_DIR_SET.has(topDir) || slashIdx === -1) {
+                throw new PathFenceError(
+                    requestedPath,
+                    `只允许编辑 (${ALLOWED_WRITE_DIRS.join(', ')}) 下的文件: ${requestedPath}`
+                );
+            }
+            return;
+        }
+
+        if (this.isBlockedReadPath(normalized)) {
+            throw new PathFenceError(requestedPath, `角色无权读取受限路径: ${requestedPath}`);
+        }
+
+        if (topDir === '.ops') {
+            if (!this.allowedOpsReadSet.has(normalized)) {
+                throw new PathFenceError(requestedPath, `禁止访问未授权 .ops 路径: ${requestedPath}`);
+            }
+            return;
+        }
+
+        if (mode === 'read') {
+            if (!ALLOWED_READ_DIR_SET.has(topDir) || slashIdx === -1) {
+                throw new PathFenceError(
+                    requestedPath,
+                    `只读路径必须位于允许目录 (${ALLOWED_READ_DIRS.join(', ')}) 下: ${requestedPath}`
+                );
+            }
+            if (!this.isChapterFileAllowed(normalized)) {
+                throw new PathFenceError(
+                    requestedPath,
+                    `当前时间线/支线禁止读取该章节手稿: ${requestedPath}`
+                );
+            }
+            return;
+        }
+
+        // searchScope
+        if (!ALLOWED_READ_DIR_SET.has(topDir)) {
+            throw new PathFenceError(
+                requestedPath,
+                `检索路径必须位于允许目录 (${ALLOWED_READ_DIRS.join(', ')}) 内: ${requestedPath}`
+            );
+        }
+        if (normalized !== 'manuscripts' && !this.isChapterFileAllowed(normalized)) {
+            throw new PathFenceError(
+                requestedPath,
+                `当前时间线/支线禁止检索该章节手稿: ${requestedPath}`
+            );
+        }
     }
 
     /** 校验并归一化相对路径，禁止路径穿越、绝对路径与未授权系统目录 */
@@ -152,7 +335,10 @@ export class PathFence {
         }
 
         if (topDir === '.ops') {
-            if (normalized === '.ops' || isHardBlockedOpsPath(normalized)) {
+            if (
+                normalized === '.ops' ||
+                (!OPS_READ_WHITELIST_MAX.has(normalized) && !OPS_WRITE_WHITELIST_MAX.has(normalized))
+            ) {
                 throw new PathFenceError(relPath, `禁止访问内部目录 .ops/: ${relPath}`);
             }
         } else if (rawSegments.includes('.ops')) {
@@ -168,32 +354,20 @@ export class PathFence {
         return normalized;
     }
 
-    /** 校验只读文件路径：必须位于 ALLOWED_READ_DIRS 或显式白名单 .ops 文件内，且真实路径不逃逸 bookRoot */
+    /** 校验只读文件路径：必须位于允许目录或白名单 .ops 文件内，且 realpath 后二次复核合法 */
     async assertReadFile(relPath: string): Promise<{ normalized: string; absPath: string }> {
         const normalized = this.normalizeRelPath(relPath);
-        const slashIdx = normalized.indexOf('/');
-        const topDir = slashIdx === -1 ? normalized : normalized.slice(0, slashIdx);
-
-        if (topDir === '.ops') {
-            if (!this.allowedOpsReadSet.has(normalized)) {
-                throw new PathFenceError(relPath, `禁止读取未授权 .ops 路径: ${relPath}`);
-            }
-        } else if (!ALLOWED_READ_DIR_SET.has(topDir) || slashIdx === -1) {
-            throw new PathFenceError(
-                relPath,
-                `只读路径必须位于允许目录 (${ALLOWED_READ_DIRS.join(', ')}) 下: ${relPath}`
-            );
-        }
+        this.assertNormalizedAllowed(normalized, relPath, 'read');
 
         const absPath = resolve(this.bookRoot, normalized);
-        await this.assertSymlinkSafe(absPath, relPath);
+        await this.assertSymlinkSafe(absPath, relPath, 'read');
         return { normalized, absPath };
     }
 
     /**
      * 校验只读检索作用域（用于 book_grep / book_glob）：
      * - 未传路径或传入 "." 时，限定返回 bookRoot 内允许目录白名单（外加显式白名单 .ops 文件）；
-     * - 传入具体子路径时，校验其位于 ALLOWED_READ_DIRS 或白名单 .ops 文件内且真实路径不逃逸。
+     * - 传入具体子路径时，校验其位于允许目录或白名单 .ops 文件内且 realpath 不逃逸。
      */
     async assertReadSearchScope(subPath?: string): Promise<{
         normalizedSubPath: string | null;
@@ -207,20 +381,10 @@ export class PathFence {
         }
 
         const normalized = this.normalizeRelPath(subPath);
-        const topDir = normalized.split('/')[0] ?? '';
-        if (topDir === '.ops') {
-            if (!this.allowedOpsReadSet.has(normalized)) {
-                throw new PathFenceError(subPath, `禁止检索未授权 .ops 路径: ${subPath}`);
-            }
-        } else if (!ALLOWED_READ_DIR_SET.has(topDir)) {
-            throw new PathFenceError(
-                subPath,
-                `检索路径必须位于允许目录 (${ALLOWED_READ_DIRS.join(', ')}) 内: ${subPath}`
-            );
-        }
+        this.assertNormalizedAllowed(normalized, subPath, 'searchScope');
 
         const absPath = resolve(this.bookRoot, normalized);
-        await this.assertSymlinkSafe(absPath, subPath);
+        await this.assertSymlinkSafe(absPath, subPath, 'searchScope');
 
         return {
             normalizedSubPath: normalized,
@@ -228,28 +392,13 @@ export class PathFence {
         };
     }
 
-    /** 校验可写文件路径（book_edit）：物理禁止 manuscripts/、未授权 .ops/、.git/ 与 ../ */
+    /** 校验可写文件路径（book_edit）：物理禁止 manuscripts/、只读世界保护集、未授权 .ops/、.git/ 与 ../ */
     async assertWriteFile(relPath: string): Promise<{ normalized: string; absPath: string }> {
         const normalized = this.normalizeRelPath(relPath);
-        const slashIdx = normalized.indexOf('/');
-        const topDir = slashIdx === -1 ? normalized : normalized.slice(0, slashIdx);
-
-        if (topDir === 'manuscripts') {
-            throw new PathFenceError(relPath, `禁止通过 book_edit 修改定稿正稿目录 manuscripts/: ${relPath}`);
-        }
-        if (topDir === '.ops') {
-            if (!this.allowedOpsWriteSet.has(normalized)) {
-                throw new PathFenceError(relPath, `禁止通过 book_edit 修改未授权 .ops 路径: ${relPath}`);
-            }
-        } else if (!ALLOWED_WRITE_DIR_SET.has(topDir) || slashIdx === -1) {
-            throw new PathFenceError(
-                relPath,
-                `只允许编辑 (${ALLOWED_WRITE_DIRS.join(', ')}) 下的文件: ${relPath}`
-            );
-        }
+        this.assertNormalizedAllowed(normalized, relPath, 'write');
 
         const absPath = resolve(this.bookRoot, normalized);
-        await this.assertSymlinkSafe(absPath, relPath);
+        await this.assertSymlinkSafe(absPath, relPath, 'write');
         return { normalized, absPath };
     }
 
@@ -273,22 +422,46 @@ export class PathFence {
         }
     }
 
-    /** 校验目标路径（或最近存在祖先）与 bookRoot 的真实路径不发生符号链接逃逸 */
-    async assertSymlinkSafe(absPath: string, requestedPath: string): Promise<void> {
+    /** 校验目标路径（或最近存在祖先）与 bookRoot 的真实路径不发生符号链接逃逸，并按权限模式二次校验目标相对路径 */
+    async assertSymlinkSafe(
+        absPath: string,
+        requestedPath: string,
+        mode: PathFenceAccessMode = 'read'
+    ): Promise<void> {
         const realRoot = await realpath(this.bookRoot);
-        const existing = await nearestExistingPath(absPath);
-        const realExisting = await realpath(existing);
-        if (!isInsideRealRoot(realRoot, realExisting)) {
+        const realTarget = await resolveTargetRealPath(absPath, requestedPath);
+        if (!isInsideRealRoot(realRoot, realTarget)) {
             throw new PathFenceError(requestedPath, `符号链接越界 bookRoot: ${requestedPath}`);
+        }
+        const realRel = relative(realRoot, realTarget);
+        if (realRel !== '') {
+            const normalizedRealRel = posix
+                .normalize(realRel.replace(/\\/g, '/'))
+                .replace(/\/+$/, '');
+            this.assertNormalizedAllowed(normalizedRealRel, requestedPath, mode);
         }
     }
 
-    /** 检查实际遍历到的子路径是否仍在 bookRoot 真实目录内 */
-    async isRealPathInsideRoot(relPath: string): Promise<boolean> {
+    /** 检查实际遍历到的子路径是否仍在 bookRoot 真实目录内且符合指定访问模式 */
+    async isRealPathInsideRoot(
+        relPath: string,
+        mode: PathFenceAccessMode = 'read'
+    ): Promise<boolean> {
         try {
             const realRoot = await realpath(this.bookRoot);
             const realTarget = await realpath(join(this.bookRoot, relPath));
-            return isInsideRealRoot(realRoot, realTarget);
+            if (!isInsideRealRoot(realRoot, realTarget)) {
+                return false;
+            }
+            const realRel = relative(realRoot, realTarget);
+            if (realRel === '') {
+                return true;
+            }
+            const normalizedRealRel = posix
+                .normalize(realRel.replace(/\\/g, '/'))
+                .replace(/\/+$/, '');
+            this.assertNormalizedAllowed(normalizedRealRel, relPath, mode);
+            return true;
         } catch {
             return false;
         }

@@ -51,10 +51,14 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
                     additionalProperties: false,
                     properties: {
                         tag: { type: 'string', required: true },
-                        sample: { type: 'string', required: true }
+                        sample: { type: 'string', required: true },
+                        source: {
+                            type: 'string',
+                            enum: ['author_sample', 'boot_seed', 'chapter_harvest']
+                        }
                     }
                 },
-                description: '作者提供样章洗净后的声纹标本（无样章时须为空数组）'
+                description: '作者提供样章洗净后的声纹标本或启动短动作种子（无样章时须为空数组）'
             },
             open_threads: {
                 type: 'array',

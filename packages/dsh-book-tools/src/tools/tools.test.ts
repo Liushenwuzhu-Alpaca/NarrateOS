@@ -582,4 +582,173 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
         expect(eightRes.items).toHaveLength(8);
         expect(roleSet.quota.count).toBe(1);
     });
+
+    it('PathFence 在 realpath 解析后二次校验 .ops 白名单、只读世界保护集与软链逃逸，且支持 blockedReadPaths / allowedChapterFiles / stagingOverlay', async () => {
+        const { bookRoot } = await createSampleBook();
+        await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
+        await mkdir(join(bookRoot, '.ops/session_logs'), { recursive: true });
+        await writeFile(join(bookRoot, 'world/roles/planner.yml'), 'id: planner\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/author_charter.md'), '# 作者契约\n绝密承诺\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/arc_director_plan.md'), '# 导演计划\n阶段天花板\n', 'utf8');
+        await writeFile(join(bookRoot, 'world/ops_style_amendments.md'), '# 风格修订\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/session_logs/s1.json'), '{"secret":true}\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/telemetry.jsonl'), '{"ch":1}\n', 'utf8');
+        await writeFile(join(bookRoot, 'manuscripts/ch_0002.md'), '# 第二章 支线秘密\n\n沈默看到第二章。\n', 'utf8');
+
+        if (process.platform !== 'win32') {
+            await symlink(join(bookRoot, 'manuscripts/ch_0001.md'), join(bookRoot, 'world/link_ms.md'));
+            await symlink(join(bookRoot, 'world/roles/planner.yml'), join(bookRoot, 'world/link_role.yml'));
+            await symlink(join(bookRoot, '.ops/session_logs/s1.json'), join(bookRoot, 'world/link_ops.json'));
+        }
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        // 1. 越权 .ops 白名单（如 .ops/session_logs/s1.json 或写 .ops/telemetry.jsonl）必须被 PathFence 构造拒绝
+        expect(() =>
+            ctx.narrateTools.buildRoleTools({
+                runId: 'run-bad-ops-read',
+                bookRoot,
+                allowedOpsPaths: ['.ops/session_logs/s1.json']
+            })
+        ).toThrow(PathFenceError);
+        expect(() =>
+            ctx.narrateTools.buildRoleTools({
+                runId: 'run-bad-ops-write',
+                bookRoot,
+                allowedOpsWritePaths: ['.ops/telemetry.jsonl']
+            })
+        ).toThrow(PathFenceError);
+
+        // 2. 硬只读世界保护集 + blockedReadPaths + allowedChapterFiles + stagingOverlay
+        const overlay = new Map<string, string | null>([
+            ['entities/char_002.md', '---\nentity_id: char_002\ncanonical_name: 林小满\n---\n支线新角色\n'],
+            ['manuscripts/ch_0001.md', '# 第一章 雨夜\n\n支线覆盖版黄铜钥匙。\n']
+        ]);
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-isolation-view',
+            bookRoot,
+            allowedOpsPaths: ['.ops/telemetry.jsonl'],
+            blockedReadPaths: ['world/author_charter.md', 'world/arc_director_plan.md'],
+            allowedChapterFiles: ['ch_0001.md'],
+            stagingOverlay: overlay
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const bookRead = roleSet.toolMap.get('book_read')!;
+        const bookEdit = roleSet.toolMap.get('book_edit')!;
+        const bookGlob = roleSet.toolMap.get('book_glob')!;
+        const bookGrep = roleSet.toolMap.get('book_grep')!;
+
+        // 写入硬只读文件必须拒绝
+        for (const roPath of [
+            'world/roles/planner.yml',
+            'world/author_charter.md',
+            'world/book_config.yaml',
+            'world/ops_style_amendments.md'
+        ]) {
+            await expect(
+                bookEdit.execute(
+                    { path: roPath, mode: 'write', replacement_text: 'tampered' },
+                    createMockExec('book_edit', {})
+                )
+            ).rejects.toThrow(PathFenceError);
+        }
+
+        if (process.platform !== 'win32') {
+            await expect(
+                bookEdit.execute(
+                    { path: 'world/link_ms.md', mode: 'write', replacement_text: 'tampered' },
+                    createMockExec('book_edit', {})
+                )
+            ).rejects.toThrow(PathFenceError);
+            await expect(
+                bookEdit.execute(
+                    { path: 'world/link_role.yml', mode: 'write', replacement_text: 'tampered' },
+                    createMockExec('book_edit', {})
+                )
+            ).rejects.toThrow(PathFenceError);
+            await expect(
+                bookRead.execute({ path: 'world/link_ops.json' }, createMockExec('book_read', {}))
+            ).rejects.toThrow(PathFenceError);
+        }
+
+        // blockedReadPaths 与未授权章节在 read/glob/grep 全链路生效
+        await expect(
+            bookRead.execute({ path: 'world/author_charter.md' }, createMockExec('book_read', {}))
+        ).rejects.toThrow(PathFenceError);
+        await expect(
+            bookRead.execute({ path: 'manuscripts/ch_0002.md' }, createMockExec('book_read', {}))
+        ).rejects.toThrow(PathFenceError);
+
+        const globRes = (await bookGlob.execute({}, createMockExec('book_glob', {}))) as {
+            files: string[];
+        };
+        expect(globRes.files).not.toContain('world/author_charter.md');
+        expect(globRes.files).not.toContain('world/arc_director_plan.md');
+        expect(globRes.files).not.toContain('manuscripts/ch_0002.md');
+        expect(globRes.files).not.toContain('world/link_ops.json');
+        expect(globRes.files).toContain('manuscripts/ch_0001.md');
+        expect(globRes.files).toContain('entities/char_002.md');
+
+        const grepHidden = (await bookGrep.execute(
+            { pattern: '绝密承诺|支线秘密' },
+            createMockExec('book_grep', {})
+        )) as { matches: unknown[]; totalMatches: number };
+        expect(grepHidden.totalMatches).toBe(0);
+
+        const readOverlay = (await bookRead.execute(
+            { path: 'manuscripts/ch_0001.md' },
+            createMockExec('book_read', {})
+        )) as { content: string; fromStaging: boolean };
+        expect(readOverlay.fromStaging).toBe(true);
+        expect(readOverlay.content).toContain('支线覆盖版黄铜钥匙');
+    });
+
+    it('book_grep 入口无条件预校验正则并支持 max_matches 与 maxOutputChars 限流截断 (ISS-023)', async () => {
+        const { bookRoot } = await createSampleBook();
+        const manyLines = Array.from({ length: 120 }, (_, i) => `第${i + 1}行：铁门与潮汐标记_${'甲'.repeat(120)}`).join('\n');
+        await writeFile(join(bookRoot, 'world/large.md'), manyLines, 'utf8');
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-grep-limit',
+            bookRoot,
+            maxReadCalls: 10
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const bookGrep = roleSet.toolMap.get('book_grep')!;
+
+        // 1. 即使在空目录或不存在路径分支前，非法正则也必抛错
+        await expect(
+            bookGrep.execute({ pattern: '[broken', path: 'lore_library' }, createMockExec('book_grep', {}))
+        ).rejects.toThrow(/fixed_strings=true/);
+
+        // 2. max_matches 截断并标记 truncated=true
+        const countTrunc = (await bookGrep.execute(
+            { pattern: '潮汐标记', max_matches: 5, context_lines: 0 },
+            createMockExec('book_grep', {})
+        )) as { totalMatches: number; truncated: boolean; hint?: string };
+        expect(countTrunc.totalMatches).toBe(5);
+        expect(countTrunc.truncated).toBe(true);
+        expect(countTrunc.hint).toBeTruthy();
+
+        // 3. 默认 maxOutputChars (12000) 保护超长文本不爆窗
+        const charTrunc = (await bookGrep.execute(
+            { pattern: '潮汐标记', context_lines: 0 },
+            createMockExec('book_grep', {})
+        )) as { totalMatches: number; truncated: boolean };
+        expect(charTrunc.truncated).toBe(true);
+        expect(charTrunc.totalMatches).toBeLessThan(80);
+    });
 });

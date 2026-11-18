@@ -4,6 +4,7 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
     ForeignKeyError,
     InnateLockViolationError,
+    normalizeForQuoteMatch,
     parseEntityMarkdown,
     serializeEntityMarkdown,
     type ApplyStatePatchOptions,
@@ -15,6 +16,8 @@ import {
 } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
 import { ExtractorOutputSchema, hasChineseCharacter, type ExtractorOutput } from './schemas.js';
+
+const ENTITY_FILENAME_RE = /^((?:char|item)_[a-zA-Z0-9_]+)\.md$/;
 
 export interface YieldStatePatchResult {
     output: ExtractorOutput;
@@ -31,6 +34,8 @@ export interface YieldStatePatchOptions {
     allowInnateMutation?: boolean | undefined;
     deferCommit?: boolean | undefined;
     applyOptions?: ApplyStatePatchOptions | undefined;
+    draftText?: string | undefined;
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
     /** 可选内存可见实体快照视图（如 PARALLEL 分支已暂存但未落盘的实体） */
     visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
     /** 可选额外可达外键集合（如 PARALLEL 分支新增实体或章节键） */
@@ -65,13 +70,15 @@ async function buildReachableSetForValidation(
             keys.add(id);
         }
     }
-    const collect = async (dirPath: string) => {
+    const collect = async (dirPath: string, entityOnly: boolean) => {
         try {
             const files = await readdir(dirPath);
             for (const file of files) {
                 if (!file.endsWith('.md')) continue;
                 const base = file.slice(0, -3);
-                keys.add(base);
+                if (!entityOnly || /^(?:char|item)_[a-zA-Z0-9_]+$/.test(base)) {
+                    keys.add(base);
+                }
                 const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
                 if (sagaMatch?.[1]) {
                     keys.add(sagaMatch[1]);
@@ -84,11 +91,66 @@ async function buildReachableSetForValidation(
         }
     };
     await Promise.all([
-        collect(join(bookRoot, 'entities')),
-        collect(join(bookRoot, 'entities/cold_archive')),
-        collect(join(bookRoot, 'manuscripts'))
+        collect(join(bookRoot, 'entities'), true),
+        collect(join(bookRoot, 'entities/cold_archive'), true),
+        collect(join(bookRoot, 'manuscripts'), false)
     ]);
     return keys;
+}
+
+async function collectKnownEntityIdsForAppeared(
+    bookRoot: string,
+    newEntityIds: ReadonlySet<string>,
+    visibleEntityMap: ReadonlyMap<string, EntityProfile>,
+    extraReachableIds?: ReadonlySet<string> | readonly string[]
+): Promise<Set<string>> {
+    const ids = new Set<string>(newEntityIds);
+    for (const id of visibleEntityMap.keys()) {
+        ids.add(id);
+    }
+    if (extraReachableIds) {
+        for (const id of extraReachableIds) {
+            if (/^(?:char|item)_[a-zA-Z0-9_]+$/.test(id)) {
+                ids.add(id);
+            }
+        }
+    }
+    for (const dir of [join(bookRoot, 'entities'), join(bookRoot, 'entities/cold_archive')]) {
+        try {
+            const files = await readdir(dir);
+            for (const file of files) {
+                const match = ENTITY_FILENAME_RE.exec(file);
+                if (match?.[1]) {
+                    ids.add(match[1]);
+                }
+            }
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
+            }
+        }
+    }
+    return ids;
+}
+
+async function resolveDraftTextForAnchorCheck(
+    bookRoot: string,
+    chapterNumber: number,
+    explicitDraftText?: string,
+    stagingOverlay?: ReadonlyMap<string, string | null>
+): Promise<string | undefined> {
+    if (explicitDraftText !== undefined) {
+        return explicitDraftText;
+    }
+    const chRel = `manuscripts/ch_${String(chapterNumber).padStart(4, '0')}.md`;
+    if (stagingOverlay?.has(chRel)) {
+        return stagingOverlay.get(chRel) ?? undefined;
+    }
+    try {
+        return await readFile(join(bookRoot, chRel), 'utf8');
+    } catch {
+        return undefined;
+    }
 }
 
 function assertTextForeignKeys(sourceId: string, text: string, reachable: Set<string>): void {
@@ -114,11 +176,14 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
         allowInnateMutation = false,
         deferCommit = false,
         applyOptions,
+        draftText,
+        stagingOverlay,
         visibleEntities,
         reachableIds,
         onYield
     } = options;
     const visibleEntityMap = toVisibleEntityMap(visibleEntities);
+    let anchorZeroMatchRetries = 0;
 
     return defineTool({
         name: 'yield_state_patch',
@@ -146,10 +211,23 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                 required: true,
                 description: '本章推进的故事天数增量（非负整数；PARALLEL/FLASHBACK 须为 0）'
             },
+            plot_summary: {
+                type: 'string',
+                description: '主干剧情与意图功能义（与 chapter_summary 二选一，推荐提供 plot_summary）'
+            },
             chapter_summary: {
                 type: 'string',
-                required: true,
-                description: '双轨 L2 章卡摘要（含主干剧情与异象锚点）'
+                description: '兼容字段：L2 章卡主干剧情摘要（与 plot_summary 二选一）'
+            },
+            prose_anchors: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '0~8 个本章原稿特写的微物件/场景/关键数字原词（须能在正文中去标点命中）'
+            },
+            appeared_entity_ids: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '本章实际在场但未产生永久状态变更的实体 ID 列表'
             },
             world_summary_markdown: {
                 type: 'string',
@@ -193,11 +271,66 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                 );
             }
 
+            if (timelineMode === 'FLASHBACK') {
+                for (const patch of parsed.entity_patches) {
+                    if (
+                        (patch.acquired_state_ops && patch.acquired_state_ops.length > 0) ||
+                        (patch.buffer_ops && patch.buffer_ops.length > 0)
+                    ) {
+                        throw new GateValidationError(
+                            'yield_state_patch',
+                            `FLASHBACK 插叙模式下严禁修改实体 ${patch.entity_id} 的 2. Acquired State 或 4. Recent Buffer`
+                        );
+                    }
+                }
+            }
+
+            // Q1 防死锁原稿锚点验真：首次全 0 命中打回重提；第 2 次或部分命中则自动过滤未命中词放行
+            if (parsed.prose_anchors.length > 0) {
+                const effectiveDraft = await resolveDraftTextForAnchorCheck(
+                    bookRoot,
+                    chapterNumber,
+                    draftText,
+                    stagingOverlay
+                );
+                if (effectiveDraft !== undefined) {
+                    const normalizedDraft = normalizeForQuoteMatch(effectiveDraft);
+                    const matchedAnchors = parsed.prose_anchors.filter((anchor) => {
+                        const normAnchor = normalizeForQuoteMatch(anchor);
+                        return normAnchor.length >= 2 && normalizedDraft.includes(normAnchor);
+                    });
+                    if (matchedAnchors.length === 0) {
+                        if (anchorZeroMatchRetries === 0) {
+                            anchorZeroMatchRetries += 1;
+                            throw new GateValidationError(
+                                'yield_state_patch',
+                                'prose_anchors 中的微物件/数字锚点均未在本章正文命中，请从正文逐字摘取 0~8 个原词重试'
+                            );
+                        }
+                        parsed.prose_anchors = [];
+                    } else {
+                        parsed.prose_anchors = matchedAnchors;
+                    }
+                }
+            }
+
+            const bookStore = store.openStore(bookRoot);
             const newEntityIds = new Set<string>();
             const existingProfiles = new Map<string, EntityProfile>();
 
-            // 预检新建实体中文 canonical_name 与既有实体 Innate Locks（优先结合内存分支可见快照）
+            // 预检新建实体中文 canonical_name、Q7 第1区禁 OMNISCIENT_SECRET 与既有/冷宫实体 Innate Locks
             for (const patch of parsed.entity_patches) {
+                if (patch.innate_locks_ops) {
+                    for (const op of patch.innate_locks_ops) {
+                        if (op.op === 'append' && op.entry.visibility === 'OMNISCIENT_SECRET') {
+                            throw new GateValidationError(
+                                'yield_state_patch',
+                                `第 1 区 Innate Locks (${patch.entity_id}) 严禁新增 OMNISCIENT_SECRET，请放入第 2 区 Acquired State 并绑定 slot_key`
+                            );
+                        }
+                    }
+                }
+
                 let existing: EntityProfile | null =
                     existingProfiles.get(patch.entity_id) ??
                     visibleEntityMap.get(patch.entity_id) ??
@@ -215,6 +348,8 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                     }
                     if (diskRaw !== null) {
                         existing = parseEntityMarkdown(diskRaw);
+                    } else {
+                        existing = await bookStore.readColdArchivedEntity(patch.entity_id);
                     }
                 }
 
@@ -242,6 +377,23 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                         throw new InnateLockViolationError(
                             patch.entity_id,
                             `禁止篡改既有实体 ${patch.entity_id} 的 1. Innate Locks`
+                        );
+                    }
+                }
+            }
+
+            if (parsed.appeared_entity_ids.length > 0) {
+                const validAppearedSet = await collectKnownEntityIdsForAppeared(
+                    bookRoot,
+                    newEntityIds,
+                    visibleEntityMap,
+                    reachableIds
+                );
+                for (const appearedId of parsed.appeared_entity_ids) {
+                    if (!validAppearedSet.has(appearedId)) {
+                        throw new GateValidationError(
+                            'yield_state_patch',
+                            `appeared_entity_ids 引用了未建档且非本轮新建的实体 ID: ${appearedId}`
                         );
                     }
                 }
@@ -277,8 +429,6 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                     updatedEntities: result.updatedEntities
                 };
             }
-
-            const bookStore = store.openStore(bookRoot);
 
             let effectiveWorldUpdate = applyOptions?.worldStateUpdate;
             if (

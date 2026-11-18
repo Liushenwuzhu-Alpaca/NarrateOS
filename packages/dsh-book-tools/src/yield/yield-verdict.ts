@@ -1,9 +1,16 @@
 import { readFile } from 'node:fs/promises';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { verifyDualQuotes, type NarrateStoreService } from '@narrateos/dsh-book-store';
+import {
+    analyzeParagraphs,
+    BookRepairLoopConfigSchema,
+    verifyDualQuotes,
+    type NarrateStoreService
+} from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
 import { PathFence } from '../tools/path-fence.js';
 import { FactCheckOutputSchema, type FactCheckOutput } from './schemas.js';
+
+const DEFAULT_REPAIR_LOOP_CFG = BookRepairLoopConfigSchema.parse({});
 
 export interface YieldVerdictOptions {
     store: NarrateStoreService;
@@ -12,6 +19,7 @@ export interface YieldVerdictOptions {
     fence?: PathFence | undefined;
     draftText?: string | undefined;
     draftPath?: string | undefined;
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
     onYield?: ((verdict: FactCheckOutput) => void) | undefined;
 }
 
@@ -19,18 +27,29 @@ async function loadSourceContent(
     store: NarrateStoreService,
     runId: string,
     fence: PathFence,
-    relPath: string
+    relPath: string,
+    stagingOverlay?: ReadonlyMap<string, string | null>
 ): Promise<string> {
     const { normalized, absPath } = await fence.assertReadFile(relPath);
+    if (store.staging.has(runId) && store.staging.getPendingWrites(runId).has(normalized)) {
+        return await store.staging.read(runId, normalized);
+    }
+    if (stagingOverlay?.has(normalized)) {
+        const val = stagingOverlay.get(normalized);
+        if (val === null || val === undefined) {
+            throw new Error(`文件在当前分支视图中不存在: ${normalized}`);
+        }
+        return val;
+    }
     if (store.staging.has(runId)) {
         return await store.staging.read(runId, normalized);
     }
     return await readFile(absPath, 'utf8');
 }
 
-/** 创建 Fact Checker 终态门禁工具 yield_verdict（强制双侧原句去标点存在性验真） */
+/** 创建 Fact Checker 终态门禁工具 yield_verdict（强制双侧原句去标点存在性验真与 LOCAL_PATCH 索引边界校验） */
 export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefinition {
-    const { store, bookRoot, runId, draftPath, onYield } = options;
+    const { store, bookRoot, runId, draftPath, stagingOverlay, onYield } = options;
     const fence = options.fence ?? new PathFence(bookRoot);
 
     return defineTool({
@@ -105,14 +124,29 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
 
             let resolvedDraft = options.draftText;
             if (resolvedDraft === undefined && draftPath !== undefined) {
-                resolvedDraft = await loadSourceContent(store, runId, fence, draftPath);
+                resolvedDraft = await loadSourceContent(store, runId, fence, draftPath, stagingOverlay);
             }
+
+            let factMaxPatchParagraphs = DEFAULT_REPAIR_LOOP_CFG.fact_max_patch_paragraphs;
+            let factMaxPatchRatio = DEFAULT_REPAIR_LOOP_CFG.fact_max_patch_ratio;
+            try {
+                const cfg = await store.openStore(bookRoot).readBookConfig();
+                if (cfg.repair_loop) {
+                    factMaxPatchParagraphs = cfg.repair_loop.fact_max_patch_paragraphs;
+                    factMaxPatchRatio = cfg.repair_loop.fact_max_patch_ratio;
+                }
+            } catch {
+                // 缺少 book_config.yaml 时使用默认修补阈值
+            }
+
+            const draftParagraphs =
+                resolvedDraft !== undefined ? analyzeParagraphs(resolvedDraft).paragraphs : [];
 
             for (let i = 0; i < verdict.issues.length; i += 1) {
                 const issue = verdict.issues[i]!;
                 const draftQuote = issue.quote_draft.trim();
                 const sourceQuote = issue.quote_source.trim();
-                const sourceRef = issue.source_ref?.trim();
+                const sourceRef = issue.source_ref?.trim() ?? '';
 
                 if (draftQuote.length === 0) {
                     throw new GateValidationError(
@@ -126,51 +160,81 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                         '无法核验 quote_draft：未提供本章草稿文本或草稿路径'
                     );
                 }
-
-                if (sourceQuote.length > 0 && !sourceRef) {
+                if (sourceRef.length === 0) {
                     throw new GateValidationError(
                         'yield_verdict',
-                        `第 ${i + 1} 条问题提供了 quote_source，但缺少对应的 source_ref 档案/原稿路径`
+                        `第 ${i + 1} 条问题缺少 source_ref 档案/原稿路径（严禁省略事实依据路径）`
                     );
                 }
-                if (sourceRef && sourceQuote.length === 0) {
+                if (sourceQuote.length === 0) {
                     throw new GateValidationError(
                         'yield_verdict',
-                        `第 ${i + 1} 条问题提供了 source_ref (${sourceRef})，但缺少 quote_source 逐字引文`
+                        `第 ${i + 1} 条问题缺少 quote_source 逐字引文（严禁省略事实依据引文）`
                     );
                 }
 
-                if (sourceRef && sourceQuote.length > 0) {
-                    let sourceText: string;
-                    try {
-                        sourceText = await loadSourceContent(store, runId, fence, sourceRef);
-                    } catch (err: unknown) {
+                if (issue.severity === 'LOCAL_PATCH') {
+                    const rawIndices: number[] = [];
+                    if (issue.paragraph_index !== undefined) {
+                        rawIndices.push(issue.paragraph_index);
+                    }
+                    if (issue.paragraph_indices !== undefined) {
+                        rawIndices.push(...issue.paragraph_indices);
+                    }
+                    const uniqueIndices = Array.from(new Set(rawIndices)).sort((a, b) => a - b);
+                    if (uniqueIndices.length === 0) {
                         throw new GateValidationError(
                             'yield_verdict',
-                            `第 ${i + 1} 条问题的 source_ref 无法读取 (${sourceRef}): ${err instanceof Error ? err.message : String(err)}`
+                            `第 ${i + 1} 条 LOCAL_PATCH 问题必须提供非空的 0-based paragraph_index 或 paragraph_indices`
                         );
                     }
-                    const dual = verifyDualQuotes(draftQuote, resolvedDraft, sourceQuote, sourceText);
-                    if (!dual.sideA.matched) {
+                    for (const idx of uniqueIndices) {
+                        if (!Number.isInteger(idx) || idx < 0 || idx >= draftParagraphs.length) {
+                            throw new GateValidationError(
+                                'yield_verdict',
+                                `第 ${i + 1} 条 LOCAL_PATCH 问题的段落索引 (${idx}) 越界，合法范围为 [0..${Math.max(0, draftParagraphs.length - 1)}]`
+                            );
+                        }
+                    }
+                    if (uniqueIndices.length > factMaxPatchParagraphs) {
                         throw new GateValidationError(
                             'yield_verdict',
-                            `第 ${i + 1} 条问题的 quote_draft 未在草稿正文中命中（疑似捏造或改写引文），请重新读取草稿逐字核查`
+                            `第 ${i + 1} 条 LOCAL_PATCH 涉及段落数 (${uniqueIndices.length}) 超过上限 ${factMaxPatchParagraphs}，请改判为 MULTI_REWRITE`
                         );
                     }
-                    if (!dual.sideB.matched) {
+                    if (
+                        uniqueIndices.length >= 2 &&
+                        draftParagraphs.length > 0 &&
+                        uniqueIndices.length / draftParagraphs.length > factMaxPatchRatio
+                    ) {
                         throw new GateValidationError(
                             'yield_verdict',
-                            `第 ${i + 1} 条问题的 quote_source 未在 ${sourceRef} 中命中（疑似捏造或改写引文），请重新读取档案/原稿逐字核查`
+                            `第 ${i + 1} 条 LOCAL_PATCH 涉及段落占比 (${uniqueIndices.length}/${draftParagraphs.length}) 超过上限 ${factMaxPatchRatio}，请改判为 MULTI_REWRITE`
                         );
                     }
-                } else {
-                    const draftCheck = verifyDualQuotes(draftQuote, resolvedDraft, draftQuote, resolvedDraft);
-                    if (!draftCheck.sideA.matched) {
-                        throw new GateValidationError(
-                            'yield_verdict',
-                            `第 ${i + 1} 条问题的 quote_draft 未在草稿正文中命中（疑似捏造或改写引文），请重新读取草稿逐字核查`
-                        );
-                    }
+                }
+
+                let sourceText: string;
+                try {
+                    sourceText = await loadSourceContent(store, runId, fence, sourceRef, stagingOverlay);
+                } catch (err: unknown) {
+                    throw new GateValidationError(
+                        'yield_verdict',
+                        `第 ${i + 1} 条问题的 source_ref 无法读取 (${sourceRef}): ${err instanceof Error ? err.message : String(err)}`
+                    );
+                }
+                const dual = verifyDualQuotes(draftQuote, resolvedDraft, sourceQuote, sourceText);
+                if (!dual.sideA.matched) {
+                    throw new GateValidationError(
+                        'yield_verdict',
+                        `第 ${i + 1} 条问题的 quote_draft 未在草稿正文中命中（疑似捏造或改写引文），请重新读取草稿逐字核查`
+                    );
+                }
+                if (!dual.sideB.matched) {
+                    throw new GateValidationError(
+                        'yield_verdict',
+                        `第 ${i + 1} 条问题的 quote_source 未在 ${sourceRef} 中命中（疑似捏造或改写引文），请重新读取档案/原稿逐字核查`
+                    );
                 }
             }
 

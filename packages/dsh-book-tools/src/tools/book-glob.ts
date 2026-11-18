@@ -10,6 +10,8 @@ export interface BookGlobToolOptions {
     runId: string;
     fence: PathFence;
     quota: ReadQuotaCounter;
+    /** 可选内存分支覆盖层（string 覆写/新增，null 删除） */
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
 }
 
 function globToRegExp(pattern: string): RegExp {
@@ -57,15 +59,20 @@ async function collectFilesUnderScope(
         throw err;
     }
 
-    if (!(await fence.isRealPathInsideRoot(relTarget))) {
-        return;
-    }
-
-    if (targetStat.isFile()) {
+    if (targetStat.isDirectory()) {
+        if (!(await fence.isRealPathInsideRoot(relTarget, 'searchScope'))) {
+            return;
+        }
+    } else if (targetStat.isFile()) {
+        if (
+            !(await fence.isRealPathInsideRoot(relTarget, 'read')) ||
+            !fence.isReadPathAllowed(relTarget)
+        ) {
+            return;
+        }
         results.add(relTarget);
         return;
-    }
-    if (!targetStat.isDirectory()) {
+    } else {
         return;
     }
 
@@ -75,20 +82,23 @@ async function collectFilesUnderScope(
             continue;
         }
         const childRel = posix.join(relTarget, entry.name);
-        if (!(await fence.isRealPathInsideRoot(childRel))) {
-            continue;
-        }
         if (entry.isDirectory()) {
+            if (!(await fence.isRealPathInsideRoot(childRel, 'searchScope'))) {
+                continue;
+            }
             await collectFilesUnderScope(fence, childRel, results);
         } else if (entry.isFile() || entry.isSymbolicLink()) {
+            if (!(await fence.isRealPathInsideRoot(childRel, 'read'))) {
+                continue;
+            }
             results.add(childRel);
         }
     }
 }
 
-/** 创建受控目录文件列举工具 book_glob（仅列举允许目录并跳过越界符号链接） */
+/** 创建受控目录文件列举工具 book_glob（仅列举允许目录并跳过越界符号链接与禁读路径） */
 export function createBookGlobTool(options: BookGlobToolOptions): ToolDefinition {
-    const { store, runId, fence, quota } = options;
+    const { store, runId, fence, quota, stagingOverlay } = options;
 
     return defineTool({
         name: 'book_glob',
@@ -134,15 +144,39 @@ export function createBookGlobTool(options: BookGlobToolOptions): ToolDefinition
                 await collectFilesUnderScope(fence, dir, fileSet);
             }
 
+            if (stagingOverlay) {
+                for (const [overlayRel, overlayVal] of stagingOverlay.entries()) {
+                    if (overlayVal === null) {
+                        fileSet.delete(overlayRel);
+                        continue;
+                    }
+                    if (
+                        scope.allowedDirs.some(
+                            (d) => overlayRel === d || overlayRel.startsWith(`${d}/`)
+                        ) &&
+                        fence.isReadPathAllowed(overlayRel)
+                    ) {
+                        fileSet.add(overlayRel);
+                    }
+                }
+            }
+
             if (store.staging.has(runId)) {
                 for (const stagedRel of store.staging.getPendingWrites(runId).keys()) {
-                    if (scope.allowedDirs.some((d) => stagedRel === d || stagedRel.startsWith(`${d}/`))) {
+                    if (
+                        scope.allowedDirs.some(
+                            (d) => stagedRel === d || stagedRel.startsWith(`${d}/`)
+                        ) &&
+                        fence.isReadPathAllowed(stagedRel)
+                    ) {
                         fileSet.add(stagedRel);
                     }
                 }
             }
 
-            let files = Array.from(fileSet).sort((a, b) => a.localeCompare(b));
+            let files = Array.from(fileSet)
+                .filter((f) => fence.isReadPathAllowed(f))
+                .sort((a, b) => a.localeCompare(b));
             if (args.pattern !== undefined && args.pattern.trim().length > 0) {
                 const normalizedPattern = args.pattern.replace(/\\/g, '/').trim();
                 const matcher = globToRegExp(normalizedPattern);

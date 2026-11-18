@@ -1,13 +1,19 @@
 import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
+    BookRetrievalConfigSchema,
     IndexRecall,
     parseEntityMarkdown,
+    splitFrontmatter,
+    verifyDualQuotes,
+    type EntityProfile,
     type NarrateStoreService,
     type RecallSlice
 } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
+import { PathFence } from '../tools/path-fence.js';
 import {
     extractActiveThreadEntityRefs,
     LibrarianOutputSchema,
@@ -23,28 +29,94 @@ export interface YieldContextPackOptions {
     store: NarrateStoreService;
     bookRoot: string;
     runId: string;
+    fence?: PathFence | undefined;
     targetChapter?: number | undefined;
     targetDay?: number | undefined;
     chapterGoal?: string | undefined;
+    allowedChapterFiles?: string[] | undefined;
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
     onYield?: ((result: YieldContextPackResult) => void) | undefined;
 }
 
 const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
+const MANUSCRIPT_CHAPTER_RE = /^manuscripts\/ch_(\d{4})\.md$/;
+const L2_CARD_FILE_RE = /^vol_(\d+)_cards\.md$/;
+const DEFAULT_RETRIEVAL_CFG = BookRetrievalConfigSchema.parse({});
 
-async function readOptionalFile(
-    store: NarrateStoreService,
-    runId: string,
-    bookRoot: string,
-    relPath: string
-): Promise<string | null> {
-    if (store.staging.has(runId)) {
-        const staged = store.staging.getPendingWrites(runId).get(relPath);
-        if (staged !== undefined) {
-            return staged;
+function parseChapterNumberFromName(nameOrPath: string): number | null {
+    const base = nameOrPath.split('/').pop() ?? '';
+    const match = CHAPTER_FILE_RE.exec(base);
+    if (!match?.[1]) return null;
+    const n = Number(match[1]);
+    return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function normalizeChapterFileName(raw: string): string {
+    const normalized = posix.normalize(raw.replace(/\\/g, '/')).replace(/^\.\//, '');
+    return normalized.split('/').pop() ?? normalized;
+}
+
+function extractChapterStoryDay(content: string): number | null {
+    const normalized = content.replace(/\r\n/g, '\n');
+    if (normalized.startsWith('---\n')) {
+        try {
+            const split = splitFrontmatter(normalized);
+            const parsed = parseYaml(split.rawYaml) as Record<string, unknown> | null;
+            if (parsed && typeof parsed['story_day'] === 'number' && Number.isInteger(parsed['story_day'])) {
+                return parsed['story_day'];
+            }
+        } catch {
+            // 忽略损坏 frontmatter
         }
     }
+    const commentMatch = /<!--\s*story_day:\s*(-?\d+)\s*-->/.exec(normalized);
+    if (commentMatch?.[1]) {
+        const day = Number(commentMatch[1]);
+        if (Number.isInteger(day)) {
+            return day;
+        }
+    }
+    return null;
+}
+
+function truncateSliceText(text: string, maxChars: number): string {
+    const trimmed = text.trim();
+    if (trimmed.length <= maxChars) {
+        return trimmed;
+    }
+    return `${trimmed.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+function buildCombinedOverlay(
+    store: NarrateStoreService,
+    runId: string,
+    stagingOverlay?: ReadonlyMap<string, string | null>
+): Map<string, string | null> {
+    const combined = new Map<string, string | null>();
+    if (stagingOverlay) {
+        for (const [k, v] of stagingOverlay.entries()) {
+            combined.set(posix.normalize(k.replace(/\\/g, '/')).replace(/^\.\//, ''), v);
+        }
+    }
+    if (store.staging.has(runId)) {
+        for (const [k, v] of store.staging.getPendingWrites(runId).entries()) {
+            combined.set(posix.normalize(k.replace(/\\/g, '/')).replace(/^\.\//, ''), v);
+        }
+    }
+    return combined;
+}
+
+async function readOptionalWithOverlay(
+    bookRoot: string,
+    overlay: ReadonlyMap<string, string | null>,
+    relPath: string
+): Promise<string | null> {
+    const normalized = posix.normalize(relPath.replace(/\\/g, '/')).replace(/^\.\//, '');
+    if (overlay.has(normalized)) {
+        return overlay.get(normalized) ?? null;
+    }
     try {
-        return await readFile(join(bookRoot, relPath), 'utf8');
+        return await readFile(join(bookRoot, normalized), 'utf8');
     } catch (err: unknown) {
         if ((err as { code?: string }).code === 'ENOENT') {
             return null;
@@ -53,26 +125,131 @@ async function readOptionalFile(
     }
 }
 
-async function listManuscriptChapters(bookRoot: string): Promise<string[]> {
+async function listAccessibleManuscriptChapters(
+    bookRoot: string,
+    overlay: ReadonlyMap<string, string | null>,
+    allowedChapterFiles?: string[]
+): Promise<string[]> {
+    const names = new Set<string>();
     try {
         const files = await readdir(join(bookRoot, 'manuscripts'));
-        return files.filter((f) => CHAPTER_FILE_RE.test(f)).sort();
-    } catch (err: unknown) {
-        if ((err as { code?: string }).code === 'ENOENT') {
-            return [];
+        for (const f of files) {
+            if (CHAPTER_FILE_RE.test(f)) {
+                names.add(f);
+            }
         }
-        throw err;
+    } catch (err: unknown) {
+        if ((err as { code?: string }).code !== 'ENOENT') {
+            throw err;
+        }
     }
+
+    for (const [relPath, content] of overlay.entries()) {
+        if (!relPath.startsWith('manuscripts/')) continue;
+        const base = relPath.slice('manuscripts/'.length);
+        if (!CHAPTER_FILE_RE.test(base)) continue;
+        if (content === null) {
+            names.delete(base);
+        } else {
+            names.add(base);
+        }
+    }
+
+    let sorted = Array.from(names).sort();
+    if (allowedChapterFiles !== undefined) {
+        const allowedSet = new Set(allowedChapterFiles.map(normalizeChapterFileName));
+        sorted = sorted.filter((name) => allowedSet.has(name));
+    }
+    return sorted;
 }
 
-/** 创建 Librarian 终态门禁工具 yield_context_pack（强制校验伏笔与证物成对挂载） */
+async function collectAccessibleL2AppearedSet(
+    bookRoot: string,
+    overlay: ReadonlyMap<string, string | null>,
+    targetChapter: number,
+    accessiblePastChapterNums: ReadonlySet<number>
+): Promise<Set<string>> {
+    const appeared = new Set<string>();
+    const cardFiles = new Set<string>();
+    try {
+        const entries = await readdir(join(bookRoot, 'index/L2_cards'));
+        for (const entry of entries) {
+            if (L2_CARD_FILE_RE.test(entry)) {
+                cardFiles.add(`index/L2_cards/${entry}`);
+            }
+        }
+    } catch (err: unknown) {
+        if ((err as { code?: string }).code !== 'ENOENT') {
+            throw err;
+        }
+    }
+    for (const [relPath, content] of overlay.entries()) {
+        if (relPath.startsWith('index/L2_cards/') && L2_CARD_FILE_RE.test(relPath.slice('index/L2_cards/'.length))) {
+            if (content === null) {
+                cardFiles.delete(relPath);
+            } else {
+                cardFiles.add(relPath);
+            }
+        }
+    }
+
+    for (const relPath of cardFiles) {
+        const content = await readOptionalWithOverlay(bookRoot, overlay, relPath);
+        if (!content) continue;
+        const normalized = content.replace(/\r\n/g, '\n');
+        const sections = normalized.split(/(?=^##\s+ch_\d{4}\b)/m);
+        for (const section of sections) {
+            const headerMatch = /^##\s+ch_(\d{4})\b/.exec(section);
+            if (!headerMatch?.[1]) continue;
+            const chNum = Number(headerMatch[1]);
+            if (chNum <= 0 || chNum >= targetChapter || !accessiblePastChapterNums.has(chNum)) {
+                continue;
+            }
+            const appMatch = /^-\s*出场实体[:：]([^\n]*)/m.exec(section);
+            if (!appMatch?.[1]) continue;
+            for (const idMatch of appMatch[1].matchAll(/\b((?:char|item)_[a-zA-Z0-9_]+)\b/g)) {
+                if (idMatch[1]) {
+                    appeared.add(idMatch[1]);
+                }
+            }
+        }
+    }
+
+    return appeared;
+}
+
+function hasAccessibleHistoricalAnchor(
+    profile: EntityProfile,
+    targetChapter: number,
+    accessiblePastChapterNums: ReadonlySet<number>
+): boolean {
+    for (const anchor of profile.metadata.historical_anchors) {
+        for (const match of anchor.matchAll(/\bch_(\d{4})\b/g)) {
+            if (!match[1]) continue;
+            const chNum = Number(match[1]);
+            if (chNum > 0 && chNum < targetChapter && accessiblePastChapterNums.has(chNum)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/** 创建 Librarian 终态门禁工具 yield_context_pack（强制校验伏笔与证物成对挂载、手填切片验真与冷宫加载） */
 export function createYieldContextPackTool(options: YieldContextPackOptions): ToolDefinition {
     const { store, bookRoot, runId, targetChapter, targetDay, chapterGoal, onYield } = options;
+    const fence =
+        options.fence ??
+        new PathFence(bookRoot, {
+            ...(options.allowedChapterFiles !== undefined
+                ? { allowedChapterFiles: options.allowedChapterFiles }
+                : {})
+        });
 
     return defineTool({
         name: 'yield_context_pack',
         description:
-            'Librarian 终态交接门禁。提交 selected_entity_ids、recall_queries / recall_slices 与 selected_lore_files；强制核验活跃伏笔或关键道具的「实体档案 + 至少 1 条 L3 原稿切片」成对挂载。',
+            'Librarian 终态交接门禁。提交 selected_entity_ids、recall_queries / recall_slices 与 selected_lore_files；强制核验活跃伏笔或历史复现证物的「实体档案 + 至少 1 条 L3 原稿切片」成对挂载与手填切片原稿验真。',
         parameters: {
             selected_entity_ids: {
                 type: 'array',
@@ -143,11 +320,18 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             exec.signal.throwIfAborted();
             const parsed = LibrarianOutputSchema.parse(args);
 
+            const combinedOverlay = buildCombinedOverlay(store, runId, options.stagingOverlay);
             const selectedSet = new Set(parsed.selected_entity_ids);
-            const chapterFiles = await listManuscriptChapters(bookRoot);
-            const hasManuscripts = chapterFiles.length > 0;
+            const wakeupSet = new Set(parsed.wakeup_entity_ids);
+            const validPackEntityIds = new Set([...selectedSet, ...wakeupSet]);
 
-            // 读取当前世界状态以获取默认 targetChapter / targetDay
+            const accessibleChapterFiles = await listAccessibleManuscriptChapters(
+                bookRoot,
+                combinedOverlay,
+                options.allowedChapterFiles
+            );
+
+            // 读取当前世界状态与作品配置
             const bookStore = store.openStore(bookRoot);
             let effectiveTargetChapter = targetChapter;
             let effectiveTargetDay = targetDay;
@@ -162,9 +346,39 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 }
             }
 
-            // 1. 校验 recall_slices / recall_queries 中的实体必须同时出现在 selected_entity_ids 中（成对要求）
+            let retrievalCfg = DEFAULT_RETRIEVAL_CFG;
+            let chapterHashes: Record<string, string> | undefined;
+            try {
+                const cfg = await bookStore.readBookConfig();
+                if (cfg.retrieval) {
+                    retrievalCfg = { ...DEFAULT_RETRIEVAL_CFG, ...cfg.retrieval };
+                }
+            } catch {
+                // 缺少 book_config.yaml 时使用默认检索配置
+            }
+            try {
+                const txState = await bookStore.readTxState();
+                chapterHashes = txState.chapter_hashes;
+            } catch {
+                // 忽略缺少 tx_state
+            }
+
+            const accessiblePastChapters = accessibleChapterFiles.filter((fileName) => {
+                const ch = parseChapterNumberFromName(fileName);
+                return ch !== null && ch < effectiveTargetChapter!;
+            });
+            const accessiblePastChapterNums = new Set<number>();
+            for (const fileName of accessiblePastChapters) {
+                const ch = parseChapterNumberFromName(fileName);
+                if (ch !== null) {
+                    accessiblePastChapterNums.add(ch);
+                }
+            }
+            const hasAccessiblePastManuscripts = accessiblePastChapters.length > 0;
+
+            // 1. 校验 recall_queries / recall_slices 中的实体必须同时出现在已选/唤醒集合中（无条件执行，严禁短路）
             for (const q of parsed.recall_queries) {
-                if (!selectedSet.has(q.entity_id)) {
+                if (!validPackEntityIds.has(q.entity_id)) {
                     throw new GateValidationError(
                         'yield_context_pack',
                         `成对挂载校验失败：recall_queries 中的实体 ${q.entity_id} 未加入 selected_entity_ids`
@@ -172,7 +386,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 }
             }
             for (const s of parsed.recall_slices) {
-                if (s.entity_id && !selectedSet.has(s.entity_id) && parsed.selected_lore_files.length === 0) {
+                if (s.entity_id && !validPackEntityIds.has(s.entity_id)) {
                     throw new GateValidationError(
                         'yield_context_pack',
                         `成对挂载校验失败：recall_slices 中的实体 ${s.entity_id} 未加入 selected_entity_ids`
@@ -180,41 +394,100 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 }
             }
 
-            // 2. 收集需要强制成对挂载 L3 原稿切片的实体集合
-            const openThreadsRaw = await readOptionalFile(store, runId, bookRoot, 'world/open_threads.md');
-            const activeThreadRefs = openThreadsRaw ? extractActiveThreadEntityRefs(openThreadsRaw) : new Set<string>();
-            const entitiesRequiringL3 = new Set<string>();
-
-            if (hasManuscripts) {
-                // 目标文本或选区中提及的活跃伏笔关联实体
-                for (const refId of activeThreadRefs) {
-                    if (selectedSet.has(refId) || (chapterGoal && chapterGoal.includes(refId))) {
-                        entitiesRequiringL3.add(refId);
-                    }
+            // 2. 校验 selected_lore_files 合法可达（支持 lore_xxx.md 或 lore_library/lore_xxx.md）
+            for (const loreFile of parsed.selected_lore_files) {
+                const normalizedInput = loreFile.replace(/\\/g, '/').trim();
+                const relLorePath = normalizedInput.includes('/')
+                    ? normalizedInput
+                    : `lore_library/${normalizedInput}`;
+                if (!relLorePath.startsWith('lore_library/')) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `selected_lore_files 仅允许引用 lore_library/ 下的词条: ${loreFile}`
+                    );
                 }
-
-                // 检查已选中实体是否包含 item_* 或未消解历史锚点
-                for (const entityId of selectedSet) {
-                    const entityRaw = await readOptionalFile(store, runId, bookRoot, `entities/${entityId}.md`);
-                    if (entityRaw === null) {
-                        throw new GateValidationError(
-                            'yield_context_pack',
-                            `selected_entity_ids 引用了不存在的实体档案: ${entityId}`
-                        );
-                    }
-                    const profile = parseEntityMarkdown(entityRaw);
-                    const hasAnchors = profile.metadata.historical_anchors.length > 0;
-                    const isUniqueItem = entityId.startsWith('item_');
-                    if (isUniqueItem || hasAnchors || activeThreadRefs.has(entityId)) {
-                        entitiesRequiringL3.add(entityId);
-                    }
+                const verifiedLore = await fence.assertReadFile(relLorePath);
+                const loreContent = await readOptionalWithOverlay(
+                    bookRoot,
+                    combinedOverlay,
+                    verifiedLore.normalized
+                );
+                if (loreContent === null) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `selected_lore_files 引用了不存在的世界书词条: ${loreFile}`
+                    );
                 }
             }
 
-            // 若 chapterGoal 引用了 activeThreadRefs，则该实体也必须在 selected_entity_ids 中
+            // 3. 加载已选及冷宫唤醒实体档案（支持 entities/ 与 entities/cold_archive/）
+            const entityProfiles = new Map<string, EntityProfile>();
+            const loadProfileForId = async (entityId: string): Promise<EntityProfile | null> => {
+                const cached = entityProfiles.get(entityId);
+                if (cached) return cached;
+
+                const activeRaw = await readOptionalWithOverlay(
+                    bookRoot,
+                    combinedOverlay,
+                    `entities/${entityId}.md`
+                );
+                if (activeRaw !== null) {
+                    const parsedProfile = parseEntityMarkdown(activeRaw);
+                    entityProfiles.set(entityId, parsedProfile);
+                    return parsedProfile;
+                }
+
+                const coldOverlayRaw = await readOptionalWithOverlay(
+                    bookRoot,
+                    combinedOverlay,
+                    `entities/cold_archive/${entityId}.md`
+                );
+                if (coldOverlayRaw !== null) {
+                    const parsedProfile = parseEntityMarkdown(coldOverlayRaw);
+                    entityProfiles.set(entityId, parsedProfile);
+                    return parsedProfile;
+                }
+
+                const coldDiskProfile = await bookStore.readColdArchivedEntity(entityId);
+                if (coldDiskProfile !== null) {
+                    entityProfiles.set(entityId, coldDiskProfile);
+                    return coldDiskProfile;
+                }
+                return null;
+            };
+
+            for (const entityId of selectedSet) {
+                const profile = await loadProfileForId(entityId);
+                if (profile === null) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `selected_entity_ids 引用了不存在的实体档案: ${entityId}`
+                    );
+                }
+            }
+            for (const wakeupId of wakeupSet) {
+                const profile = await loadProfileForId(wakeupId);
+                if (profile === null) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `wakeup_entity_ids 引用了不存在的冷宫/实体档案: ${wakeupId}`
+                    );
+                }
+            }
+
+            // 4. 收集需要强制成对挂载 L3 原稿切片的实体集合（含 Q1 首次登场豁免）
+            const openThreadsRaw = await readOptionalWithOverlay(
+                bookRoot,
+                combinedOverlay,
+                'world/open_threads.md'
+            );
+            const activeThreadRefs = openThreadsRaw
+                ? extractActiveThreadEntityRefs(openThreadsRaw)
+                : new Set<string>();
+
             if (chapterGoal) {
                 for (const refId of activeThreadRefs) {
-                    if (chapterGoal.includes(refId) && !selectedSet.has(refId)) {
+                    if (chapterGoal.includes(refId) && !validPackEntityIds.has(refId)) {
                         throw new GateValidationError(
                             'yield_context_pack',
                             `成对挂载校验失败：本章目标涉及活跃伏笔实体 ${refId}，但未列入 selected_entity_ids`
@@ -223,44 +496,183 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 }
             }
 
-            // 3. 通过 IndexRecall 执行 recall_queries，并统计每个实体的有效 L3 原稿切片
-            const recallEngine = new IndexRecall(store.system);
-            const recalledSlices: RecallSlice[] = [];
-            const sliceCountByEntity = new Map<string, number>();
+            const entitiesRequiringL3 = new Set<string>();
+            if (hasAccessiblePastManuscripts) {
+                const accessibleL2AppearedSet = await collectAccessibleL2AppearedSet(
+                    bookRoot,
+                    combinedOverlay,
+                    effectiveTargetChapter,
+                    accessiblePastChapterNums
+                );
 
-            for (const slice of parsed.recall_slices) {
-                if (slice.entity_id) {
+                const candidateRequireIds = new Set<string>(validPackEntityIds);
+                for (const refId of activeThreadRefs) {
+                    if (chapterGoal && chapterGoal.includes(refId)) {
+                        candidateRequireIds.add(refId);
+                    }
+                }
+
+                for (const entityId of candidateRequireIds) {
+                    const profile = entityProfiles.get(entityId);
+                    if (!profile) continue;
+                    const isUniqueItem = entityId.startsWith('item_');
+                    const hasAnchors = profile.metadata.historical_anchors.length > 0;
+                    const touchesThread = activeThreadRefs.has(entityId);
+                    if (!isUniqueItem && !hasAnchors && !touchesThread) {
+                        continue;
+                    }
+
+                    // Q1 首次登场豁免：仅当在 < targetChapter 的可达历史原稿/L2卡/锚点确有出场记录时，才强制要求 >= 1 条 L3 切片
+                    const hasPriorSeen =
+                        profile.metadata.last_seen_ch > 0 &&
+                        profile.metadata.last_seen_ch < effectiveTargetChapter &&
+                        accessiblePastChapterNums.has(profile.metadata.last_seen_ch);
+                    const hasPriorL2 = accessibleL2AppearedSet.has(entityId);
+                    const hasPriorAnchor = hasAccessibleHistoricalAnchor(
+                        profile,
+                        effectiveTargetChapter,
+                        accessiblePastChapterNums
+                    );
+
+                    if (hasPriorSeen || hasPriorL2 || hasPriorAnchor) {
+                        entitiesRequiringL3.add(entityId);
+                    }
+                }
+            }
+
+            // 5. 校验手填 recall_slices 原稿存在性、章号一致性与时间差信封包覆
+            const sliceCountByEntity = new Map<string, number>();
+            const manualSlices: Array<{ slice: RecallSlice; entityId?: string | undefined }> = [];
+
+            for (const rawSlice of parsed.recall_slices) {
+                if (!rawSlice.file || rawSlice.file.trim().length === 0) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        '手填 recall_slices 必须提供有效的 manuscripts/ch_XXXX.md 文件路径 file'
+                    );
+                }
+                const normalizedInput = rawSlice.file.replace(/\\/g, '/').trim();
+                const relChapterPath =
+                    !normalizedInput.includes('/') && CHAPTER_FILE_RE.test(normalizedInput)
+                        ? `manuscripts/${normalizedInput}`
+                        : normalizedInput;
+
+                const verified = await fence.assertReadFile(relChapterPath);
+                const chMatch = MANUSCRIPT_CHAPTER_RE.exec(verified.normalized);
+                if (!chMatch?.[1]) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `手填 recall_slices 的 file 必须位于 manuscripts/ch_XXXX.md: ${rawSlice.file}`
+                    );
+                }
+                const realChapterNumber = Number(chMatch[1]);
+                if (
+                    rawSlice.chapter_number !== undefined &&
+                    rawSlice.chapter_number !== realChapterNumber
+                ) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `手填 recall_slices 的 chapter_number (${rawSlice.chapter_number}) 与文件真实章号 (${realChapterNumber}) 不一致`
+                    );
+                }
+                if (realChapterNumber >= effectiveTargetChapter) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `手填 recall_slices 禁止引用当前或未来章节 (${verified.normalized} >= ch_${String(effectiveTargetChapter).padStart(4, '0')})`
+                    );
+                }
+
+                const chapterText = await readOptionalWithOverlay(
+                    bookRoot,
+                    combinedOverlay,
+                    verified.normalized
+                );
+                if (chapterText === null) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `手填 recall_slices 引用了不存在的手稿文件: ${verified.normalized}`
+                    );
+                }
+
+                const quoteVerify = verifyDualQuotes(
+                    rawSlice.snippet,
+                    chapterText,
+                    rawSlice.snippet,
+                    chapterText
+                );
+                if (!quoteVerify.sideA.matched) {
+                    throw new GateValidationError(
+                        'yield_context_pack',
+                        `手填 recall_slices 的 snippet 未在 ${verified.normalized} 原稿中命中，禁止捏造切片`
+                    );
+                }
+
+                const chapterDay = extractChapterStoryDay(chapterText);
+                const truncatedSnippet = truncateSliceText(
+                    rawSlice.snippet,
+                    retrievalCfg.slice_max_chars
+                );
+                const envelopedSlice: RecallSlice = {
+                    file: verified.normalized,
+                    chapterId: `ch_${String(realChapterNumber).padStart(4, '0')}`,
+                    chapterNumber: realChapterNumber,
+                    chapterDay,
+                    targetChapter: effectiveTargetChapter,
+                    targetDay: effectiveTargetDay,
+                    deltaChapters: effectiveTargetChapter - realChapterNumber,
+                    deltaDays: chapterDay !== null ? effectiveTargetDay - chapterDay : null,
+                    line: quoteVerify.sideA.lineNumber ?? 1,
+                    text: truncatedSnippet,
+                    contextBefore: [],
+                    contextAfter: [],
+                    matchedKeys: rawSlice.entity_id ? [rawSlice.entity_id] : [],
+                    snippet: truncatedSnippet
+                };
+                manualSlices.push({ slice: envelopedSlice, entityId: rawSlice.entity_id });
+                if (rawSlice.entity_id) {
                     sliceCountByEntity.set(
-                        slice.entity_id,
-                        (sliceCountByEntity.get(slice.entity_id) ?? 0) + 1
+                        rawSlice.entity_id,
+                        (sliceCountByEntity.get(rawSlice.entity_id) ?? 0) + 1
                     );
                 }
             }
 
+            // 6. 通过 IndexRecall 执行 recall_queries（透传 focus_chapters、上限与支线隔离 chapterFiles）
+            const recallEngine = new IndexRecall(store.system);
+            const autoSlices: Array<{ slice: RecallSlice; entityId: string }> = [];
+
             for (const query of parsed.recall_queries) {
-                const entityRaw = await readOptionalFile(store, runId, bookRoot, `entities/${query.entity_id}.md`);
-                if (entityRaw === null) {
+                const profile = await loadProfileForId(query.entity_id);
+                if (profile === null) {
                     throw new GateValidationError(
                         'yield_context_pack',
                         `recall_queries 引用了不存在的实体档案: ${query.entity_id}`
                     );
                 }
-                const profile = parseEntityMarkdown(entityRaw);
                 const slices = await recallEngine.recallEntitySlices(bookRoot, {
                     profile,
                     targetChapter: effectiveTargetChapter,
                     targetDay: effectiveTargetDay,
+                    chapterFiles: accessibleChapterFiles,
+                    stagingOverlay: combinedOverlay,
+                    chapterHashes,
                     extraKeywords: query.extra_keywords,
+                    focusChapters: query.focus_chapters,
+                    maxSlicesPerEntity: retrievalCfg.max_slices_per_entity,
+                    sliceContextParagraphs: retrievalCfg.slice_context_paragraphs,
+                    sliceMaxChars: retrievalCfg.slice_max_chars,
                     includeHistoricalAnchors: true
                 });
-                recalledSlices.push(...slices);
+                for (const s of slices) {
+                    autoSlices.push({ slice: s, entityId: query.entity_id });
+                }
                 sliceCountByEntity.set(
                     query.entity_id,
                     (sliceCountByEntity.get(query.entity_id) ?? 0) + slices.length
                 );
             }
 
-            // 4. 校验所有要求成对挂载的实体都至少拥有 1 条 L3 原稿切片
+            // 7. 校验所有要求成对挂载的实体都至少拥有 1 条 L3 原稿切片
             for (const requiredId of entitiesRequiringL3) {
                 const count = sliceCountByEntity.get(requiredId) ?? 0;
                 if (count < 1) {
@@ -271,7 +683,31 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 }
             }
 
-            // 若存在未指向具体 entity_id 的裸切片兜底校验：当无特定实体但要求 L3 时提示
+            // 8. 标记 requiredEntityId 并按 max_slices_per_chapter_pack 封顶（优先保底必需证据切片）
+            const allTagged = [...autoSlices, ...manualSlices];
+            const requiredMarkedCount = new Map<string, number>();
+            const requiredSlices: RecallSlice[] = [];
+            const optionalSlices: RecallSlice[] = [];
+
+            for (const item of allTagged) {
+                if (item.entityId && entitiesRequiringL3.has(item.entityId)) {
+                    const marked = requiredMarkedCount.get(item.entityId) ?? 0;
+                    if (marked < retrievalCfg.required_slices_per_entity) {
+                        item.slice.requiredEntityId = item.entityId;
+                        requiredMarkedCount.set(item.entityId, marked + 1);
+                        requiredSlices.push(item.slice);
+                        continue;
+                    }
+                }
+                optionalSlices.push(item.slice);
+            }
+
+            const maxChapterSlices = retrievalCfg.max_slices_per_chapter_pack;
+            const recalledSlices: RecallSlice[] = [...requiredSlices, ...optionalSlices].slice(
+                0,
+                maxChapterSlices
+            );
+
             onYield?.({
                 payload: parsed,
                 recalledSlices
@@ -282,7 +718,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             return {
                 accepted: true,
                 selectedCount: parsed.selected_entity_ids.length,
-                recalledSliceCount: recalledSlices.length + parsed.recall_slices.length
+                recalledSliceCount: recalledSlices.length
             };
         }
     });

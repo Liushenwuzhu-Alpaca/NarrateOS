@@ -372,10 +372,40 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
             expect(roleSet.toolMap.has(diskTool)).toBe(false);
         }
 
-        await roleSet.toolMap.get('yield_patched_draft')!.execute(
-            { summary: '直接提交' },
-            createMockExec('yield_patched_draft', { summary: '直接提交' })
-        );
-        expect(roleSet.hasYielded()).toBe(true);
+        await expect(
+            roleSet.toolMap.get('yield_patched_draft')!.execute(
+                { summary: '直接提交' },
+                createMockExec('yield_patched_draft', { summary: '直接提交' })
+            )
+        ).rejects.toThrow(GateValidationError);
+        expect(roleSet.hasYielded()).toBe(false);
+    });
+
+    it('拒绝通过 patch_paragraphs 将全部非标题正文段落删空 (ISS-042)', async () => {
+        const sessionWithHeading = new InMemoryDraftPatchSession('# 第一章\n\n仅此一段正文。');
+        const tool1 = createPatchParagraphsTool({ session: sessionWithHeading });
+        await expect(
+            tool1.execute(
+                {
+                    edits: [{ start_paragraph: 1, end_paragraph: 1, replacement_paragraphs: [] }]
+                },
+                createMockExec('patch_paragraphs', {})
+            )
+        ).rejects.toThrow(/非 # 标题正文段落/);
+        expect(sessionWithHeading.getParagraphs()).toEqual(['# 第一章', '仅此一段正文。']);
+        expect(sessionWithHeading.getEditCount()).toBe(0);
+
+        const sessionNoHeading = new InMemoryDraftPatchSession('第一段。\n\n第二段。');
+        const tool2 = createPatchParagraphsTool({ session: sessionNoHeading });
+        await expect(
+            tool2.execute(
+                {
+                    edits: [{ start_paragraph: 0, end_paragraph: 1, replacement_paragraphs: [] }]
+                },
+                createMockExec('patch_paragraphs', {})
+            )
+        ).rejects.toThrow(/非 # 标题正文段落/);
+        expect(sessionNoHeading.getParagraphs()).toEqual(['第一段。', '第二段。']);
+        expect(sessionNoHeading.getEditCount()).toBe(0);
     });
 });

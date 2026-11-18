@@ -1,10 +1,15 @@
-import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
+    assertEntryTagsSafe,
+    BookDreamingConfigSchema,
     ForeignKeyError,
     InnateLockViolationError,
     parseEntityMarkdown,
+    parseVoiceSamplesYaml,
+    StaticProseGate,
+    type NarrationSubjectivity,
     type NarrateStoreService
 } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
@@ -16,8 +21,49 @@ import {
     type DreamCommitRecord
 } from './schemas.js';
 
-const ENTITY_PROFILE_PATH_RE = /^entities\/([^/]+)\.md$/;
+const ENTITY_PROFILE_PATH_RE = /^entities\/(?:cold_archive\/)?([^/]+)\.md$/;
 const ENTITY_ID_FILENAME_RE = /^((?:char|item)_[a-zA-Z0-9_]+)$/;
+const DEFAULT_DREAMING_CFG = BookDreamingConfigSchema.parse({});
+const DREAM_READONLY_PROTECTED_PATHS = [
+    'manuscripts',
+    'world/roles',
+    'world/author_charter.md',
+    'world/book_config.yaml',
+    'world/ops_style_amendments.md',
+    'world/current_arc_envelope.md'
+] as const;
+
+function matchesProtectedPrefix(relPath: string, prefix: string): boolean {
+    return relPath === prefix || relPath.startsWith(`${prefix}/`);
+}
+
+function extractActiveThreadKeys(markdown: string): string[] {
+    const normalized = markdown.replace(/\r\n/g, '\n');
+    let inArchiveSection = false;
+    const keys: string[] = [];
+
+    for (const rawLine of normalized.split('\n')) {
+        const trimmed = rawLine.trim();
+        if (/^##\s+.*(已回收|已解决|已兑现|Resolved|Archive)/i.test(trimmed)) {
+            inArchiveSection = true;
+            continue;
+        }
+        if (/^##\s+/.test(trimmed)) {
+            inArchiveSection = false;
+            continue;
+        }
+        if (!trimmed.startsWith('- ') || inArchiveSection) {
+            continue;
+        }
+        if (/\bstatus:\s*RESOLVED\b/i.test(trimmed) || /\[RESOLVED\]/i.test(trimmed)) {
+            continue;
+        }
+        const idMatch = /^-\s*\[([^|\]]+)/.exec(trimmed);
+        keys.push(idMatch?.[1]?.trim() || trimmed);
+    }
+
+    return keys;
+}
 
 export interface YieldDreamCommitOptions {
     store: NarrateStoreService;
@@ -29,6 +75,13 @@ export interface YieldDreamCommitOptions {
 
 async function readDiskOptional(absPath: string): Promise<string | null> {
     try {
+        const st = await lstat(absPath);
+        if (st.isSymbolicLink()) {
+            throw new GateValidationError(
+                'yield_dream_commit',
+                `禁止通过符号链接目标读取或覆写作品文件: ${absPath}`
+            );
+        }
         return await readFile(absPath, 'utf8');
     } catch (err: unknown) {
         if ((err as { code?: string }).code === 'ENOENT') {
@@ -44,13 +97,24 @@ async function buildDreamReachableKeys(
 ): Promise<Set<string>> {
     const keys = new Set<string>();
 
-    const collectDir = async (dirPath: string) => {
+    const collectDir = async (dirPath: string, entityOnly: boolean) => {
         try {
             const files = await readdir(dirPath);
             for (const file of files) {
                 if (!file.endsWith('.md')) continue;
+                const absFile = join(dirPath, file);
+                try {
+                    const st = await lstat(absFile);
+                    if (st.isSymbolicLink() || !st.isFile()) {
+                        continue;
+                    }
+                } catch {
+                    continue;
+                }
                 const base = file.slice(0, -3);
-                keys.add(base);
+                if (!entityOnly || ENTITY_ID_FILENAME_RE.test(base)) {
+                    keys.add(base);
+                }
                 const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
                 if (sagaMatch?.[1]) {
                     keys.add(sagaMatch[1]);
@@ -64,21 +128,18 @@ async function buildDreamReachableKeys(
     };
 
     await Promise.all([
-        collectDir(join(bookRoot, 'entities')),
-        collectDir(join(bookRoot, 'entities/cold_archive')),
-        collectDir(join(bookRoot, 'manuscripts'))
+        collectDir(join(bookRoot, 'entities'), true),
+        collectDir(join(bookRoot, 'entities/cold_archive'), true),
+        collectDir(join(bookRoot, 'manuscripts'), false)
     ]);
 
     for (const relPath of pendingWrites.keys()) {
         const entityMatch = ENTITY_PROFILE_PATH_RE.exec(relPath);
         if (entityMatch?.[1]) {
-            keys.add(entityMatch[1]);
-            continue;
-        }
-        const coldMatch = /^entities\/cold_archive\/([^/]+)\.md$/.exec(relPath);
-        if (coldMatch?.[1]) {
-            keys.add(coldMatch[1]);
-            const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(coldMatch[1]);
+            if (ENTITY_ID_FILENAME_RE.test(entityMatch[1])) {
+                keys.add(entityMatch[1]);
+            }
+            const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(entityMatch[1]);
             if (sagaMatch?.[1]) {
                 keys.add(sagaMatch[1]);
             }
@@ -154,32 +215,55 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
             }
 
             const bookStore = store.openStore(bookRoot);
+            let dreamingCfg = DEFAULT_DREAMING_CFG;
+            let narrationSubjectivity: NarrationSubjectivity = 'objective_third';
+            try {
+                const cfg = await bookStore.readBookConfig();
+                if (cfg.dreaming) {
+                    dreamingCfg = { ...DEFAULT_DREAMING_CFG, ...cfg.dreaming };
+                }
+                narrationSubjectivity = cfg.narration_subjectivity;
+            } catch {
+                // 缺少 book_config.yaml 时使用默认 Dreaming 门禁配置
+            }
 
             const record = await bookStore.withTxLock(async (): Promise<DreamCommitRecord> => {
                 // 0. 校验当前 WAL 相位允许执行 Dreaming（拒绝 DRAFTING 与 FEAT_COMMITTED）
                 const txState = await bookStore.assertDreamingPhaseSafe();
                 const pendingWrites = store.staging.getPendingWrites(runId);
 
-                // 1. 校验暂存路径白名单，严格拦截 manuscripts/ 与越界路径
+                // 1. 校验暂存路径白名单，物理拒止 manuscripts/、只读世界保护集、current_arc_envelope.md 与越界路径
                 for (const relPath of pendingWrites.keys()) {
-                    if (relPath === 'manuscripts' || relPath.startsWith('manuscripts/')) {
-                        throw new GateValidationError(
-                            'yield_dream_commit',
-                            `禁止 Dreamer 提交修改正稿目录 manuscripts/: ${relPath}`
-                        );
+                    for (const protectedPath of DREAM_READONLY_PROTECTED_PATHS) {
+                        if (matchesProtectedPrefix(relPath, protectedPath)) {
+                            throw new GateValidationError(
+                                'yield_dream_commit',
+                                `禁止 Dreamer 修改只读保护路径 (${protectedPath}): ${relPath}`
+                            );
+                        }
                     }
                     await fence.assertWriteFile(relPath);
                 }
 
-                // 2. 校验所有暂存实体档案：既有实体 Innate Locks & canonical_name 零篡改，新建实体必填中文 canonical_name
+                // 2. 校验所有暂存实体档案（含 cold_archive 实体，跳过非实体文档如 warped_horizon.md）
                 for (const [relPath, stagedContent] of pendingWrites.entries()) {
                     const entityMatch = ENTITY_PROFILE_PATH_RE.exec(relPath);
-                    if (!entityMatch?.[1]) {
+                    if (!entityMatch?.[1] || !ENTITY_ID_FILENAME_RE.test(entityMatch[1])) {
                         continue;
                     }
                     const fileStem = entityMatch[1];
                     const stagedProfile = parseEntityMarkdown(stagedContent);
-                    if (ENTITY_ID_FILENAME_RE.test(fileStem) && stagedProfile.metadata.entity_id !== fileStem) {
+                    for (const sectionList of [
+                        stagedProfile.innateLocks,
+                        stagedProfile.acquiredState,
+                        stagedProfile.irreversibleTrajectory,
+                        stagedProfile.recentBuffer
+                    ]) {
+                        for (const entry of sectionList) {
+                            assertEntryTagsSafe(entry);
+                        }
+                    }
+                    if (stagedProfile.metadata.entity_id !== fileStem) {
                         throw new GateValidationError(
                             'yield_dream_commit',
                             `实体档案 ${relPath} 的 entity_id (${stagedProfile.metadata.entity_id}) 与文件名不一致`
@@ -204,24 +288,84 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                                 `禁止篡改实体 ${stagedProfile.metadata.entity_id} 的 1. Innate Locks`
                             );
                         }
-                    } else if (!hasChineseCharacter(stagedProfile.metadata.canonical_name)) {
+                    } else {
+                        if (!hasChineseCharacter(stagedProfile.metadata.canonical_name)) {
+                            throw new GateValidationError(
+                                'yield_dream_commit',
+                                `新建实体 ${stagedProfile.metadata.entity_id} 必须提供包含中文字符的 canonical_name`
+                            );
+                        }
+                        for (const lockEntry of stagedProfile.innateLocks) {
+                            if (lockEntry.visibility === 'OMNISCIENT_SECRET') {
+                                throw new GateValidationError(
+                                    'yield_dream_commit',
+                                    `新建实体 ${stagedProfile.metadata.entity_id} 第 1 区 Innate Locks 严禁包含 OMNISCIENT_SECRET`
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // 3. 校验暂存 world/open_threads.md 的活跃伏笔上限与单次新增伏笔上限
+                const stagedThreads = pendingWrites.get('world/open_threads.md');
+                if (stagedThreads !== undefined) {
+                    const activeThreads = countActiveOpenThreads(stagedThreads);
+                    if (activeThreads > dreamingCfg.max_active_open_threads) {
                         throw new GateValidationError(
                             'yield_dream_commit',
-                            `新建实体 ${stagedProfile.metadata.entity_id} 必须提供包含中文字符的 canonical_name`
+                            `world/open_threads.md 活跃伏笔数 (${activeThreads}) 超过上限 ${dreamingCfg.max_active_open_threads} 条，请先归档已兑现伏笔`
+                        );
+                    }
+                    const diskThreadsRaw = (await readDiskOptional(join(bookRoot, 'world/open_threads.md'))) ?? '';
+                    const diskKeys = new Set(extractActiveThreadKeys(diskThreadsRaw));
+                    const stagedKeys = extractActiveThreadKeys(stagedThreads);
+                    const addedThreadCount = stagedKeys.filter((key) => !diskKeys.has(key)).length;
+                    if (addedThreadCount > dreamingCfg.max_new_threads_per_dream) {
+                        throw new GateValidationError(
+                            'yield_dream_commit',
+                            `单次 Dreaming 新增伏笔数 (${addedThreadCount}) 超过上限 ${dreamingCfg.max_new_threads_per_dream} 条`
                         );
                     }
                 }
 
-                // 3. 校验暂存 world/open_threads.md 的活跃伏笔数量 <= 15
-                const stagedThreads = pendingWrites.get('world/open_threads.md');
-                if (stagedThreads !== undefined) {
-                    const activeThreads = countActiveOpenThreads(stagedThreads);
-                    if (activeThreads > 15) {
-                        throw new GateValidationError(
-                            'yield_dream_commit',
-                            `world/open_threads.md 活跃伏笔数 (${activeThreads}) 超过上限 15 条，请先归档已兑现伏笔`
-                        );
+                // 3.1 若暂存修改了 .ops/voice_samples.yaml，对每条声纹强制跑 StaticProseGate
+                const stagedVoiceYaml = pendingWrites.get('.ops/voice_samples.yaml');
+                if (stagedVoiceYaml !== undefined) {
+                    const voicePool = parseVoiceSamplesYaml(stagedVoiceYaml);
+                    const proseGate = new StaticProseGate();
+                    for (const sample of voicePool.samples) {
+                        const gateRes = proseGate.evaluate(sample.text, {
+                            narrationSubjectivity
+                        });
+                        if (!gateRes.passed) {
+                            throw new GateValidationError(
+                                'yield_dream_commit',
+                                `.ops/voice_samples.yaml 样本 (${sample.id}/${sample.tag}) 未通过 StaticProseGate: ${gateRes.violations.map((v) => v.message).join('; ')}`
+                            );
+                        }
                     }
+                }
+
+                // 3.2 若暂存修改了 .ops/signals.jsonl，校验每行合法 JSON 并确保尾换行
+                const stagedSignalsRaw = pendingWrites.get('.ops/signals.jsonl');
+                let normalizedStagedSignals: string | undefined;
+                if (stagedSignalsRaw !== undefined) {
+                    const lines = stagedSignalsRaw.replace(/\r\n/g, '\n').split('\n');
+                    const validLines: string[] = [];
+                    for (let idx = 0; idx < lines.length; idx += 1) {
+                        const trimmed = lines[idx]!.trim();
+                        if (!trimmed) continue;
+                        try {
+                            JSON.parse(trimmed);
+                        } catch {
+                            throw new GateValidationError(
+                                'yield_dream_commit',
+                                `.ops/signals.jsonl 第 ${idx + 1} 行不是合法 JSON`
+                            );
+                        }
+                        validLines.push(trimmed);
+                    }
+                    normalizedStagedSignals = validLines.length > 0 ? `${validLines.join('\n')}\n` : '';
                 }
 
                 // 4. 1ms 跨文件外键可达性校验（char_* / item_* / ch_XXXX）
@@ -259,12 +403,29 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 }
                 await bookStore.recordPendingWrites(allTargetRelPaths);
 
-                // 6. 原子写入暂存文件到磁盘
+                // 6. 原子写入暂存文件到磁盘（落盘前再次 lstat 拦截符号链接目标）
                 const committedRelPaths: string[] = [];
-                for (const [relPath, content] of pendingWrites.entries()) {
+                for (const [relPath, rawContent] of pendingWrites.entries()) {
                     const absTarget = join(bookRoot, relPath);
+                    try {
+                        const st = await lstat(absTarget);
+                        if (st.isSymbolicLink()) {
+                            throw new GateValidationError(
+                                'yield_dream_commit',
+                                `禁止覆盖符号链接目标: ${relPath}`
+                            );
+                        }
+                    } catch (err: unknown) {
+                        if ((err as { code?: string }).code !== 'ENOENT') {
+                            throw err;
+                        }
+                    }
+                    const contentToWrite =
+                        relPath === '.ops/signals.jsonl' && normalizedStagedSignals !== undefined
+                            ? normalizedStagedSignals
+                            : rawContent;
                     await mkdir(dirname(absTarget), { recursive: true });
-                    await writeFile(absTarget, content, 'utf8');
+                    await writeFile(absTarget, contentToWrite, 'utf8');
                     committedRelPaths.push(relPath);
                 }
 
@@ -291,10 +452,10 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
 
                 const chapterNumber = parsed.chapter_number ?? txState.last_committed_ch;
 
-                // 更新 .ops/dream_watermark.json 并执行 Git dream 提交
+                // 更新 .ops/dream_watermark.json（整理完成后将累计新增字数水位确定性归零）
                 await bookStore.writeDreamWatermark({
                     last_dream_ch: chapterNumber,
-                    accumulated_words_since_dream: parsed.accumulated_words,
+                    accumulated_words_since_dream: 0,
                     updated_at: new Date().toISOString()
                 });
                 if (!committedRelPaths.includes('.ops/dream_watermark.json')) {

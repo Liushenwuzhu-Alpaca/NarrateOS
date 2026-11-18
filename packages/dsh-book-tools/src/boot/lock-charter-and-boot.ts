@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
@@ -17,11 +16,29 @@ import {
 } from '@narrateos/dsh-book-store';
 import { BootGateError } from '../errors.js';
 import {
+    BootVoiceSampleSchema,
     CompiledEntitySchema,
     CompiledLoreEntrySchema,
     type CompiledEntity
 } from '../yield/schemas.js';
 import { validateBootBundle } from './boot-validation.js';
+
+const STANDARD_BOOK_GITIGNORE = [
+    '# NarrateOS 运行态与事务临时文件（严禁纳入版本历史）',
+    '.ops/tx.lock',
+    '.ops/pending_writes.json',
+    '.ops/runs.jsonl',
+    '.ops/llm_calls.jsonl',
+    '.ops/session_logs/',
+    '.ops/traces/',
+    '.ops/recovery/',
+    '.ops/safe_halt.json',
+    '.ops/quarantine_report.json',
+    '.ops/heal_plan.json',
+    '.ops/sync_conflicts.json',
+    '.ops/manual_edits/',
+    ''
+].join('\n');
 
 /** 开篇序列节拍（3~5 拍，不绑定章号） */
 export const OpeningSequenceBeatSchema = z.object({
@@ -76,14 +93,7 @@ export const LockCharterAndBootInputSchema = z.object({
             })
         )
         .default([]),
-    voice_samples: z
-        .array(
-            z.object({
-                tag: z.string().min(1),
-                sample: z.string().min(1)
-            })
-        )
-        .default([]),
+    voice_samples: z.array(BootVoiceSampleSchema).default([]),
     tokens_per_char: z.number().positive().default(0.6),
     narration_subjectivity: z.enum(['objective_third', 'subjective_first']).default('objective_third'),
     writer_token_budget: z.number().int().positive().nullable().default(null),
@@ -95,6 +105,12 @@ export const LockCharterAndBootInputSchema = z.object({
 export type LockCharterAndBootInput = z.input<typeof LockCharterAndBootInputSchema>;
 export type ParsedLockCharterAndBootInput = z.infer<typeof LockCharterAndBootInputSchema>;
 
+/** onBookBooted 回调返回值（用于回报自动切书是否因在途锁冲突被跳过） */
+export interface BootSwitchOutcome {
+    switchedBook: boolean;
+    switchConflictReason?: string | undefined;
+}
+
 /** lock_charter_and_boot 执行结果 */
 export interface LockCharterAndBootResult {
     bookRoot: string;
@@ -105,34 +121,17 @@ export interface LockCharterAndBootResult {
     voiceSampleCount: number;
     filteredVoiceSampleCount: number;
     halted: true;
+    switchedBook?: boolean | undefined;
+    switchConflictReason?: string | undefined;
 }
 
 /** lock_charter_and_boot 运行选项 */
 export interface LockCharterAndBootOptions {
     booksRoot: string;
     system?: SystemPort | undefined;
-    onBookBooted?: ((result: LockCharterAndBootResult) => void | Promise<void>) | undefined;
-}
-
-function countVolumesInMarkdown(markdown: string): number {
-    const volIds = new Set<string>();
-    const volRegex = /\bvol_(\d+)\b/gi;
-    let match: RegExpExecArray | null;
-    while ((match = volRegex.exec(markdown)) !== null) {
-        if (match[1]) {
-            volIds.add(String(Number(match[1])));
-        }
-    }
-
-    const cnVolIds = new Set<string>();
-    const cnRegex = /第\s*([一二三四五六七八九十百\d]+)\s*卷/g;
-    while ((match = cnRegex.exec(markdown)) !== null) {
-        if (match[1]) {
-            cnVolIds.add(match[1]);
-        }
-    }
-
-    return Math.max(volIds.size, cnVolIds.size);
+    onBookBooted?:
+        | ((result: LockCharterAndBootResult) => BootSwitchOutcome | void | Promise<BootSwitchOutcome | void>)
+        | undefined;
 }
 
 function toEntityProfile(compiled: CompiledEntity): EntityProfile {
@@ -152,6 +151,9 @@ function toEntityProfile(compiled: CompiledEntity): EntityProfile {
         };
         if (item.slotKey !== undefined) {
             entry.slotKey = item.slotKey;
+        }
+        if (item.owner !== undefined) {
+            entry.owner = item.owner;
         }
         return entry;
     });
@@ -324,176 +326,242 @@ export async function lockCharterAndBoot(
         parsed.narration_subjectivity
     );
 
-    const bookRootExistedBefore = existsSync(bookRoot);
-    if (bookRootExistedBefore && (await readdir(bookRoot)).length > 0) {
-        throw new Error(`开书目标目录非空，禁止覆盖已有作品: ${bookRoot}`);
-    }
-
-    await mkdir(bookRoot, { recursive: true });
-
+    await mkdir(resolvedBooksRoot, { recursive: true });
+    const bootLockPath = join(resolvedBooksRoot, `.boot-lock-${parsed.book_slug}.lock`);
     try {
-        const requiredDirs = [
-            'manuscripts',
-            'entities',
-            'entities/cold_archive',
-            'world',
-            'lore_library',
-            'index',
-            'index/L2_cards',
-            '.ops',
-            '.ops/parallel_deltas'
-        ];
-        for (const dir of requiredDirs) {
-            await mkdir(join(bookRoot, dir), { recursive: true });
-        }
-
-        await writeFile(join(bookRoot, 'manuscripts/.gitkeep'), '', 'utf8');
-        await writeFile(join(bookRoot, 'entities/cold_archive/.gitkeep'), '', 'utf8');
-        await writeFile(join(bookRoot, '.ops/parallel_deltas/.gitkeep'), '', 'utf8');
-        if (parsed.lore_entries.length === 0) {
-            await writeFile(join(bookRoot, 'lore_library/.gitkeep'), '', 'utf8');
-        }
-
-        const system = options.system ?? new NodeSystemAdapter();
-        const store = new BookStore(bookRoot, system);
-
-        const bookConfig: BookConfig = {
-            book_slug: parsed.book_slug,
-            title: parsed.title,
-            tokens_per_char: parsed.tokens_per_char,
-            narration_subjectivity: parsed.narration_subjectivity,
-            trace_level: 'full',
-            writer_token_budget: parsed.writer_token_budget,
-            max_auto_rollback_chapters: parsed.max_auto_rollback_chapters,
-            structured_json_retry: {
-                max_retries: 5,
-                backoff_ms: [1000, 2000, 4000, 8000, 16000]
-            },
-            craft_plugins: parsed.craft_plugins,
-            prose_gate: {
-                enable_anti_cliche: true,
-                enable_cross_chapter_simile: true,
-                cross_chapter_simile_window: 5
-            }
-        };
-        if (parsed.model_routing !== undefined) {
-            bookConfig.model_routing = parsed.model_routing;
-        }
-        await store.writeBookConfig(bookConfig);
-
-        await store.writeWorldState({
-            frontmatter: {
-                story_day: 0,
-                current_volume: 1,
-                current_chapter: 0,
-                pov_character: parsed.pov_character,
-                timeline_mode: 'MAINLINE'
-            },
-            summaryMarkdown: parsed.world_summary
-        });
-
-        await store.writeAuthorCharter(formatAuthorCharterMarkdown(parsed));
-        await store.writeArcDirectorPlan(formatArcDirectorPlanMarkdown(parsed));
-        await store.writeCurrentArcEnvelope(
-            `# 当前卷正向舞台常态 (Current Arc Envelope)\n\n${parsed.current_arc_envelope.trim()}\n`
-        );
-        await store.writeStaticBaseAndVoice(
-            `# 世界底层法则与抽象句法纪律\n\n${parsed.static_base_and_voice.trim()}\n`
-        );
-        await store.writeOpsStyleAmendments('# 卷中风格修订 (Ops Style Amendments)\n\n');
-        await store.writeFutureHorizon(formatFutureHorizonMarkdown(parsed));
-        await store.writeOpenThreads(formatOpenThreadsMarkdown(parsed));
-
-        // 无作者样章时保持 .ops/voice_samples.yaml 为空数组 samples: []
-        const normalizedVoiceSamples = cleanVoiceSamples.map((item, idx) => ({
-            id: `voice_${String(idx + 1).padStart(2, '0')}`,
-            tag: item.tag,
-            text: item.sample,
-            sample: item.sample,
-            last_used_ch: 0,
-            use_count: 0
-        }));
-        const voiceYaml = stringifyYaml({ samples: normalizedVoiceSamples }, { lineWidth: 0 });
-        await writeFile(join(bookRoot, '.ops/voice_samples.yaml'), voiceYaml, 'utf8');
-
-        await writeFile(
-            join(bookRoot, 'index/L0_sagas.md'),
-            formatMarkdownWithFallbackHeading(parsed.l0_sagas_markdown, '# L0 纪元折叠总表'),
-            'utf8'
-        );
-        await writeFile(
-            join(bookRoot, 'index/L1_volumes.md'),
-            formatMarkdownWithFallbackHeading(parsed.l1_volumes_markdown, '# L1 活跃卷级总表'),
-            'utf8'
-        );
-        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), '# 第 1 卷双轨章卡\n\n', 'utf8');
-
-        const loreIds: string[] = [];
-        for (const lore of parsed.lore_entries) {
-            loreIds.push(lore.id);
-            const loreContent = [
-                `# ${lore.title}`,
-                '',
-                `> 摘要: ${lore.summary}`,
-                '',
-                lore.content.trim(),
-                ''
-            ].join('\n');
-            await writeFile(join(bookRoot, `lore_library/${lore.id}.md`), loreContent, 'utf8');
-        }
-
-        const entityIds: string[] = [];
-        for (const compiledEntity of parsed.entities) {
-            entityIds.push(compiledEntity.entityId);
-            const profile = toEntityProfile(compiledEntity);
-            await writeFile(
-                join(bookRoot, `entities/${compiledEntity.entityId}.md`),
-                serializeEntityMarkdown(profile),
-                'utf8'
-            );
-        }
-
-        // 初始化 .ops/tx_state.json (last_committed_ch = 0) 并执行初始 Git 提交
-        await store.initializeWalFromDisk();
-        await system.initRepo(bookRoot);
-        const { sha } = await system.commitPaths(
-            bookRoot,
-            ['.'],
-            `chore(boot): initialize ${parsed.book_slug}`
-        );
-
-        const result: LockCharterAndBootResult = {
-            bookRoot,
-            bookSlug: parsed.book_slug,
-            commitSha: sha,
-            entityIds,
-            loreIds,
-            voiceSampleCount: normalizedVoiceSamples.length,
-            filteredVoiceSampleCount,
-            halted: true
-        };
-
-        if (options.onBookBooted) {
-            await options.onBookBooted(result);
-        }
-
-        return result;
+        const handle = await open(bootLockPath, 'wx');
+        await handle.close();
     } catch (err: unknown) {
-        if (!bookRootExistedBefore) {
-            await rm(bookRoot, { recursive: true, force: true }).catch(() => undefined);
-        } else {
-            try {
-                const entries = await readdir(bookRoot);
-                await Promise.all(
-                    entries.map((entry) =>
-                        rm(join(bookRoot, entry), { recursive: true, force: true })
-                    )
-                );
-            } catch {
-                // 保留原始建库失败原因，忽略回滚清理次生异常
-            }
+        if ((err as { code?: string }).code === 'EEXIST') {
+            throw new Error(`开书正在进行中，禁止并发建库覆盖同一作品: ${parsed.book_slug}`);
         }
         throw err;
+    }
+
+    let bookRootExistedBefore = false;
+    try {
+        bookRootExistedBefore = existsSync(bookRoot);
+        if (bookRootExistedBefore && (await readdir(bookRoot)).length > 0) {
+            throw new Error(`开书目标目录非空，禁止覆盖已有作品: ${bookRoot}`);
+        }
+
+        if (!bookRootExistedBefore) {
+            await mkdir(bookRoot);
+        }
+
+        try {
+            const requiredDirs = [
+                'manuscripts',
+                'entities',
+                'entities/cold_archive',
+                'world',
+                'lore_library',
+                'index',
+                'index/L2_cards',
+                '.ops',
+                '.ops/parallel_deltas'
+            ];
+            for (const dir of requiredDirs) {
+                await mkdir(join(bookRoot, dir), { recursive: true });
+            }
+
+            const bootCommitPaths: string[] = [
+                '.gitignore',
+                'manuscripts/.gitkeep',
+                'entities/cold_archive/.gitkeep',
+                '.ops/parallel_deltas/.gitkeep'
+            ];
+
+            await writeFile(join(bookRoot, '.gitignore'), STANDARD_BOOK_GITIGNORE, 'utf8');
+            await writeFile(join(bookRoot, 'manuscripts/.gitkeep'), '', 'utf8');
+            await writeFile(join(bookRoot, 'entities/cold_archive/.gitkeep'), '', 'utf8');
+            await writeFile(join(bookRoot, '.ops/parallel_deltas/.gitkeep'), '', 'utf8');
+            if (parsed.lore_entries.length === 0) {
+                await writeFile(join(bookRoot, 'lore_library/.gitkeep'), '', 'utf8');
+                bootCommitPaths.push('lore_library/.gitkeep');
+            }
+
+            const system = options.system ?? new NodeSystemAdapter();
+            const store = new BookStore(bookRoot, system);
+
+            const bookConfig: BookConfig = {
+                book_slug: parsed.book_slug,
+                title: parsed.title,
+                tokens_per_char: parsed.tokens_per_char,
+                narration_subjectivity: parsed.narration_subjectivity,
+                trace_level: 'full',
+                writer_token_budget: parsed.writer_token_budget,
+                max_auto_rollback_chapters: parsed.max_auto_rollback_chapters,
+                structured_json_retry: {
+                    max_retries: 5,
+                    backoff_ms: [1000, 2000, 4000, 8000, 16000]
+                },
+                craft_plugins: parsed.craft_plugins,
+                prose_gate: {
+                    enable_anti_cliche: true,
+                    enable_cross_chapter_simile: true,
+                    cross_chapter_simile_window: 5
+                }
+            };
+            if (parsed.model_routing !== undefined) {
+                bookConfig.model_routing = parsed.model_routing;
+            }
+            await store.writeBookConfig(bookConfig);
+            bootCommitPaths.push('world/book_config.yaml');
+
+            await store.writeWorldState({
+                frontmatter: {
+                    story_day: 0,
+                    current_volume: 1,
+                    current_chapter: 0,
+                    pov_character: parsed.pov_character,
+                    timeline_mode: 'MAINLINE'
+                },
+                summaryMarkdown: parsed.world_summary
+            });
+            bootCommitPaths.push('world/world_state.md');
+
+            await store.writeAuthorCharter(formatAuthorCharterMarkdown(parsed));
+            await store.writeArcDirectorPlan(formatArcDirectorPlanMarkdown(parsed));
+            await store.writeCurrentArcEnvelope(
+                formatMarkdownWithFallbackHeading(
+                    parsed.current_arc_envelope,
+                    '# 当前卷正向舞台常态 (Current Arc Envelope)'
+                )
+            );
+            await store.writeStaticBaseAndVoice(
+                formatMarkdownWithFallbackHeading(
+                    parsed.static_base_and_voice,
+                    '# 世界底层法则与抽象句法纪律'
+                )
+            );
+            await store.writeOpsStyleAmendments('# 卷中风格修订 (Ops Style Amendments)\n\n');
+            await store.writeFutureHorizon(formatFutureHorizonMarkdown(parsed));
+            await store.writeOpenThreads(formatOpenThreadsMarkdown(parsed));
+            bootCommitPaths.push(
+                'world/author_charter.md',
+                'world/arc_director_plan.md',
+                'world/current_arc_envelope.md',
+                'world/static_base_and_voice.md',
+                'world/ops_style_amendments.md',
+                'world/future_horizon.md',
+                'world/open_threads.md'
+            );
+
+            // 统一通过 BookStore.writeVoiceSamples 写入标准字段（零冗余 sample 键）
+            const normalizedVoiceSamples = cleanVoiceSamples.map((item, idx) => ({
+                id: `voice_${String(idx + 1).padStart(2, '0')}`,
+                tag: item.tag,
+                text: item.sample,
+                last_used_ch: 0,
+                use_count: 0,
+                ...(item.source !== undefined ? { source: item.source } : {})
+            }));
+            await store.writeVoiceSamples({ samples: normalizedVoiceSamples });
+            bootCommitPaths.push('.ops/voice_samples.yaml');
+
+            await writeFile(
+                join(bookRoot, 'index/L0_sagas.md'),
+                formatMarkdownWithFallbackHeading(parsed.l0_sagas_markdown, '# L0 纪元折叠总表'),
+                'utf8'
+            );
+            await writeFile(
+                join(bookRoot, 'index/L1_volumes.md'),
+                formatMarkdownWithFallbackHeading(parsed.l1_volumes_markdown, '# L1 活跃卷级总表'),
+                'utf8'
+            );
+            await writeFile(
+                join(bookRoot, 'index/L2_cards/vol_01_cards.md'),
+                '# 第 1 卷双轨章卡\n\n',
+                'utf8'
+            );
+            bootCommitPaths.push(
+                'index/L0_sagas.md',
+                'index/L1_volumes.md',
+                'index/L2_cards/vol_01_cards.md'
+            );
+
+            const loreIds: string[] = [];
+            for (const lore of parsed.lore_entries) {
+                loreIds.push(lore.id);
+                const loreContent = [
+                    `# ${lore.title}`,
+                    '',
+                    `> 摘要: ${lore.summary}`,
+                    '',
+                    lore.content.trim(),
+                    ''
+                ].join('\n');
+                const loreRel = `lore_library/${lore.id}.md`;
+                await writeFile(join(bookRoot, loreRel), loreContent, 'utf8');
+                bootCommitPaths.push(loreRel);
+            }
+
+            const entityIds: string[] = [];
+            for (const compiledEntity of parsed.entities) {
+                entityIds.push(compiledEntity.entityId);
+                const profile = toEntityProfile(compiledEntity);
+                const entityRel = `entities/${compiledEntity.entityId}.md`;
+                await writeFile(
+                    join(bookRoot, entityRel),
+                    serializeEntityMarkdown(profile),
+                    'utf8'
+                );
+                bootCommitPaths.push(entityRel);
+            }
+
+            // 初始化 .ops/tx_state.json (last_committed_ch = 0) 并使用显式受控路径执行初始 Git 提交
+            await store.initializeWalFromDisk();
+            bootCommitPaths.push('.ops/tx_state.json');
+
+            await system.initRepo(bookRoot);
+            const { sha } = await system.commitPaths(
+                bookRoot,
+                bootCommitPaths,
+                `chore(boot): initialize ${parsed.book_slug}`
+            );
+
+            const result: LockCharterAndBootResult = {
+                bookRoot,
+                bookSlug: parsed.book_slug,
+                commitSha: sha,
+                entityIds,
+                loreIds,
+                voiceSampleCount: normalizedVoiceSamples.length,
+                filteredVoiceSampleCount,
+                halted: true
+            };
+
+            if (options.onBookBooted) {
+                const switchOutcome = await options.onBookBooted(result);
+                if (switchOutcome && typeof switchOutcome === 'object') {
+                    result.switchedBook = switchOutcome.switchedBook;
+                    if (switchOutcome.switchConflictReason !== undefined) {
+                        result.switchConflictReason = switchOutcome.switchConflictReason;
+                    }
+                }
+            }
+
+            return result;
+        } catch (err: unknown) {
+            if (!bookRootExistedBefore) {
+                await rm(bookRoot, { recursive: true, force: true }).catch(() => undefined);
+            } else {
+                try {
+                    const entries = await readdir(bookRoot);
+                    await Promise.all(
+                        entries.map((entry) =>
+                            rm(join(bookRoot, entry), { recursive: true, force: true })
+                        )
+                    );
+                } catch {
+                    // 保留原始建库失败原因，忽略回滚清理次生异常
+                }
+            }
+            throw err;
+        }
+    } finally {
+        await rm(bootLockPath, { force: true }).catch(() => undefined);
     }
 }
 
@@ -583,10 +651,20 @@ export function createLockCharterAndBootTool(options: LockCharterAndBootOptions)
                     loreIds: { type: 'array', required: true, items: { type: 'string' } },
                     voiceSampleCount: { type: 'integer', required: true },
                     filteredVoiceSampleCount: { type: 'integer', required: true },
-                    halted: { type: 'boolean', required: true }
+                    halted: { type: 'boolean', required: true },
+                    switchedBook: { type: 'boolean' },
+                    switchConflictReason: { type: 'string' }
                 }
             },
             render(_args, value) {
+                if (value.switchedBook === false) {
+                    return [
+                        {
+                            type: 'text',
+                            text: `建库成功但因存在在途任务未自动切书（${value.switchConflictReason ?? '存在在途任务锁冲突'}），请在在途任务结束后手动切书：${value.bookSlug} (commit=${value.commitSha.slice(0, 8)}, 实体=${value.entityIds.length}, 声纹=${value.voiceSampleCount})`
+                        }
+                    ];
+                }
                 return [
                     {
                         type: 'text',
@@ -598,7 +676,21 @@ export function createLockCharterAndBootTool(options: LockCharterAndBootOptions)
         isConcurrencySafe: () => false,
         async execute(args, exec) {
             exec.signal.throwIfAborted();
-            return await lockCharterAndBoot(args as LockCharterAndBootInput, options);
+            const res = await lockCharterAndBoot(args as LockCharterAndBootInput, options);
+            return {
+                bookRoot: res.bookRoot,
+                bookSlug: res.bookSlug,
+                commitSha: res.commitSha,
+                entityIds: res.entityIds,
+                loreIds: res.loreIds,
+                voiceSampleCount: res.voiceSampleCount,
+                filteredVoiceSampleCount: res.filteredVoiceSampleCount,
+                halted: res.halted,
+                ...(res.switchedBook !== undefined ? { switchedBook: res.switchedBook } : {}),
+                ...(res.switchConflictReason !== undefined
+                    ? { switchConflictReason: res.switchConflictReason }
+                    : {})
+            };
         }
     });
 }
