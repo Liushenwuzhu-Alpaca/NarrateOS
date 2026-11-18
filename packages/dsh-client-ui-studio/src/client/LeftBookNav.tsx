@@ -127,6 +127,72 @@ function resolveChapterBadge(chapter: ChapterNavItem): {
     };
 }
 
+function renderChapterListBody(options: {
+    chapters: readonly ChapterNavItem[];
+    activeViewKind: MaterializedViewKind | null;
+    selectedChapter: number | null;
+    loading: boolean;
+    embedded: boolean;
+    onSelectChapter: (chapterNumber: number) => void;
+}): React.ReactElement {
+    const { chapters, activeViewKind, selectedChapter, loading, embedded, onSelectChapter } = options;
+    if (!embedded && loading && chapters.length === 0) {
+        return (
+            <div className="ns-ch-list" aria-label="章节目录加载中" role="status">
+                {Array.from({ length: 6 }, (_, idx) => (
+                    <div key={idx} className="ns-skel-row">
+                        <span className="ns-skel ns-skel-code" />
+                        <span className="ns-skel ns-skel-title" />
+                        <span className="ns-skel ns-skel-pill" />
+                    </div>
+                ))}
+            </div>
+        );
+    }
+
+    if (chapters.length === 0) {
+        return (
+            <div className="ns-empty-hint">
+                新书契约已就绪，点击右上角「写下一章」开启首章校准。
+            </div>
+        );
+    }
+
+    return (
+        <div className="ns-ch-list">
+            {chapters.map((chapter) => {
+                const isSelected =
+                    activeViewKind === null && selectedChapter === chapter.chapterNumber;
+                const badge = resolveChapterBadge(chapter);
+                return (
+                    <button
+                        key={chapter.fileName}
+                        type="button"
+                        className={`ns-ch-item ns-ch-btn${isSelected ? ' ns-active' : ''}`}
+                        onClick={() => onSelectChapter(chapter.chapterNumber)}
+                        aria-current={!embedded && isSelected ? 'page' : undefined}
+                        title={`${chapter.fileName} (${chapter.charCount} 字)`}
+                    >
+                        <span className="ns-ch-title-wrap">
+                            {embedded ? (
+                                <span className="ns-mono ns-ch-code ns-ch-no ns-num">
+                                    {formatLegacyChapterCode(chapter.chapterNumber)}
+                                </span>
+                            ) : (
+                                <span className="ns-ch-no ns-num">第 {chapter.chapterNumber} 章</span>
+                            )}
+                            <span>{chapter.title}</span>
+                        </span>
+                        <span className={badge.badgeClass} data-wal-status={badge.status}>
+                            {badge.label}
+                        </span>
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
 /**
  * 东方清样左栏导航组件：
  * - 顶部：当前卷名 + 故事天数胶囊
@@ -163,15 +229,15 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
     const volumeLabel = resolveVolumeLabel(currentVolumeLabel, sortedChapters);
     const horizonTotal = (warpedHorizonCount ?? 0) + (pendingHorizonCount ?? 0);
 
-    const handleChapterClick = (chapterNumber: number) => {
+    function handleChapterClick(chapterNumber: number): void {
         onSelectChapter(chapterNumber);
         onCloseDrawer?.();
-    };
+    }
 
-    const handleOpenCodex = (kind: MaterializedViewKind) => {
+    function handleOpenCodex(kind: MaterializedViewKind): void {
         onOpenView(kind);
         onCloseDrawer?.();
-    };
+    }
 
     const codexSection = (
         <div className="ns-left-codex" aria-label="全书设定集（跨章汇总）">
@@ -217,6 +283,15 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
         </div>
     );
 
+    const chapterListBody = renderChapterListBody({
+        chapters: sortedChapters,
+        activeViewKind,
+        selectedChapter,
+        loading,
+        embedded,
+        onSelectChapter: handleChapterClick
+    });
+
     if (embedded) {
         return (
             <div className="ns-toc-embedded" aria-label="章节目录与全书设定集">
@@ -225,38 +300,7 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
                         <span>正文目录</span>
                         <span className="ns-num">共 {displayChapterCount} 章</span>
                     </div>
-                    {sortedChapters.length === 0 ? (
-                        <div className="ns-empty-hint">
-                            新书契约已就绪，点击右上角「写下一章」开启首章校准。
-                        </div>
-                    ) : (
-                        <div className="ns-ch-list">
-                            {sortedChapters.map((chapter) => {
-                                const isSelected =
-                                    activeViewKind === null && selectedChapter === chapter.chapterNumber;
-                                const badge = resolveChapterBadge(chapter);
-                                return (
-                                    <button
-                                        key={chapter.fileName}
-                                        type="button"
-                                        className={`ns-ch-item ns-ch-btn${isSelected ? ' ns-active' : ''}`}
-                                        onClick={() => handleChapterClick(chapter.chapterNumber)}
-                                        title={`${chapter.fileName} (${chapter.charCount} 字)`}
-                                    >
-                                        <span className="ns-ch-title-wrap">
-                                            <span className="ns-mono ns-ch-code ns-ch-no ns-num">
-                                                {formatLegacyChapterCode(chapter.chapterNumber)}
-                                            </span>
-                                            <span>{chapter.title}</span>
-                                        </span>
-                                        <span className={badge.badgeClass} data-wal-status={badge.status}>
-                                            {badge.label}
-                                        </span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    )}
+                    {chapterListBody}
                 </section>
                 {codexSection}
             </div>
@@ -277,48 +321,7 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
                     <span>正文目录</span>
                     <span className="ns-num">共 {displayChapterCount} 章</span>
                 </div>
-
-                {loading && sortedChapters.length === 0 ? (
-                    <div className="ns-ch-list" aria-label="章节目录加载中" role="status">
-                        {Array.from({ length: 6 }, (_, idx) => (
-                            <div key={idx} className="ns-skel-row">
-                                <span className="ns-skel ns-skel-code" />
-                                <span className="ns-skel ns-skel-title" />
-                                <span className="ns-skel ns-skel-pill" />
-                            </div>
-                        ))}
-                    </div>
-                ) : sortedChapters.length === 0 ? (
-                    <div className="ns-empty-hint">
-                        新书契约已就绪，点击右上角「写下一章」开启首章校准。
-                    </div>
-                ) : (
-                    <div className="ns-ch-list">
-                        {sortedChapters.map((chapter) => {
-                            const isSelected =
-                                activeViewKind === null && selectedChapter === chapter.chapterNumber;
-                            const badge = resolveChapterBadge(chapter);
-                            return (
-                                <button
-                                    key={chapter.fileName}
-                                    type="button"
-                                    className={`ns-ch-item ns-ch-btn${isSelected ? ' ns-active' : ''}`}
-                                    onClick={() => handleChapterClick(chapter.chapterNumber)}
-                                    aria-current={isSelected ? 'page' : undefined}
-                                    title={`${chapter.fileName} (${chapter.charCount} 字)`}
-                                >
-                                    <span className="ns-ch-title-wrap">
-                                        <span className="ns-ch-no ns-num">第 {chapter.chapterNumber} 章</span>
-                                        <span>{chapter.title}</span>
-                                    </span>
-                                    <span className={badge.badgeClass} data-wal-status={badge.status}>
-                                        {badge.label}
-                                    </span>
-                                </button>
-                            );
-                        })}
-                    </div>
-                )}
+                {chapterListBody}
             </div>
 
             {codexSection}

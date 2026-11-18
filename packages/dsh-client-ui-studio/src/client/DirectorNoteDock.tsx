@@ -47,6 +47,72 @@ export interface DirectorNoteDockProps {
     onDismissSignal?: ((index: number) => void) | undefined;
 }
 
+function renderNextIdeasPanel(options: {
+    isBusy: boolean;
+    nextChapterOptions: readonly string[];
+    ideasExpanded: boolean;
+    onToggleExpanded: () => void;
+    onPickOption: (opt: string) => void;
+    onStepWithOption: (chapterGoal?: string) => Promise<void> | void;
+}): React.ReactNode {
+    const {
+        isBusy,
+        nextChapterOptions,
+        ideasExpanded,
+        onToggleExpanded,
+        onPickOption,
+        onStepWithOption
+    } = options;
+    if (isBusy || nextChapterOptions.length === 0) {
+        return null;
+    }
+
+    return (
+        <div className="ns-next-ideas-panel">
+            <button
+                type="button"
+                className="ns-next-ideas-header"
+                aria-expanded={ideasExpanded}
+                onClick={onToggleExpanded}
+            >
+                <span>
+                    {StudioIcons.spark}{' '}
+                    <b>下一章走向建议 ({nextChapterOptions.length})</b>{' '}
+                    <span className="ns-muted">
+                        {ideasExpanded
+                            ? '点文字填入微调，点右侧直接开写'
+                            : '点击展开查看候选剧情'}
+                    </span>
+                </span>
+                <span>{ideasExpanded ? StudioIcons.chev : StudioIcons.chevUp}</span>
+            </button>
+            {ideasExpanded ? (
+                <div className="ns-next-idea-list">
+                    {nextChapterOptions.map((opt, idx) => (
+                        <div key={`${idx}-${opt}`} className="ns-next-idea-row">
+                            <button
+                                type="button"
+                                className="ns-next-idea-text"
+                                onClick={() => onPickOption(opt)}
+                            >
+                                {idx + 1}. {opt}
+                            </button>
+                            <button
+                                type="button"
+                                className="ns-next-idea-go"
+                                disabled={isBusy}
+                                onClick={() => void onStepWithOption(opt)}
+                            >
+                                直接写 →
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
 /**
  * 底部纵向走向建议与一体式导演便签舱（ISS-060, ISS-062）：
  * - 可收折纵向 nextChapterOptions 建议：点文字填入微调，点「直接写 ->」立即推进指定目标
@@ -124,54 +190,18 @@ export function DirectorNoteDock({
     return (
         <footer className="ns-director-footer">
             <div className="ns-director-wrap">
-                {!isBusy && nextChapterOptions.length > 0 ? (
-                    <div className="ns-next-ideas-panel">
-                        <button
-                            type="button"
-                            className="ns-next-ideas-header"
-                            aria-expanded={ideasExpanded}
-                            onClick={() => setIdeasExpanded((prev) => !prev)}
-                        >
-                            <span>
-                                {StudioIcons.spark}{' '}
-                                <b>下一章走向建议 ({nextChapterOptions.length})</b>{' '}
-                                <span className="ns-muted">
-                                    {ideasExpanded
-                                        ? '点文字填入微调，点右侧直接开写'
-                                        : '点击展开查看候选剧情'}
-                                </span>
-                            </span>
-                            <span>{ideasExpanded ? StudioIcons.chev : StudioIcons.chevUp}</span>
-                        </button>
-                        {ideasExpanded ? (
-                            <div className="ns-next-idea-list">
-                                {nextChapterOptions.map((opt, idx) => (
-                                    <div key={`${idx}-${opt}`} className="ns-next-idea-row">
-                                        <button
-                                            type="button"
-                                            className="ns-next-idea-text"
-                                            onClick={() => {
-                                                onChangeNoteKind('DIRECTOR_NOTE');
-                                                onChangeNoteText(opt);
-                                                inputRef.current?.focus();
-                                            }}
-                                        >
-                                            {idx + 1}. {opt}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="ns-next-idea-go"
-                                            disabled={isBusy}
-                                            onClick={() => void onStepWithOption(opt)}
-                                        >
-                                            直接写 →
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        ) : null}
-                    </div>
-                ) : null}
+                {renderNextIdeasPanel({
+                    isBusy,
+                    nextChapterOptions,
+                    ideasExpanded,
+                    onToggleExpanded: () => setIdeasExpanded((prev) => !prev),
+                    onPickOption: (opt) => {
+                        onChangeNoteKind('DIRECTOR_NOTE');
+                        onChangeNoteText(opt);
+                        inputRef.current?.focus();
+                    },
+                    onStepWithOption
+                })}
 
                 {pendingSignals.length > 0 ? (
                     <div className="ns-queued-notes" aria-label="待消费导演便签队列">
