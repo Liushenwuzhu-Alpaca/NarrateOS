@@ -207,9 +207,24 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
 
         expect(res.voiceSampleCount).toBe(1);
         expect(res.filteredVoiceSampleCount).toBe(1);
+        expect(res.switchedBook).toBe(true);
+        expect(ctx.narrateStore.bookRoot).toBe(res.bookRoot);
         const voiceYaml = await readFile(join(res.bookRoot, '.ops/voice_samples.yaml'), 'utf8');
         expect(voiceYaml).toContain('单子上的骑缝章少了一角');
         expect(voiceYaml).not.toContain('深吸一口气');
+
+        // 编程接口在存在在途 runId 时不回滚建库，显式返回 switchedBook=false
+        ctx.narrateStore.beginRun('programmatic-inflight');
+        try {
+            const conflictRes = await ctx.narrateTools.lockCharterAndBoot(
+                buildMinimalValidBootInput({ book_slug: 'prog-conflict-book' })
+            );
+            expect(conflictRes.halted).toBe(true);
+            expect(conflictRes.switchedBook).toBe(false);
+            expect(conflictRes.switchConflictReason).toBeTruthy();
+        } finally {
+            ctx.narrateStore.endRun('programmatic-inflight');
+        }
     });
 
     it('拒绝缺少中文 canonicalName 与 static_base_and_voice 违规，且写入/Git 失败时彻底回滚新建目录', async () => {
@@ -535,6 +550,71 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
                 { booksRoot }
             )
         ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-q7-innate-inline',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [{ visibility: 'PUBLIC', text: '内联 OMNISCIENT_SECRET 潜伏线人' }],
+                            acquiredState: [],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-q7-acquired-noslot',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'OMNISCIENT_SECRET', text: '没有槽位键的秘密底牌' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        const okQ7Slot = await lockCharterAndBoot(
+            buildMinimalValidBootInput({
+                book_slug: 'ok-q7-acquired-slot',
+                entities: [
+                    {
+                        entityId: 'char_shen',
+                        canonicalName: '沈默',
+                        innateLocks: [],
+                        acquiredState: [
+                            {
+                                storyDay: 0,
+                                visibility: 'OMNISCIENT_SECRET',
+                                slotKey: 'secret_identity',
+                                text: '暗中携总署密令查账'
+                            }
+                        ],
+                        irreversibleTrajectory: [],
+                        recentBuffer: []
+                    }
+                ]
+            }),
+            { booksRoot }
+        );
+        expect(okQ7Slot.halted).toBe(true);
 
         await expect(
             lockCharterAndBoot(

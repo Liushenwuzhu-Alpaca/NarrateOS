@@ -322,7 +322,15 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             for (const patch of parsed.entity_patches) {
                 if (patch.innate_locks_ops) {
                     for (const op of patch.innate_locks_ops) {
-                        if (op.op === 'append' && op.entry.visibility === 'OMNISCIENT_SECRET') {
+                        if (op.op !== 'append') continue;
+                        const hasInlineOmniscient =
+                            op.entry.visibility === 'OMNISCIENT_SECRET' ||
+                            /\bOMNISCIENT_SECRET\b/i.test(op.entry.text) ||
+                            (op.entry.continuationLines?.some((line) =>
+                                /\bOMNISCIENT_SECRET\b/i.test(line)
+                            ) ??
+                                false);
+                        if (hasInlineOmniscient) {
                             throw new GateValidationError(
                                 'yield_state_patch',
                                 `第 1 区 Innate Locks (${patch.entity_id}) 严禁新增 OMNISCIENT_SECRET，请放入第 2 区 Acquired State 并绑定 slot_key`

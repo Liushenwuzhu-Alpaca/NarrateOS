@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { appendFile, lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
@@ -30,7 +31,8 @@ const DREAM_READONLY_PROTECTED_PATHS = [
     'world/author_charter.md',
     'world/book_config.yaml',
     'world/ops_style_amendments.md',
-    'world/current_arc_envelope.md'
+    'world/current_arc_envelope.md',
+    'world/static_base_and_voice.md'
 ] as const;
 
 function matchesProtectedPrefix(relPath: string, prefix: string): boolean {
@@ -296,7 +298,15 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                             );
                         }
                         for (const lockEntry of stagedProfile.innateLocks) {
-                            if (lockEntry.visibility === 'OMNISCIENT_SECRET') {
+                            const hasInlineOmniscient =
+                                lockEntry.visibility === 'OMNISCIENT_SECRET' ||
+                                (lockEntry.rawInvalidVisibility !== undefined &&
+                                    /\bOMNISCIENT_SECRET\b/i.test(lockEntry.rawInvalidVisibility)) ||
+                                /\bOMNISCIENT_SECRET\b/i.test(lockEntry.text) ||
+                                lockEntry.continuationLines.some((line) =>
+                                    /\bOMNISCIENT_SECRET\b/i.test(line)
+                                );
+                            if (hasInlineOmniscient) {
                                 throw new GateValidationError(
                                     'yield_dream_commit',
                                     `新建实体 ${stagedProfile.metadata.entity_id} 第 1 区 Innate Locks 严禁包含 OMNISCIENT_SECRET`
@@ -429,22 +439,30 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                     committedRelPaths.push(relPath);
                 }
 
-                // 写入可选 Spotlight Trigger 信号
+                // 写入可选 Spotlight Trigger 信号（lstat 防软链 + 补齐既有文件尾换行 + 唯一 id 对齐 Q6）
                 if (parsed.spotlight_triggers.length > 0) {
                     const chapterNum = parsed.chapter_number ?? txState.last_committed_ch;
                     const signalsPath = join(bookRoot, '.ops/signals.jsonl');
                     await mkdir(dirname(signalsPath), { recursive: true });
-                    for (const trigger of parsed.spotlight_triggers) {
-                        const signalLine = JSON.stringify({
+                    let prefixNewline = '';
+                    if (normalizedStagedSignals === undefined) {
+                        const existingSignals = await readDiskOptional(signalsPath);
+                        if (existingSignals && existingSignals.length > 0 && !existingSignals.endsWith('\n')) {
+                            prefixNewline = '\n';
+                        }
+                    }
+                    const newLines = parsed.spotlight_triggers.map((trigger) =>
+                        JSON.stringify({
+                            id: `sig_dream_${randomUUID()}`,
                             type: 'SPOTLIGHT_TRIGGER',
                             created_at: new Date().toISOString(),
                             chapter: chapterNum,
                             entity_id: trigger.entity_id,
                             suggested_mode: trigger.suggested_mode,
                             reason: trigger.reason
-                        });
-                        await appendFile(signalsPath, `${signalLine}\n`, 'utf8');
-                    }
+                        })
+                    );
+                    await appendFile(signalsPath, `${prefixNewline}${newLines.join('\n')}\n`, 'utf8');
                     if (!committedRelPaths.includes('.ops/signals.jsonl')) {
                         committedRelPaths.push('.ops/signals.jsonl');
                     }

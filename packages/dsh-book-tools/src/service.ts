@@ -393,10 +393,14 @@ export class NarrateToolsService {
         if (this.disposed) {
             throw new Error('NarrateToolsService 已卸载，拒绝执行开书编译');
         }
+        const defaultOnBookBooted = createAutoSwitchBookCallback(this.narrateStore);
         return await lockCharterAndBoot(input, {
             booksRoot: overrides?.booksRoot ?? this.booksRoot,
             system: overrides?.system ?? this.narrateStore.system,
-            onBookBooted: overrides?.onBookBooted
+            onBookBooted:
+                overrides && 'onBookBooted' in overrides
+                    ? overrides.onBookBooted
+                    : defaultOnBookBooted
         });
     }
 
@@ -414,6 +418,23 @@ declare module '@deepseek-ai/cordis' {
     interface Context {
         narrateTools: NarrateToolsService;
     }
+}
+
+function createAutoSwitchBookCallback(
+    narrateStore: NarrateStoreService
+): NonNullable<LockCharterAndBootOptions['onBookBooted']> {
+    return async (res) => {
+        try {
+            await narrateStore.switchBook(res.bookRoot);
+            return { switchedBook: true };
+        } catch (err: unknown) {
+            // 若遇在途锁冲突不回滚已落盘建库结果，向调用方显式回报未切书原因
+            return {
+                switchedBook: false,
+                switchConflictReason: err instanceof Error ? err.message : String(err)
+            };
+        }
+    };
 }
 
 /**
@@ -437,18 +458,7 @@ export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
                 createLockCharterAndBootTool({
                     booksRoot: service.booksRoot,
                     system: ctx.narrateStore.system,
-                    onBookBooted: async (res) => {
-                        try {
-                            await ctx.narrateStore.switchBook(res.bookRoot);
-                            return { switchedBook: true };
-                        } catch (err: unknown) {
-                            // 若遇在途锁冲突不回滚已落盘建库结果，向调用方显式回报未切书原因
-                            return {
-                                switchedBook: false,
-                                switchConflictReason: err instanceof Error ? err.message : String(err)
-                            };
-                        }
-                    }
+                    onBookBooted: createAutoSwitchBookCallback(ctx.narrateStore)
                 })
             );
             const disposeGuard = registerMainSessionWriteGuard(

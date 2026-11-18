@@ -1182,6 +1182,53 @@ describe('yield_* 终态门禁工具确定性校验', () => {
                 createSpyExec('yield_outline', {}).exec
             )
         ).rejects.toThrow(GateValidationError);
+
+        // 5. ISS-035 分句归一化拦截 director_rationale 实质子句及实体 OMNISCIENT_SECRET 未揭底牌子句
+        await writeFile(
+            join(bookRoot, 'entities/char_001.md'),
+            [
+                '---',
+                'entity_id: char_001',
+                'canonical_name: 沈默',
+                '---',
+                '',
+                '## 1. Innate Locks',
+                '- [vis: PUBLIC] 左肩旧伤',
+                '',
+                '## 2. Acquired State',
+                '- [day:0 | ch:0 | vis: OMNISCIENT_SECRET | slot:hidden_goal] SECRET_GOAL: 沈默其实在暗中替失踪兄长查账',
+                ''
+            ].join('\n'),
+            'utf8'
+        );
+        await expect(
+            ch2Outline.execute(
+                {
+                    chapter_title: '泄底测试一',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '幕后线人真实身份将在第四卷公开，真正的接头人将在第三章才现身，此处暂不点破。',
+                    chapter_turn: '转折',
+                    scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                    outline_text: '沈默在货栈等候，真正的接头人将在第三章才现身。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        await expect(
+            ch2Outline.execute(
+                {
+                    chapter_title: '泄底测试二',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '日常试探。',
+                    chapter_turn: '转折',
+                    scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                    outline_text: '旁白点明沈默其实在暗中替失踪兄长查账。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
     });
 
     it('yield_verdict 废除省略 source_ref 后门，校验 LOCAL_PATCH 段落索引边界与比例上限', async () => {
@@ -1364,6 +1411,25 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             )
         ).rejects.toThrow(GateValidationError);
 
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_002',
+                            canonical_name: '林舟',
+                            innate_locks_ops: [
+                                { op: 'append', entry: { visibility: 'PUBLIC', text: '内联 OMNISCIENT_SECRET 潜伏' } }
+                            ]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    plot_summary: '测试 Q7 内联'
+                },
+                createSpyExec('yield_state_patch', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
         // 第 1 次 prose_anchors 全部未命中 -> 抛错打回
         await expect(
             yieldPatch.execute(
@@ -1416,7 +1482,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
 
         const store = ctx.narrateStore.openStore(bookRoot);
 
-        // 1. 拒绝篡改 world/current_arc_envelope.md
+        // 1. 拒绝篡改 world/current_arc_envelope.md 与 world/static_base_and_voice.md
         const envSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-dream-env',
             bookRoot,
@@ -1438,6 +1504,28 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             )
         ).rejects.toThrow(GateValidationError);
         envSet.cleanup();
+
+        const voiceBaseSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-static-base',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        registerCleanup(() => voiceBaseSet.cleanup());
+        await voiceBaseSet.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/static_base_and_voice.md',
+                mode: 'write',
+                replacement_text: '# 篡改底层文风前缀\n'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await expect(
+            voiceBaseSet.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '篡改静态前缀' },
+                createSpyExec('yield_dream_commit', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        voiceBaseSet.cleanup();
 
         // 2. 拒绝篡改冷宫实体的 Innate Locks
         const coldSet = ctx.narrateTools.buildRoleTools({
@@ -1516,7 +1604,12 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         ).rejects.toThrow(GateValidationError);
         newThreadSet.cleanup();
 
-        // 4. 正常提交后 dream_watermark.json 的 accumulated_words_since_dream 确定性归零
+        // 4. 磁盘既有无尾换行 signals.jsonl 下投递 spotlight_triggers 补齐换行且每行可独立 JSON.parse，并清零字数水位
+        await writeFile(
+            join(bookRoot, '.ops/signals.jsonl'),
+            JSON.stringify({ id: 'sig_old_1', type: 'DIRECTION', chapter: 1, reason: '旧信号无尾换行' }),
+            'utf8'
+        );
         const okSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-dream-watermark-reset',
             bookRoot,
@@ -1524,10 +1617,26 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         });
         registerCleanup(() => okSet.cleanup());
         await okSet.toolMap.get('yield_dream_commit')!.execute(
-            { summary: '归零验证', chapter_number: 1, accumulated_words: 9999 },
+            {
+                summary: '归零与信号补换行验证',
+                chapter_number: 1,
+                accumulated_words: 9999,
+                spotlight_triggers: [
+                    { entity_id: 'char_001', reason: '前台切镜核对', suggested_mode: 'MAINLINE' }
+                ]
+            },
             createSpyExec('yield_dream_commit', {}).exec
         );
         const wm = await store.readDreamWatermark();
         expect(wm?.accumulated_words_since_dream).toBe(0);
+        const signalsAfter = await readFile(join(bookRoot, '.ops/signals.jsonl'), 'utf8');
+        expect(signalsAfter.endsWith('\n')).toBe(true);
+        const parsedSignals = signalsAfter
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as { id?: string; type: string });
+        expect(parsedSignals).toHaveLength(2);
+        expect(parsedSignals[1]?.type).toBe('SPOTLIGHT_TRIGGER');
+        expect(parsedSignals[1]?.id).toMatch(/^sig_dream_/);
     });
 });

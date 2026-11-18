@@ -1,8 +1,10 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
     BookOpeningConfigSchema,
+    normalizeForQuoteMatch,
+    parseEntityMarkdown,
     type EntityProfile,
     type NarrateStoreService,
     type PlannerOutline
@@ -25,39 +27,64 @@ export interface YieldOutlineOptions {
     onYield?: ((outline: PlannerOutline) => void) | undefined;
 }
 
-async function collectKnownEntityIds(
+const MIN_SECRET_CLAUSE_NORM_LEN = 10;
+
+function extractSubstantiveNormalizedClauses(text: string): string[] {
+    const clauses: string[] = [];
+    for (const rawClause of text.split(/[。！？；，,;\n]/)) {
+        const trimmed = rawClause.trim();
+        if (!trimmed) continue;
+        const candidates = [trimmed];
+        const colonIdx = trimmed.search(/[:：]/);
+        if (colonIdx > 0 && colonIdx < trimmed.length - 1) {
+            candidates.push(trimmed.slice(colonIdx + 1).trim());
+        }
+        for (const candidate of candidates) {
+            const norm = normalizeForQuoteMatch(candidate);
+            if (norm.length >= MIN_SECRET_CLAUSE_NORM_LEN) {
+                clauses.push(norm);
+            }
+        }
+    }
+    return clauses;
+}
+
+async function loadKnownEntityProfiles(
     bookRoot: string | undefined,
     visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile>
-): Promise<Set<string>> {
-    const ids = new Set<string>();
-    if (visibleEntities instanceof Map) {
-        for (const id of visibleEntities.keys()) {
-            ids.add(id);
-        }
-    } else if (visibleEntities) {
-        for (const id of Object.keys(visibleEntities)) {
-            ids.add(id);
-        }
-    }
-    if (!bookRoot) {
-        return ids;
-    }
-    for (const subDir of ['entities', 'entities/cold_archive']) {
-        try {
-            const entries = await readdir(join(bookRoot, subDir));
-            for (const entry of entries) {
-                const match = ENTITY_FILENAME_RE.exec(entry);
-                if (match?.[1]) {
-                    ids.add(match[1]);
+): Promise<Map<string, EntityProfile>> {
+    const profiles = new Map<string, EntityProfile>();
+    if (bookRoot) {
+        for (const subDir of ['entities', 'entities/cold_archive']) {
+            try {
+                const entries = await readdir(join(bookRoot, subDir));
+                for (const entry of entries) {
+                    const match = ENTITY_FILENAME_RE.exec(entry);
+                    if (!match?.[1] || profiles.has(match[1])) continue;
+                    try {
+                        const raw = await readFile(join(bookRoot, subDir, entry), 'utf8');
+                        profiles.set(match[1], parseEntityMarkdown(raw));
+                    } catch {
+                        // 忽略损坏文件
+                    }
+                }
+            } catch (err: unknown) {
+                if ((err as { code?: string }).code !== 'ENOENT') {
+                    throw err;
                 }
             }
-        } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') {
-                throw err;
-            }
         }
     }
-    return ids;
+    if (visibleEntities instanceof Map) {
+        for (const [id, profile] of visibleEntities.entries()) {
+            profiles.set(id, profile);
+        }
+    } else if (visibleEntities) {
+        for (const [id, profile] of Object.entries(visibleEntities)) {
+            profiles.set(id, profile);
+        }
+    }
+    return profiles;
 }
 
 /** 创建 Planner 终态门禁工具 yield_outline（校验里表分流、合法 entity_id、节拍与戏眼上限） */
@@ -165,10 +192,41 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
                 );
             }
 
-            const knownEntityIds = await collectKnownEntityIds(bookRoot, visibleEntities);
-            if (knownEntityIds.size > 0) {
+            const knownProfiles = await loadKnownEntityProfiles(bookRoot, visibleEntities);
+            const normalizedOutline = normalizeForQuoteMatch(outline.outline_text);
+            if (normalizedOutline.length > 0) {
+                for (const clauseNorm of extractSubstantiveNormalizedClauses(rationaleTrimmed)) {
+                    if (normalizedOutline.includes(clauseNorm)) {
+                        throw new GateValidationError(
+                            'yield_outline',
+                            '里表分流校验失败：outline_text 命中 director_rationale 全知内参实质子句，请改写为净室镜头表现'
+                        );
+                    }
+                }
+                for (const profile of knownProfiles.values()) {
+                    const secretEntries = [
+                        ...profile.innateLocks,
+                        ...profile.acquiredState,
+                        ...profile.irreversibleTrajectory,
+                        ...profile.recentBuffer
+                    ].filter((entry) => entry.visibility === 'OMNISCIENT_SECRET');
+                    for (const entry of secretEntries) {
+                        const fullEntryText = [entry.text, ...entry.continuationLines].join('\n');
+                        for (const secretClause of extractSubstantiveNormalizedClauses(fullEntryText)) {
+                            if (normalizedOutline.includes(secretClause)) {
+                                throw new GateValidationError(
+                                    'yield_outline',
+                                    `里表分流校验失败：outline_text 疑似泄露实体 ${profile.metadata.entity_id} 的 OMNISCIENT_SECRET 未揭底牌`
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (knownProfiles.size > 0) {
                 for (const id of [...outline.focus_cast, ...outline.background_cast]) {
-                    if (!knownEntityIds.has(id)) {
+                    if (!knownProfiles.has(id)) {
                         throw new GateValidationError(
                             'yield_outline',
                             `focus_cast / background_cast 必须填写真实存在的 entity_id，收到未知实体标识: ${id}`

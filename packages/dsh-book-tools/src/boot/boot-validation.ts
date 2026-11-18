@@ -172,7 +172,10 @@ export function validateBootBundle(
         }
 
         for (const lockItem of entity.innateLocks) {
-            if (lockItem.visibility === 'OMNISCIENT_SECRET') {
+            if (
+                lockItem.visibility === 'OMNISCIENT_SECRET' ||
+                /\bOMNISCIENT_SECRET\b/i.test(lockItem.text)
+            ) {
                 issues.push(
                     `第 1 区 innateLocks (${entity.entityId}) 严禁包含 OMNISCIENT_SECRET，请改放第 2 区 acquiredState 并绑定 slotKey`
                 );
@@ -184,6 +187,16 @@ export function validateBootBundle(
                 issues.push(
                     `T0 泄露 (${entity.entityId}.acquiredState): storyDay=${item.storyDay} > 0`
                 );
+            }
+            if (item.visibility === 'OMNISCIENT_SECRET') {
+                const hasFlippableSlot =
+                    Boolean(item.slotKey?.trim()) ||
+                    /^[^:：\s][^:：\n]{0,39}[:：]\s*\S/.test(item.text.trim());
+                if (!hasFlippableSlot) {
+                    issues.push(
+                        `第 2 区 acquiredState (${entity.entityId}) 的 OMNISCIENT_SECRET 条目必须提供显式 slotKey 或「槽位: 内容」前缀以便后续原地揭秘翻转`
+                    );
+                }
             }
             if (item.slotKey !== undefined) {
                 try {
