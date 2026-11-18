@@ -5,6 +5,7 @@ import '@deepseek-ai/dsh-agent';
 import '@deepseek-ai/dsh-commands';
 import '@deepseek-ai/dsh-host-webserver';
 import '@deepseek-ai/dsh-llm';
+import '@deepseek-ai/dsh-session';
 import '@deepseek-ai/dsh-skill';
 import Schema from '@deepseek-ai/schemastery';
 import '@narrateos/dsh-book-store';
@@ -12,7 +13,11 @@ import '@narrateos/dsh-book-tools';
 import { resolveDefaultEngineCraftPluginDir } from './pipeline/chapter-pipeline.js';
 import type { LlmPoolRouting } from './schemas.js';
 import { registerNarrateCommands } from './runtime/commands.js';
-import { NarrateRuntimeController } from './runtime/controller.js';
+import {
+    NarrateRuntimeController,
+    type PluginPoolRouteOverride,
+    type PluginPoolRoutingOverrides
+} from './runtime/controller.js';
 import { registerNarrateRoutes } from './runtime/routes.js';
 import { registerPresetBootSkill } from './runtime/skills.js';
 
@@ -21,6 +26,18 @@ export const name = 'narrateos-pipeline';
 
 /** 静态强依赖核心宿主服务（不强依赖 webServer / commands / skills，支持无头测试） */
 export const inject = ['narrateStore', 'narrateTools', 'agents', 'llm'] as const;
+
+/** 插件层单个模型池可选覆写 */
+export interface PluginPoolRouteConfig {
+    provider?: string | undefined;
+    model?: string | undefined;
+}
+
+/** 插件层双模型池可选覆写配置 */
+export interface PluginPoolRoutingConfig {
+    strong_creative?: PluginPoolRouteConfig | undefined;
+    fast_retrieval?: PluginPoolRouteConfig | undefined;
+}
 
 /** @narrateos/dsh-pipeline 插件配置类型 */
 export interface NarratePipelineConfig {
@@ -32,33 +49,32 @@ export interface NarratePipelineConfig {
     presetRoot?: string | undefined;
     /** 外部认知与文风插件搜索目录列表（可选，默认自动解析仓库级 plugins/craft 与预设插件目录） */
     pluginSearchDirs?: string[] | undefined;
-    /** 模型池路由映射 */
-    poolRouting?: LlmPoolRouting | undefined;
+    /** 可选强/弱双池显式覆盖映射（留空时实时继承 DSH 本体当前模型） */
+    poolRouting?: PluginPoolRoutingConfig | LlmPoolRouting | undefined;
     /** SSE 保活心跳间隔毫秒数（<= 0 时关闭） */
     heartbeatIntervalMs?: number | undefined;
     /** 卸载排空告警超时毫秒数 */
     shutdownTimeoutMs?: number | undefined;
 }
 
-const DEFAULT_POOL_ROUTING: LlmPoolRouting = {
-    strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-    fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
-    audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
-};
-
-function applyEnvRouteOverride(
-    base: LlmPoolRouting['strong_creative'],
+function resolvePoolOverrideWithEnv(
+    base: PluginPoolRouteConfig | undefined,
     modelEnvKey: string,
     providerEnvKey: string
-): LlmPoolRouting['strong_creative'] {
-    const model = process.env[modelEnvKey]?.trim();
-    const provider = process.env[providerEnvKey]?.trim();
-    if (!model && !provider) {
-        return base;
+): PluginPoolRouteOverride | undefined {
+    const envModel = process.env[modelEnvKey]?.trim() ?? '';
+    const envProvider = process.env[providerEnvKey]?.trim() ?? '';
+    const baseModel = base?.model?.trim() ?? '';
+    const baseProvider = base?.provider?.trim() ?? '';
+
+    const model = envModel.length > 0 ? envModel : baseModel;
+    const provider = envProvider.length > 0 ? envProvider : baseProvider;
+    if (model.length === 0 && provider.length === 0) {
+        return undefined;
     }
     return {
-        provider: provider || base.provider,
-        model: model || base.model
+        ...(provider.length > 0 ? { provider } : {}),
+        ...(model.length > 0 ? { model } : {})
     };
 }
 
@@ -88,18 +104,17 @@ export const Config = Schema.object({
     ),
     poolRouting: Schema.object({
         strong_creative: Schema.object({
-            provider: Schema.string().default(DEFAULT_POOL_ROUTING.strong_creative.provider),
-            model: Schema.string().default(DEFAULT_POOL_ROUTING.strong_creative.model)
-        }).default(DEFAULT_POOL_ROUTING.strong_creative),
+            provider: Schema.string().default(''),
+            model: Schema.string().default('')
+        }).default({ provider: '', model: '' }),
         fast_retrieval: Schema.object({
-            provider: Schema.string().default(DEFAULT_POOL_ROUTING.fast_retrieval.provider),
-            model: Schema.string().default(DEFAULT_POOL_ROUTING.fast_retrieval.model)
-        }).default(DEFAULT_POOL_ROUTING.fast_retrieval),
-        audit: Schema.object({
-            provider: Schema.string().default(DEFAULT_POOL_ROUTING.audit.provider),
-            model: Schema.string().default(DEFAULT_POOL_ROUTING.audit.model)
-        }).default(DEFAULT_POOL_ROUTING.audit)
-    }).default(DEFAULT_POOL_ROUTING),
+            provider: Schema.string().default(''),
+            model: Schema.string().default('')
+        }).default({ provider: '', model: '' })
+    }).default({
+        strong_creative: { provider: '', model: '' },
+        fast_retrieval: { provider: '', model: '' }
+    }),
     heartbeatIntervalMs: Schema.number().default(15_000).description('SSE 心跳间隔毫秒数'),
     shutdownTimeoutMs: Schema.number().default(5_000).description('卸载排空等待告警超时毫秒数')
 }).default({});
@@ -114,27 +129,27 @@ declare module '@deepseek-ai/cordis' {
  * Cordis 插件入口：
  * - 通过 ctx.effect(function* () { ... }) 保证严格有序停机：
  *   卸载时先执行 controller.shutdown() 关闭准入并等待在途 Agent / WAL / Git 彻底排空，
- *   排空完成后再依次注销 skills / commands / webServer 路由与 ctx.narratePipeline 服务；
+ *   排空完成后再依次注销事件监听 / skills / commands / webServer 路由与 ctx.narratePipeline 服务；
  * - 动态通过 ctx.inject(['webServer' | 'commands' | 'skills']) 挂载控制面，无头宿主下自动跳过。
  */
 export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
-    const resolvedRouting: LlmPoolRouting = {
-        strong_creative: applyEnvRouteOverride(
-            config.poolRouting?.strong_creative ?? DEFAULT_POOL_ROUTING.strong_creative,
-            'NARRATEOS_MODEL_STRONG',
-            'NARRATEOS_PROVIDER_STRONG'
-        ),
-        fast_retrieval: applyEnvRouteOverride(
-            config.poolRouting?.fast_retrieval ?? DEFAULT_POOL_ROUTING.fast_retrieval,
-            'NARRATEOS_MODEL_FAST',
-            'NARRATEOS_PROVIDER_FAST'
-        ),
-        audit: applyEnvRouteOverride(
-            config.poolRouting?.audit ?? DEFAULT_POOL_ROUTING.audit,
-            'NARRATEOS_MODEL_AUDIT',
-            'NARRATEOS_PROVIDER_AUDIT'
-        )
-    };
+    const resolvedOverrides: PluginPoolRoutingOverrides = {};
+    const strongOverride = resolvePoolOverrideWithEnv(
+        config.poolRouting?.strong_creative,
+        'NARRATEOS_MODEL_STRONG',
+        'NARRATEOS_PROVIDER_STRONG'
+    );
+    if (strongOverride) {
+        resolvedOverrides.strong_creative = strongOverride;
+    }
+    const fastOverride = resolvePoolOverrideWithEnv(
+        config.poolRouting?.fast_retrieval,
+        'NARRATEOS_MODEL_FAST',
+        'NARRATEOS_PROVIDER_FAST'
+    );
+    if (fastOverride) {
+        resolvedOverrides.fast_retrieval = fastOverride;
+    }
 
     const resolvedPluginSearchDirs = resolvePluginSearchDirs(config);
 
@@ -143,7 +158,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
         booksRoot: config.booksRoot,
         presetRoot: config.presetRoot,
         pluginSearchDirs: resolvedPluginSearchDirs,
-        poolRouting: resolvedRouting,
+        poolRoutingOverrides: resolvedOverrides,
         heartbeatIntervalMs: config.heartbeatIntervalMs,
         shutdownTimeoutMs: config.shutdownTimeoutMs
     });
@@ -151,6 +166,28 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
     ctx.effect(function* () {
         yield ctx.provide('narratePipeline', controller);
         void controller.trackBackgroundTask(controller.ensureDefaultBookSelected());
+        void controller.trackBackgroundTask(controller.refreshDiscoveredDefaultModel());
+
+        yield ctx.on('session/event', (session, event) => {
+            if (controller.isAdmissionClosed) return;
+            const sessionId = (session as { id?: unknown } | undefined)?.id;
+            if (typeof sessionId === 'string' && sessionId.startsWith('narrate-')) {
+                return;
+            }
+            if (event && event.type === 'model/selection') {
+                controller.handleHostSessionModelSelection(event.data);
+            }
+        });
+
+        yield ctx.on('llm/adapters-updated', () => {
+            if (controller.isAdmissionClosed) return;
+            controller.handleHostLlmCatalogUpdated();
+        });
+
+        yield ctx.on('llm/models-updated', () => {
+            if (controller.isAdmissionClosed) return;
+            controller.handleHostLlmCatalogUpdated();
+        });
 
         // 独立子插件隔离 RoleRunner 动态挂载点（session/event 监听与 agents.create 作用域），
         // 确保卸载时先由 controller.shutdown() 排空活跃运行，再释放 runnerFiber。

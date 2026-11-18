@@ -1208,7 +1208,7 @@ export class SyncPipeline {
             const scanRes = await generateStructuredJson(
                 this.llm,
                 {
-                    pool: 'audit',
+                    pool: 'strong_creative',
                     traceStage: 'sync.audit',
                     staticPrefixBlocks: [
                         '你是只读连续性冲突扫描器。历史旧章已被作者修订，请扫描下游已归档章节是否存在与旧章修订内容冲突之处，精确标出 dirty_chapter、dirty_quote（历史脏章原文原句）、chapter_number、line_number、quote（下游章节原文原句）与 description。严禁建议自动修改下游正文。'

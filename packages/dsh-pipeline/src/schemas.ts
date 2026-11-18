@@ -20,8 +20,25 @@ export interface LlmRouteTarget {
     model: string;
 }
 
-/** 三个模型池的路由映射 */
-export type LlmPoolRouting = Record<LlmPool, LlmRouteTarget>;
+/** 双模型池的路由映射（兼容可选历史 audit 字段） */
+export interface LlmPoolRouting {
+    strong_creative: LlmRouteTarget;
+    fast_retrieval: LlmRouteTarget;
+    audit?: LlmRouteTarget | undefined;
+}
+
+/** DSH 本体当前默认模型选择 */
+export interface HostDefaultModelSelection {
+    provider: string;
+    model: string;
+    reasoningEffort?: string | undefined;
+}
+
+/** 显式覆盖的强/弱双池模型路由（跟随 DSH 默认时省略对应键） */
+export interface PoolModelOverrides {
+    strong_creative?: string | undefined;
+    fast_retrieval?: string | undefined;
+}
 
 /** 运行态排他任务类型 */
 export type RuntimeTaskKind =
@@ -138,6 +155,8 @@ export interface AvailableModelItem {
 /** 模型路由保存响应载荷 (对应 PUT /api/narrate/model-routing) */
 export interface SaveModelRoutingResult {
     status: 'ok';
+    defaultModel: HostDefaultModelSelection | null;
+    poolOverrides: PoolModelOverrides;
     modelRouting: Record<string, string>;
     roleRouting: Record<string, RoleModelOverride>;
     roleDefinitions: RoleDefinitionItem[];

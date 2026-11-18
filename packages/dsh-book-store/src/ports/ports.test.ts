@@ -11,7 +11,8 @@ import {
     NodeSystemAdapter,
     ScriptedLlmAdapter,
     StructuredOutputError,
-    generateStructuredJson
+    generateStructuredJson,
+    normalizeLlmPool
 } from './index.js';
 
 const tempDirs: string[] = [];
@@ -146,6 +147,13 @@ describe('LlmPort & generateStructuredJson', () => {
         const parsed0 = JSON.parse(lines[0]!) as LlmCallLogEntry;
         expect(parsed0.pool).toBe('strong_creative');
         expect(parsed0.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('normalizeLlmPool 将历史 audit 池无损回退至 strong_creative', () => {
+        expect(normalizeLlmPool('strong_creative')).toBe('strong_creative');
+        expect(normalizeLlmPool('fast_retrieval')).toBe('fast_retrieval');
+        expect(normalizeLlmPool('audit')).toBe('strong_creative');
+        expect(normalizeLlmPool(undefined)).toBe('strong_creative');
     });
 });
 

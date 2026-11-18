@@ -6,6 +6,7 @@ import {
     type StreamChunk
 } from '@deepseek-ai/dsh-llm';
 import {
+    normalizeLlmPool,
     sleepWithSignal,
     traceArtifact,
     traceEvent,
@@ -15,6 +16,7 @@ import {
     type LlmPool,
     type LlmPort,
     type ReasoningEffortLevel,
+    type RoleModelOverride,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
 import { isAbortError } from '../pipeline/helpers.js';
@@ -43,10 +45,13 @@ const RETRYABLE_NODE_CODES = new Set<string>([
 /** DshLlmAdapter 配置选项 */
 export interface DshLlmAdapterOptions {
     poolRouting: LlmPoolRouting;
+    resolvePoolRouting?: (() => LlmPoolRouting) | undefined;
+    ensurePoolRoutingReady?: (() => Promise<void>) | undefined;
     resolveModelRouting?: () => Promise<Record<string, string> | undefined>;
     resolveBookConfig?:
         | (() => Promise<Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined>)
         | undefined;
+    resolveGlobalRoleRouting?: (() => Record<string, RoleModelOverride>) | undefined;
     maxRetries?: number | undefined;
     backoffMs?: readonly number[] | undefined;
     retryableCodes?: readonly string[] | undefined;
@@ -127,21 +132,37 @@ export function parseProviderModelSpec(spec: string, fallbackProvider: string): 
     return { provider: fallbackProvider, model: trimmed };
 }
 
-/** 按模型池解析 provider 与 model（支持 book_config.yaml 的 model_routing 单书覆盖与 provider:model 复合格式） */
+/** 按模型池解析 provider 与 model（支持 book_config.yaml 的 model_routing 单书覆盖、provider:model 复合格式及历史 'audit' 无损回退） */
 export function resolvePoolRoute(
     poolRouting: LlmPoolRouting,
     pool: LlmPool,
     bookConfig?: Pick<BookConfig, 'model_routing'> | Record<string, string> | undefined
 ): LlmRouteTarget {
-    const base = poolRouting[pool];
-    if (!base) {
-        throw new Error(`未配置模型池路由: ${pool}`);
-    }
     const routingMap =
         bookConfig && 'model_routing' in bookConfig
             ? (bookConfig as Pick<BookConfig, 'model_routing'>).model_routing
             : (bookConfig as Record<string, string> | undefined);
-    const override = routingMap?.[pool]?.trim();
+
+    if (pool === 'audit') {
+        const auditOverride = routingMap?.['audit']?.trim();
+        const auditBase = poolRouting.audit ?? poolRouting.strong_creative;
+        if (auditOverride) {
+            if (!auditBase) {
+                throw new Error('未配置模型池路由: strong_creative');
+            }
+            return parseProviderModelSpec(auditOverride, auditBase.provider);
+        }
+        if (poolRouting.audit) {
+            return { provider: poolRouting.audit.provider, model: poolRouting.audit.model };
+        }
+    }
+
+    const effectivePool = pool === 'audit' ? normalizeLlmPool(pool) : pool;
+    const base = poolRouting[effectivePool];
+    if (!base) {
+        throw new Error(`未配置模型池路由: ${effectivePool}`);
+    }
+    const override = routingMap?.[effectivePool]?.trim();
     if (!override) {
         return { provider: base.provider, model: base.model };
     }
@@ -256,12 +277,15 @@ export async function resolveCompatibleReasoningEffort(
  */
 export class DshLlmAdapter implements LlmPort {
     private readonly poolRouting: LlmPoolRouting;
+    private readonly resolvePoolRouting: DshLlmAdapterOptions['resolvePoolRouting'];
+    private readonly ensurePoolRoutingReady: DshLlmAdapterOptions['ensurePoolRoutingReady'];
     private readonly maxRetries: number;
     private readonly backoffMs: readonly number[];
     private readonly retryableCodes: Set<string>;
     private readonly sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>;
     private readonly resolveModelRouting: DshLlmAdapterOptions['resolveModelRouting'];
     private readonly resolveBookConfig: DshLlmAdapterOptions['resolveBookConfig'];
+    private readonly resolveGlobalRoleRouting: DshLlmAdapterOptions['resolveGlobalRoleRouting'];
 
     constructor(
         private readonly llm: Pick<LlmRuntime, 'stream'> & {
@@ -270,8 +294,11 @@ export class DshLlmAdapter implements LlmPort {
         options: DshLlmAdapterOptions
     ) {
         this.poolRouting = options.poolRouting;
+        this.resolvePoolRouting = options.resolvePoolRouting;
+        this.ensurePoolRoutingReady = options.ensurePoolRoutingReady;
         this.resolveModelRouting = options.resolveModelRouting;
         this.resolveBookConfig = options.resolveBookConfig;
+        this.resolveGlobalRoleRouting = options.resolveGlobalRoleRouting;
         this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
         this.backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;
         this.retryableCodes = options.retryableCodes
@@ -292,15 +319,32 @@ export class DshLlmAdapter implements LlmPort {
             throw signal.reason instanceof Error ? signal.reason : new Error('Aborted');
         }
 
+        await this.ensurePoolRoutingReady?.();
+        const activePoolRouting = this.resolvePoolRouting
+            ? this.resolvePoolRouting()
+            : this.poolRouting;
         const resolvedBookConfig =
             roleContext?.bookConfig ?? (await this.resolveBookConfig?.());
         const modelRouting = resolvedBookConfig
             ? resolvedBookConfig.model_routing
             : await this.resolveModelRouting?.();
-        const effectiveBookConfig: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined =
-            resolvedBookConfig ?? (modelRouting ? { model_routing: modelRouting } : undefined);
+        const globalRoleRouting = this.resolveGlobalRoleRouting?.();
+        const mergedRoleRouting =
+            globalRoleRouting && Object.keys(globalRoleRouting).length > 0
+                ? { ...globalRoleRouting, ...(resolvedBookConfig?.role_routing ?? {}) }
+                : resolvedBookConfig?.role_routing;
+        let effectiveBookConfig: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined;
+        if (resolvedBookConfig || modelRouting || mergedRoleRouting) {
+            effectiveBookConfig = {};
+            if (modelRouting) {
+                effectiveBookConfig.model_routing = modelRouting;
+            }
+            if (mergedRoleRouting) {
+                effectiveBookConfig.role_routing = mergedRoleRouting;
+            }
+        }
         const route = resolveRoleRoute(
-            this.poolRouting,
+            activePoolRouting,
             roleContext?.roleId,
             req.pool,
             effectiveBookConfig

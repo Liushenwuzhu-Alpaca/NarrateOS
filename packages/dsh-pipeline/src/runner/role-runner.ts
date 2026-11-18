@@ -17,6 +17,7 @@ import {
     type NarrationSubjectivity,
     type NarrateStoreService,
     type ProseGateOptions,
+    type RoleModelOverride,
     type TimelineMode,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
@@ -196,6 +197,9 @@ export interface RoleRunnerDeps {
     roleLoader: RoleLoader;
     llmAdapter: DshLlmAdapter;
     poolRouting: LlmPoolRouting;
+    resolvePoolRouting?: (() => LlmPoolRouting) | undefined;
+    ensurePoolRoutingReady?: (() => Promise<void>) | undefined;
+    resolveGlobalRoleRouting?: (() => Record<string, RoleModelOverride>) | undefined;
     onStageEvent?: ((event: StageStreamSseEvent) => void) | undefined;
 }
 
@@ -331,6 +335,11 @@ export class RoleRunner {
     private readonly roleLoader: RoleLoader;
     private readonly llmAdapter: DshLlmAdapter;
     private readonly poolRouting: LlmPoolRouting;
+    private readonly resolvePoolRouting: (() => LlmPoolRouting) | undefined;
+    private readonly ensurePoolRoutingReady: (() => Promise<void>) | undefined;
+    private readonly resolveGlobalRoleRouting:
+        | (() => Record<string, RoleModelOverride>)
+        | undefined;
     private readonly defaultOnStageEvent: ((event: StageStreamSseEvent) => void) | undefined;
     private readonly activeHandles = new Set<AgentHandle>();
     private readonly activePromises = new Set<Promise<unknown>>();
@@ -346,7 +355,26 @@ export class RoleRunner {
         this.roleLoader = deps.roleLoader;
         this.llmAdapter = deps.llmAdapter;
         this.poolRouting = deps.poolRouting;
+        this.resolvePoolRouting = deps.resolvePoolRouting;
+        this.ensurePoolRoutingReady = deps.ensurePoolRoutingReady;
+        this.resolveGlobalRoleRouting = deps.resolveGlobalRoleRouting;
         this.defaultOnStageEvent = deps.onStageEvent;
+    }
+
+    private resolveEffectiveBookConfig(
+        bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'>
+    ): Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined {
+        const globalRoleRouting = this.resolveGlobalRoleRouting?.();
+        if (!globalRoleRouting || Object.keys(globalRoleRouting).length === 0) {
+            return bookConfig;
+        }
+        return {
+            ...(bookConfig ?? {}),
+            role_routing: {
+                ...globalRoleRouting,
+                ...(bookConfig?.role_routing ?? {})
+            }
+        };
     }
 
     /** 绑定独立的 Cordis 子执行上下文（隔离 session/event 监听与 agents.create 作用域） */
@@ -601,11 +629,16 @@ export class RoleRunner {
         try {
             this.storeService.beginRun(runId);
 
+            await this.ensurePoolRoutingReady?.();
+            const activePoolRouting = this.resolvePoolRouting
+                ? this.resolvePoolRouting()
+                : this.poolRouting;
+            const effectiveBookConfig = this.resolveEffectiveBookConfig(params.bookConfig);
             const route = resolveRoleRoute(
-                this.poolRouting,
+                activePoolRouting,
                 params.roleId,
                 roleCfg.pool,
-                params.bookConfig,
+                effectiveBookConfig,
                 params.poolOverride
             );
             modelId = `${route.provider}:${route.model}`;
@@ -757,7 +790,7 @@ export class RoleRunner {
             const requestedEffort = resolveRoleReasoningEffort(
                 params.roleId,
                 roleCfg.reasoningEffort,
-                params.bookConfig,
+                effectiveBookConfig,
                 params.reasoningEffortOverride
             );
             const compatibleEffort = await resolveCompatibleReasoningEffort(
@@ -771,7 +804,7 @@ export class RoleRunner {
             const effectiveTemperature = params.temperatureOverride ?? roleCfg.temperature;
 
             if (params.bookConfig?.trace_level !== 'off') {
-                const roleOverride = params.bookConfig?.role_routing?.[params.roleId];
+                const roleOverride = effectiveBookConfig?.role_routing?.[params.roleId];
                 const effectivePool = resolveTierPool(
                     roleOverride?.tier,
                     params.poolOverride ?? roleCfg.pool
@@ -1116,10 +1149,11 @@ export class RoleRunner {
             throw new Error(`净室工种 ${roleId} 禁止配置 tools 或 yield_tool`);
         }
 
+        const effectiveBookConfig = this.resolveEffectiveBookConfig(options.bookConfig);
         const resolvedEffort = resolveRoleReasoningEffort(
             roleId,
             roleCfg.reasoningEffort,
-            options.bookConfig,
+            effectiveBookConfig,
             options.request.reasoningEffort
         );
         const req: CleanroomRequest = {
@@ -1142,7 +1176,7 @@ export class RoleRunner {
                     generate: (tracedReq, signal) =>
                         this.llmAdapter.generate(tracedReq, signal, {
                             roleId,
-                            bookConfig: options.bookConfig
+                            bookConfig: effectiveBookConfig
                         })
                 },
                 req,

@@ -11,7 +11,7 @@ import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from '../index.js';
 import { RoleLoader } from '../roles/role-loader.js';
-import { DshLlmAdapter, resolvePoolRoute } from '../runner/dsh-llm-adapter.js';
+import { DshLlmAdapter, resolvePoolRoute, resolveRoleRoute } from '../runner/dsh-llm-adapter.js';
 import { RoleRunner } from '../runner/role-runner.js';
 import {
     createGitBookWorkspace,
@@ -122,6 +122,57 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         );
     });
 
+    it('RoleLoader 与 resolvePoolRoute/resolveRoleRoute 对旧书残留 audit 配置无损回退至 strong_creative', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'legacy-audit-fallback');
+        await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
+        await writeFile(join(bookRoot, 'world/roles/prompts/fact-checker.md'), '核查提示词正文\n', 'utf8');
+        await writeFile(
+            join(bookRoot, 'world/roles/fact-checker.yml'),
+            [
+                'id: fact-checker',
+                'pool: audit',
+                'cleanroom: false',
+                'promptFile: ./prompts/fact-checker.md',
+                'temperature: 0.1',
+                'maxSteps: 6',
+                'maxReadCalls: 5',
+                'tools:',
+                '  - book_read',
+                'yieldTool: yield_verdict'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+
+        const loader = new RoleLoader();
+        const loaded = await loader.loadRoleConfig('fact-checker', bookRoot);
+        expect(loaded.pool).toBe('strong_creative');
+
+        const dualPoolRouting = {
+            strong_creative: { provider: 'openai', model: 'gpt-5-prose' },
+            fast_retrieval: { provider: 'openai', model: 'gpt-5-mini' }
+        };
+        expect(resolvePoolRoute(dualPoolRouting, 'audit')).toEqual({
+            provider: 'openai',
+            model: 'gpt-5-prose'
+        });
+        expect(
+            resolveRoleRoute(dualPoolRouting, 'fact-checker', 'audit', {
+                model_routing: { strong_creative: 'anthropic:claude-sonnet-4-5' }
+            })
+        ).toEqual({
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-5'
+        });
+        expect(
+            resolveRoleRoute(dualPoolRouting, 'fact-checker', 'audit', {
+                model_routing: { audit: 'legacy-audit-model' }
+            })
+        ).toEqual({
+            provider: 'openai',
+            model: 'legacy-audit-model'
+        });
+    });
+
     it('DshLlmAdapter 解析 provider:model 复合路由，RoleRunner 保证 beginRun 失败必落账、会话清理跨书隔离且透传真实 finishReason', async () => {
         const route = resolvePoolRoute(
             {
@@ -165,12 +216,10 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         });
 
         const incompleteRouting = {
-            strong_creative: { provider: 'deepseek', model: 'v4' },
             fast_retrieval: { provider: 'deepseek', model: 'flash' }
         } as unknown as {
             strong_creative: { provider: string; model: string };
             fast_retrieval: { provider: string; model: string };
-            audit: { provider: string; model: string };
         };
         const errorRunner = new RoleRunner({
             ctx,

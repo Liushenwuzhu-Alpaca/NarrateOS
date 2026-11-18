@@ -125,9 +125,12 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.equal(pipeline.id, 'narrateos-pipeline');
     assert.equal(pipeline.config?.booksRoot, './books');
     assert.equal(pipeline.config?.presetRoot, undefined, 'dsh-pipeline 自行回退解析 presetRoot，不在 patch 中硬编码 !!js');
-    for (const pool of ['strong_creative', 'fast_retrieval', 'audit']) {
-        assert.ok(pipeline.config?.poolRouting?.[pool]?.provider, `缺少 poolRouting.${pool}.provider`);
-        assert.ok(pipeline.config?.poolRouting?.[pool]?.model, `缺少 poolRouting.${pool}.model`);
+    assert.equal(pipeline.config?.poolRouting?.audit, undefined, 'cordis.patch.yml 仅暴露强/弱双池，不得残留 audit 第三池');
+    for (const pool of ['strong_creative', 'fast_retrieval']) {
+        const poolCfg = pipeline.config?.poolRouting?.[pool];
+        assert.ok(poolCfg !== undefined && typeof poolCfg === 'object', `缺少 poolRouting.${pool} 双池槽位`);
+        assert.equal(poolCfg.provider ?? '', '', `poolRouting.${pool}.provider 不应写死默认假模型提供商`);
+        assert.equal(poolCfg.model ?? '', '', `poolRouting.${pool}.model 不应写死默认假模型名`);
     }
 
     const studioUi = hostByName.get('@narrateos/dsh-client-ui-studio');
@@ -409,7 +412,7 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         planner: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_outline', tools: ['book_read', 'book_grep'] },
         writer: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: true, yieldTool: null, tools: [], maxSteps: 1, maxReadCalls: 0 },
         patch: { pool: 'strong_creative', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_patched_draft', tools: ['patch_paragraphs'], maxSteps: 8, maxReadCalls: 0 },
-        'fact-checker': { pool: 'audit', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
+        'fact-checker': { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
         extractor: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_state_patch', tools: ['book_read', 'book_grep'] },
         dreamer: { pool: 'strong_creative', reasoningEffort: 'high', cleanroom: false, yieldTool: 'yield_dream_commit', tools: ['book_read', 'book_grep', 'book_glob', 'book_edit'] }
     };
