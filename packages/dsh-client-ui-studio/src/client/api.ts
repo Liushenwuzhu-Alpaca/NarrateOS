@@ -1,4 +1,6 @@
 import type {
+    AdvanceVolumeRequest,
+    AdvanceVolumeResponse,
     BooksListPayload,
     BootBookRequest,
     BootBookResponse,
@@ -7,12 +9,18 @@ import type {
     DreamRequest,
     DreamResponse,
     EntitiesViewPayload,
+    HaltRequest,
     HaltResponse,
     HaltViewPayload,
     HarvestVoiceRequest,
     HarvestVoiceResponse,
+    HealConflictsRequest,
+    HealConflictsResponse,
     MarkdownViewPayload,
     NarrateStatusPayload,
+    ParallelForkResponse,
+    ParallelMergeResponse,
+    ParallelWindowRequest,
     PostSignalRequest,
     PostSignalResponse,
     PutChapterRequest,
@@ -29,6 +37,7 @@ import type {
     StageRunRecord,
     StepChapterRequest,
     StepChapterResponse,
+    SyncConflictsViewPayload,
     SyncResponse,
     TelemetryViewPayload,
     YoloStartRequest,
@@ -200,6 +209,11 @@ export function fetchViewHalt(): Promise<HaltViewPayload> {
     return requestJson<HaltViewPayload>('/api/narrate/views?kind=halt');
 }
 
+/** 查询手改下游同步冲突视图（.ops/sync_conflicts.json） */
+export function fetchViewSyncConflicts(): Promise<SyncConflictsViewPayload> {
+    return requestJson<SyncConflictsViewPayload>('/api/narrate/views?kind=sync_conflicts');
+}
+
 /** 推进单章生成流水线 */
 export function stepChapter(payload: StepChapterRequest): Promise<StepChapterResponse> {
     return requestJson<StepChapterResponse>('/api/narrate/step', {
@@ -219,6 +233,38 @@ export function syncManuscripts(): Promise<SyncResponse> {
 /** 手动触发离线 Dreaming（VACUUM 与跨章自愈） */
 export function runDreaming(payload: DreamRequest = {}): Promise<DreamResponse> {
     return requestJson<DreamResponse>('/api/narrate/dream', {
+        method: 'POST',
+        body: payload
+    });
+}
+
+/** 触发三级跨章连续性自愈（未传 conflicts 时自动读取 .ops/sync_conflicts.json） */
+export function healConflicts(payload: HealConflictsRequest = {}): Promise<HealConflictsResponse> {
+    return requestJson<HealConflictsResponse>('/api/narrate/heal', {
+        method: 'POST',
+        body: payload
+    });
+}
+
+/** 执行原子换卷封存或全书完结封笔 */
+export function advanceVolume(payload: AdvanceVolumeRequest = {}): Promise<AdvanceVolumeResponse> {
+    return requestJson<AdvanceVolumeResponse>('/api/narrate/volume/advance', {
+        method: 'POST',
+        body: payload
+    });
+}
+
+/** 开启并行时间线分叉窗口 */
+export function forkParallelWindow(payload: ParallelWindowRequest): Promise<ParallelForkResponse> {
+    return requestJson<ParallelForkResponse>('/api/narrate/parallel/fork', {
+        method: 'POST',
+        body: payload
+    });
+}
+
+/** 合流并执行并行时间线 3-Way Merge */
+export function mergeParallelWindow(payload: ParallelWindowRequest): Promise<ParallelMergeResponse> {
+    return requestJson<ParallelMergeResponse>('/api/narrate/parallel/merge', {
         method: 'POST',
         body: payload
     });
@@ -255,11 +301,13 @@ export function deleteSignal(payload: {
     });
 }
 
-/** 请求在安全检查点停机（Safe-Point Halt） */
-export function requestHalt(): Promise<HaltResponse> {
+/** 请求停机（默认安全点软停机；传入 { force: true } 立即硬中断在途调用） */
+export function requestHalt(options?: HaltRequest): Promise<HaltResponse> {
+    const body: HaltRequest =
+        options?.force !== undefined ? { force: options.force } : {};
     return requestJson<HaltResponse>('/api/narrate/halt', {
         method: 'POST',
-        body: {}
+        body
     });
 }
 
@@ -279,7 +327,7 @@ export function stopYolo(): Promise<YoloStopResponse> {
     });
 }
 
-const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
+export const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
     'connected',
     'book_switched',
     'halt:requested',
@@ -291,11 +339,17 @@ const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
     'chapter:phase',
     'stage',
     'stage:session',
+    'stage:event',
     'gate:result',
     'checker:result',
     'dream:started',
     'dream:completed',
     'signal:received',
+    'signal:withdrawn',
+    'volume:advanced',
+    'task:idle',
+    'heal:started',
+    'heal:completed',
     'telemetry',
     'yolo:stop_requested',
     'yolo_halted',
