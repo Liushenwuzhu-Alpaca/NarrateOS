@@ -1,0 +1,2784 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NarrateOS 创作室 · Wave 4 满血清样剧场原型 v4</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+
+  @property --beam-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .proto-stage {
+    --bg-outer: #0c0d0f;
+    --bg-host: #121316;
+    --bg-side: #16171a;
+    --bg-stage: #1a1b1e;
+    --bg-sheet: #1f2024;
+    --bg-elevated: #26282d;
+    --bg-hover: rgba(255, 255, 255, 0.052);
+    --bg-active: rgba(255, 255, 255, 0.09);
+
+    --line-subtle: rgba(255, 255, 255, 0.068);
+    --line-default: rgba(255, 255, 255, 0.125);
+    --line-strong: rgba(255, 255, 255, 0.22);
+
+    --ink-1: #f3f2ee;
+    --ink-2: #c8c6bf;
+    --ink-3: #98968f;
+    --ink-4: #76746e;
+    --ink-prose: #e6e2d8;
+
+    --accent: #4c7cf0;
+    --accent-fill: #3762cc;
+    --accent-fill-hover: #436fd9;
+    --accent-ink: #96b6ff;
+    --accent-soft: rgba(76, 124, 240, 0.14);
+    --accent-line: rgba(76, 124, 240, 0.4);
+
+    --ok: #46c978;
+    --ok-ink: #6ee098;
+    --ok-soft: rgba(70, 201, 120, 0.14);
+
+    --warn: #eba434;
+    --warn-ink: #f5be62;
+    --warn-soft: rgba(235, 164, 52, 0.13);
+    --warn-line: rgba(235, 164, 52, 0.38);
+
+    --danger: #e86565;
+    --danger-ink: #f59393;
+    --danger-soft: rgba(232, 101, 101, 0.12);
+    --danger-line: rgba(232, 101, 101, 0.38);
+
+    --seal: #df6447;
+    --seal-soft: rgba(223, 100, 71, 0.11);
+    --numeral-ink: #575853;
+    --scrim: rgba(0, 0, 0, 0.44);
+
+    --shadow-sheet: 0 6px 24px rgba(0, 0, 0, 0.14);
+    --shadow-float: 0 16px 40px rgba(0, 0, 0, 0.44), 0 2px 8px rgba(0, 0, 0, 0.24);
+    --shadow-dock: 0 10px 30px rgba(0, 0, 0, 0.34);
+
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-layout: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+    --font-serif: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", Georgia, serif;
+    --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+    color-scheme: dark;
+    caret-color: var(--accent);
+    width: 100%;
+    height: 100%;
+    background: var(--bg-outer);
+    color: var(--ink-1);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .proto-stage[data-theme="light"] {
+    color-scheme: light;
+    --bg-outer: #e4dfd5;
+    --bg-host: #ece8df;
+    --bg-side: #f2efe7;
+    --bg-stage: #f8f5ee;
+    --bg-sheet: #fcfbf7;
+    --bg-elevated: #ffffff;
+    --bg-hover: rgba(32, 28, 22, 0.048);
+    --bg-active: rgba(32, 28, 22, 0.085);
+
+    --line-subtle: rgba(32, 28, 22, 0.08);
+    --line-default: rgba(32, 28, 22, 0.14);
+    --line-strong: rgba(32, 28, 22, 0.24);
+
+    --ink-1: #1e1c18;
+    --ink-2: #48443d;
+    --ink-3: #68635a;
+    --ink-4: #847e73;
+    --ink-prose: #26231e;
+
+    --accent: #3566d6;
+    --accent-fill: #2f5ec9;
+    --accent-fill-hover: #2650b2;
+    --accent-ink: #2450b5;
+    --accent-soft: rgba(53, 102, 214, 0.11);
+    --accent-line: rgba(53, 102, 214, 0.36);
+
+    --ok: #1f9952;
+    --ok-ink: #16703b;
+    --ok-soft: rgba(31, 153, 82, 0.12);
+
+    --warn: #cc7408;
+    --warn-ink: #8a4b03;
+    --warn-soft: rgba(204, 116, 8, 0.11);
+    --warn-line: rgba(204, 116, 8, 0.36);
+
+    --danger: #cf4242;
+    --danger-ink: #a12525;
+    --danger-soft: rgba(207, 66, 66, 0.09);
+    --danger-line: rgba(207, 66, 66, 0.35);
+
+    --seal: #c4452b;
+    --seal-soft: rgba(196, 69, 43, 0.08);
+    --numeral-ink: #bdb5a7;
+
+    --shadow-sheet: 0 6px 22px rgba(36, 30, 20, 0.06);
+    --shadow-float: 0 16px 38px rgba(36, 30, 20, 0.13), 0 2px 8px rgba(36, 30, 20, 0.06);
+    --shadow-dock: 0 8px 26px rgba(36, 30, 20, 0.08);
+  }
+
+  .proto-stage ::selection { background: var(--accent-soft); }
+  .proto-stage :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 7px; }
+  .proto-stage ::-webkit-scrollbar { width: 6px; height: 6px; }
+  .proto-stage ::-webkit-scrollbar-thumb { background: var(--line-default); border-radius: 999px; }
+  .proto-stage ::-webkit-scrollbar-track { background: transparent; }
+
+  .num { font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  /* 原生 View Transitions 共享元素流转 */
+  ::view-transition-old(studio-sheet),
+  ::view-transition-new(studio-sheet) {
+    animation-duration: 210ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  ::view-transition-group(trace-lamp),
+  ::view-transition-group(trace-role) {
+    animation-duration: 260ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* 顶部仿真预览栏（仅独立 HTML 演示器使用，正式挂载 DSH 时不渲染） */
+  .sim-bar {
+    min-height: 36px;
+    padding: 4px 12px;
+    background: var(--bg-host);
+    color: var(--ink-2);
+    border-bottom: 1px solid var(--line-subtle);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .sim-tag {
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: var(--seal-soft);
+    color: var(--seal);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .sim-seg {
+    display: inline-flex;
+    background: var(--bg-hover);
+    border-radius: 5px;
+    padding: 2px;
+    gap: 2px;
+    white-space: nowrap;
+  }
+  .sim-seg button {
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .sim-seg button:hover { color: var(--ink-1); }
+  .sim-seg button.on { background: var(--accent-fill); color: #ffffff; font-weight: 500; }
+  .sim-action-btn {
+    border: 1px solid var(--seal);
+    background: var(--seal-soft);
+    color: var(--seal);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .sim-action-btn:hover { background: var(--bg-active); color: var(--ink-1); }
+  .sim-meta {
+    margin-left: auto;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .viewport-shell {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .dsh-app {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    background: var(--bg-stage);
+    border-left: 1px solid var(--line-subtle);
+    border-right: 1px solid var(--line-subtle);
+    transition: max-width 0.22s var(--ease-layout), grid-template-columns 0.22s var(--ease-layout);
+    overflow: hidden;
+  }
+
+  /* DSH 宿主左侧栏 */
+  .host-rail {
+    background: var(--bg-host);
+    border-right: 1px solid var(--line-subtle);
+    padding: 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    user-select: none;
+    overflow: hidden;
+  }
+  .host-brand-row {
+    height: 32px;
+    padding: 0 6px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--ink-1);
+  }
+  .host-nav-btn {
+    height: 32px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-3);
+    font-family: inherit;
+    font-size: 12.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .host-nav-btn:hover { background: var(--bg-hover); color: var(--ink-1); }
+  .host-nav-btn.active { background: var(--bg-active); color: var(--ink-1); font-weight: 500; }
+  .host-collapsed .host-txt { display: none; }
+  .host-collapsed .host-brand-row,
+  .host-collapsed .host-nav-btn { justify-content: center; padding: 0; }
+
+  .studio-grid {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    transition: grid-template-columns 0.22s var(--ease-layout);
+    position: relative;
+    scroll-timeline: --manuscript-scroll y;
+  }
+
+  /* 通用按钮与徽标 */
+  .btn {
+    height: 30px;
+    padding: 0 11px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+  }
+  .btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--ink-1); }
+  .btn-subtle { background: var(--bg-hover); color: var(--ink-1); }
+  .btn-subtle:hover:not(:disabled) { background: var(--bg-active); }
+  .btn-outline { border-color: var(--line-default); background: var(--bg-sheet); color: var(--ink-1); }
+  .btn-outline:hover:not(:disabled) { border-color: var(--line-strong); background: var(--bg-elevated); }
+  .btn-primary {
+    background: var(--accent-fill);
+    color: #ffffff;
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-fill-hover); color: #ffffff; }
+  .btn-warn {
+    background: var(--warn-soft);
+    border-color: var(--warn-line);
+    color: var(--warn-ink);
+  }
+  .btn-warn:hover:not(:disabled) { background: var(--bg-active); }
+  .icon-only { width: 30px; padding: 0; justify-content: center; }
+
+  .split-action {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 7px;
+    position: relative;
+  }
+  .split-action > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .split-action > .btn:nth-child(2) {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.22);
+    padding: 0 9px;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .badge-ok { background: var(--ok-soft); color: var(--ok-ink); }
+  .badge-accent { background: var(--accent-soft); color: var(--accent-ink); }
+  .badge-warn { background: var(--warn-soft); color: var(--warn-ink); }
+  .badge-danger { background: var(--danger-soft); color: var(--danger-ink); }
+  .badge-neutral { background: var(--bg-hover); color: var(--ink-3); }
+
+  /* 浮层菜单（@starting-style 原生渐显，关闭快于打开） */
+  .menu-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 244px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--line-default);
+    border-radius: 11px;
+    box-shadow: var(--shadow-float);
+    padding: 5px;
+    z-index: 80;
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    transition: opacity 0.14s var(--ease-out), transform 0.14s var(--ease-out);
+  }
+  @starting-style {
+    .menu-pop {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.98);
+    }
+  }
+  .menu-pop.left { right: auto; left: 0; }
+  .menu-row {
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-1);
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    cursor: pointer;
+  }
+  .menu-row:hover { background: var(--bg-hover); }
+  .menu-row span { font-size: 11px; color: var(--ink-3); }
+  .menu-row.danger { color: var(--danger-ink); }
+  .menu-divider { height: 1px; background: var(--line-subtle); margin: 4px 4px; }
+
+  /* 左栏 */
+  .left-pane {
+    background: var(--bg-side);
+    border-right: 1px solid var(--line-subtle);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .left-vol-bar {
+    height: 46px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--ink-2);
+    font-weight: 600;
+  }
+  .left-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 8px;
+  }
+  .left-group-label {
+    padding: 4px 10px 6px;
+    font-size: 11px;
+    color: var(--ink-3);
+    display: flex;
+    justify-content: space-between;
+  }
+  .ch-item {
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12.5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+    margin-bottom: 2px;
+  }
+  .ch-item:hover { background: var(--bg-hover); color: var(--ink-1); }
+  .ch-item.active { background: var(--bg-active); color: var(--ink-1); font-weight: 500; }
+  .ch-title-wrap { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ch-no { color: var(--ink-3); margin-right: 4px; font-size: 11.5px; }
+  .left-codex {
+    padding: 10px 8px 12px;
+    border-top: 1px solid var(--line-subtle);
+  }
+  .codex-row {
+    width: 100%;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+  }
+  .codex-row:hover { background: var(--bg-hover); color: var(--ink-1); }
+  .codex-row.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 500; }
+
+  /* 中栏 */
+  .center-pane {
+    background: var(--bg-stage);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+  }
+  .center-header {
+    height: 46px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--line-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .book-switcher {
+    border: 0;
+    background: transparent;
+    color: var(--ink-1);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 4px 8px;
+    margin-left: -8px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .book-switcher:hover { background: var(--bg-hover); }
+
+  /* 阅读工具栏 + 672px 版心光学对齐的 3x2 Agent 工序矩阵 */
+  .reader-toolbar-wrap {
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 10px 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .reader-bar {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .seg-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--bg-side);
+    padding: 3px;
+    border-radius: 9px;
+    border: 1px solid var(--line-subtle);
+  }
+  .seg-tab {
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 11px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
+  }
+  .seg-tab:hover { color: var(--ink-1); }
+  .seg-tab.active {
+    background: var(--bg-sheet);
+    color: var(--ink-1);
+    font-weight: 500;
+  }
+
+  .pipeline-toggle-btn {
+    height: 31px;
+    padding: 0 11px;
+    border-radius: 9px;
+    border: 1px solid var(--line-default);
+    background: var(--bg-sheet);
+    color: var(--ink-1);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .pipeline-toggle-btn:hover { border-color: var(--line-strong); background: var(--bg-elevated); }
+  .pipeline-toggle-btn.open { border-color: var(--accent-line); background: var(--bg-elevated); }
+
+  .lamp-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .lamp {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1.5px solid var(--line-strong);
+    display: inline-block;
+    flex-shrink: 0;
+    transition: background 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  }
+  .lamp.done {
+    background: var(--ok);
+    border-color: var(--ok);
+    box-shadow: 0 0 0 2px var(--ok-soft);
+  }
+  .lamp.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+    animation: lamp-breathe 1.8s ease-in-out infinite;
+  }
+  .lamp.halt {
+    background: var(--danger);
+    border-color: var(--danger);
+    border-radius: 5px;
+    transform: rotate(45deg) scale(0.88);
+    box-shadow: 0 0 0 3px var(--danger-soft);
+  }
+
+  @keyframes lamp-breathe {
+    0%, 100% { box-shadow: 0 0 0 2px var(--accent-soft); }
+    50% { box-shadow: 0 0 0 5px var(--accent-soft); }
+  }
+
+  @keyframes beam-spin {
+    to { --beam-angle: 360deg; }
+  }
+
+  /* Bolder + Animate 强化版 3x2 工序灯阵 */
+  .pipeline-drawer {
+    width: 100%;
+    background: var(--bg-sheet);
+    border: 1px solid var(--line-default);
+    border-radius: 11px;
+    padding: 9px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+  }
+  .pipe-card {
+    padding: 9px 11px;
+    border-radius: 9px;
+    border: 1px solid var(--line-subtle);
+    background: var(--bg-side);
+    color: var(--ink-1);
+    font-family: inherit;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: pointer;
+    position: relative;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s var(--ease-out);
+  }
+  .pipe-card:hover { background: var(--bg-hover); border-color: var(--line-default); }
+  .pipe-card.selected {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+  }
+  /* 连写运行态激活卡片呼吸能量边框（CSS @property 驱动） */
+  .pipe-card.running-live {
+    background:
+      linear-gradient(var(--bg-sheet), var(--bg-sheet)) padding-box,
+      conic-gradient(from var(--beam-angle), var(--accent-line), rgba(76, 124, 240, 0.08) 42%, var(--accent) 78%, var(--accent-line)) border-box;
+    border: 1px solid transparent;
+    animation: beam-spin 3.6s linear infinite;
+  }
+  .pipe-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .pipe-step-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-1);
+  }
+  .pipe-step-state {
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+  .pipe-card.running-live .pipe-step-state { color: var(--accent-ink); font-weight: 500; }
+  .pipe-live-note {
+    font-size: 11px;
+    color: var(--ink-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pipe-card.running-live .pipe-live-note { color: var(--ink-2); }
+  .pipe-model-tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pipe-card.selected .pipe-model-tag { color: var(--accent-ink); }
+
+  /* 书稿滚动区 + CSS scroll() 阅读进度丝带 */
+  .stage-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 24px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    scroll-timeline-name: --manuscript-scroll;
+    scroll-timeline-axis: block;
+  }
+
+  .manuscript-sheet {
+    width: 100%;
+    max-width: 672px;
+    background: var(--bg-sheet);
+    border: 1px solid var(--line-subtle);
+    border-radius: 12px;
+    padding: 36px 44px 44px;
+    box-shadow: var(--shadow-sheet);
+    position: relative;
+    overflow: hidden;
+    view-transition-name: studio-sheet;
+  }
+
+  /* Overdrive A：纯 CSS scroll() 驱动的 2px 朱砂阅读进度丝带（含无感 JS 回退） */
+  .reading-ribbon {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--seal);
+    transform-origin: 0 50%;
+    transform: scaleX(var(--scroll-fallback, 0));
+    opacity: 0.88;
+    pointer-events: none;
+  }
+  @supports (animation-timeline: scroll()) {
+    .reading-ribbon {
+      transform: scaleX(0);
+      animation: ribbon-progress linear both;
+      animation-timeline: --manuscript-scroll;
+    }
+  }
+  @keyframes ribbon-progress {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+  }
+
+  .ch-meta-line {
+    font-size: 12px;
+    color: var(--ink-3);
+    margin-top: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .manuscript-sheet h1 {
+    font-family: var(--font-serif);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.38;
+    color: var(--ink-1);
+    margin: 0;
+    letter-spacing: 0.02em;
+    text-wrap: balance;
+  }
+
+  /* 清样品牌签名刊头：68px 超细序号 + 标题与下方元数据（绝不在标题上方放小号眉题） */
+  .editorial-masthead {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 22px;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+  .editorial-numeral {
+    font-family: Inter, system-ui, sans-serif;
+    font-weight: 200;
+    font-size: 68px;
+    line-height: 0.86;
+    letter-spacing: -0.04em;
+    color: var(--numeral-ink);
+    padding-right: 20px;
+    border-right: 1px solid var(--line-default);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+  }
+
+  /* 真实 Patch 润色校勘签（位于刊头下方，不猜字符偏移） */
+  .patch-colophon-bar {
+    margin: -8px 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 11px;
+    border-radius: 9px;
+    background: var(--warn-soft);
+    border: 1px solid var(--warn-line);
+    color: var(--warn-ink);
+    font-size: 12px;
+  }
+  .patch-colophon-bar button {
+    border: 0;
+    background: transparent;
+    color: var(--warn-ink);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .prose-body {
+    font-family: var(--font-serif);
+    font-size: 17px;
+    line-height: 1.98;
+    color: var(--ink-prose);
+    letter-spacing: 0.012em;
+  }
+  .prose-para-wrap { position: relative; }
+  .prose-folio {
+    position: absolute;
+    left: -36px;
+    top: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-4);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    user-select: none;
+  }
+  .prose-para-wrap:hover .prose-folio { opacity: 0.9; }
+  .prose-body p {
+    margin: 0 0 16px;
+    text-indent: 2em;
+    border-radius: 5px;
+  }
+  .prose-body p.conflict-highlight {
+    background: var(--danger-soft);
+    outline: 1px solid var(--danger-line);
+    padding: 6px 10px;
+    margin-left: -10px;
+    margin-right: -10px;
+  }
+
+  /* 章末朱砂印泥「定稿」章（内联 SVG feTurbulence 纤维肌理 + 落印阻尼） */
+  .editorial-endmark {
+    margin-top: 36px;
+    padding-top: 24px;
+    border-top: 1px dashed var(--line-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 9px;
+  }
+  .seal-stamp {
+    width: 50px;
+    height: 50px;
+    border-radius: 7px;
+    border: 1.6px solid var(--seal);
+    background: var(--seal-soft);
+    color: var(--seal);
+    font-family: var(--font-serif);
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    display: grid;
+    place-items: center;
+    transform: rotate(-4deg);
+    filter: url(#cinnabar-ink-grain);
+    user-select: none;
+    transition: transform 0.25s var(--ease-out);
+  }
+  .seal-stamp:hover { transform: rotate(0deg) scale(1.04); }
+  .seal-stamp.stamping {
+    animation: seal-impress 0.36s var(--ease-out) both;
+  }
+  @keyframes seal-impress {
+    0% { opacity: 0; transform: scale(1.38) rotate(-10deg); }
+    68% { opacity: 1; transform: scale(0.96) rotate(-3deg); }
+    100% { opacity: 1; transform: scale(1) rotate(-4deg); }
+  }
+
+  /* 双模式设定冲突裁决卡（Q1 物理真源分流） */
+  .conflict-card {
+    width: 100%;
+    max-width: 672px;
+    background: var(--bg-sheet);
+    border: 1px solid var(--danger-line);
+    border-radius: 12px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .conflict-head {
+    padding: 10px 16px;
+    background: var(--danger-soft);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .conflict-body {
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .conflict-compare {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+  }
+  .compare-pane {
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: var(--bg-side);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+  .compare-caption {
+    font-size: 11px;
+    color: var(--ink-3);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* 暂存草稿恢复温和提示条（Q5 非阻断草稿守卫） */
+  .stash-restore-bar {
+    width: 100%;
+    max-width: 672px;
+    padding: 8px 14px;
+    border-radius: 11px;
+    background: var(--warn-soft);
+    border: 1px solid var(--warn-line);
+    color: var(--warn-ink);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  /* 底部候选与便签舱 */
+  .director-footer {
+    padding: 6px 24px 16px;
+    display: flex;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .director-wrap {
+    width: 100%;
+    max-width: 672px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .next-ideas-panel {
+    background: var(--bg-sheet);
+    border: 1px solid var(--line-default);
+    border-radius: 11px;
+    overflow: hidden;
+  }
+  .next-ideas-header {
+    width: 100%;
+    padding: 6px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+  }
+  .next-ideas-header:hover { background: var(--bg-hover); color: var(--ink-1); }
+  .next-idea-list {
+    border-top: 1px solid var(--line-subtle);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .next-idea-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 5px 8px;
+    border-radius: 7px;
+  }
+  .next-idea-row:hover { background: var(--bg-hover); }
+  .next-idea-text {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1.45;
+  }
+  .next-idea-row:hover .next-idea-text { color: var(--ink-1); }
+  .next-idea-go {
+    border: 0;
+    background: transparent;
+    color: var(--accent-ink);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .next-idea-row:hover .next-idea-go { background: var(--accent-soft); }
+
+  .queued-notes { display: flex; flex-wrap: wrap; gap: 6px; }
+  .note-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--bg-sheet);
+    border: 1px solid var(--line-default);
+    font-size: 11.5px;
+    color: var(--ink-2);
+  }
+  .note-tag button {
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .note-dock {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 10px;
+    background: var(--bg-sheet);
+    border: 1px solid var(--line-default);
+    border-radius: 11px;
+    box-shadow: var(--shadow-dock);
+    position: relative;
+    transition: border-color 0.15s ease;
+  }
+  .note-dock:focus-within { border-color: var(--accent-line); }
+  .note-kind-btn {
+    height: 26px;
+    padding: 0 9px;
+    border-radius: 7px;
+    border: 0;
+    background: var(--bg-hover);
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .spotlight-select {
+    height: 25px;
+    border-radius: 7px;
+    border: 1px solid var(--accent-line);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    padding: 0 6px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .note-input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ink-1);
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  .note-input::placeholder { color: var(--ink-3); }
+
+  /* 右栏（支持 <820px 自动浮层抽屉） */
+  .right-pane {
+    background: var(--bg-side);
+    border-left: 1px solid var(--line-subtle);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .right-pane.as-drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(352px, 90%);
+    z-index: 65;
+    box-shadow: var(--shadow-float);
+  }
+  .drawer-scrim {
+    position: absolute;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 60;
+  }
+  .right-top {
+    height: 46px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--line-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .right-tab {
+    height: 30px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-3);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .right-tab:hover { color: var(--ink-1); background: var(--bg-hover); }
+  .right-tab.active { color: var(--ink-1); background: var(--bg-active); font-weight: 500; }
+  .right-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* 去框化右栏分组（De-boxed Inspector） */
+  .panel-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+  .panel-section:last-child { border-bottom: 0; }
+  .sec-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-1);
+  }
+  .stat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .stat-row span:first-child { color: var(--ink-3); }
+
+  /* 实时轨迹流条目（Q3 保留 DSH 原生会话与工具调用粒度） */
+  .trace-turn {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12.5px;
+    line-height: 1.62;
+    color: var(--ink-2);
+  }
+  .trace-turn:last-child { border-bottom: 0; }
+  .trace-tool-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 9px;
+    border-radius: 7px;
+    background: var(--bg-sheet);
+    border: 1px solid var(--line-subtle);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-2);
+  }
+
+  /* 两层可编辑模型路由 */
+  .pool-edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .role-override-list {
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--line-subtle);
+  }
+  .role-row { border-bottom: 1px solid var(--line-subtle); }
+  .role-summary {
+    width: 100%;
+    padding: 8px 4px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-1);
+    font-family: inherit;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+    border-radius: 7px;
+  }
+  .role-summary:hover { background: var(--bg-hover); }
+  .role-detail {
+    padding: 8px 4px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .field-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+  .field-row select,
+  .field-row input {
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 7px;
+    border: 1px solid var(--line-default);
+    background: var(--bg-sheet);
+    color: var(--ink-1);
+    font-family: inherit;
+    font-size: 12px;
+  }
+
+  /* 轻量内联对话框（A2 换卷 / 多线并行 / 开新书） */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    display: grid;
+    place-items: center;
+    z-index: 110;
+    padding: 16px;
+  }
+  .modal-card {
+    width: 100%;
+    max-width: 440px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--line-default);
+    border-radius: 12px;
+    box-shadow: var(--shadow-float);
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .modal-card h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink-1);
+  }
+
+  .toast-banner {
+    position: fixed;
+    top: 48px;
+    right: 20px;
+    padding: 8px 14px;
+    border-radius: 9px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--line-default);
+    box-shadow: var(--shadow-float);
+    color: var(--ink-1);
+    font-size: 12px;
+    z-index: 140;
+  }
+
+  /* 无障碍：系统减弱动态效果时移除位移、旋转循环与脉冲，保留色彩与状态反馈 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+    ::view-transition-old(studio-sheet),
+    ::view-transition-new(studio-sheet),
+    ::view-transition-group(trace-lamp),
+    ::view-transition-group(trace-role) {
+      animation: none !important;
+    }
+  }
+</style>
+</head>
+<body>
+<!-- 内联宣纸印泥纤维微斑驳 SVG 滤镜（零外部资源依赖） -->
+<svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true">
+  <defs>
+    <filter id="cinnabar-ink-grain" x="-8%" y="-8%" width="116%" height="116%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.75" numOctaves="2" seed="7" result="grain" />
+      <feDisplacementMap in="SourceGraphic" in2="grain" scale="1.4" xChannelSelector="R" yChannelSelector="G" />
+    </filter>
+  </defs>
+</svg>
+
+<div id="app" class="proto-stage" data-theme="dark"></div>
+
+<script>
+(function () {
+  const BOOKS = {
+    port: {
+      slug: 'port-audit',
+      title: '港口审计',
+      vol: '第一卷 · 寒潮封港',
+      storyDay: 4,
+      dirtyCount: 0,
+      commitSha: '81c4a9e',
+      stateSha: 'f03d72b',
+      patchedCount: 1,
+      chapters: [
+        { num: 1, title: '五号驳船封条', chars: 3180 },
+        { num: 2, title: '夜账缺页', chars: 2940 }
+      ],
+      prose: [
+        { text: '海风把三号栈桥铁缆上的水汽吹进领口时，陈砚收回摸过封条的手。指腹沾着一层混了柴油味的黑霜，封条铅扣背面那道新锉痕还在反光。', kind: 'normal' },
+        { text: '雾气顺着铁缆爬上三号栈桥时，五号驳船的甲板还滴着煤水，陈砚抬起完好无损的左手推开账房木门。', kind: 'conflict' },
+        { text: '周敬山坐在柜台内侧，炭盆搁在墙角，算盘珠子压在受潮翻卷的舱单底页上，谁也没有先开口。', kind: 'normal' },
+        { text: '油灯芯爆了一粒轻响。陈砚把牛皮公文包放到台沿，露出夹层里那张盖过海关旧戳的过磅单。', kind: 'normal' },
+        { text: '周敬山的目光在那枚暗红旧戳上停了两秒，枯瘦手指把算盘往怀里拨了半寸，低声道：“封港夜里不过磅，审计员先生走错门了。”', kind: 'normal' }
+      ],
+      options: [
+        '陈砚当面拆穿五号驳船吨位涂改，逼周敬山交出夜班钥匙',
+        '暂不打草惊蛇，借核对煤水损耗潜入东港冷库查验封条',
+        '切换周敬山视角：在陈砚离开栈桥后连夜销毁副账底页'
+      ],
+      codex: {
+        entities: [
+          { id: 'char_chenyan', name: '陈砚（审计员）', innate: '左腕旧骨折未愈，无法单手推举重物', current: '持五号驳船过磅单、三号栈桥通行证', secret: '真实受命调查三年前沉船案（未揭晓底牌，写手不可见）' },
+          { id: 'char_zhou', name: '周敬山（东港账房）', innate: '右耳微聋，精于复式旧账', current: '保管冷库副钥匙，神色戒备', secret: '替港务副督办隐瞒私货吨位（非当前视角内心，写手不可见）' }
+        ],
+        threads: [
+          '五号驳船吃水线比报关单深三十公分（第 1 章埋设 · 待揭穿）',
+          '海关旧戳日期比封港令晚两天（第 2 章埋设 · 跟进中）'
+        ],
+        warped: [
+          '原定第 2 章码头工人罢工冲突 -> 因陈砚选择夜访账房，该预案已自动作废，物理隔离在写手视野外'
+        ],
+        pending: [
+          '东港三号冷库夹层藏有未登记进口医疗器械封箱（待后续触发）'
+        ]
+      }
+    },
+    tower: {
+      slug: 'salt-belltower',
+      title: '白盐钟楼',
+      vol: '第二卷 · 灰雾学派',
+      storyDay: 12,
+      dirtyCount: 1,
+      commitSha: 'c49e10a',
+      stateSha: '92ab114',
+      patchedCount: 0,
+      chapters: [
+        { num: 13, title: '铜摆停跳', chars: 3420 },
+        { num: 14, title: '地下盐井回声', chars: 3090 }
+      ],
+      prose: [
+        { text: '钟楼第四层没有窗，只有潮湿盐霜顺着石灰缝往下淌。林澈数到第十七级石阶时停住脚步。', kind: 'normal' },
+        { text: '提灯照亮井口铁栏，昨天还锁死的三道铅封已经被利器齐根切断，断口干干净净。', kind: 'normal' }
+      ],
+      options: [
+        '顺着绳索下探盐井底部的旧排水暗渠',
+        '返回守夜人值房调阅昨晚的出入火漆登记'
+      ],
+      codex: { entities: [{ id: 'char_linche', name: '林澈（守钟学徒）', innate: '对高频金属共振异常敏锐', current: '持守夜提灯立于盐井铁栏前', secret: '知晓导师失踪前曾私自拆解铜摆' }], threads: ['三道铅封切口带有学派内部银锯齿痕'], warped: [], pending: ['井底暗渠通向旧海关盐税司地窖'] }
+    },
+    fresh: {
+      slug: 'new-chronicle',
+      title: '灰烬航路（新书待开篇）',
+      vol: '第一卷 · 尚未开写',
+      storyDay: 1,
+      dirtyCount: 0,
+      commitSha: 'init001',
+      stateSha: 'init001',
+      patchedCount: 0,
+      chapters: [],
+      prose: [],
+      options: [
+        '按《作者契约》开篇第一拍写出主角登船验货与首个悬念锚点'
+      ],
+      codex: { entities: [{ id: 'char_shen', name: '沈渡（领航员）', innate: '熟悉北方冰山暗流海图', current: '初抵七号船坞候船', secret: '海图夹页藏有失踪商队最后航迹' }], threads: [], warped: [], pending: ['首章完成校准后自动提取沈渡对话声纹标本'] }
+    }
+  };
+
+  const ROLES = [
+    { step: 1, id: 'librarian', shortName: '1. Librarian', roleTitle: 'Librarian', label: '翻阅前文与设定选页', liveHint: '已召回第 1 章摘要与 2 张人物卡', defaultPool: 'fast' },
+    { step: 2, id: 'planner', shortName: '2. Planner', roleTitle: 'Planner', label: '规划本章剧情节拍', liveHint: '已锁定两拍夜访账房细纲', defaultPool: 'strong' },
+    { step: 3, id: 'writer', shortName: '3. Writer', roleTitle: 'Writer', label: '纯净环境执笔正文', liveHint: '正在执笔正文 · 已屏蔽 2 项未揭底牌', defaultPool: 'strong' },
+    { step: 0, id: 'patch', shortName: 'Patch', roleTitle: 'Patch', label: '局部修补套话与瑕疵', liveHint: '替换套话“空气仿佛凝固了”', defaultPool: 'strong' },
+    { step: 4, id: 'fact_checker', shortName: '4. Checker', roleTitle: 'Checker', label: '独立核对前后设定矛盾', liveHint: '逐句核验人物伤势与时间线', defaultPool: 'audit' },
+    { step: 5, id: 'extractor', shortName: '5. Extractor', roleTitle: 'Extractor', label: '章末更新人物与伏笔', liveHint: '待正文通过后同步人物与下章候选', defaultPool: 'fast' },
+    { step: 6, id: 'dreamer', shortName: '6. Dreamer', roleTitle: 'Dreamer', label: '跨章阶段整理与归纳', liveHint: '距下次满额整理还差 8,880 字', defaultPool: 'strong' }
+  ];
+
+  const NOTE_KINDS = [
+    { key: 'DIRECTOR_NOTE', label: '剧情微调' },
+    { key: 'SPOTLIGHT_TRIGGER', label: '切换视角' },
+    { key: 'FLASHBACK', label: '插入回忆' },
+    { key: 'RETCON', label: '圆谎修补' }
+  ];
+
+  const state = {
+    theme: 'dark',
+    vp: 'full',
+    hostCollapsed: true,
+    scene: 'idle', // 'idle' | 'running' | 'conflict_sync' | 'conflict_halt'
+    stopPending: false,
+    parallelActive: false,
+    parallelWindowId: 'win-dock-night',
+    parallelBranchId: 'branch-a',
+    bookKey: 'port',
+    selectedCh: 2,
+    mainSurface: 'chapter',
+    chapterTab: 'prose',
+    codexTab: 'entities',
+    isEditing: false,
+    draftBySlot: {}, // key: `${bookKey}:${ch}`
+    pipelineExpanded: true,
+    ideasExpanded: false,
+    noteKind: 'DIRECTOR_NOTE',
+    spotlightEntityId: 'char_zhou',
+    flashbackDay: 2,
+    noteText: '',
+    notes: [
+      { kind: '剧情微调', text: '陈砚去三号栈桥门房，与周敬山当面对质五号驳船夜班钥匙' }
+    ],
+    rightOpen: true,
+    rightTab: 'trace',
+    traceAttempt: 'writer', // 'writer' | 'patch'
+    selectedRoleForTrace: 'writer',
+    lowLevelOpen: false,
+    expandedRoles: { writer: true },
+    poolModels: {
+      strong: 'deepseek:deepseek-reasoner',
+      fast: 'deepseek:deepseek-chat',
+      audit: 'openai:gpt-5.4-high'
+    },
+    roleOverrides: {
+      writer: { tier: '', effort: 'high', model: '' },
+      fact_checker: { tier: '', effort: 'high', model: 'anthropic:claude-opus-4-6' }
+    },
+    routingDirty: false,
+    openMenu: null,
+    activeModal: null, // 'volume' | 'parallel' | 'boot'
+    sealJustStamped: false,
+    measuredStudioW: 0,
+    toast: null
+  };
+
+  let activeInkAnimations = [];
+
+  const ICONS = {
+    sidebar: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M5.5 2.5v11"/></svg>',
+    rightbar: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10.5 2.5v11"/></svg>',
+    chat: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 3.5h11v7.5H6l-3.5 2.5V3.5z"/></svg>',
+    plugin: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 2.5v3M10 2.5v3M3.5 5.5h9v3.5a4.5 4.5 0 0 1-9 0V5.5zM8 13.5v-1"/></svg>',
+    studio: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2.5h10v11H3z"/><path d="M5.5 6h5M5.5 9h3.5"/></svg>',
+    chev: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4.5 6.2L8 9.8l3.5-3.6"/></svg>',
+    chevUp: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4.5 9.8L8 6.2l3.5 3.6"/></svg>',
+    play: '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 3.2l8.3 4.8-8.3 4.8V3.2z"/></svg>',
+    pause: '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><rect x="3.5" y="3" width="3.2" height="10" rx="0.8"/><rect x="9.3" y="3" width="3.2" height="10" rx="0.8"/></svg>',
+    more: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>',
+    sync: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.2 8a5.2 5.2 0 1 1-1.4-3.6"/><path d="M13.4 2.6v2.6h-2.6"/></svg>',
+    edit: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.8 2.8l2.4 2.4-7.6 7.6H3.2v-2.4l7.6-7.6z"/></svg>',
+    spark: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2l1.6 4.4L14 8l-4.4 1.6L8 14l-1.6-4.4L2 8l4.4-1.6L8 2z"/></svg>',
+    send: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M8 12.8V3.5M4.2 7.2L8 3.4l3.8 3.8"/></svg>',
+    back: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>',
+    close: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg>'
+  };
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function prefersReducedMotion() {
+    return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  function withViewTransition(fn) {
+    cancelInkAnimations();
+    if (!prefersReducedMotion() && typeof document.startViewTransition === 'function') {
+      document.startViewTransition(() => { fn(); });
+    } else {
+      fn();
+    }
+  }
+
+  function cancelInkAnimations() {
+    while (activeInkAnimations.length > 0) {
+      const anim = activeInkAnimations.pop();
+      try { anim.cancel(); } catch (_) {}
+    }
+  }
+
+  /* Overdrive B：Web Animations API 新章段落墨迹渐进显影 + 印泥落章 */
+  function triggerInkAndSealReveal() {
+    cancelInkAnimations();
+    state.sealJustStamped = true;
+    render();
+    if (prefersReducedMotion()) return;
+
+    const paras = document.querySelectorAll('.prose-para-wrap');
+    paras.forEach((el, idx) => {
+      if (typeof el.animate !== 'function') return;
+      const anim = el.animate(
+        [
+          { opacity: 0.08, transform: 'translateY(5px)', filter: 'blur(1.5px)' },
+          { opacity: 1, transform: 'translateY(0)', filter: 'blur(0px)' }
+        ],
+        {
+          duration: 340,
+          delay: Math.min(idx * 55, 240),
+          easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+          fill: 'both'
+        }
+      );
+      activeInkAnimations.push(anim);
+    });
+    clearTimeout(triggerInkAndSealReveal._t);
+    triggerInkAndSealReveal._t = setTimeout(() => {
+      state.sealJustStamped = false;
+    }, 500);
+  }
+
+  function showToast(msg) {
+    state.toast = msg;
+    render();
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => { state.toast = null; render(); }, 2600);
+  }
+
+  function slotKey(bookKey, ch) {
+    return bookKey + ':' + ch;
+  }
+
+  function resolveEffectiveModel(role) {
+    const ov = state.roleOverrides[role.id] || {};
+    if (ov.model && ov.model.trim()) {
+      return { model: ov.model.trim(), source: '单独指定模型' };
+    }
+    if (ov.tier === 'strong') return { model: state.poolModels.strong, source: '改用强模型池' };
+    if (ov.tier === 'weak') return { model: state.poolModels.fast, source: '改用快模型池' };
+    const base = role.defaultPool === 'strong' ? state.poolModels.strong : role.defaultPool === 'fast' ? state.poolModels.fast : state.poolModels.audit;
+    return { model: base, source: '跟随默认池' };
+  }
+
+  function isConflictScene() {
+    return state.scene === 'conflict_sync' || state.scene === 'conflict_halt';
+  }
+
+  function stepStatus(roleId) {
+    if (state.scene === 'idle') return roleId === 'dreamer' ? 'idle' : 'done';
+    if (state.scene === 'running') {
+      if (roleId === 'librarian' || roleId === 'planner') return 'done';
+      if (roleId === 'writer') return 'active';
+      return 'idle';
+    }
+    if (roleId === 'librarian' || roleId === 'planner' || roleId === 'writer') return 'done';
+    if (roleId === 'fact_checker') return 'halt';
+    return 'idle';
+  }
+
+  function stepStatusText(st) {
+    if (st === 'done') return '已完成';
+    if (st === 'active') return '生成中';
+    if (st === 'halt') return '有冲突';
+    return '待命';
+  }
+
+  function renderCodexView(book) {
+    const horizonTotal = book.codex.warped.length + book.codex.pending.length;
+    return `
+      <div class="manuscript-sheet">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid var(--line-subtle)">
+          <div>
+            <h1 style="font-family:inherit;font-size:20px;margin-bottom:4px">《${esc(book.title)}》全书设定集</h1>
+            <div style="font-size:12px;color:var(--ink-3)">每写完一章从正文自动提炼汇总，并非单章手稿页签</div>
+          </div>
+          <button type="button" class="btn btn-subtle" style="height:28px;padding:0 10px" data-act="back-to-prose">
+            ${ICONS.back} 返回${book.chapters.length ? '第 ' + state.selectedCh + ' 章正文' : '书稿扉页'}
+          </button>
+        </div>
+
+        <div class="seg-tabs" style="margin-bottom:18px">
+          <button type="button" class="seg-tab ${state.codexTab === 'entities' ? 'active' : ''}" data-act="codex-tab" data-tab="entities">人物与物品 (${book.codex.entities.length})</button>
+          <button type="button" class="seg-tab ${state.codexTab === 'threads' ? 'active' : ''}" data-act="codex-tab" data-tab="threads">未解伏笔 (${book.codex.threads.length})</button>
+          <button type="button" class="seg-tab ${state.codexTab === 'discarded' ? 'active' : ''}" data-act="codex-tab" data-tab="discarded">剧情预案与废案 (${horizonTotal})</button>
+        </div>
+
+        ${state.codexTab === 'entities' ? (book.codex.entities.length ? book.codex.entities.map(e => `
+          <div style="padding:12px 0;border-bottom:1px solid var(--line-subtle);display:flex;flex-direction:column;gap:6px">
+            <div style="font-weight:600;font-size:14px;color:var(--ink-1)">${esc(e.name)}</div>
+            <div style="font-size:12.5px;color:var(--ink-2)"><span style="color:var(--ink-3)">固有特征：</span>${esc(e.innate)}</div>
+            <div style="font-size:12.5px;color:var(--ink-2)"><span style="color:var(--ink-3)">当前状态：</span>${esc(e.current)}</div>
+            <div style="font-size:12px;color:var(--warn-ink)">隐藏底牌：${esc(e.secret)}</div>
+          </div>
+        `).join('') : '<div style="color:var(--ink-3);font-size:12.5px">暂无已建档人物条目。</div>') : ''}
+
+        ${state.codexTab === 'threads' ? (book.codex.threads.length ? book.codex.threads.map(t => `
+          <div style="padding:10px 0;border-bottom:1px solid var(--line-subtle);font-size:13px;color:var(--ink-2)">· ${esc(t)}</div>
+        `).join('') : '<div style="color:var(--ink-3);font-size:12.5px">当前尚无挂起的跨卷伏笔。</div>') : ''}
+
+        ${state.codexTab === 'discarded' ? `
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div>
+              <div style="font-weight:600;font-size:12.5px;color:var(--ink-1);margin-bottom:8px">已推翻隔离的旧预案（写手不可见 · ${book.codex.warped.length}）</div>
+              ${book.codex.warped.length ? book.codex.warped.map(d => `
+                <div style="padding:10px 12px;border-radius:9px;background:var(--bg-side);font-size:13px;color:var(--ink-2);margin-bottom:6px">${esc(d)}</div>
+              `).join('') : '<div style="font-size:12px;color:var(--ink-3)">暂无因改道作废的旧预案。</div>'}
+            </div>
+            <div style="padding-top:10px;border-top:1px solid var(--line-subtle)">
+              <div style="font-weight:600;font-size:12.5px;color:var(--ink-1);margin-bottom:8px">待推进的后续伏脉预案（${book.codex.pending.length}）</div>
+              ${book.codex.pending.length ? book.codex.pending.map(p => `
+                <div style="padding:6px 0;font-size:12.5px;color:var(--ink-2)">· ${esc(p)}</div>
+              `).join('') : '<div style="font-size:12px;color:var(--ink-3)">暂无待推进预案。</div>'}
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function renderRightPane(book) {
+    if (state.rightTab === 'trace') {
+      const role = ROLES.find(r => r.id === state.selectedRoleForTrace) || ROLES[2];
+      const eff = resolveEffectiveModel(role);
+      const st = stepStatus(role.id);
+      const showAttempts = role.id === 'writer' || role.id === 'patch';
+      return `
+        <div class="panel-section">
+          <div class="sec-head">
+            <span style="display:inline-flex;align-items:center;gap:8px">
+              <i class="lamp ${st}" style="view-transition-name:trace-lamp"></i>
+              <span style="view-transition-name:trace-role">${esc(role.shortName)}</span>
+            </span>
+            <span class="badge ${st === 'halt' ? 'badge-danger' : st === 'active' ? 'badge-accent' : 'badge-ok'}">
+              ${stepStatusText(st)}
+            </span>
+          </div>
+          <div style="font-size:12px;color:var(--ink-3)">执行模型：<span class="mono" style="color:var(--ink-1)">${esc(eff.model)}</span></div>
+          ${showAttempts ? `
+            <div style="display:flex;gap:6px;margin-top:2px">
+              <button type="button" class="btn ${state.traceAttempt === 'writer' ? 'btn-subtle' : ''}" style="height:24px;padding:0 9px;font-size:11.5px" data-act="pick-attempt" data-att="writer">初稿执笔 (Writer)</button>
+              <button type="button" class="btn ${state.traceAttempt === 'patch' ? 'btn-subtle' : ''}" style="height:24px;padding:0 9px;font-size:11.5px" data-act="pick-attempt" data-att="patch">局部润色 (Patch #1)</button>
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="panel-section">
+          <div class="sec-head"><span>实时思考流与工具调用轨迹</span><span class="mono" style="color:var(--ink-4)">DSH Native</span></div>
+          ${role.id === 'librarian' ? `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">思考链 (Thinking)</b>
+              <div>本章需衔接五号驳船封条锉痕并进入东港账房，先检索陈砚伤势与周敬山档案，再核对第 1 章末尾时间锚点。</div>
+              <div class="trace-tool-pill"><span>book_search("五号驳船 铅封")</span><span style="color:var(--ok-ink)">18ms · 命中 2 处</span></div>
+              <div class="trace-tool-pill"><span>book_read("entities/char_chenyan.md")</span><span style="color:var(--ok-ink)">9ms · 完整读取</span></div>
+            </div>
+          ` : role.id === 'planner' ? `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">排纲推演 (Planner)</b>
+              <div>消化导演便签“当面对质夜班钥匙”，编排两拍递增节拍并校验未触碰第一卷禁区上限。</div>
+              <div class="trace-tool-pill"><span>yield_outline(beats: 2)</span><span style="color:var(--ok-ink)">门禁通过</span></div>
+            </div>
+          ` : role.id === 'fact_checker' ? `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">独立异构核查 (Checker)</b>
+              <div>逐段比对草稿动作与陈砚固有伤势锁、故事第 4 天时间线，自动筛除 1 条无原文依据的幻觉指控。</div>
+              <div class="trace-tool-pill"><span>book_read("entities/char_chenyan.md")</span><span style="color:var(--ok-ink)">双原句验真</span></div>
+              <div class="trace-tool-pill"><span>yield_verdict(pass: ${isConflictScene() ? 'false' : 'true'})</span><span style="color:${isConflictScene() ? 'var(--danger-ink)' : 'var(--ok-ink)'}">${isConflictScene() ? '命中 1 处伤势矛盾' : '核验通过'}</span></div>
+            </div>
+          ` : role.id === 'extractor' ? `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">章末台账提炼 (Extractor)</b>
+              <div>从定稿正文提取周敬山算盘底页线索，更新第 2 章双轨摘要卡并生成 3 条下一章走向建议。</div>
+              <div class="trace-tool-pill"><span>yield_state_patch(entities: 2)</span><span style="color:var(--ok-ink)">原子提交</span></div>
+            </div>
+          ` : role.id === 'dreamer' ? `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">跨章阶段整理 (Dreamer)</b>
+              <div>当前距上次整理新增 6,120 字（未满 15,000 字阈值），保持前缀缓存稳定命中 92.6%，暂无需唤醒整理。</div>
+            </div>
+          ` : state.traceAttempt === 'patch' || role.id === 'patch' ? `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">纯内存段落润色 (Zero-Disk Cleanroom Patch)</b>
+              <div>静态文风门禁检出第 3 段含高频套话“空气仿佛凝固了”，仅提取该段上下文执行具象动作替换。</div>
+              <div class="trace-tool-pill"><span>替换段落 P03</span><span style="color:var(--ok-ink)">套话密度归 0.0</span></div>
+            </div>
+          ` : `
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">净室输入核验 (Cleanroom Input)</b>
+              <div>零工具单轮执笔模式：已装入卷级前缀与本章两拍细纲；系统物理剥离周敬山隐藏底牌与作废的码头罢工旧预案。</div>
+            </div>
+            <div class="trace-turn">
+              <b style="color:var(--ink-1)">思考链与成稿输出</b>
+              <div>围绕铁缆水汽、受潮舱单与暗红海关旧戳展开动作博弈，避免心理直白总结，完稿共 2,940 字。</div>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    if (state.rightTab === 'status') {
+      return `
+        <div class="panel-section">
+          <div class="sec-head"><span>本章给写手装入的资料</span><span class="badge badge-accent num">18.4k / 32k Token</span></div>
+          <div class="stat-row"><span>固定背景与人物声纹</span><b class="num">4,120 Token</b></div>
+          <div class="stat-row"><span>前文片段与本章细纲</span><b class="num">14,280 Token</b></div>
+          <div class="stat-row"><span>防剧透自动屏蔽项</span><span style="color:var(--warn-ink)">已隔离 2 项秘密底牌</span></div>
+        </div>
+
+        <div class="panel-section">
+          <div class="sec-head"><span>文风体检</span><span class="badge badge-ok">通过</span></div>
+          <div class="stat-row"><span>词汇丰富度</span><b class="num">0.79（良好）</b></div>
+          <div class="stat-row"><span>信息新鲜度（防车轱辘话）</span><b class="num">4.12 bit（充沛）</b></div>
+          <div class="stat-row"><span>句式长短变化</span><b class="num">0.64（自然）</b></div>
+          <div class="stat-row"><span>网文套话密度</span><b class="num">0.0 处 / 千字</b></div>
+        </div>
+
+        <div class="panel-section">
+          <div class="sec-head"><span>自动整理进度</span><span class="badge badge-neutral num">6,120 / 15,000 字</span></div>
+          <div class="stat-row"><span>待整理变动人物</span><b class="num">2 / 6 位</b></div>
+          <div class="stat-row"><span>前缀缓存命中率</span><b class="num" style="color:var(--ok-ink)">92.6%</b></div>
+        </div>
+
+        <div class="panel-section">
+          <button type="button" class="role-summary" style="padding:4px 0" data-act="toggle-lowlevel">
+            <span style="font-weight:600;color:var(--ink-2)">底层校验与提交明细（核查 / 锁 / Git SHA）</span>
+            <span>${state.lowLevelOpen ? ICONS.chevUp : ICONS.chev}</span>
+          </button>
+          ${state.lowLevelOpen ? `
+            <div style="display:flex;flex-direction:column;gap:4px;padding-top:4px">
+              <div class="stat-row"><span>独占事务锁状态</span><span class="mono">${state.scene === 'running' ? '已锁定 (STEPPING)' : '空闲 (free)'}</span></div>
+              <div class="stat-row"><span>最近正文提交 SHA</span><span class="mono">${esc(book.commitSha)}</span></div>
+              <div class="stat-row"><span>最近台账提交 SHA</span><span class="mono">${esc(book.stateSha)}</span></div>
+              <div class="stat-row"><span>Checker 筛除伪引文</span><b class="num">已筛除 1 条幻觉指控</b></div>
+              <div class="stat-row"><span>待生效视角切镜队列</span><b class="num">${state.notes.filter(n => n.kind.indexOf('切换视角') === 0).length} 条</b></div>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    const allExpanded = ROLES.every(r => state.expandedRoles[r.id]);
+    return `
+      <div class="panel-section">
+        <div class="sec-head">
+          <span>第一层 · 全局强弱基础模型底座</span>
+          <span class="badge badge-neutral">可直接修改</span>
+        </div>
+        <div class="pool-edit-list">
+          <label class="field-row">
+            <span>强模型池（默认负责 Planner · Writer · Patch · Dreamer）</span>
+            <input type="text" class="mono" data-pool-model="strong" value="${esc(state.poolModels.strong)}" list="model-candidates" />
+          </label>
+          <label class="field-row">
+            <span>快模型池（默认负责 Librarian · Extractor）</span>
+            <input type="text" class="mono" data-pool-model="fast" value="${esc(state.poolModels.fast)}" list="model-candidates" />
+          </label>
+          <label class="field-row">
+            <span>独立挑错池（默认负责 Checker 异构核查）</span>
+            <input type="text" class="mono" data-pool-model="audit" value="${esc(state.poolModels.audit)}" list="model-candidates" />
+          </label>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <div class="sec-head">
+          <span>第二层 · 按 Agent 单独指定</span>
+          <button type="button" class="btn" style="height:24px;padding:0 8px;font-size:11.5px" data-act="toggle-all-roles">
+            ${allExpanded ? '全部收起' : '全部展开'}
+          </button>
+        </div>
+        <div class="role-override-list">
+          ${ROLES.map(role => {
+            const eff = resolveEffectiveModel(role);
+            const ov = state.roleOverrides[role.id] || { tier: '', effort: '', model: '' };
+            const open = Boolean(state.expandedRoles[role.id]);
+            return `
+              <div class="role-row">
+                <button type="button" class="role-summary" data-act="toggle-role" data-role="${role.id}">
+                  <span style="font-weight:500">${esc(role.roleTitle)}</span>
+                  <span style="display:inline-flex;align-items:center;gap:6px;min-width:0">
+                    <span class="mono" style="color:${eff.source === '跟随默认池' ? 'var(--ink-2)' : 'var(--accent-ink)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(eff.model)}</span>
+                    ${open ? ICONS.chevUp : ICONS.chev}
+                  </span>
+                </button>
+                ${open ? `
+                  <div class="role-detail">
+                    <div style="font-size:11px;color:var(--ink-3)">${esc(role.label)} · ${esc(eff.source)}</div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                      <label class="field-row">
+                        <span>强弱档位</span>
+                        <select data-role-tier="${role.id}">
+                          <option value="" ${!ov.tier ? 'selected' : ''}>跟随默认</option>
+                          <option value="strong" ${ov.tier === 'strong' ? 'selected' : ''}>强模型 (strong)</option>
+                          <option value="weak" ${ov.tier === 'weak' ? 'selected' : ''}>快模型 (weak)</option>
+                        </select>
+                      </label>
+                      <label class="field-row">
+                        <span>思考深度</span>
+                        <select data-role-effort="${role.id}">
+                          <option value="" ${!ov.effort ? 'selected' : ''}>默认</option>
+                          <option value="off" ${ov.effort === 'off' ? 'selected' : ''}>off</option>
+                          <option value="low" ${ov.effort === 'low' ? 'selected' : ''}>low</option>
+                          <option value="medium" ${ov.effort === 'medium' ? 'selected' : ''}>medium</option>
+                          <option value="high" ${ov.effort === 'high' ? 'selected' : ''}>high</option>
+                          <option value="max" ${ov.effort === 'max' ? 'selected' : ''}>max</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label class="field-row">
+                      <span>指定具体模型（填写后优先于上方强弱档位）</span>
+                      <input type="text" class="mono" data-role-model="${role.id}" value="${esc(ov.model || '')}" placeholder="例如 anthropic:claude-opus-4-6（留空继承档位）" list="model-candidates" />
+                    </label>
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+        <datalist id="model-candidates">
+          <option value="deepseek:deepseek-reasoner"></option>
+          <option value="deepseek:deepseek-chat"></option>
+          <option value="anthropic:claude-opus-4-6"></option>
+          <option value="openai:gpt-5.4-high"></option>
+        </datalist>
+        <button type="button" class="btn ${state.routingDirty ? 'btn-primary' : 'btn-outline'}" style="justify-content:center;margin-top:6px" data-act="save-routing">${state.routingDirty ? '保存模型分配（有未保存修改）' : '保存模型分配'}</button>
+      </div>
+    `;
+  }
+
+  function renderModal(book) {
+    if (!state.activeModal) return '';
+    if (state.activeModal === 'volume') {
+      return `
+        <div class="modal-backdrop" data-act="close-modal-bg">
+          <div class="modal-card" role="dialog" aria-modal="true" aria-label="换卷与归档">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <h2>结束本卷 / 开启下一卷</h2>
+              <button type="button" class="btn icon-only" data-act="close-modal">${ICONS.close}</button>
+            </div>
+            <div style="font-size:12.5px;color:var(--ink-2);line-height:1.6">系统将封存当前卷摘要并打上版本标签，未勾选的长期退场人物将自动归入冷档案以节省后续上下文。</div>
+            <div style="display:flex;flex-direction:column;gap:6px;padding:8px 0;border-top:1px solid var(--line-subtle);border-bottom:1px solid var(--line-subtle)">
+              <span style="font-size:11.5px;color:var(--ink-3)">勾选跨入下一卷的随行核心人物：</span>
+              ${book.codex.entities.map(e => `
+                <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-1)">
+                  <input type="checkbox" checked /> ${esc(e.name)}
+                </label>
+              `).join('')}
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              <button type="button" class="btn btn-outline" data-act="confirm-vol" data-complete="1">全书完结封笔</button>
+              <button type="button" class="btn btn-primary" data-act="confirm-vol" data-complete="0">封存本卷并开启下一卷</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    if (state.activeModal === 'parallel') {
+      return `
+        <div class="modal-backdrop" data-act="close-modal-bg">
+          <div class="modal-card" role="dialog" aria-modal="true" aria-label="多线并行章节窗口">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <h2>多线并行章节窗口</h2>
+              <button type="button" class="btn icon-only" data-act="close-modal">${ICONS.close}</button>
+            </div>
+            <div style="font-size:12.5px;color:var(--ink-2);line-height:1.6">同一故事时间段分头推进两条人物支线（互不提前剧透对方结果），写完后一键合流回主线。</div>
+            <label class="field-row">
+              <span>并行窗口标识 (windowId)</span>
+              <input id="par-win-inp" type="text" class="mono" value="${esc(state.parallelWindowId)}" />
+            </label>
+            <div style="display:flex;justify-content:flex-end;gap:8px">
+              ${state.parallelActive ? `<button type="button" class="btn btn-warn" data-act="confirm-parallel-merge">合流回主线</button>` : ''}
+              <button type="button" class="btn btn-primary" data-act="confirm-parallel-fork">${state.parallelActive ? '切换支线继续写' : '开启并行分叉'}</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    return `
+      <div class="modal-backdrop" data-act="close-modal-bg">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-label="开启新作品">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <h2>开启新作品建库</h2>
+            <button type="button" class="btn icon-only" data-act="close-modal">${ICONS.close}</button>
+          </div>
+          <div style="padding:8px 10px;border-radius:9px;background:var(--accent-soft);color:var(--accent-ink);font-size:12px;line-height:1.55">
+            提示：推荐先在左侧「开书构思对话」使用 /narrate-boot 与 AI 推敲《作者契约》；若已有成熟大纲，也可在此直接建库。
+          </div>
+          <label class="field-row"><span>作品代号 (slug)</span><input type="text" class="mono" value="ash-route" /></label>
+          <label class="field-row"><span>作品书名</span><input type="text" value="灰烬航路" /></label>
+          <label class="field-row"><span>开篇视角主角</span><input type="text" value="沈渡" /></label>
+          <div style="display:flex;justify-content:flex-end;gap:8px">
+            <button type="button" class="btn btn-subtle" data-act="close-modal">切回构思对话</button>
+            <button type="button" class="btn btn-primary" data-act="confirm-boot">立即编译建库</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function render() {
+    const app = document.getElementById('app');
+    app.setAttribute('data-theme', state.theme);
+
+    const book = BOOKS[state.bookKey];
+    const vpWidth = state.vp === '860' ? 860 : state.vp === '1280' ? 1280 : state.vp === '1600' ? 1600 : (window.innerWidth || 1520);
+    const hostW = state.hostCollapsed ? 56 : 264;
+    const studioW = Math.max(500, vpWidth - hostW);
+    const showLeftPane = studioW >= 1200;
+    const rightAsDrawer = studioW < 820;
+    const gridCols = `${showLeftPane ? '224px ' : ''}minmax(0, 1fr) ${state.rightOpen && !rightAsDrawer ? '340px' : '0px'}`;
+    const noteKindMeta = NOTE_KINDS.find(k => k.key === state.noteKind) || NOTE_KINDS[0];
+    const pipelineRoles = ROLES.filter(r => r.step > 0);
+    const currentSlot = slotKey(state.bookKey, state.selectedCh);
+    const stashedDraft = state.draftBySlot[currentSlot];
+    const activeChapterObj = book.chapters.find(c => c.num === state.selectedCh) || book.chapters[book.chapters.length - 1] || null;
+
+    app.innerHTML = `
+      <div class="sim-bar">
+        <span class="sim-tag">Overdrive v4 预览</span>
+        <div class="sim-seg">
+          <button type="button" class="${state.vp === 'full' ? 'on' : ''}" data-act="vp" data-v="full">铺满</button>
+          <button type="button" class="${state.vp === '1600' ? 'on' : ''}" data-act="vp" data-v="1600">宽屏 1600</button>
+          <button type="button" class="${state.vp === '1280' ? 'on' : ''}" data-act="vp" data-v="1280">笔记本 1280</button>
+          <button type="button" class="${state.vp === '860' ? 'on' : ''}" data-act="vp" data-v="860">紧凑 860</button>
+        </div>
+        <div class="sim-seg">
+          <button type="button" class="${state.hostCollapsed ? 'on' : ''}" data-act="host" data-v="1">宿主收起(56)</button>
+          <button type="button" class="${!state.hostCollapsed ? 'on' : ''}" data-act="host" data-v="0">宿主展开(264)</button>
+        </div>
+        <div class="sim-seg">
+          <button type="button" class="${state.scene === 'idle' ? 'on' : ''}" data-act="scene" data-v="idle">定稿审阅</button>
+          <button type="button" class="${state.scene === 'running' ? 'on' : ''}" data-act="scene" data-v="running">YOLO 连写呼吸</button>
+          <button type="button" class="${state.scene === 'conflict_sync' ? 'on' : ''}" data-act="scene" data-v="conflict_sync">冲突(已落盘穿帮)</button>
+          <button type="button" class="${state.scene === 'conflict_halt' ? 'on' : ''}" data-act="scene" data-v="conflict_halt">冲突(新章拦截)</button>
+        </div>
+        <button type="button" class="sim-action-btn" data-act="demo-reveal">演示墨迹显影与落印</button>
+        <div class="sim-seg">
+          <button type="button" class="${state.theme === 'dark' ? 'on' : ''}" data-act="theme" data-v="dark">深墨夜间</button>
+          <button type="button" class="${state.theme === 'light' ? 'on' : ''}" data-act="theme" data-v="light">暖纸日间</button>
+        </div>
+        <span class="sim-meta">容器 ${studioW}px · ${showLeftPane ? '三栏常驻' : rightAsDrawer ? '紧凑抽屉态' : '收左栏保书页'}</span>
+      </div>
+
+      <div class="viewport-shell">
+        <div class="dsh-app" style="max-width:${state.vp === 'full' ? '100%' : vpWidth + 'px'};grid-template-columns:${hostW}px minmax(0, 1fr)">
+          <nav class="host-rail ${state.hostCollapsed ? 'host-collapsed' : ''}" aria-label="宿主导航">
+            <div class="host-brand-row">
+              <span class="host-txt">deepseek</span>
+              <button type="button" class="btn icon-only" data-act="toggle-host" title="展开或收起宿主侧边栏">${ICONS.sidebar}</button>
+            </div>
+            <button type="button" class="host-nav-btn">${ICONS.chat}<span class="host-txt">开书构思对话</span></button>
+            <button type="button" class="host-nav-btn">${ICONS.plugin}<span class="host-txt">插件管理</span></button>
+            <button type="button" class="host-nav-btn active">${ICONS.studio}<span class="host-txt">创作室</span></button>
+          </nav>
+
+          <div id="studio-shell" class="studio-grid" style="grid-template-columns:${gridCols}">
+            ${showLeftPane ? `
+              <aside class="left-pane" aria-label="章节与设定目录">
+                <div class="left-vol-bar">
+                  <span>${esc(book.vol)}</span>
+                  <span class="badge badge-neutral num">第 ${book.storyDay} 天</span>
+                </div>
+                <div class="left-list">
+                  <div class="left-group-label"><span>正文目录</span><span class="num">共 ${book.chapters.length} 章</span></div>
+                  ${book.chapters.length ? book.chapters.map(ch => `
+                    <button type="button" class="ch-item ${state.mainSurface === 'chapter' && state.selectedCh === ch.num ? 'active' : ''}" data-act="pick-ch" data-ch="${ch.num}">
+                      <span class="ch-title-wrap"><span class="ch-no num">第 ${ch.num} 章</span>${esc(ch.title)}</span>
+                      ${isConflictScene() && ch.num === book.chapters[book.chapters.length - 1].num
+                        ? '<span class="badge badge-danger">冲突</span>'
+                        : (book.dirtyCount > 0 && ch.num === book.chapters[book.chapters.length - 1].num) || state.draftBySlot[slotKey(state.bookKey, ch.num)]
+                          ? '<span class="badge badge-warn">已改</span>'
+                          : `<span class="num" style="font-size:11px;color:var(--ink-4)">${ch.chars}</span>`}
+                    </button>
+                  `).join('') : `<div style="padding:12px 10px;font-size:12px;color:var(--ink-3)">新书契约已就绪，点击右上角「写下一章」开启首章校准。</div>`}
+                </div>
+                <div class="left-codex">
+                  <div class="left-group-label"><span>全书设定集（跨章汇总）</span></div>
+                  <button type="button" class="codex-row ${state.mainSurface === 'codex' && state.codexTab === 'entities' ? 'active' : ''}" data-act="open-codex" data-tab="entities">
+                    <span>人物与物品档案</span><span class="badge badge-neutral num">${book.codex.entities.length}</span>
+                  </button>
+                  <button type="button" class="codex-row ${state.mainSurface === 'codex' && state.codexTab === 'threads' ? 'active' : ''}" data-act="open-codex" data-tab="threads">
+                    <span>未解伏笔清单</span><span class="badge badge-neutral num">${book.codex.threads.length}</span>
+                  </button>
+                  <button type="button" class="codex-row ${state.mainSurface === 'codex' && state.codexTab === 'discarded' ? 'active' : ''}" data-act="open-codex" data-tab="discarded">
+                    <span>剧情预案与废案</span><span class="badge badge-neutral num">${book.codex.warped.length + book.codex.pending.length}</span>
+                  </button>
+                </div>
+              </aside>
+            ` : ''}
+
+            <main class="center-pane">
+              <header class="center-header">
+                <div style="display:flex;align-items:center;gap:8px;position:relative;min-width:0">
+                  <button type="button" class="book-switcher" data-act="menu" data-m="book">
+                    <span>《${esc(book.title)}》</span>
+                    ${ICONS.chev}
+                  </button>
+                  ${state.openMenu === 'book' ? `
+                    <div class="menu-pop left">
+                      <button type="button" class="menu-row" data-act="switch-book" data-b="port">
+                        <b>港口审计</b><span>第一卷 · 已写至第 2 章</span>
+                      </button>
+                      <button type="button" class="menu-row" data-act="switch-book" data-b="tower">
+                        <b>白盐钟楼</b><span>第二卷 · 已写至第 14 章（含待同步手改）</span>
+                      </button>
+                      <button type="button" class="menu-row" data-act="switch-book" data-b="fresh">
+                        <b>灰烬航路（新书扉页演示）</b><span>契约已锁定 · 待写第 1 章</span>
+                      </button>
+                      <div class="menu-divider"></div>
+                      <button type="button" class="menu-row" data-act="new-book">
+                        <b>+ 开启新作品</b><span>打开建库向导或切回构思对话</span>
+                      </button>
+                    </div>
+                  ` : ''}
+
+                  ${!showLeftPane ? `
+                    <div style="position:relative">
+                      <button type="button" class="btn btn-subtle" data-act="menu" data-m="toc">
+                        <span>${activeChapterObj ? '第 ' + state.selectedCh + ' 章' : '新书'} · 目录与设定集</span>${ICONS.chev}
+                      </button>
+                      ${state.openMenu === 'toc' ? `
+                        <div class="menu-pop left">
+                          ${book.chapters.map(ch => `
+                            <button type="button" class="menu-row" data-act="pick-ch" data-ch="${ch.num}">
+                              <b>第 ${ch.num} 章 · ${esc(ch.title)}</b><span>${ch.chars} 字</span>
+                            </button>
+                          `).join('')}
+                          <div class="menu-divider"></div>
+                          <button type="button" class="menu-row" data-act="open-codex" data-tab="entities">
+                            <b>打开全书设定集</b><span>人物档案 · 未解伏笔 · 预案与废案</span>
+                          </button>
+                        </div>
+                      ` : ''}
+                    </div>
+                  ` : ''}
+
+                  ${state.scene === 'running' ? '<span class="badge badge-accent">YOLO 连写中 · 第 3 章</span>' : ''}
+                  ${state.parallelActive ? `<span class="badge badge-warn">多线并行 · ${esc(state.parallelWindowId)}</span>` : ''}
+                </div>
+
+                <div style="display:flex;align-items:center;gap:8px;position:relative">
+                  ${book.dirtyCount > 0 ? `
+                    <button type="button" class="btn btn-warn" data-act="sync-now" title="根据手改正文自动更新人物与章节台账">
+                      ${ICONS.sync} 同步修改 (${book.dirtyCount})
+                    </button>
+                  ` : ''}
+
+                  ${state.scene === 'running' ? `
+                    <div class="split-action">
+                      <button type="button" class="btn btn-warn" data-act="soft-stop">
+                        ${ICONS.pause} ${state.stopPending ? '写完本章即停…' : '写完本章暂停'}
+                      </button>
+                      <button type="button" class="btn btn-warn" data-act="menu" data-m="stop" aria-label="更多停止选项">${ICONS.chev}</button>
+                      ${state.openMenu === 'stop' ? `
+                        <div class="menu-pop">
+                          <button type="button" class="menu-row" data-act="soft-stop">
+                            <b>写完本章后平稳停下（推荐）</b><span>等当前章节保存完整后再退出 YOLO</span>
+                          </button>
+                          <div class="menu-divider"></div>
+                          <button type="button" class="menu-row danger" data-act="force-stop">
+                            <b>立即中断并撤回半截草稿</b><span>强行打断当前生成，恢复到上一章干净状态</span>
+                          </button>
+                        </div>
+                      ` : ''}
+                    </div>
+                  ` : `
+                    <div class="split-action">
+                      <button type="button" class="btn btn-primary" data-act="run-one">${ICONS.play} 写下一章</button>
+                      <button type="button" class="btn btn-primary" data-act="menu" data-m="run">YOLO ${ICONS.chev}</button>
+                      ${state.openMenu === 'run' ? `
+                        <div class="menu-pop">
+                          <button type="button" class="menu-row" data-act="start-cont">
+                            <b>YOLO 持续连写</b><span>遇到设定冲突、关键视角切镜或手动暂停时自动停下</span>
+                          </button>
+                          <button type="button" class="menu-row" data-act="start-cont">
+                            <b>YOLO 连写 5 章</b><span>写满 5 章后自动停下待审</span>
+                          </button>
+                        </div>
+                      ` : ''}
+                    </div>
+                  `}
+
+                  <div style="position:relative">
+                    <button type="button" class="btn icon-only" data-act="menu" data-m="ops" title="更多创作整理操作">${ICONS.more}</button>
+                    ${state.openMenu === 'ops' ? `
+                      <div class="menu-pop">
+                        <button type="button" class="menu-row" data-act="dream-now">
+                          <b>立即整理设定与伏笔</b><span>归纳近期章节的人物变化与复现线索</span>
+                        </button>
+                        <button type="button" class="menu-row" data-act="next-vol">
+                          <b>结束本卷 / 开启下一卷</b><span>勾选随行人物、归档退场角色并规划新卷</span>
+                        </button>
+                        <button type="button" class="menu-row" data-act="parallel-fork">
+                          <b>${state.parallelActive ? '管理 / 合流多线并行窗口' : '开启多线并行章节'}</b><span>同一时间段分头推进两条人物支线</span>
+                        </button>
+                        <div class="menu-divider"></div>
+                        <button type="button" class="menu-row" data-act="harvest-voice">
+                          <b>重新提取本章对话声纹</b><span>从当前选定章节采集鲜活表达标本</span>
+                        </button>
+                      </div>
+                    ` : ''}
+                  </div>
+
+                  <button type="button" class="btn icon-only ${state.rightOpen ? 'btn-subtle' : ''}" data-act="toggle-right" title="展开或收起右侧面板">${ICONS.rightbar}</button>
+                </div>
+              </header>
+
+              ${state.mainSurface === 'chapter' && activeChapterObj ? `
+                <div class="reader-toolbar-wrap">
+                  <div class="reader-bar">
+                    <div class="seg-tabs" role="tablist" aria-label="本章视图">
+                      <button type="button" class="seg-tab ${state.chapterTab === 'prose' ? 'active' : ''}" data-act="ch-tab" data-tab="prose">本章正文</button>
+                      <button type="button" class="seg-tab ${state.chapterTab === 'plan' ? 'active' : ''}" data-act="ch-tab" data-tab="plan">本章细纲</button>
+                      <button type="button" class="seg-tab ${state.chapterTab === 'diff' ? 'active' : ''}" data-act="ch-tab" data-tab="diff">改动对比</button>
+                    </div>
+
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <button type="button" class="pipeline-toggle-btn ${state.pipelineExpanded ? 'open' : ''}" data-act="toggle-pipeline" aria-expanded="${state.pipelineExpanded}">
+                        <span class="lamp-group">
+                          ${pipelineRoles.map(r => `<i class="lamp ${stepStatus(r.id)}"></i>`).join('')}
+                        </span>
+                        <span>${isConflictScene() ? 'Checker 暂停' : state.scene === 'running' ? 'Writer 生成中' : 'Agent 工序与模型'}</span>
+                        ${state.pipelineExpanded ? ICONS.chevUp : ICONS.chev}
+                      </button>
+
+                      <button type="button" class="btn ${state.isEditing ? 'btn-subtle' : ''}" data-act="toggle-edit">
+                        ${ICONS.edit} ${state.isEditing ? '退出编辑' : '直接改稿'}
+                      </button>
+                    </div>
+                  </div>
+
+                  ${state.pipelineExpanded ? `
+                    <section class="pipeline-drawer" aria-label="6 步工序与执行模型详情">
+                      ${pipelineRoles.map(r => {
+                        const st = stepStatus(r.id);
+                        const eff = resolveEffectiveModel(r);
+                        const selected = state.rightOpen && state.rightTab === 'trace' && state.selectedRoleForTrace === r.id;
+                        const isLiveRunning = state.scene === 'running' && st === 'active';
+                        const shareLamp = selected ? '' : '';
+                        return `
+                          <button type="button" class="pipe-card ${selected ? 'selected' : ''} ${isLiveRunning ? 'running-live' : ''}" data-act="inspect-step" data-role="${r.id}" title="点击飞入右侧查看 ${esc(r.shortName)} 的实时思考过程">
+                            <div class="pipe-card-top">
+                              <span class="pipe-step-name">
+                                <i class="lamp ${st}"></i>
+                                <span>${esc(r.shortName)}</span>
+                              </span>
+                              <span class="pipe-step-state">${stepStatusText(st)}</span>
+                            </div>
+                            <div class="pipe-live-note">${esc(r.liveHint)}</div>
+                            <div class="pipe-model-tag">${esc(eff.model)}</div>
+                          </button>
+                        `;
+                      }).join('')}
+                    </section>
+                  ` : ''}
+                </div>
+              ` : ''}
+
+              <div id="stage-scroller" class="stage-scroll">
+                ${stashedDraft && !state.isEditing && state.mainSurface === 'chapter' ? `
+                  <div class="stash-restore-bar">
+                    <span>检测到本章有你刚才暂存的未保存手改草稿</span>
+                    <div style="display:flex;gap:8px">
+                      <button type="button" class="btn btn-warn" style="height:25px;padding:0 9px" data-act="toggle-edit">继续改稿</button>
+                      <button type="button" class="btn" style="height:25px;padding:0 8px" data-act="discard-stash">放弃暂存</button>
+                    </div>
+                  </div>
+                ` : ''}
+
+                ${isConflictScene() && state.mainSurface === 'chapter' ? `
+                  <section class="conflict-card">
+                    <div class="conflict-head">
+                      <div style="display:flex;align-items:center;gap:8px;font-weight:600">
+                        <span class="badge badge-danger">已暂停 · 发现设定冲突</span>
+                        <span>${state.scene === 'conflict_sync' ? '手改旧章引发第 2 章伤势设定穿帮（已落盘可自动修补）' : '第 3 章新草稿动作与陈砚固有伤势矛盾（未落盘安全拦截）'}</span>
+                      </div>
+                      <span class="mono" style="color:var(--danger-ink)">${state.scene === 'conflict_sync' ? '波及 1 章 · 2,940 字' : '重试耗尽 · 未污染正文'}</span>
+                    </div>
+                    <div class="conflict-body">
+                      <div class="conflict-compare">
+                        <div class="compare-pane">
+                          <div class="compare-caption"><span>人物设定档案 · 陈砚</span><span>固有特征锁</span></div>
+                          <div>“陈砚左腕旧骨折未愈，无法单手推举重物。”</div>
+                        </div>
+                        <div class="compare-pane">
+                          <div class="compare-caption"><span>${state.scene === 'conflict_sync' ? '第 2 章已存正文 · P02' : '第 3 章拦截草稿 · P02'}</span><span>冲突原句</span></div>
+                          <div>“……陈砚抬起完好无损的左手推开账房木门。”</div>
+                        </div>
+                      </div>
+                      <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        ${state.scene === 'conflict_sync' ? `
+                          <button type="button" class="btn btn-primary" data-act="auto-heal">${ICONS.spark} 自动修补这句冲突</button>
+                          <button type="button" class="btn btn-outline" data-act="toggle-edit">${ICONS.edit} 我自己动手改稿</button>
+                          <button type="button" class="btn" data-act="fill-retcon">写条便签解释原因</button>
+                        ` : `
+                          <button type="button" class="btn btn-primary" data-act="retry-with-note">${ICONS.spark} 带上微调便签重写本章</button>
+                          <button type="button" class="btn btn-outline" data-act="fill-retcon">先写便签调整走向</button>
+                        `}
+                      </div>
+                    </div>
+                  </section>
+                ` : ''}
+
+                ${state.mainSurface === 'codex' ? renderCodexView(book) : !activeChapterObj ? `
+                  <article class="manuscript-sheet" style="text-align:center;padding:56px 44px">
+                    <div class="seal-stamp" style="margin:0 auto 18px;transform:rotate(-3deg)">开卷</div>
+                    <h1 style="margin-bottom:10px">《${esc(book.title)}》契约已锁定</h1>
+                    <p style="max-width:440px;margin:0 auto 22px;color:var(--ink-2);font-size:13.5px;line-height:1.75">
+                      人物初始档案与第一卷方向已准备就绪。点击下方或右上角「写下一章」生成正式第一章，完成后系统将停下供你校准文风并自动采集人物对话声纹。
+                    </p>
+                    <button type="button" class="btn btn-primary" data-act="run-one">${ICONS.play} 开始写第 1 章</button>
+                  </article>
+                ` : state.chapterTab === 'plan' ? `
+                  <div class="manuscript-sheet">
+                    <h1>第 ${state.selectedCh} 章细纲 · ${esc(activeChapterObj.title)}</h1>
+                    <div class="ch-meta-line" style="margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--line-subtle)">
+                      <span>排纲导演 (Planner) 规划节拍 · 视角：陈砚 · 故事第 ${book.storyDay} 天</span>
+                    </div>
+                    <div class="prose-body" style="font-family:inherit;font-size:14px;line-height:1.85">
+                      <p style="text-indent:0"><b>第一拍 · 栈桥验封：</b>寒夜海雾中，陈砚查验五号驳船铁缆封条与甲板煤水，确认吃水深度与报关吨位对不上。</p>
+                      <p style="text-indent:0"><b>第二拍 · 账房试探：</b>陈砚带过磅单进入东港账房，借炭盆与油灯微光观察周敬山压在算盘下的受潮底页。</p>
+                    </div>
+                  </div>
+                ` : state.chapterTab === 'diff' ? `
+                  <div class="manuscript-sheet">
+                    <h1>第 ${state.selectedCh} 章 · 改动对比</h1>
+                    <div class="ch-meta-line" style="margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--line-subtle)">
+                      <span>与最近一次定稿 (commit ${esc(book.commitSha)}) 比对结果</span>
+                    </div>
+                    <div style="font-size:13.5px;line-height:1.8;display:flex;flex-direction:column;gap:8px">
+                      <div style="padding:8px 12px;border-radius:7px;background:var(--danger-soft);color:var(--danger-ink)">删去：雾气顺着铁缆爬上三号栈桥时，陈砚抬起完好无损的左手推开账房木门。</div>
+                      <div style="padding:8px 12px;border-radius:7px;background:var(--ok-soft);color:var(--ok-ink)">改为：雾气顺着铁缆爬上三号栈桥时，陈砚护着隐隐作痛的左腕，用右肩抵开账房木门。</div>
+                    </div>
+                  </div>
+                ` : state.isEditing ? `
+                  <div class="manuscript-sheet" style="display:flex;flex-direction:column;gap:12px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                      <span class="badge badge-warn">正在手改第 ${state.selectedCh} 章正文（切书或切章会自动暂存草稿，绝不丢失）</span>
+                      <button type="button" class="btn btn-primary" data-act="save-edit">保存手改并同步设定</button>
+                    </div>
+                    <textarea id="editor-box" style="width:100%;min-height:320px;border:1px solid var(--accent-line);border-radius:9px;padding:14px;background:var(--bg-stage);color:var(--ink-prose);font-family:var(--font-serif);font-size:17px;line-height:1.92;resize:vertical">${esc(stashedDraft ?? book.prose.map(p => p.text).join('\n\n'))}</textarea>
+                  </div>
+                ` : `
+                  <article class="manuscript-sheet">
+                    <div id="reading-ribbon" class="reading-ribbon" aria-hidden="true"></div>
+                    <div class="editorial-masthead">
+                      <div class="editorial-numeral">${String(state.selectedCh).padStart(2, '0')}</div>
+                      <div>
+                        <h1>${esc(activeChapterObj.title)}</h1>
+                        <div class="ch-meta-line">
+                          <span>${esc(book.vol)} · 故事第 ${book.storyDay} 天 · ${activeChapterObj.chars.toLocaleString()} 字</span>
+                          ${book.dirtyCount > 0 ? '<span class="badge badge-warn">待同步修改</span>' : '<span class="badge badge-ok">已定稿</span>'}
+                        </div>
+                      </div>
+                    </div>
+
+                    ${book.patchedCount > 0 ? `
+                      <div class="patch-colophon-bar">
+                        <span>校勘记录：本章成稿时已自动润色消除 ${book.patchedCount} 处高频套话</span>
+                        <button type="button" data-act="open-patch-trace">查看润色思考过程 &rarr;</button>
+                      </div>
+                    ` : ''}
+
+                    <div class="prose-body">
+                      ${book.prose.map((p, idx) => {
+                        const cls = isConflictScene() && p.kind === 'conflict' ? 'conflict-highlight' : '';
+                        return `
+                          <div class="prose-para-wrap">
+                            <span class="prose-folio">P0${idx + 1}</span>
+                            <p class="${cls}">${esc(p.text)}</p>
+                          </div>
+                        `;
+                      }).join('')}
+                    </div>
+
+                    ${state.scene === 'idle' && book.dirtyCount === 0 ? `
+                      <div class="editorial-endmark">
+                        <div class="seal-stamp ${state.sealJustStamped ? 'stamping' : ''}">定稿</div>
+                        <span class="mono" style="color:var(--ink-3);font-size:11px">commit ${esc(book.commitSha)} · 双门禁核验入库</span>
+                      </div>
+                    ` : book.dirtyCount > 0 ? `
+                      <div class="editorial-endmark">
+                        <span class="badge badge-warn">本章含未同步手改 · 点击顶部「同步修改」更新人物台账后重新盖印</span>
+                      </div>
+                    ` : ''}
+                  </article>
+                `}
+              </div>
+
+              ${state.mainSurface === 'chapter' ? `
+                <footer class="director-footer">
+                  <div class="director-wrap">
+                    ${state.scene === 'idle' && book.options.length > 0 ? `
+                      <div class="next-ideas-panel">
+                        <button type="button" class="next-ideas-header" data-act="toggle-ideas">
+                          <span style="display:inline-flex;align-items:center;gap:6px">
+                            <span style="color:var(--accent-ink)">${ICONS.spark}</span>
+                            <b>下一章走向建议 (${book.options.length})</b>
+                            <span style="color:var(--ink-3)">${state.ideasExpanded ? '点文字填入微调，点右侧直接开写' : '点击展开查看候选剧情'}</span>
+                          </span>
+                          <span>${state.ideasExpanded ? ICONS.chev : ICONS.chevUp}</span>
+                        </button>
+                        ${state.ideasExpanded ? `
+                          <div class="next-idea-list">
+                            ${book.options.map((opt, i) => `
+                              <div class="next-idea-row">
+                                <button type="button" class="next-idea-text" data-act="fill-idea" data-idx="${i}">${i + 1}. ${esc(opt)}</button>
+                                <button type="button" class="next-idea-go" data-act="run-idea" data-idx="${i}">直接写 &rarr;</button>
+                              </div>
+                            `).join('')}
+                          </div>
+                        ` : ''}
+                      </div>
+                    ` : ''}
+
+                    ${state.notes.length > 0 ? `
+                      <div class="queued-notes">
+                        ${state.notes.map((n, i) => `
+                          <span class="note-tag">
+                            <span style="color:var(--accent-ink);font-weight:500">${esc(n.kind)}</span>
+                            <span>${esc(n.text)}</span>
+                            <button type="button" data-act="del-note" data-idx="${i}" title="撤回这张便签" aria-label="撤回便签">×</button>
+                          </span>
+                        `).join('')}
+                      </div>
+                    ` : ''}
+
+                    <div class="note-dock">
+                      <div style="position:relative">
+                        <button type="button" class="note-kind-btn" data-act="menu" data-m="kind">
+                          <span>${esc(noteKindMeta.label)}</span>${ICONS.chev}
+                        </button>
+                        ${state.openMenu === 'kind' ? `
+                          <div class="menu-pop left" style="bottom:calc(100% + 6px);top:auto;min-width:176px">
+                            ${NOTE_KINDS.map(k => `
+                              <button type="button" class="menu-row" data-act="pick-kind" data-k="${k.key}"><b>${esc(k.label)}</b></button>
+                            `).join('')}
+                          </div>
+                        ` : ''}
+                      </div>
+
+                      ${state.noteKind === 'SPOTLIGHT_TRIGGER' && book.codex.entities.length > 0 ? `
+                        <select id="sp-entity" class="spotlight-select" aria-label="选择切镜人物">
+                          ${book.codex.entities.map(ent => `<option value="${esc(ent.id)}" ${state.spotlightEntityId === ent.id ? 'selected' : ''}>${esc(ent.name)}</option>`).join('')}
+                        </select>
+                      ` : ''}
+
+                      ${state.noteKind === 'FLASHBACK' ? `
+                        <label style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--warn-ink);white-space:nowrap">
+                          回到第 <input id="fb-day" type="number" min="1" value="${state.flashbackDay}" style="width:44px;height:24px;border-radius:5px;border:1px solid var(--warn-line);background:var(--warn-soft);color:var(--warn-ink);padding:0 5px;font-size:12px" /> 天
+                        </label>
+                      ` : ''}
+
+                      <input id="note-input" class="note-input" type="text" value="${esc(state.noteText)}" placeholder="给下一章递张导演便签（写完下一章自动生效并清空）" />
+
+                      <button type="button" class="btn" style="height:28px;padding:0 9px;font-size:12px" data-act="add-note">先存便签</button>
+                      <button type="button" class="btn btn-primary icon-only" style="width:28px;height:28px" data-act="send-run" title="存入便签并立即写下一章" aria-label="存入便签并立即写下一章">${ICONS.send}</button>
+                    </div>
+                  </div>
+                </footer>
+              ` : ''}
+            </main>
+
+            ${state.rightOpen && rightAsDrawer ? `<div class="drawer-scrim" data-act="toggle-right" aria-hidden="true"></div>` : ''}
+
+            ${state.rightOpen ? `
+              <aside class="right-pane ${rightAsDrawer ? 'as-drawer' : ''}" aria-label="右侧状态与配置栏">
+                <div class="right-top">
+                  <div style="display:flex;align-items:center;gap:4px">
+                    <button type="button" class="right-tab ${state.rightTab === 'trace' ? 'active' : ''}" data-act="r-tab" data-tab="trace">思考过程</button>
+                    <button type="button" class="right-tab ${state.rightTab === 'status' ? 'active' : ''}" data-act="r-tab" data-tab="status">运行状态</button>
+                    <button type="button" class="right-tab ${state.rightTab === 'routing' ? 'active' : ''}" data-act="r-tab" data-tab="routing">模型分配</button>
+                  </div>
+                  ${rightAsDrawer ? `<button type="button" class="btn icon-only" data-act="toggle-right" aria-label="关闭抽屉">${ICONS.close}</button>` : ''}
+                </div>
+                <div class="right-scroll">${renderRightPane(book)}</div>
+              </aside>
+            ` : ''}
+          </div>
+        </div>
+      </div>
+
+      ${renderModal(book)}
+      ${state.toast ? `<div class="toast-banner" role="status">${esc(state.toast)}</div>` : ''}
+    `;
+
+    bindFields();
+  }
+
+  function bindFields() {
+    const scroller = document.getElementById('stage-scroller');
+    const ribbon = document.getElementById('reading-ribbon');
+    if (scroller && ribbon && !(window.CSS && CSS.supports && CSS.supports('animation-timeline: scroll()'))) {
+      scroller.onscroll = () => {
+        const max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+        ribbon.style.setProperty('--scroll-fallback', String(Math.min(1, scroller.scrollTop / max)));
+      };
+    }
+
+    const inp = document.getElementById('note-input');
+    if (inp) {
+      inp.oninput = (e) => { state.noteText = e.target.value; };
+      inp.onkeydown = (e) => {
+        if (e.key === 'Enter' && state.noteText.trim()) {
+          e.preventDefault();
+          pushNote(e.ctrlKey || e.metaKey);
+        }
+      };
+    }
+
+    const fb = document.getElementById('fb-day');
+    if (fb) fb.oninput = (e) => { state.flashbackDay = Number(e.target.value) || 1; };
+
+    const sp = document.getElementById('sp-entity');
+    if (sp) sp.onchange = (e) => { state.spotlightEntityId = e.target.value; };
+
+    const pw = document.getElementById('par-win-inp');
+    if (pw) pw.oninput = (e) => { state.parallelWindowId = e.target.value.trim() || 'win-dock-night'; };
+
+    const ed = document.getElementById('editor-box');
+    if (ed) ed.oninput = (e) => { state.draftBySlot[slotKey(state.bookKey, state.selectedCh)] = e.target.value; };
+
+    document.querySelectorAll('[data-pool-model]').forEach(el => {
+      el.oninput = (e) => {
+        const pool = el.getAttribute('data-pool-model');
+        state.poolModels[pool] = e.target.value;
+        state.routingDirty = true;
+      };
+      el.onchange = () => render();
+    });
+
+    document.querySelectorAll('[data-role-tier]').forEach(el => {
+      el.onchange = (e) => {
+        const r = el.getAttribute('data-role-tier');
+        state.roleOverrides[r] = Object.assign({}, state.roleOverrides[r], { tier: e.target.value });
+        state.routingDirty = true;
+        render();
+      };
+    });
+    document.querySelectorAll('[data-role-effort]').forEach(el => {
+      el.onchange = (e) => {
+        const r = el.getAttribute('data-role-effort');
+        state.roleOverrides[r] = Object.assign({}, state.roleOverrides[r], { effort: e.target.value });
+        state.routingDirty = true;
+        render();
+      };
+    });
+    document.querySelectorAll('[data-role-model]').forEach(el => {
+      el.oninput = (e) => {
+        const r = el.getAttribute('data-role-model');
+        state.roleOverrides[r] = Object.assign({}, state.roleOverrides[r], { model: e.target.value });
+        state.routingDirty = true;
+      };
+      el.onchange = () => render();
+    });
+  }
+
+  function pushNote(andRun) {
+    const text = state.noteText.trim();
+    if (!text) return;
+    const book = BOOKS[state.bookKey];
+    const kindLabel = (NOTE_KINDS.find(k => k.key === state.noteKind) || NOTE_KINDS[0]).label;
+    let prefix = '';
+    if (state.noteKind === 'FLASHBACK') {
+      prefix = '（回到第 ' + state.flashbackDay + ' 天）';
+    } else if (state.noteKind === 'SPOTLIGHT_TRIGGER') {
+      const ent = book.codex.entities.find(e => e.id === state.spotlightEntityId) || book.codex.entities[0];
+      if (ent) prefix = '（' + ent.name.split('（')[0] + '）';
+    }
+    state.notes.push({ kind: kindLabel, text: prefix + text });
+    state.noteText = '';
+    if (andRun) {
+      state.scene = 'running';
+      state.stopPending = false;
+      showToast('已附上便签并开始写下一章');
+    } else {
+      showToast('便签已收好，写下一章时自动生效');
+    }
+    render();
+  }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) {
+      if (state.openMenu) { state.openMenu = null; render(); }
+      return;
+    }
+    const act = btn.getAttribute('data-act');
+    const book = BOOKS[state.bookKey];
+
+    if (act === 'close-modal-bg' && e.target !== btn) return;
+    if (act === 'close-modal' || act === 'close-modal-bg') { state.activeModal = null; render(); return; }
+
+    if (act === 'vp') { state.vp = btn.getAttribute('data-v'); render(); return; }
+    if (act === 'host') { state.hostCollapsed = btn.getAttribute('data-v') === '1'; render(); return; }
+    if (act === 'toggle-host') { state.hostCollapsed = !state.hostCollapsed; render(); return; }
+    if (act === 'scene') {
+      withViewTransition(() => {
+        state.scene = btn.getAttribute('data-v');
+        state.stopPending = false;
+        state.openMenu = null;
+        render();
+      });
+      return;
+    }
+    if (act === 'demo-reveal') {
+      state.mainSurface = 'chapter';
+      state.chapterTab = 'prose';
+      state.isEditing = false;
+      state.scene = 'idle';
+      if (state.bookKey === 'fresh') { state.bookKey = 'port'; state.selectedCh = 2; }
+      BOOKS[state.bookKey].dirtyCount = 0;
+      triggerInkAndSealReveal();
+      showToast('已演示新章墨迹显影与朱砂定稿落印');
+      return;
+    }
+    if (act === 'theme') { state.theme = btn.getAttribute('data-v'); render(); return; }
+    if (act === 'menu') {
+      const m = btn.getAttribute('data-m');
+      state.openMenu = state.openMenu === m ? null : m;
+      render();
+      return;
+    }
+    if (act === 'toggle-pipeline') { state.pipelineExpanded = !state.pipelineExpanded; render(); return; }
+    if (act === 'switch-book') {
+      const next = btn.getAttribute('data-b');
+      state.openMenu = null;
+      const hadEdit = state.isEditing;
+      withViewTransition(() => {
+        state.isEditing = false;
+        state.bookKey = next;
+        const chs = BOOKS[next].chapters;
+        state.selectedCh = chs.length ? chs[chs.length - 1].num : 1;
+        state.mainSurface = 'chapter';
+        render();
+      });
+      if (hadEdit) {
+        showToast('已自动暂存《' + book.title + '》未保存手稿，切回可继续改');
+      }
+      return;
+    }
+    if (act === 'pick-ch') {
+      const nextCh = Number(btn.getAttribute('data-ch'));
+      const hadEdit = state.isEditing && nextCh !== state.selectedCh;
+      withViewTransition(() => {
+        state.isEditing = false;
+        state.selectedCh = nextCh;
+        state.mainSurface = 'chapter';
+        state.openMenu = null;
+        render();
+      });
+      if (hadEdit) showToast('已自动暂存上一章未保存手改草稿');
+      return;
+    }
+    if (act === 'discard-stash') {
+      delete state.draftBySlot[slotKey(state.bookKey, state.selectedCh)];
+      showToast('已丢弃暂存手改，恢复定稿原文');
+      return;
+    }
+    if (act === 'open-codex') {
+      withViewTransition(() => {
+        state.mainSurface = 'codex';
+        state.codexTab = btn.getAttribute('data-tab');
+        state.openMenu = null;
+        render();
+      });
+      return;
+    }
+    if (act === 'codex-tab') { state.codexTab = btn.getAttribute('data-tab'); render(); return; }
+    if (act === 'back-to-prose') {
+      withViewTransition(() => { state.mainSurface = 'chapter'; render(); });
+      return;
+    }
+    if (act === 'ch-tab') {
+      withViewTransition(() => { state.chapterTab = btn.getAttribute('data-tab'); render(); });
+      return;
+    }
+    if (act === 'r-tab') { state.rightTab = btn.getAttribute('data-tab'); render(); return; }
+    if (act === 'toggle-right') { state.rightOpen = !state.rightOpen; render(); return; }
+    if (act === 'toggle-lowlevel') { state.lowLevelOpen = !state.lowLevelOpen; render(); return; }
+    if (act === 'pick-attempt') { state.traceAttempt = btn.getAttribute('data-att'); render(); return; }
+    if (act === 'open-patch-trace') {
+      withViewTransition(() => {
+        state.selectedRoleForTrace = 'writer';
+        state.traceAttempt = 'patch';
+        state.rightOpen = true;
+        state.rightTab = 'trace';
+        render();
+      });
+      return;
+    }
+    if (act === 'inspect-step') {
+      withViewTransition(() => {
+        state.selectedRoleForTrace = btn.getAttribute('data-role');
+        state.traceAttempt = 'writer';
+        state.rightOpen = true;
+        state.rightTab = 'trace';
+        render();
+      });
+      return;
+    }
+    if (act === 'toggle-ideas') { state.ideasExpanded = !state.ideasExpanded; render(); return; }
+    if (act === 'fill-idea') {
+      state.noteText = book.options[Number(btn.getAttribute('data-idx'))] || '';
+      state.noteKind = 'DIRECTOR_NOTE';
+      render();
+      const inp = document.getElementById('note-input');
+      if (inp) inp.focus();
+      return;
+    }
+    if (act === 'run-idea' || act === 'run-one' || act === 'start-cont') {
+      state.openMenu = null;
+      state.scene = 'running';
+      state.stopPending = false;
+      state.selectedRoleForTrace = 'writer';
+      showToast('已启动章节生成管线');
+      return;
+    }
+    if (act === 'soft-stop') {
+      state.openMenu = null;
+      state.stopPending = true;
+      showToast('将在本章写完保存后平稳停下');
+      return;
+    }
+    if (act === 'force-stop') {
+      state.openMenu = null;
+      state.scene = 'idle';
+      state.stopPending = false;
+      showToast('已立即中断并清理未完成半截草稿');
+      return;
+    }
+    if (act === 'pick-kind') {
+      state.noteKind = btn.getAttribute('data-k');
+      state.openMenu = null;
+      render();
+      return;
+    }
+    if (act === 'add-note') { pushNote(false); return; }
+    if (act === 'send-run') { pushNote(true); return; }
+    if (act === 'del-note') {
+      state.notes.splice(Number(btn.getAttribute('data-idx')), 1);
+      showToast('已撤回便签');
+      return;
+    }
+    if (act === 'toggle-edit') { state.chapterTab = 'prose'; state.isEditing = !state.isEditing; render(); return; }
+    if (act === 'save-edit' || act === 'sync-now') {
+      state.isEditing = false;
+      delete state.draftBySlot[slotKey(state.bookKey, state.selectedCh)];
+      book.dirtyCount = 0;
+      state.scene = 'idle';
+      triggerInkAndSealReveal();
+      showToast('已保存手改并同步全书设定集，重新加盖定稿印');
+      return;
+    }
+    if (act === 'auto-heal') {
+      state.scene = 'idle';
+      triggerInkAndSealReveal();
+      showToast('已自动修补冲突语句并更新本章台账');
+      return;
+    }
+    if (act === 'retry-with-note') {
+      state.notes.push({ kind: '圆谎修补', text: '陈砚护着旧伤未愈的左腕，改用右肩抵开账房木门' });
+      state.scene = 'running';
+      showToast('已附修正便签并重新启动本章执笔');
+      return;
+    }
+    if (act === 'fill-retcon') {
+      state.noteKind = 'RETCON';
+      state.noteText = '补圆左腕伤势：陈砚用右肩抵门，左手仅虚扶门框';
+      render();
+      const inp = document.getElementById('note-input');
+      if (inp) inp.focus();
+      return;
+    }
+    if (act === 'toggle-role') {
+      const r = btn.getAttribute('data-role');
+      state.expandedRoles[r] = !state.expandedRoles[r];
+      render();
+      return;
+    }
+    if (act === 'toggle-all-roles') {
+      const next = !ROLES.every(r => state.expandedRoles[r.id]);
+      ROLES.forEach(r => { state.expandedRoles[r.id] = next; });
+      render();
+      return;
+    }
+    if (act === 'save-routing') { state.routingDirty = false; showToast('第一层基础池与第二层单 Agent 覆盖已一并保存'); return; }
+    if (act === 'dream-now') { state.openMenu = null; showToast('已启动跨章设定与伏笔整理'); return; }
+    if (act === 'harvest-voice') { state.openMenu = null; showToast('已从本章提取鲜活对话声纹标本'); return; }
+    if (act === 'next-vol') { state.openMenu = null; state.activeModal = 'volume'; render(); return; }
+    if (act === 'parallel-fork') { state.openMenu = null; state.activeModal = 'parallel'; render(); return; }
+    if (act === 'new-book') { state.openMenu = null; state.activeModal = 'boot'; render(); return; }
+    if (act === 'confirm-vol') {
+      const doneBook = btn.getAttribute('data-complete') === '1';
+      state.activeModal = null;
+      showToast(doneBook ? '已封存全书并打上完结标签' : '已封存本卷并生成下一卷大纲');
+      return;
+    }
+    if (act === 'confirm-parallel-fork') {
+      state.activeModal = null;
+      state.parallelActive = true;
+      showToast('已开启多线并行窗口：' + state.parallelWindowId);
+      return;
+    }
+    if (act === 'confirm-parallel-merge') {
+      state.activeModal = null;
+      state.parallelActive = false;
+      showToast('已将并行支线合流回主线时间轴');
+      return;
+    }
+    if (act === 'confirm-boot') {
+      state.activeModal = null;
+      state.bookKey = 'fresh';
+      state.mainSurface = 'chapter';
+      showToast('新作品《灰烬航路》建库完成，已停机待命');
+      return;
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (state.vp === 'full') render();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

@@ -8,7 +8,7 @@
 - **业务流与数据契约** -> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：修改作者契约对齐、开书编译与停机、开篇校准与声纹采集、作品目录结构、视角与禁区隔离、单章管线、`Sync`、三态时间线、多轮 `Dreaming`、换卷或跨章自愈时读取。
 - **文风纪律与门禁词典** -> [`docs/WRITING-CRAFT.md`](docs/WRITING-CRAFT.md)：调整叙述人称主观度、规划/执笔提示词、声纹标本边界、静态门禁规则或 `craft_plugins` 时读取。
 - **DSH 插件架构与开发计划** -> [`docs/DEVELOPMENT-PLAN.md`](docs/DEVELOPMENT-PLAN.md)：开发 `dsh-*` 插件包、编写外部 `roles/*.yml` 角色配置、接入 `ctx.agents.create` / `yield_*` 门禁 / 斜杠命令 / Studio 节点日志钻取，或核查各阶段完工判据时读取。
-- **产品边界与架构决策** -> [`docs/PRODUCT.md`](docs/PRODUCT.md)、[`docs/adr/`](docs/adr/)：核对双入口协作定位、Operator Studio 交互职责或历史架构取舍原因时读取。
+- **产品边界、视觉设计与架构决策** -> [`docs/impeccable/PRODUCT.md`](docs/impeccable/PRODUCT.md)、[`docs/impeccable/DESIGN.md`](docs/impeccable/DESIGN.md)、[`docs/impeccable/studio-frontend-brief.md`](docs/impeccable/studio-frontend-brief.md)、[`docs/adr/`](docs/adr/)：核对双入口协作定位、Operator Studio 视觉与交互规范或历史架构取舍原因时读取。
 - **外部论文与 DSH 源码备忘** -> [`docs/RESEARCH.md`](docs/RESEARCH.md)：查阅长篇评测实证数据、跨厂商缓存/`logprobs` 契约，或核对 `@deepseek-ai/dsh` 底座机制时读取。
 - **代码审查准则与工程门禁** -> [`CODING_STANDARDS.md`](CODING_STANDARDS.md)：执行代码审查（Standards 轴）、核查 WAL 事务/时间线/净室/Cordis 生命周期不变量，或运行统一门禁（`pnpm run check`）与隔离沙盒（`pnpm run dev:sandbox`）时读取。
 
