@@ -1,10 +1,10 @@
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { NodeSystemAdapter } from '../ports/index.js';
-import { EntityProfile } from '../store/schemas.js';
-import { IndexRecall } from './index.js';
+import { EntityProfile, EntryStatus } from '../store/schemas.js';
+import { IndexRecall, parseL2CardSections } from './index.js';
 
 const FIXTURE_BOOK_DIR = resolve(import.meta.dirname, '../../../../fixtures/sample-book');
 const tempDirs: string[] = [];
@@ -396,5 +396,397 @@ describe('IndexRecall', () => {
         expect(res.overallStatus).toBe('paired');
         expect(res.chapterVerifications[0]?.status).toBe('paired');
         expect(res.chapterVerifications[0]?.entityEntries).toHaveLength(1);
+    });
+
+    it('实例级章节缓存：复用未变更缓存、(mtimeMs, size, chapterHash) 联合防等长碰撞、clearCache 按书隔离与暂存覆盖层优先', async () => {
+        const bookRootA = await createTempBookDir();
+        const bookRootB = await createTempBookDir();
+        const recall = new IndexRecall(new NodeSystemAdapter());
+
+        const ch1PathA = join(bookRootA, 'manuscripts/ch_0001.md');
+        const ch1PathB = join(bookRootB, 'manuscripts/ch_0001.md');
+        const baseContentA = '<!-- story_day: 2 -->\n# 第一章\n\n神代雪乃在旧校舍门前AAA。\n';
+        const sameLenContentA = '<!-- story_day: 7 -->\n# 第一章\n\n神代雪乃在旧校舍门前BBB。\n';
+        expect(Buffer.byteLength(baseContentA, 'utf8')).toBe(Buffer.byteLength(sameLenContentA, 'utf8'));
+
+        await writeFile(ch1PathA, baseContentA, 'utf8');
+        await writeFile(ch1PathB, '<!-- story_day: 4 -->\n# 第一章B\n\n神代雪乃在图书馆CCC。\n', 'utf8');
+        const stBeforeQuantize = await stat(ch1PathA);
+        await utimes(ch1PathA, stBeforeQuantize.atime, stBeforeQuantize.mtime);
+        const stInitial = await stat(ch1PathA);
+
+        const profile = createSampleProfile({
+            metadata: {
+                entity_id: 'char_002',
+                canonical_name: '神代雪乃',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 1
+            }
+        });
+
+        // 1. 首次读取命中并缓存 (hash_v1)
+        const slices1 = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            chapterHashes: { ch_0001: 'hash_v1' }
+        });
+        expect(slices1[0]?.text).toContain('AAA');
+        expect(slices1[0]?.chapterDay).toBe(2);
+
+        // 2. 同 mtimeMs + 同 size 覆写：传入相同 hash_v1 时命中缓存（不读盘），传入新 hash_v2 时立刻穿透刷新
+        await writeFile(ch1PathA, sameLenContentA, 'utf8');
+        await utimes(ch1PathA, stInitial.atime, stInitial.mtime);
+
+        const cachedHitSlices = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            chapterHashes: { ch_0001: 'hash_v1' }
+        });
+        expect(cachedHitSlices[0]?.text).toContain('AAA');
+
+        const refreshedSlices = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            chapterHashes: { ch_0001: 'hash_v2' }
+        });
+        expect(refreshedSlices[0]?.text).toContain('BBB');
+        expect(refreshedSlices[0]?.chapterDay).toBe(7);
+
+        // 3. 暂存覆盖层（stagingOverlay / stagingRead）优先于磁盘缓存，且不污染磁盘缓存，支持 null 标记删除
+        const stagingOverlay = new Map<string, string | null>([
+            ['manuscripts/ch_0001.md', '<!-- story_day: 9 -->\n# 第一章暂存\n\n神代雪乃在屋顶DDD。\n']
+        ]);
+        const stagedSlices = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            stagingOverlay
+        });
+        expect(stagedSlices[0]?.text).toContain('DDD');
+        expect(stagedSlices[0]?.chapterDay).toBe(9);
+
+        const deletedOverlay = new Map<string, string | null>([['manuscripts/ch_0001.md', null]]);
+        const deletedSlices = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            stagingOverlay: deletedOverlay
+        });
+        expect(deletedSlices).toEqual([]);
+
+        const stagingReadSlices = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            stagingRead: (rel) =>
+                rel === 'manuscripts/ch_0001.md'
+                    ? '<!-- story_day: 8 -->\n# 第一章读回调\n\n神代雪乃在琴房EEE。\n'
+                    : undefined
+        });
+        expect(stagingReadSlices[0]?.text).toContain('EEE');
+
+        // 移去暂存后磁盘缓存仍为 BBB
+        const dayMapA = await recall.resolveChapterDayMap(bookRootA, ['manuscripts/ch_0001.md']);
+        expect(dayMapA.get(1)).toBe(7);
+
+        // 4. bookRoot 隔离缓存与 clearCache(bookRootA) 不影响 bookRootB
+        const slicesB = await recall.recallEntitySlices(bookRootB, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10
+        });
+        expect(slicesB[0]?.text).toContain('CCC');
+
+        await writeFile(ch1PathA, baseContentA, 'utf8');
+        await utimes(ch1PathA, stInitial.atime, stInitial.mtime);
+        recall.clearCache(bookRootA);
+
+        const afterClearA = await recall.recallEntitySlices(bookRootA, {
+            profile,
+            targetChapter: 2,
+            targetDay: 10,
+            chapterHashes: { ch_0001: 'hash_v2' }
+        });
+        expect(afterClearA[0]?.text).toContain('AAA');
+        expect((await recall.resolveChapterDayMap(bookRootB, ['manuscripts/ch_0001.md'])).get(1)).toBe(4);
+    });
+
+    it('段级多词共现打分、focusChapters 第一优先级与 maxSlicesPerEntity / sliceMaxChars 截断', async () => {
+        const bookRoot = await createTempBookDir();
+        const recall = new IndexRecall(new NodeSystemAdapter());
+
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0001.md'),
+            [
+                '<!-- story_day: 1 -->',
+                '# 第一章',
+                '',
+                '前文铺垫一段很长的背景描述，用于验证上下文保留与总字符预算截断时不会挤掉命中核心段落。',
+                '',
+                '神代雪乃只是路过走廊。',
+                '',
+                '冰之审判官神代雪乃站在旧校舍 音乐室门前，手里拿着钥匙。',
+                '',
+                '神代雪乃推开旧校舍里的音乐室。',
+                '',
+                '后文还有一段补充描写。'
+            ].join('\n'),
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0002.md'),
+            [
+                '<!-- story_day: 2 -->',
+                '# 第二章',
+                '',
+                '神代雪乃在旧校舍门前停步。'
+            ].join('\n'),
+            'utf8'
+        );
+
+        const profile = createSampleProfile({
+            metadata: {
+                entity_id: 'char_002',
+                canonical_name: '神代雪乃',
+                unique_aliases: ['冰之审判官'],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 2
+            }
+        });
+
+        // 未指定 focusChapters 时：ch_0001 精确短语+双身份键段排在首位，其次是拆词共现段，再其次是 ch_0002
+        const scoredSlices = await recall.recallEntitySlices(bookRoot, {
+            profile,
+            targetChapter: 3,
+            targetDay: 10,
+            extraKeywords: ['旧校舍 音乐室'],
+            sliceContextParagraphs: 1,
+            sliceMaxChars: 130,
+            maxSlicesPerEntity: 3
+        });
+
+        expect(scoredSlices).toHaveLength(3);
+        expect(scoredSlices[0]?.text).toContain('冰之审判官神代雪乃站在旧校舍 音乐室门前');
+        expect(scoredSlices[1]?.text).toContain('神代雪乃推开旧校舍里的音乐室');
+        expect(scoredSlices[0]?.contextBefore.length).toBeLessThanOrEqual(1);
+        expect(scoredSlices[0]?.contextAfter.length).toBeLessThanOrEqual(1);
+        for (const s of scoredSlices) {
+            expect(s.snippet.length).toBeLessThanOrEqual(130);
+        }
+
+        // 指定 focusChapters: [2] 且 maxSlicesPerEntity: 1 时，ch_0002 获得 +1000 优先并直接截断返回 1 条
+        const focusedOnly = await recall.recallEntitySlices(bookRoot, {
+            profile,
+            targetChapter: 3,
+            targetDay: 10,
+            extraKeywords: ['旧校舍 音乐室'],
+            focusChapters: [2],
+            maxSlicesPerEntity: 1,
+            sliceContextParagraphs: 0
+        });
+        expect(focusedOnly).toHaveLength(1);
+        expect(focusedOnly[0]?.chapterNumber).toBe(2);
+        expect(focusedOnly[0]?.contextBefore).toEqual([]);
+        expect(focusedOnly[0]?.contextAfter).toEqual([]);
+
+        // 指定 focusChapters: [2] 但 maxSlicesPerEntity: 2 时，ch_0002 排第 1，其余章按相关性补足 1 条
+        const focusedPlusFallback = await recall.recallEntitySlices(bookRoot, {
+            profile,
+            targetChapter: 3,
+            targetDay: 10,
+            extraKeywords: ['旧校舍 音乐室'],
+            focusChapters: [2],
+            maxSlicesPerEntity: 2,
+            sliceContextParagraphs: 1
+        });
+        expect(focusedPlusFallback).toHaveLength(2);
+        expect(focusedPlusFallback[0]?.chapterNumber).toBe(2);
+        expect(focusedPlusFallback[1]?.chapterNumber).toBe(1);
+        expect(focusedPlusFallback[1]?.text).toContain('冰之审判官神代雪乃站在旧校舍 音乐室门前');
+    });
+
+    it('buildLibrarianCatalog 定长块冻结折叠与半角/全角冒号 L2 卡解析兼容性', async () => {
+        const bookRoot = await createTempBookDir();
+        const recall = new IndexRecall(new NodeSystemAdapter());
+
+        await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
+        await writeFile(join(bookRoot, 'manuscripts/ch_0002.md'), '风纪委员长在走廊出现。', 'utf8');
+        await writeFile(join(bookRoot, 'manuscripts/ch_0003.md'), '风纪委员长在天台出现。', 'utf8');
+
+        // 1. 验证 L2 卡半角冒号与全角冒号同时兼容 (- 出场实体[:：] / - 异象锚点[:：])
+        const mixedColonCard = [
+            '# 第 1 卷双轨章卡',
+            '',
+            '## ch_0001 (day:1)',
+            '- 主干剧情: 神代雪乃下达废部通知。后续细节略。',
+            '- 异象锚点: 玻璃弹珠, 四楼《月光》',
+            '- 出场实体: char_001',
+            '',
+            '## ch_0002 (day:2)',
+            '- 主干剧情: 夜巡旧校舍发现新划痕。',
+            '- 异象锚点: 黄铜钥匙，门锁划痕',
+            '- 出场实体: char_002',
+            '',
+            '## ch_0003 (day:3)',
+            '- 主干剧情：天台交锋。',
+            '- 异象锚点：铁门锁链',
+            '- 出场实体：char_003'
+        ].join('\n');
+
+        const parsedCard = parseL2CardSections(mixedColonCard);
+        expect(parsedCard.sections).toHaveLength(3);
+        expect(parsedCard.sections[0]?.appearedEntityIds).toEqual(['char_001']);
+        expect(parsedCard.sections[0]?.anomalyAnchors).toEqual(['玻璃弹珠', '四楼《月光》']);
+        expect(parsedCard.sections[1]?.appearedEntityIds).toEqual(['char_002']);
+        expect(parsedCard.sections[1]?.anomalyAnchors).toEqual(['黄铜钥匙', '门锁划痕']);
+        expect(parsedCard.sections[2]?.appearedEntityIds).toEqual(['char_003']);
+        expect(parsedCard.sections[2]?.anomalyAnchors).toEqual(['铁门锁链']);
+
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), mixedColonCard, 'utf8');
+        const roleSlices = await recall.recallEntitySlices(bookRoot, {
+            profile: createSampleProfile({
+                metadata: {
+                    entity_id: 'char_002',
+                    canonical_name: '不可能匹配的名字',
+                    unique_aliases: [],
+                    contextual_titles: ['风纪委员长'],
+                    historical_anchors: [],
+                    last_seen_ch: 2
+                }
+            }),
+            targetChapter: 4,
+            targetDay: 10
+        });
+        expect(roleSlices.map((s) => s.chapterNumber)).toEqual([2]);
+
+        // 2. 验证超过 l2FullUnfrozenThreshold 后按 l2FreezeBlockChapters 整块冻结进 staticPrefix 且前缀稳定
+        const buildCardText = (count: number) =>
+            [
+                '# 第 1 卷双轨章卡',
+                '',
+                ...Array.from({ length: count }, (_, idx) => {
+                    const ch = idx + 1;
+                    const chId = `ch_${String(ch).padStart(4, '0')}`;
+                    const colon = ch % 2 === 0 ? '：' : ':';
+                    return [
+                        `## ${chId} (day:${ch})`,
+                        `- 主干剧情${colon} 第 ${ch} 章主干首句。第 ${ch} 章次句补充。`,
+                        `- 异象锚点${colon} 线索_${ch}`,
+                        `- 出场实体${colon} char_001, char_002`
+                    ].join('\n');
+                })
+            ].join('\n\n');
+
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), buildCardText(4), 'utf8');
+        const cat4 = await recall.buildLibrarianCatalog(bookRoot, {
+            currentVolume: 1,
+            l2FullUnfrozenThreshold: 4,
+            l2FreezeBlockChapters: 2
+        });
+        expect(cat4.staticPrefix).not.toContain('Frozen Active Volume Index');
+        expect(cat4.dynamicTail).toContain('第 1 章次句补充');
+
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), buildCardText(5), 'utf8');
+        const cat5 = await recall.buildLibrarianCatalog(bookRoot, {
+            currentVolume: 1,
+            l2FullUnfrozenThreshold: 4,
+            l2FreezeBlockChapters: 2
+        });
+        expect(cat5.staticPrefix).toContain('Frozen Active Volume Index: vol_01_cards.md (ch_0001-ch_0002)');
+        expect(cat5.staticPrefix).toContain('Frozen Active Volume Index: vol_01_cards.md (ch_0003-ch_0004)');
+        expect(cat5.staticPrefix).toContain('- ch_0001 (day:1) | 第 1 章主干首句。 | 出场实体: char_001, char_002');
+        expect(cat5.staticPrefix).not.toContain('第 1 章次句补充');
+        expect(cat5.dynamicTail).toContain('## ch_0005 (day:5)');
+        expect(cat5.dynamicTail).toContain('第 5 章次句补充');
+        expect(cat5.dynamicTail).not.toContain('## ch_0004');
+
+        // 新增第 6 章（未满新整块），staticPrefix 保持字节级完全不变
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), buildCardText(6), 'utf8');
+        const cat6 = await recall.buildLibrarianCatalog(bookRoot, {
+            currentVolume: 1,
+            l2FullUnfrozenThreshold: 4,
+            l2FreezeBlockChapters: 2
+        });
+        expect(cat6.staticPrefix).toBe(cat5.staticPrefix);
+        expect(cat6.dynamicTail).toContain('## ch_0005 (day:5)');
+        expect(cat6.dynamicTail).toContain('## ch_0006 (day:6)');
+    });
+
+    it('verifyPairedRecall：空证据返回 unpaired、不篡改 focusChapters、过滤 WARPED 且支持双侧缺席与不截断审计', async () => {
+        const bookRoot = await createTempBookDir();
+        const recall = new IndexRecall(new NodeSystemAdapter());
+
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0002.md'),
+            '<!-- story_day: 2 -->\n# 第二章\n\n今天毫无异常。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0003.md'),
+            '<!-- story_day: 3 -->\n# 第三章\n\n桌上放着那瓶波子汽水。\n',
+            'utf8'
+        );
+
+        // 1. 声明章与命中章均为空且未传 focusChapters -> paired: false, overallStatus: 'unpaired'
+        const emptyProfile = createSampleProfile({
+            metadata: {
+                entity_id: 'item_999',
+                canonical_name: '完全不存在的物件',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 0
+            }
+        });
+        const emptyRes = await recall.verifyPairedRecall(bookRoot, {
+            profile: emptyProfile,
+            targetChapter: 3,
+            targetDay: 3
+        });
+        expect(emptyRes.paired).toBe(false);
+        expect(emptyRes.overallStatus).toBe('unpaired');
+        expect(emptyRes.chapterVerifications).toEqual([]);
+
+        // 2. focusChapters 不可变 + 过滤大小写不敏感 WARPED 条目 + 双侧均无记录标记 missing_both
+        const warpedAndMixedProfile = createSampleProfile({
+            metadata: {
+                entity_id: 'item_001',
+                canonical_name: '波子汽水',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 3
+            },
+            acquiredState: [
+                { chapter: 1, storyDay: 1, status: 'ACTIVE', text: '出现在活动室桌角', continuationLines: [] },
+                { chapter: 2, storyDay: 2, status: 'warped' as unknown as EntryStatus, text: '被扭曲时间线作废的记录', continuationLines: [] },
+                { chapter: 3, storyDay: 3, status: 'ACTIVE', text: '再次出现在桌上', continuationLines: [] }
+            ]
+        });
+
+        const inputFocus = [3, 1, 2];
+        const auditRes = await recall.verifyPairedRecall(bookRoot, {
+            profile: warpedAndMixedProfile,
+            targetChapter: 3,
+            targetDay: 3,
+            focusChapters: inputFocus,
+            maxSlicesPerEntity: 1 // verifyPairedRecall 内部绝不截断
+        });
+
+        expect(inputFocus).toEqual([3, 1, 2]);
+        expect(auditRes.paired).toBe(false);
+        expect(auditRes.overallStatus).toBe('unpaired');
+
+        const statusByCh = new Map(auditRes.chapterVerifications.map((v) => [v.chapterNumber, v.status]));
+        expect(statusByCh.get(1)).toBe('paired');
+        expect(statusByCh.get(2)).toBe('missing_both');
+        expect(statusByCh.get(3)).toBe('paired');
+        expect(auditRes.unpairedIssues.map((i) => i.chapterNumber)).toEqual([2]);
     });
 });
