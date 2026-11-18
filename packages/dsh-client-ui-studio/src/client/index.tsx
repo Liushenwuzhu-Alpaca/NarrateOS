@@ -1755,6 +1755,7 @@ export function NarrateStudioRoot({
 
                     {rightTab === 'insp' ? (
                         <RightOpsInspector
+                            bookRoot={status?.bookRoot ?? null}
                             walLock={{
                                 walPhase: status?.walPhase ?? 'IDLE',
                                 timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),

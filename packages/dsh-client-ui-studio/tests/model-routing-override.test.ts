@@ -13,22 +13,53 @@ import {
     RightOpsInspector,
     type RightOpsInspectorProps
 } from '../src/client/RightOpsInspector.js';
+import { normalizeRoleRoutingMap } from '../src/client/RoleRoutingEditor.js';
 import type {
     AvailableModelItem,
     RoleDefinitionItem,
+    RoleModelOverride,
+    RoleReasoningEffort,
     SaveModelRoutingRequest
 } from '../src/client/types.js';
 
-const CANONICAL_ROLES = [
-    'librarian',
-    'planner',
-    'writer',
-    'patch',
-    'fact-checker',
-    'extractor',
-    'dreamer',
-    'boot-compiler'
-] as const;
+const SAMPLE_ROLE_DEFINITIONS: RoleDefinitionItem[] = [
+    {
+        id: 'librarian',
+        defaultPool: 'fast_retrieval',
+        defaultReasoningEffort: 'low',
+        effectivePool: 'fast_retrieval',
+        effectiveProvider: 'deepseek',
+        effectiveModel: 'deepseek-chat',
+        effectiveReasoningEffort: 'low'
+    },
+    {
+        id: 'writer',
+        defaultPool: 'strong_creative',
+        defaultReasoningEffort: 'medium',
+        effectivePool: 'strong_creative',
+        effectiveProvider: 'anthropic',
+        effectiveModel: 'claude-sonnet-4-5',
+        effectiveReasoningEffort: 'medium'
+    },
+    {
+        id: 'patch',
+        defaultPool: 'strong_creative',
+        defaultReasoningEffort: 'low',
+        effectivePool: 'strong_creative',
+        effectiveProvider: 'anthropic',
+        effectiveModel: 'claude-sonnet-4-5',
+        effectiveReasoningEffort: 'low'
+    },
+    {
+        id: 'fact-checker',
+        defaultPool: 'audit',
+        defaultReasoningEffort: 'medium',
+        effectivePool: 'audit',
+        effectiveProvider: 'openai',
+        effectiveModel: 'gpt-4.1',
+        effectiveReasoningEffort: 'medium'
+    }
+];
 
 const globalState = globalThis as Record<string, unknown>;
 let hadReactActEnv = false;
@@ -93,11 +124,16 @@ function baseProps(overrides?: Partial<RightOpsInspectorProps>): RightOpsInspect
             spotlightQueue: null
         },
         volumeProgress: null,
+        bookRoot: '/books/alpha',
+        roleDefinitions: SAMPLE_ROLE_DEFINITIONS,
         ...overrides
     };
 }
 
-function mountInspector(props: RightOpsInspectorProps): HTMLElement {
+function mountInspector(props: RightOpsInspectorProps): {
+    container: HTMLElement;
+    rerender: (nextProps: RightOpsInspectorProps) => void;
+} {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -105,7 +141,14 @@ function mountInspector(props: RightOpsInspectorProps): HTMLElement {
     act(() => {
         root.render(createElement(RightOpsInspector, props));
     });
-    return container;
+    return {
+        container,
+        rerender: (nextProps: RightOpsInspectorProps) => {
+            act(() => {
+                root.render(createElement(RightOpsInspector, nextProps));
+            });
+        }
+    };
 }
 
 function setSelectValue(select: HTMLSelectElement, value: string): void {
@@ -175,30 +218,60 @@ describe('saveModelRouting API 客户端', () => {
 });
 
 describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
-    it('未传入 roleDefinitions 时仍展示全部 8 个标准工种，传入时优先展示后端 roleDefinitions 与生效模型', () => {
-        const defaultContainer = mountInspector(baseProps());
-        const cardText = defaultContainer.textContent ?? '';
-        expect(cardText).toContain('分角色模型覆盖 (Subagent 2-Layer Override)');
-        for (const roleId of CANONICAL_ROLES) {
-            expect(defaultContainer.querySelector(`[data-role-id="${roleId}"]`)).not.toBeNull();
-        }
+    it('roleDefinitions 为空且无既有 roleRouting 时显示占位提示；有既有键时仅基于既有键生成最小行', () => {
+        const { container: emptyContainer } = mountInspector(
+            baseProps({ roleDefinitions: null, roleRouting: null })
+        );
+        expect(emptyContainer.textContent).toContain('分角色模型覆盖 (Subagent 2-Layer Override)');
+        expect(emptyContainer.textContent).toContain('等待服务端下发工种配置 (roleDefinitions)...');
+        expect(emptyContainer.querySelectorAll('[data-role-id]')).toHaveLength(0);
 
-        const roleDefinitions: RoleDefinitionItem[] = CANONICAL_ROLES.map((id) => ({
-            id,
-            defaultPool: id === 'fact-checker' ? 'audit' : id === 'librarian' || id === 'extractor' ? 'fast_retrieval' : 'strong_creative',
-            defaultReasoningEffort: id === 'patch' ? 'low' : 'medium',
-            effectiveTier: id === 'librarian' ? 'strong' : null,
-            effectivePool: id === 'librarian' ? 'strong_creative' : 'fast_retrieval',
-            effectiveProvider: id === 'writer' ? 'openai' : 'anthropic',
-            effectiveModel: id === 'writer' ? 'gpt-4.1' : 'claude-sonnet-4-5',
-            effectiveReasoningEffort: id === 'writer' ? 'high' : 'medium'
-        }));
+        const emptySaveBtn = Array.from(emptyContainer.querySelectorAll<HTMLButtonElement>('button')).find(
+            (btn) => btn.textContent?.includes('保存工种模型配置')
+        )!;
+        expect(emptySaveBtn.disabled).toBe(true);
+
+        const { container: fallbackContainer } = mountInspector(
+            baseProps({
+                roleDefinitions: [],
+                roleRouting: { writer: { tier: 'weak' } }
+            })
+        );
+        const rows = Array.from(fallbackContainer.querySelectorAll<HTMLElement>('[data-role-id]'));
+        expect(rows.map((el) => el.getAttribute('data-role-id'))).toEqual(['writer']);
+        expect(rows[0]?.textContent).toContain('--');
+        expect(rows[0]?.textContent).toContain('deepseek:deepseek-chat');
+    });
+
+    it('完全由后端 roleDefinitions 驱动渲染，并正确展示“继承默认”文案与候选模型', () => {
+        const roleDefinitions: RoleDefinitionItem[] = [
+            {
+                id: 'librarian',
+                defaultPool: 'fast_retrieval',
+                defaultReasoningEffort: 'low',
+                effectiveTier: 'strong',
+                effectivePool: 'strong_creative',
+                effectiveProvider: 'anthropic',
+                effectiveModel: 'claude-sonnet-4-5',
+                effectiveReasoningEffort: 'low'
+            },
+            {
+                id: 'writer',
+                defaultPool: 'strong_creative',
+                defaultReasoningEffort: 'medium',
+                effectiveTier: null,
+                effectivePool: 'strong_creative',
+                effectiveProvider: 'openai',
+                effectiveModel: 'gpt-4.1',
+                effectiveReasoningEffort: 'high'
+            }
+        ];
         const availableModels: AvailableModelItem[] = [
             { provider: 'anthropic', model: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
             { provider: 'openai', model: 'gpt-4.1', label: 'GPT-4.1' }
         ];
 
-        const customContainer = mountInspector(
+        const { container: customContainer } = mountInspector(
             baseProps({
                 roleDefinitions,
                 availableModels,
@@ -209,8 +282,24 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
             })
         );
 
+        expect(
+            Array.from(customContainer.querySelectorAll('[data-role-id]')).map((el) =>
+                el.getAttribute('data-role-id')
+            )
+        ).toEqual(['librarian', 'writer']);
+
         const writerRow = customContainer.querySelector<HTMLElement>('[data-role-id="writer"]');
-        expect(writerRow?.textContent).toContain('openai:gpt-4.1');
+        expect(writerRow?.textContent).toContain('openai:gpt-4.1 (high)');
+
+        const tierDefaultOpt = customContainer.querySelector<HTMLOptionElement>(
+            'select[aria-label="writer 档位覆盖"] option[value=""]'
+        );
+        const effortDefaultOpt = customContainer.querySelector<HTMLOptionElement>(
+            'select[aria-label="writer 推理强度"] option[value=""]'
+        );
+        expect(tierDefaultOpt?.textContent).toBe('继承默认');
+        expect(effortDefaultOpt?.textContent).toBe('继承默认');
+
         const writerModelInput = customContainer.querySelector<HTMLInputElement>(
             'input[aria-label="writer 指定模型"]'
         );
@@ -225,7 +314,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
 
     it('支持选择 Layer 1 强/弱档位、填写 Layer 2 具体模型与 reasoning_effort 并提交保存', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
-        const container = mountInspector(
+        const { container } = mountInspector(
             baseProps({
                 availableModels: [
                     { provider: 'deepseek', model: 'deepseek-reasoner', label: 'DeepSeek R1' }
@@ -273,16 +362,31 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
         expect(container.textContent).toContain('工种模型配置已保存');
     });
 
-    it('Layer 2 留空时继承 Layer 1 并在保存载荷中剥离空字段', async () => {
+    it('Layer 2 留空时继承 Layer 1；重置 reasoning_effort 回退到 defaultReasoningEffort 且不残留旧 effectiveReasoningEffort', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
-        const container = mountInspector(
+        const { container } = mountInspector(
             baseProps({
+                roleDefinitions: [
+                    {
+                        id: 'writer',
+                        defaultPool: 'strong_creative',
+                        defaultReasoningEffort: 'medium',
+                        effectiveTier: 'weak',
+                        effectivePool: 'fast_retrieval',
+                        effectiveProvider: 'openai',
+                        effectiveModel: 'gpt-4.1',
+                        effectiveReasoningEffort: 'high'
+                    }
+                ],
                 roleRouting: {
                     writer: { tier: 'weak', model: 'openai:gpt-4.1', reasoning_effort: 'high' }
                 },
                 onSaveModelRouting: onSave
             })
         );
+
+        const writerRow = container.querySelector<HTMLElement>('[data-role-id="writer"]');
+        expect(writerRow?.textContent).toContain('openai:gpt-4.1 (high)');
 
         const writerModel = container.querySelector<HTMLInputElement>(
             'input[aria-label="writer 指定模型"]'
@@ -293,9 +397,9 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
         setInputValue(writerModel, '   ');
         setSelectValue(writerEffort, '');
 
-        const writerRow = container.querySelector<HTMLElement>('[data-role-id="writer"]');
-        // Layer 2 留空后继承 Layer 1 (weak -> fast_retrieval)
-        expect(writerRow?.textContent).toContain('deepseek:deepseek-chat');
+        // Layer 2 留空后继承 Layer 1 (weak -> fast_retrieval)，reasoning_effort 回退到 defaultReasoningEffort (medium)
+        expect(writerRow?.textContent).toContain('deepseek:deepseek-chat (medium)');
+        expect(writerRow?.textContent).not.toContain('(high)');
 
         const saveBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
             (btn) => btn.textContent?.includes('保存工种模型配置')
@@ -311,8 +415,94 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
         });
     });
 
+    it('modelRouting 仅含裸模型名时，跨 tier 切换依据对应池已知 effectiveProvider 推导而非借用本工种 provider', () => {
+        const { container } = mountInspector(
+            baseProps({
+                modelPool: {
+                    fastModel: 'deepseek-chat',
+                    strongModel: 'claude-sonnet-4-5',
+                    auditModel: 'gpt-4.1',
+                    inputTokens: 0,
+                    cacheReadTokens: 0
+                },
+                modelRouting: {
+                    strong_creative: 'claude-sonnet-4-5',
+                    fast_retrieval: 'deepseek-chat',
+                    audit: 'gpt-4.1'
+                },
+                roleDefinitions: SAMPLE_ROLE_DEFINITIONS
+            })
+        );
+
+        const librarianTier = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="librarian 档位覆盖"]'
+        )!;
+        const librarianModel = container.querySelector<HTMLInputElement>(
+            'input[aria-label="librarian 指定模型"]'
+        )!;
+
+        setSelectValue(librarianTier, 'strong');
+        const librarianRow = container.querySelector<HTMLElement>('[data-role-id="librarian"]');
+        expect(librarianRow?.textContent).toContain('anthropic:claude-sonnet-4-5');
+        expect(librarianRow?.textContent).not.toContain('deepseek:claude-sonnet-4-5');
+
+        setInputValue(librarianModel, 'claude-opus-4');
+        expect(librarianRow?.textContent).toContain('anthropic:claude-opus-4');
+        expect(librarianRow?.textContent).not.toContain('deepseek:claude-opus-4');
+    });
+
+    it('切换 bookRoot 时即使两书同为 roleRouting: {} 也重置未保存草稿与提示状态', async () => {
+        const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
+        const propsA = baseProps({
+            bookRoot: '/books/a',
+            roleRouting: {},
+            onSaveModelRouting: onSave
+        });
+        const { container, rerender } = mountInspector(propsA);
+
+        const writerTier = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 档位覆盖"]'
+        )!;
+        setSelectValue(writerTier, 'weak');
+        expect(writerTier.value).toBe('weak');
+
+        rerender(
+            baseProps({
+                bookRoot: '/books/b',
+                roleRouting: {},
+                onSaveModelRouting: onSave
+            })
+        );
+
+        const nextWriterTier = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 档位覆盖"]'
+        )!;
+        expect(nextWriterTier.value).toBe('');
+    });
+
+    it('normalizeRoleRoutingMap 校验并剔除非法 reasoning_effort', () => {
+        const raw = {
+            writer: {
+                tier: 'strong',
+                model: '  openai:gpt-4.1  ',
+                reasoning_effort: 'turbo' as unknown as RoleReasoningEffort
+            },
+            librarian: {
+                reasoning_effort: 'invalid_level' as unknown as RoleReasoningEffort
+            },
+            patch: {
+                reasoning_effort: 'high'
+            }
+        } satisfies Record<string, RoleModelOverride>;
+
+        expect(normalizeRoleRoutingMap(raw, true)).toEqual({
+            writer: { tier: 'strong', model: 'openai:gpt-4.1' },
+            patch: { reasoning_effort: 'high' }
+        });
+    });
+
     it('busy 为 true 或保存请求在途时禁用保存按钮，保存失败展示错误提示', async () => {
-        const busyContainer = mountInspector(
+        const { container: busyContainer } = mountInspector(
             baseProps({
                 busy: true,
                 onSaveModelRouting: vi.fn()
@@ -325,7 +515,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
 
         const deferred = Promise.withResolvers<void>();
         const onSave = vi.fn(() => deferred.promise);
-        const container = mountInspector(
+        const { container } = mountInspector(
             baseProps({
                 busy: false,
                 onSaveModelRouting: onSave

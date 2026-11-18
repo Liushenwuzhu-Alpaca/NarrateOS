@@ -576,4 +576,88 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             container.querySelector('[data-role-id="writer"]')?.textContent
         ).toContain('openai:gpt-4.1');
     });
+
+    it('切书至同样 roleRouting: {} 的 B 书时重置检查器未保存草稿与提示，roleDefinitions 缺省时显示占位提示', async () => {
+        const statusByBook: Record<string, NarrateStatusPayload> = {
+            '/books/a': {
+                ...statusPayload('/books/a'),
+                modelRouting: {
+                    strong_creative: 'anthropic:claude-sonnet-4-5',
+                    fast_retrieval: 'deepseek:deepseek-chat',
+                    audit: 'openai:gpt-4.1'
+                },
+                roleRouting: {},
+                roleDefinitions: [
+                    {
+                        id: 'writer',
+                        defaultPool: 'strong_creative',
+                        defaultReasoningEffort: 'medium',
+                        effectivePool: 'strong_creative',
+                        effectiveProvider: 'anthropic',
+                        effectiveModel: 'claude-sonnet-4-5',
+                        effectiveReasoningEffort: 'medium'
+                    }
+                ]
+            },
+            '/books/b': {
+                ...statusPayload('/books/b'),
+                modelRouting: {
+                    strong_creative: 'anthropic:claude-sonnet-4-5',
+                    fast_retrieval: 'deepseek:deepseek-chat',
+                    audit: 'openai:gpt-4.1'
+                },
+                roleRouting: {},
+                roleDefinitions: [
+                    {
+                        id: 'writer',
+                        defaultPool: 'strong_creative',
+                        defaultReasoningEffort: 'medium',
+                        effectivePool: 'strong_creative',
+                        effectiveProvider: 'anthropic',
+                        effectiveModel: 'claude-sonnet-4-5',
+                        effectiveReasoningEffort: 'medium'
+                    }
+                ]
+            }
+        };
+        vi.mocked(api.fetchStatus).mockImplementation(async () => statusByBook[activeBookRoot]!);
+
+        const container = await mountStudio();
+        await click(buttonByText(container, '检查器'));
+
+        const writerTier = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 档位覆盖"]'
+        )!;
+        const writerEffort = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 推理强度"]'
+        )!;
+        expect(writerTier.options[0]?.textContent).toBe('继承默认');
+        expect(writerEffort.options[0]?.textContent).toBe('继承默认');
+
+        // A 书本地未保存草稿
+        await act(async () => {
+            writerTier.value = 'weak';
+            writerTier.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        expect(writerTier.value).toBe('weak');
+
+        // 切换到同样 roleRouting: {} 的 B 书 -> 未保存草稿必须重置
+        await act(async () => {
+            const select = bookSelect(container);
+            select.value = '/books/b';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        const nextWriterTier = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 档位覆盖"]'
+        )!;
+        expect(nextWriterTier.value).toBe('');
+
+        // 若服务端未下发 roleDefinitions 且 roleRouting 为空 -> 呈现清晰占位提示
+        statusByBook['/books/b'] = {
+            ...statusByBook['/books/b']!,
+            roleDefinitions: []
+        };
+        await emit({ event: 'stage', data: { stage: 'COMMITTED', chapterNumber: 2 } });
+        expect(container.textContent).toContain('等待服务端下发工种配置 (roleDefinitions)...');
+    });
 });

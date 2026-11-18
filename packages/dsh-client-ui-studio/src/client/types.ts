@@ -50,6 +50,9 @@ export interface RuntimeStatusSummary {
     haltRequested: boolean;
 }
 
+/** 后端标准模型池标识 */
+export type RolePoolId = 'strong_creative' | 'fast_retrieval' | 'audit';
+
 /** 分角色模型路由第一层档位覆盖 */
 export type RoleTierOverride = 'strong' | 'weak';
 
@@ -60,19 +63,19 @@ export type RoleReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max';
 export interface RoleModelOverride {
     tier?: RoleTierOverride | undefined;
     model?: string | undefined;
-    reasoning_effort?: RoleReasoningEffort | string | undefined;
+    reasoning_effort?: RoleReasoningEffort | undefined;
 }
 
 /** 后端下发的工种模型解析定义（对应 status.roleDefinitions） */
 export interface RoleDefinitionItem {
     id: string;
-    defaultPool: 'strong_creative' | 'fast_retrieval' | 'audit' | string;
-    defaultReasoningEffort?: string | undefined;
+    defaultPool?: RolePoolId | undefined;
+    defaultReasoningEffort?: RoleReasoningEffort | undefined;
     effectiveTier?: RoleTierOverride | null | undefined;
-    effectivePool: string;
+    effectivePool?: RolePoolId | undefined;
     effectiveProvider: string;
     effectiveModel: string;
-    effectiveReasoningEffort?: string | undefined;
+    effectiveReasoningEffort?: RoleReasoningEffort | undefined;
 }
 
 /** 后端注册的可用模型候选（对应 status.availableModels） */
