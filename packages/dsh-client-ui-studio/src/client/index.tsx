@@ -21,6 +21,7 @@ import {
     requestHalt,
     runDreaming,
     saveChapter,
+    saveModelRouting,
     selectBook,
     startYolo,
     stepChapter,
@@ -77,6 +78,7 @@ import type {
     HaltViewPayload,
     MarkdownViewPayload,
     NarrateStatusPayload,
+    SaveModelRoutingRequest,
     SignalsViewPayload,
     SseEventPayload,
     StageRunRecord,
@@ -1228,6 +1230,42 @@ export function NarrateStudioRoot({
         await Promise.all([loadStatus(), loadViews()]);
     }, [loadStatus, loadViews]);
 
+    const handleSaveModelRouting = useCallback(
+        async (payload: SaveModelRoutingRequest) => {
+            if (switchingBookRef.current) {
+                throw new Error('正在切换作品，请稍后重试');
+            }
+            const bookRoot = currentBookRootRef.current;
+            const epoch = workspaceEpochRef.current;
+            try {
+                const res = await saveModelRouting(payload);
+                if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
+                setStatus((prev) =>
+                    prev
+                        ? {
+                              ...prev,
+                              ...(res.modelRouting !== undefined
+                                  ? { modelRouting: res.modelRouting }
+                                  : {}),
+                              ...(res.roleRouting !== undefined
+                                  ? { roleRouting: res.roleRouting }
+                                  : {}),
+                              ...(res.roleDefinitions !== undefined
+                                  ? { roleDefinitions: res.roleDefinitions }
+                                  : {})
+                          }
+                        : prev
+                );
+                await loadStatus().catch(() => undefined);
+                showToast('工种模型配置已保存');
+            } catch (err) {
+                showToast(err instanceof Error ? err.message : String(err), 'error');
+                throw err;
+            }
+        },
+        [isCurrentWorkspace, loadStatus, showToast]
+    );
+
     const handleRequestHalt = useCallback(async () => {
         try {
             await requestHalt();
@@ -1750,10 +1788,15 @@ export function NarrateStudioRoot({
                                 spotlightQueue: null
                             }}
                             haltDiagnostic={haltDiagnostic}
+                            modelRouting={status?.modelRouting ?? null}
+                            roleRouting={status?.roleRouting ?? null}
+                            roleDefinitions={status?.roleDefinitions ?? null}
+                            availableModels={status?.availableModels ?? null}
                             entities={inspectorEntities}
                             openThreads={inspectorOpenThreads}
                             volumeProgress={inspectorVolumeProgress}
                             busy={isBusy}
+                            onSaveModelRouting={handleSaveModelRouting}
                             onSelectEntity={() => {
                                 handleOpenView('entities');
                                 if (isNarrow) setRightOpen(false);

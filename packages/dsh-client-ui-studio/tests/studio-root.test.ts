@@ -19,6 +19,7 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
         ...original,
         fetchBooks: vi.fn(), selectBook: vi.fn(), bootBook: vi.fn(),
         fetchStatus: vi.fn(), fetchChapters: vi.fn(), fetchChapter: vi.fn(), fetchRunRecords: vi.fn(), fetchRunDetail: vi.fn(), saveChapter: vi.fn(),
+        saveModelRouting: vi.fn(),
         fetchViewEntities: vi.fn(), fetchViewHorizon: vi.fn(), fetchViewThreads: vi.fn(),
         fetchViewTelemetry: vi.fn(), fetchViewSignals: vi.fn(), fetchViewHalt: vi.fn(),
         stepChapter: vi.fn(), syncManuscripts: vi.fn(), runDreaming: vi.fn(),
@@ -125,6 +126,12 @@ beforeEach(() => {
         writes.push({ ...payload, bookRoot: activeBookRoot });
         manuscripts.set(manuscriptKey(activeBookRoot, payload.chapterNumber), payload.content);
         return saveResponse(payload.chapterNumber);
+    });
+    vi.mocked(api.saveModelRouting).mockResolvedValue({
+        status: 'ok',
+        modelRouting: {},
+        roleRouting: {},
+        roleDefinitions: []
     });
     vi.mocked(api.fetchViewEntities).mockResolvedValue({ kind: 'entities', entities: [], coldArchiveCount: 0, coldArchiveIds: [] });
     vi.mocked(api.fetchViewHorizon).mockResolvedValue({ kind: 'horizon', content: '' });
@@ -466,5 +473,107 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(api.saveChapter).toHaveBeenCalledTimes(2);
         expect(api.saveChapter).toHaveBeenLastCalledWith({ chapterNumber: 1, content: draft });
         expect(container.querySelector('.ns-prose')?.textContent).toContain(draft);
+    });
+
+    it('在检查器修改分角色模型覆盖并保存后调用 saveModelRouting 且刷新 status', async () => {
+        const baseStatus = statusPayload('/books/a');
+        let currentStatus: NarrateStatusPayload = {
+            ...baseStatus,
+            modelRouting: {
+                strong_creative: 'anthropic:claude-sonnet-4-5',
+                fast_retrieval: 'deepseek:deepseek-chat',
+                audit: 'openai:gpt-4.1'
+            },
+            roleRouting: {},
+            roleDefinitions: [
+                {
+                    id: 'librarian',
+                    defaultPool: 'fast_retrieval',
+                    effectivePool: 'fast_retrieval',
+                    effectiveProvider: 'deepseek',
+                    effectiveModel: 'deepseek-chat'
+                },
+                {
+                    id: 'writer',
+                    defaultPool: 'strong_creative',
+                    effectivePool: 'strong_creative',
+                    effectiveProvider: 'anthropic',
+                    effectiveModel: 'claude-sonnet-4-5'
+                }
+            ],
+            availableModels: [
+                { provider: 'openai', model: 'gpt-4.1', label: 'GPT-4.1' },
+                { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat' }
+            ]
+        };
+        vi.mocked(api.fetchStatus).mockImplementation(async () => currentStatus);
+        vi.mocked(api.saveModelRouting).mockImplementation(async (payload) => {
+            currentStatus = {
+                ...currentStatus,
+                roleRouting: payload.role_routing ?? {},
+                roleDefinitions: [
+                    {
+                        id: 'librarian',
+                        defaultPool: 'fast_retrieval',
+                        effectiveTier: 'strong',
+                        effectivePool: 'strong_creative',
+                        effectiveProvider: 'anthropic',
+                        effectiveModel: 'claude-sonnet-4-5'
+                    },
+                    {
+                        id: 'writer',
+                        defaultPool: 'strong_creative',
+                        effectivePool: 'strong_creative',
+                        effectiveProvider: 'openai',
+                        effectiveModel: 'gpt-4.1'
+                    }
+                ]
+            };
+            return {
+                status: 'ok',
+                modelRouting: currentStatus.modelRouting,
+                roleRouting: currentStatus.roleRouting,
+                roleDefinitions: currentStatus.roleDefinitions
+            };
+        });
+
+        const container = await mountStudio();
+        await click(buttonByText(container, '检查器'));
+
+        const librarianTier = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="librarian 档位覆盖"]'
+        );
+        const writerModel = container.querySelector<HTMLInputElement>(
+            'input[aria-label="writer 指定模型"]'
+        );
+        expect(librarianTier).not.toBeNull();
+        expect(writerModel).not.toBeNull();
+
+        await act(async () => {
+            librarianTier!.value = 'strong';
+            librarianTier!.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        await act(async () => {
+            inputSetter?.call(writerModel!, 'openai:gpt-4.1');
+            writerModel!.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        const statusCallsBeforeSave = vi.mocked(api.fetchStatus).mock.calls.length;
+        await click(buttonByText(container, '保存工种模型配置'));
+
+        expect(api.saveModelRouting).toHaveBeenCalledExactlyOnceWith({
+            role_routing: {
+                librarian: { tier: 'strong' },
+                writer: { model: 'openai:gpt-4.1' }
+            }
+        });
+        expect(vi.mocked(api.fetchStatus).mock.calls.length).toBeGreaterThan(statusCallsBeforeSave);
+        expect(
+            container.querySelector('[data-role-id="librarian"]')?.textContent
+        ).toContain('anthropic:claude-sonnet-4-5');
+        expect(
+            container.querySelector('[data-role-id="writer"]')?.textContent
+        ).toContain('openai:gpt-4.1');
     });
 });
