@@ -310,14 +310,14 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
 test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通过', () => {
     const rolesDir = path.join(PRESET_ROOT, 'roles');
     const expectedRoles = {
-        'boot-compiler': { pool: 'strong_creative', cleanroom: false, yieldTool: 'yield_boot_bundle', tools: [] },
-        librarian: { pool: 'fast_retrieval', cleanroom: false, yieldTool: 'yield_context_pack', tools: ['book_glob', 'book_grep', 'book_read'] },
-        planner: { pool: 'strong_creative', cleanroom: false, yieldTool: 'yield_outline', tools: ['book_read', 'book_grep'] },
-        writer: { pool: 'strong_creative', cleanroom: true, yieldTool: null, tools: [] },
-        patch: { pool: 'strong_creative', cleanroom: true, yieldTool: null, tools: [] },
-        'fact-checker': { pool: 'audit', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
-        extractor: { pool: 'fast_retrieval', cleanroom: false, yieldTool: 'yield_state_patch', tools: ['book_read', 'book_grep'] },
-        dreamer: { pool: 'strong_creative', cleanroom: false, yieldTool: 'yield_dream_commit', tools: ['book_read', 'book_grep', 'book_glob', 'book_edit'] }
+        'boot-compiler': { pool: 'strong_creative', reasoningEffort: 'high', cleanroom: false, yieldTool: 'yield_boot_bundle', tools: [] },
+        librarian: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_context_pack', tools: ['book_glob', 'book_grep', 'book_read'] },
+        planner: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_outline', tools: ['book_read', 'book_grep'] },
+        writer: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: true, yieldTool: null, tools: [] },
+        patch: { pool: 'strong_creative', reasoningEffort: 'low', cleanroom: true, yieldTool: null, tools: [] },
+        'fact-checker': { pool: 'audit', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
+        extractor: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_state_patch', tools: ['book_read', 'book_grep'] },
+        dreamer: { pool: 'strong_creative', reasoningEffort: 'high', cleanroom: false, yieldTool: 'yield_dream_commit', tools: ['book_read', 'book_grep', 'book_glob', 'book_edit'] }
     };
 
     for (const [roleId, expected] of Object.entries(expectedRoles)) {
@@ -330,7 +330,8 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         assert.equal(cfg.cleanroom, expected.cleanroom);
         assert.equal(typeof cfg.promptFile, 'string');
         assert.equal(typeof cfg.temperature, 'number');
-        assert.ok(['off', 'low', 'high', 'max'].includes(cfg.reasoningEffort));
+        assert.ok(['off', 'low', 'medium', 'high', 'max'].includes(cfg.reasoningEffort));
+        assert.equal(cfg.reasoningEffort, expected.reasoningEffort, `角色 ${roleId} 的 reasoningEffort 应为 ${expected.reasoningEffort}`);
         assert.ok(Number.isInteger(cfg.maxSteps) && cfg.maxSteps >= 1);
         assert.ok(Number.isInteger(cfg.maxReadCalls) && cfg.maxReadCalls >= 0);
         assert.deepEqual(cfg.tools, expected.tools);
@@ -350,6 +351,44 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
             assert.ok(!cleanroomPrompt.includes(token), `${promptRel} 提示词不应包含否定禁令或反噬套词 "${token}"`);
         }
     }
+
+    // 校验 Ch.2 修复相关的提示词契约锚点
+    const writerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/writer.md'), 'utf8');
+    assert.ok(writerPrompt.includes('# 标题名称'), 'writer.md 必须正向说明正文首行输出 `# 标题名称` 一级标题');
+
+    const patchPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/patch.md'), 'utf8');
+    assert.ok(patchPrompt.includes('# '), 'patch.md 必须正向约定保留目标段落中的一级标题行');
+
+    const librarianPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/librarian.md'), 'utf8');
+    for (const marker of ['已由管线预注入', 'world_state.md', 'open_threads.md', 'last_seen_ch', 'book_read({ paths:', 'maxReadCalls']) {
+        assert.ok(librarianPrompt.includes(marker), `librarian.md 缺少关键契约锚点: ${marker}`);
+    }
+
+    const extractorPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/extractor.md'), 'utf8');
+    for (const marker of [
+        '已由管线预注入',
+        'open_threads.md',
+        'buffer_ops',
+        'upsert_slot',
+        'trim_buffer',
+        'max_entries',
+        'acquired_state_ops',
+        'upsert_ledger',
+        'trajectory_ops',
+        'entry',
+        'yield_state_patch'
+    ]) {
+        assert.ok(extractorPrompt.includes(marker), `extractor.md 缺少关键契约锚点: ${marker}`);
+    }
+
+    const jsonMatch = /```json\r?\n([\s\S]*?)\r?\n```/.exec(extractorPrompt);
+    assert.ok(jsonMatch, 'extractor.md 必须包含 JSON 示例块');
+    const examplePayload = JSON.parse(jsonMatch[1]);
+    assert.ok(Array.isArray(examplePayload.entity_patches) && examplePayload.entity_patches.length >= 1);
+    const firstPatch = examplePayload.entity_patches[0];
+    assert.ok(Array.isArray(firstPatch.acquired_state_ops) && firstPatch.acquired_state_ops.some((op) => op.op === 'upsert_slot'));
+    assert.ok(Array.isArray(firstPatch.trajectory_ops) && firstPatch.trajectory_ops.some((op) => op.op === 'append'));
+    assert.ok(Array.isArray(firstPatch.buffer_ops) && firstPatch.buffer_ops.some((op) => op.op === 'upsert_slot') && firstPatch.buffer_ops.some((op) => op.op === 'trim_buffer'));
 });
 
 test('narrate-boot Skill 满足 < 8,192 字符预算并附带完整 references', () => {

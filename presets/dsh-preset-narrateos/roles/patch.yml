@@ -3,7 +3,7 @@ pool: strong_creative
 cleanroom: true
 promptFile: ./prompts/patch.md
 temperature: 0.4
-reasoningEffort: high
+reasoningEffort: low
 maxSteps: 1
 maxReadCalls: 0
 tools: []

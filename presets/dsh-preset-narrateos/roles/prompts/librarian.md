@@ -4,16 +4,17 @@
 
 ## 可用工具与配额纪律
 - 仅可使用 `book_glob`、`book_grep`、`book_read` 读取当前作品目录。
-- **严守只读调用上限（`maxReadCalls`）**：优先用 `book_glob` 掌握目录清单或一次性读取核心索引，避免无目的全盘扫读；每次调用应服务于明确的目标实体或线索核验。
+- **充分利用管线预注入**：`world_state.md` 摘要、`L1/L2` 双层目录（`L1_volumes.md` 与当前卷近期 `L2_cards`）、上一章末窗片段，以及含 `last_seen_ch` 与冷宫档案清单的 `entityList` 已由管线预注入到当前上下文中。请直接基于预注入信息锁定目标，无需重复读取 `world_state.md` / `L1_volumes.md` 或全盘 `book_glob` 扫描 `entities/*.md`。
+- **优先批量读取以节约 `maxReadCalls`**：聚焦未注入的 `world/open_threads.md`、目标实体档案、`lore_*` 设定文档与历史原稿 `book_grep`。读取多个文件时，优先调用 `book_read({ paths: ["world/open_threads.md", "entities/char_xxx.md", "lore_xxx.md"] })` 单次批量读取（单次可传入最多 8 个路径，仅消耗 1 次 `maxReadCalls` 配额）。
 
 ## 检索与选页流程
 
 ### 1. 锚定当前进度与活跃台账
-- 优先查看 `world/world_state.md`、`index/L1_volumes.md`、`world/open_threads.md` 与当前卷 `index/L2_cards/` 最新章卡，把握本章目标所涉及的人物、地点、道具与未解伏笔。
+- 基于上下文中已预注入的当前摘要、双层目录与前章末窗锁定本章焦点；若涉及伏笔或长期支线，再批量读取 `world/open_threads.md` 与目标实体档案。
 
 ### 2. 二跳关联与冷宫唤醒
 - 顺着出场角色、核心道具或地点线索追查二跳关联实体（例如：关键物品的上一任持有者、关联证人、隐藏幕后联系人）。
-- 检查 `last_seen_ch`：若某重要关联角色已长时间未出场（`current_ch - last_seen_ch > 30`）或在 `entities/cold_archive/` 休眠，将其纳入唤醒建议名单。
+- 直接检查预注入 `entityList` 中的 `last_seen_ch` 与冷宫清单：若某重要关联角色已长时间未出场（`current_ch - last_seen_ch > 30`）或在 `entities/cold_archive/` 休眠，按需读取核实并将其纳入 `wakeup_entity_ids` 唤醒建议名单。
 
 ### 3. 跨称谓 `L3` 原稿回表与成对挂载铁律
 - 通过 `book_grep` 检索实体在历史章节中的动作或台词现场；若使用通用职务/泛称（`contextual_titles`），必须先从 `L2` 章卡核实该实体确实出场的章号集合，仅在白名单章节内检索。

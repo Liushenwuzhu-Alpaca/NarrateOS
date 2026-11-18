@@ -3,7 +3,7 @@ pool: audit
 cleanroom: false
 promptFile: ./prompts/fact-checker.md
 temperature: 0.1
-reasoningEffort: high
+reasoningEffort: medium
 maxSteps: 6
 maxReadCalls: 5
 tools:

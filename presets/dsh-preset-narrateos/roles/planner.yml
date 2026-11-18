@@ -3,7 +3,7 @@ pool: strong_creative
 cleanroom: false
 promptFile: ./prompts/planner.md
 temperature: 0.5
-reasoningEffort: high
+reasoningEffort: medium
 maxSteps: 6
 maxReadCalls: 3
 tools:
