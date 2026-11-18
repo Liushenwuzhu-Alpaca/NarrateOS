@@ -180,11 +180,11 @@ export class CraftPluginLoader {
      * - 过滤掉 enabled === false 的插件
      */
     async loadForBook(options: LoadForBookOptions): Promise<LoadedCraftPlugin[]> {
-        const catalog = await this.loadAll(options.searchDirs, options.onConflict ?? 'error');
-
         if (options.enabledPluginIds.length === 0) {
             return [];
         }
+
+        const catalog = await this.loadAll(options.searchDirs, options.onConflict ?? 'error');
 
         const missingIds: string[] = [];
         const seenIds = new Set<string>();

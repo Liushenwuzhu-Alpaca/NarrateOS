@@ -167,6 +167,20 @@ describe('CraftPluginLoader', () => {
         expect(empty).toEqual([]);
     });
 
+    it('enabledPluginIds 为空数组时零磁盘扫描直接返回空数组', async () => {
+        await fs.writeFile(
+            path.join(repoPluginDir, 'broken.yaml'),
+            'id: [unclosed-broken-yaml',
+            'utf-8'
+        );
+
+        const loaded = await loader.loadForBook({
+            searchDirs: [repoPluginDir],
+            enabledPluginIds: []
+        });
+        expect(loaded).toEqual([]);
+    });
+
     it('缺失白名单插件时抛出 CraftPluginNotFoundError', async () => {
         await expect(
             loader.loadForBook({
@@ -359,20 +373,33 @@ describe('CraftPluginLoader', () => {
         expect(result.exceededRules).toContain('custom_abstract_mood');
     });
 
-    it('仓库默认模板目录 plugins/craft/ 下提供通用合规的默认插件', async () => {
+    it('仓库默认模板目录 plugins/craft/ 下提供通用合规的默认插件（含迁出的规划期认知插件）', async () => {
         const catalog = await loader.loadAll([REPO_CRAFT_PLUGINS_DIR]);
         expect(catalog.has('sensory-grounding')).toBe(true);
         expect(catalog.has('dialogue-subtext')).toBe(true);
+        expect(catalog.has('vad-bdi')).toBe(true);
+        expect(catalog.has('dual-reaction')).toBe(true);
+        expect(catalog.has('scene-act')).toBe(true);
 
         const loaded = await loader.loadForBook({
             searchDirs: [REPO_CRAFT_PLUGINS_DIR],
-            enabledPluginIds: ['sensory-grounding', 'dialogue-subtext']
+            enabledPluginIds: ['sensory-grounding', 'dialogue-subtext', 'vad-bdi', 'dual-reaction', 'scene-act']
         });
-        expect(loaded).toHaveLength(2);
+        expect(loaded).toHaveLength(5);
 
         const writerPrompt = loader.mergePromptInjection(loaded, 'writer');
         expect(writerPrompt.length).toBeGreaterThan(20);
+        expect(writerPrompt).not.toContain('vad-bdi');
+        expect(writerPrompt).not.toContain('dual-reaction');
+        expect(writerPrompt).not.toContain('scene-act');
+
+        const plannerPrompt = loader.mergePromptInjection(loaded, 'planner');
+        expect(plannerPrompt).toContain('vad-bdi');
+        expect(plannerPrompt).toContain('dual-reaction');
+        expect(plannerPrompt).toContain('scene-act');
+
         // 确认遵循正向槽位表达（不包含纯否定禁令词如“禁止”“严禁”“不要”）
         expect(writerPrompt).not.toMatch(/禁止|严禁|不要|不得|切忌/);
+        expect(plannerPrompt).not.toMatch(/禁止|严禁|不要|不得|切忌/);
     });
 });

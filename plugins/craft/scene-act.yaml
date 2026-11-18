@@ -1,0 +1,11 @@
+id: scene-act
+name: 五元组场面调度
+version: "1.0.0"
+description: 围绕 now -> beat -> then -> initiative -> interplay 结构化组织连续动作与对话穿插
+applicable_roles:
+  - planner
+prompt_injection: |
+  [文风插件: 五元组场面调度 (scene-act)]
+  - 五元组微节拍: 围绕「now(入场态势) -> beat(核心交锋) -> then(物理后果) -> initiative(主动权归属) -> interplay(视线/器物交互)」逐节编排场面推进。
+  - 物理锚定推进: 每段对话交锋同步绑定角色身位调整或器物操作，确保主动权转移落地为可验证的动作结果。
+enabled: true

@@ -1,0 +1,11 @@
+id: vad-bdi
+name: 三维情绪钳位与认知演算链
+version: "1.0.0"
+description: 按效价(Valence)、唤醒度(Arousal)、支配度(Dominance)稳定角色情绪幅度，并沿 BDI 链条推演当场抉择
+applicable_roles:
+  - planner
+prompt_injection: |
+  [文风插件: 三维情绪钳位与认知演算链 (vad-bdi)]
+  - 情绪三维钳位: 依据角色的效价(Valence)、唤醒度(Arousal)与支配度(Dominance)基线限定单场情绪跃迁幅度，保持慢热关系与压抑对抗的渐进张力。
+  - BDI 认知演算: 围绕「信念(现有认知) -> 欲望(当场诉求) -> 现实约束(客观代价与立场) -> 意图 -> 行动」逐层推演角色抉择，使行为逻辑与既有认知边界自然咬合。
+enabled: true

@@ -3,6 +3,9 @@ import type { RecallSlice } from '../recall/index-recall.js';
 import type { SlicedView } from '../slicer/view-slicer.js';
 import type { BookConfig } from '../store/schemas.js';
 
+/** 声纹标本溯源类型 */
+export type VoiceSampleSource = 'author_sample' | 'boot_seed' | 'chapter_harvest';
+
 /** 声纹标本单条记录 */
 export interface VoiceSample {
     id: string;
@@ -10,6 +13,7 @@ export interface VoiceSample {
     text: string;
     last_used_ch: number;
     use_count?: number | undefined;
+    source?: VoiceSampleSource | undefined;
 }
 
 /** 声纹标本池结构 (voice_samples.yaml) */

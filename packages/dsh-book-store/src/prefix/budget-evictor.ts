@@ -1,9 +1,15 @@
 import type { RecallSlice } from '../recall/index-recall.js';
+import { sanitizeLoreForWriter } from '../slicer/view-slicer.js';
 import type { EntityEntry, EntityProfile } from '../store/schemas.js';
 import type { EvictionLevel, PreviousChapterContext } from './types.js';
 
 const DEFAULT_FALLBACK_TAIL_CHARS = 600;
 const WARPED_LINE_RE = /\bWARPED\b/i;
+const RECALL_RESTRICTED_RE =
+    /\b(?:WARPED|OMNISCIENT_SECRET|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+const CLEANROOM_ENTRY_RESTRICTED_RE =
+    /\b(?:WARPED|OMNISCIENT_SECRET)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+const UNKNOWN_VIS_TAG_KEY_RE = /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis)$/i;
 
 /** 基于 tokens_per_char 估算文本 Token 数 */
 export function estimateTokens(text: string, tokensPerChar: number): number {
@@ -18,18 +24,58 @@ export function sanitizePositiveText(text: string): string {
     return kept.join('\n').trim();
 }
 
+function renderLedgerBody(entry: EntityEntry, cleanroomDisplay: boolean): string {
+    const pairs = Object.entries(entry.ledger ?? {}).map(([k, v]) => `${k}: ${v}`);
+    if (pairs.length > 0) {
+        return cleanroomDisplay
+            ? `数值账本：${pairs.join('，')}`
+            : `[Tracked Numeric Ledger] ${pairs.join(' | ')}`;
+    }
+    return cleanroomDisplay ? entry.text : `[Tracked Numeric Ledger] ${entry.text}`.trim();
+}
+
+function filterEntryContinuations(
+    entry: EntityEntry,
+    stripWarped: boolean,
+    cleanroomDisplay: boolean
+): string[] {
+    return entry.continuationLines.filter((line) => {
+        if (stripWarped && WARPED_LINE_RE.test(line)) return false;
+        if (cleanroomDisplay && CLEANROOM_ENTRY_RESTRICTED_RE.test(line)) return false;
+        return true;
+    });
+}
+
 /** 格式化单条实体记录 */
-function formatEntryLine(entry: EntityEntry): string {
-    const tags: string[] = [];
-    if (entry.storyDay !== undefined) tags.push(`day:${entry.storyDay}`);
-    if (entry.chapter !== undefined) tags.push(`ch:${entry.chapter}`);
-    if (entry.slotKey) tags.push(`slot:${entry.slotKey}`);
-    if (entry.visibility) tags.push(`vis:${entry.visibility}`);
-    if (entry.owner) tags.push(`owner:${entry.owner}`);
-    if (entry.status) tags.push(`status:${entry.status}`);
-    const prefix = tags.length > 0 ? `[${tags.join(' | ')}] ` : '';
-    const extra = entry.continuationLines.length > 0 ? `\n  ${entry.continuationLines.join('\n  ')}` : '';
-    return `- ${prefix}${entry.text}${extra}`;
+export function formatEntryLine(
+    entry: EntityEntry,
+    cleanroomDisplay = false,
+    stripWarped = false
+): string {
+    const bodyText = entry.isNumericLedger
+        ? renderLedgerBody(entry, cleanroomDisplay)
+        : entry.text;
+
+    let prefix = '';
+    if (cleanroomDisplay) {
+        const timeParts: string[] = [];
+        if (entry.storyDay !== undefined) timeParts.push(`第${entry.storyDay}天`);
+        if (entry.chapter !== undefined) timeParts.push(`第${entry.chapter}章`);
+        prefix = timeParts.length > 0 ? `（${timeParts.join('，')}）` : '';
+    } else {
+        const tags: string[] = [];
+        if (entry.storyDay !== undefined) tags.push(`day:${entry.storyDay}`);
+        if (entry.chapter !== undefined) tags.push(`ch:${entry.chapter}`);
+        if (entry.slotKey) tags.push(`slot:${entry.slotKey}`);
+        if (entry.visibility) tags.push(`vis:${entry.visibility}`);
+        if (entry.owner) tags.push(`owner:${entry.owner}`);
+        if (entry.status) tags.push(`status:${entry.status}`);
+        prefix = tags.length > 0 ? `[${tags.join(' | ')}] ` : '';
+    }
+
+    const continuations = filterEntryContinuations(entry, stripWarped, cleanroomDisplay);
+    const extra = continuations.length > 0 ? `\n  ${continuations.join('\n  ')}` : '';
+    return `- ${prefix}${bodyText}${extra}`;
 }
 
 /** 渲染单个实体的完整或裁剪后档案 */
@@ -39,16 +85,32 @@ export function renderEntityProfile(
         compactCard: boolean;
         recentBufferLimit?: number | undefined;
         stripWarped: boolean;
+        cleanroomDisplay?: boolean | undefined;
     }
 ): string {
     if (options.stripWarped && profile.metadata.status === 'WARPED') {
         return '';
     }
 
+    const cleanroomDisplay = options.cleanroomDisplay ?? false;
+
     const filterEntries = (entries: EntityEntry[]): EntityEntry[] =>
         entries.filter((entry) => {
-            if (options.stripWarped && entry.status === 'WARPED') return false;
-            if (options.stripWarped && WARPED_LINE_RE.test(entry.text)) return false;
+            if (options.stripWarped) {
+                if (entry.status === 'WARPED') return false;
+                if (WARPED_LINE_RE.test(entry.text)) return false;
+                if (entry.continuationLines.some((line) => WARPED_LINE_RE.test(line))) return false;
+            }
+            if (cleanroomDisplay) {
+                if (entry.visibility === 'OMNISCIENT_SECRET') return false;
+                if (
+                    entry.extraTags &&
+                    Object.keys(entry.extraTags).some((k) => UNKNOWN_VIS_TAG_KEY_RE.test(k.trim()))
+                ) {
+                    return false;
+                }
+                if (CLEANROOM_ENTRY_RESTRICTED_RE.test(entry.text)) return false;
+            }
             return true;
         });
 
@@ -58,11 +120,23 @@ export function renderEntityProfile(
     const recentAll = filterEntries(profile.recentBuffer);
 
     if (options.compactCard) {
-        // 第 2 级降级：background_cast 压缩为单行简卡，仅留姓名、先天物理红线、当场位置/状态与口癖/声纹
-        const innateText = innate[0]?.text ?? '无特殊先天红线';
-        const stateText = acquired[0]?.text ?? trajectory[0]?.text ?? '在场';
+        // 第 2 级降级：background_cast 压缩为单行简卡，保留全部可见先天红线、最新当场状态与完整口癖/声纹标本
+        const formatCompactEntry = (item: EntityEntry): string => {
+            const baseText = item.isNumericLedger
+                ? renderLedgerBody(item, cleanroomDisplay)
+                : item.text;
+            const cont = filterEntryContinuations(item, options.stripWarped, cleanroomDisplay)
+                .map((line) => line.trim())
+                .filter(Boolean);
+            return cont.length > 0 ? `${baseText} ${cont.join(' ')}` : baseText;
+        };
+
+        const innateText =
+            innate.length > 0 ? innate.map(formatCompactEntry).join('；') : '无特殊先天红线';
+        const latestStateEntry = acquired.at(-1) ?? trajectory.at(-1);
+        const stateText = latestStateEntry ? formatCompactEntry(latestStateEntry) : '在场';
         const voiceEntry = recentAll.find((item) => /口癖|声纹/.test(item.text));
-        const voiceSuffix = voiceEntry ? ` | 口癖/声纹: ${voiceEntry.text}` : '';
+        const voiceSuffix = voiceEntry ? ` | 口癖/声纹: ${formatCompactEntry(voiceEntry)}` : '';
         const title = profile.metadata.contextual_titles[0]
             ? `(${profile.metadata.contextual_titles[0]})`
             : '';
@@ -75,17 +149,25 @@ export function renderEntityProfile(
 
     if (innate.length > 0) {
         lines.push(profile.sectionHeadings.innateLocks || '#### 1. Innate Locks');
-        for (const item of innate) lines.push(formatEntryLine(item));
+        for (const item of innate) {
+            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+        }
     }
 
     if (acquired.length > 0) {
         lines.push(profile.sectionHeadings.acquiredState || '#### 2. Acquired State');
-        for (const item of acquired) lines.push(formatEntryLine(item));
+        for (const item of acquired) {
+            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+        }
     }
 
     if (trajectory.length > 0) {
-        lines.push(profile.sectionHeadings.irreversibleTrajectory || '#### 3. Irreversible Trajectory');
-        for (const item of trajectory) lines.push(formatEntryLine(item));
+        lines.push(
+            profile.sectionHeadings.irreversibleTrajectory || '#### 3. Irreversible Trajectory'
+        );
+        for (const item of trajectory) {
+            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+        }
     }
 
     const recentSlice =
@@ -97,18 +179,32 @@ export function renderEntityProfile(
 
     if (recentSlice.length > 0) {
         lines.push(profile.sectionHeadings.recentBuffer || '#### 4. Recent Buffer');
-        for (const item of recentSlice) lines.push(formatEntryLine(item));
+        for (const item of recentSlice) {
+            lines.push(formatEntryLine(item, cleanroomDisplay, options.stripWarped));
+        }
     }
 
     return lines.join('\n');
 }
 
-/** 渲染带时间差信封的 IndexRecall 切片 */
+/** 渲染带时间差信封的 IndexRecall 切片（净室模式下整条校验，命中机密或 WARPED 整条丢弃） */
 export function renderRecallSlice(slice: RecallSlice, stripWarped: boolean): string {
-    const dayDeltaText =
-        slice.deltaDays !== null ? `，相距${slice.deltaDays}天` : '';
-    const rawContent = slice.snippet || slice.text;
-    const content = stripWarped ? sanitizePositiveText(rawContent) : rawContent;
+    if (stripWarped) {
+        const combined = [
+            slice.snippet,
+            slice.text,
+            ...slice.contextBefore,
+            ...slice.contextAfter
+        ]
+            .filter(Boolean)
+            .join('\n');
+        if (RECALL_RESTRICTED_RE.test(combined)) {
+            return '';
+        }
+    }
+
+    const dayDeltaText = slice.deltaDays !== null ? `，相距${slice.deltaDays}天` : '';
+    const content = (slice.snippet || slice.text).trim();
     if (!content) return '';
     return `- [${slice.chapterId} | 相距${slice.deltaChapters}章${dayDeltaText}] ${content}`;
 }
@@ -129,12 +225,37 @@ export interface DynamicTailDraft {
     loreEntries: string[];
     previousChapter?: PreviousChapterContext | undefined;
     stripWarped: boolean;
+    cleanroomDisplay?: boolean | undefined;
+}
+
+interface PartitionedRecallSlices {
+    guaranteedIndices: Set<number>;
+    optionalIndices: number[];
+}
+
+function partitionRecallSlices(slices: RecallSlice[]): PartitionedRecallSlices {
+    const guaranteedIndices = new Set<number>();
+    const optionalIndices: number[] = [];
+    const seenRequiredEntities = new Set<string>();
+
+    for (let i = 0; i < slices.length; i += 1) {
+        const slice = slices[i]!;
+        const reqId = slice.requiredEntityId?.trim();
+        if (reqId && !seenRequiredEntities.has(reqId)) {
+            seenRequiredEntities.add(reqId);
+            guaranteedIndices.add(i);
+        } else {
+            optionalIndices.push(i);
+        }
+    }
+
+    return { guaranteedIndices, optionalIndices };
 }
 
 interface RenderState {
     useWindowForPrevChapter: boolean;
     compactBackgroundCast: boolean;
-    maxRecallCount: number;
+    maxOptionalRecallCount: number;
     maxLoreCount: number;
 }
 
@@ -176,8 +297,13 @@ function renderPreviousChapter(
     return `## 前章衔接尾窗 (ch_${String(prev.chapterNumber).padStart(4, '0')})\n${parts.join('\n')}`;
 }
 
-function renderDynamicTail(draft: DynamicTailDraft, state: RenderState): string {
+function renderDynamicTail(
+    draft: DynamicTailDraft,
+    state: RenderState,
+    partitioned: PartitionedRecallSlices
+): string {
     const blocks: string[] = [];
+    const cleanroomDisplay = draft.cleanroomDisplay ?? false;
     const pushIfNonEmpty = (text: string) => {
         const clean = draft.stripWarped ? sanitizePositiveText(text) : text.trim();
         if (clean) blocks.push(clean);
@@ -205,7 +331,8 @@ function renderDynamicTail(draft: DynamicTailDraft, state: RenderState): string 
             .map((p) =>
                 renderEntityProfile(p, {
                     compactCard: false,
-                    stripWarped: draft.stripWarped
+                    stripWarped: draft.stripWarped,
+                    cleanroomDisplay
                 })
             )
             .filter(Boolean);
@@ -220,7 +347,8 @@ function renderDynamicTail(draft: DynamicTailDraft, state: RenderState): string 
             .map((p) =>
                 renderEntityProfile(p, {
                     compactCard: state.compactBackgroundCast,
-                    stripWarped: draft.stripWarped
+                    stripWarped: draft.stripWarped,
+                    cleanroomDisplay
                 })
             )
             .filter(Boolean);
@@ -239,26 +367,41 @@ function renderDynamicTail(draft: DynamicTailDraft, state: RenderState): string 
         pushIfNonEmpty(`## 平行时间线全局广播\n${draft.parallelBroadcastLines.join('\n')}`);
     }
 
-    // 召回切片（受第 3 级预算裁剪控制）
-    const activeSlices = draft.recallSlices.filter((slice, index) => slice.requiredEntityId || index < state.maxRecallCount);
-    if (activeSlices.length > 0) {
-        const renderedSlices = activeSlices.map((slice) => {
-            const rendered = renderRecallSlice(slice, draft.stripWarped);
-            if (slice.requiredEntityId && !rendered.trim()) {
-                throw new Error(`写手成对召回证据不可挂载: ${slice.requiredEntityId}`);
-            }
-            return rendered;
-        }).filter(Boolean);
+    // 召回切片（拆分为必配证据保底切片与可裁剪可选切片，受第 3 级预算裁剪控制）
+    const keptOptionalSet = new Set(
+        partitioned.optionalIndices.slice(0, state.maxOptionalRecallCount)
+    );
+    const activeSliceEntries: Array<{ index: number; slice: RecallSlice }> = [];
+    for (let i = 0; i < draft.recallSlices.length; i += 1) {
+        if (partitioned.guaranteedIndices.has(i) || keptOptionalSet.has(i)) {
+            activeSliceEntries.push({ index: i, slice: draft.recallSlices[i]! });
+        }
+    }
+
+    if (activeSliceEntries.length > 0) {
+        const renderedSlices = activeSliceEntries
+            .map(({ index, slice }) => {
+                const rendered = renderRecallSlice(slice, draft.stripWarped);
+                if (partitioned.guaranteedIndices.has(index) && !rendered.trim()) {
+                    throw new Error(`写手成对召回证据不可挂载: ${slice.requiredEntityId}`);
+                }
+                return rendered;
+            })
+            .filter(Boolean);
         if (renderedSlices.length > 0) {
             blocks.push(`## 跨章召回切片 (IndexRecall)\n${renderedSlices.join('\n')}`);
         }
     }
 
-    // 外围设定词条（受第 4 级预算裁剪控制）
+    // 外围设定词条（受第 4 级预算裁剪控制；写手侧强制执行净室机密清洗）
     const activeLore = draft.loreEntries.slice(0, state.maxLoreCount);
     if (activeLore.length > 0) {
         const loreLines = activeLore
-            .map((entry) => (draft.stripWarped ? sanitizePositiveText(entry) : entry.trim()))
+            .map((entry) =>
+                draft.stripWarped || cleanroomDisplay
+                    ? sanitizeLoreForWriter(entry)
+                    : entry.trim()
+            )
             .filter(Boolean)
             .map((entry) => `- ${entry}`);
         if (loreLines.length > 0) {
@@ -302,14 +445,15 @@ export function evictDynamicTailToBudget(
     const calcTotal = (tail: string): number =>
         estimateTokens(staticJoined, tokensPerChar) + estimateTokens(tail, tokensPerChar);
 
+    const partitioned = partitionRecallSlices(draft.recallSlices);
     const state: RenderState = {
         useWindowForPrevChapter: false,
         compactBackgroundCast: false,
-        maxRecallCount: draft.recallSlices.length,
+        maxOptionalRecallCount: partitioned.optionalIndices.length,
         maxLoreCount: draft.loreEntries.length
     };
 
-    let dynamicTail = renderDynamicTail(draft, state);
+    let dynamicTail = renderDynamicTail(draft, state, partitioned);
     let totalTokens = calcTotal(dynamicTail);
 
     if (budget === null || budget === undefined || totalTokens <= budget) {
@@ -330,7 +474,7 @@ export function evictDynamicTailToBudget(
         state.useWindowForPrevChapter = true;
         evictionLevel = 1;
         appliedEvictions.push('L1:前章全文降级为尾窗摘要');
-        dynamicTail = renderDynamicTail(draft, state);
+        dynamicTail = renderDynamicTail(draft, state, partitioned);
         totalTokens = calcTotal(dynamicTail);
         if (totalTokens <= budget) {
             return {
@@ -348,7 +492,7 @@ export function evictDynamicTailToBudget(
         state.compactBackgroundCast = true;
         evictionLevel = 2;
         appliedEvictions.push('L2:background_cast压缩为单行简卡');
-        dynamicTail = renderDynamicTail(draft, state);
+        dynamicTail = renderDynamicTail(draft, state, partitioned);
         totalTokens = calcTotal(dynamicTail);
         if (totalTokens <= budget) {
             return {
@@ -361,15 +505,21 @@ export function evictDynamicTailToBudget(
         }
     }
 
-    // 第 ③ 级：逐条缩减 IndexRecall 回表切片数量直至达标或清空（不触碰 loreEntries）
-    if (state.maxRecallCount > 0) {
-        evictionLevel = 3;
-        while (state.maxRecallCount > 0 && totalTokens > budget) {
-            state.maxRecallCount -= 1;
-            dynamicTail = renderDynamicTail(draft, state);
+    // 第 ③ 级：逐条缩减可选 IndexRecall 回表切片（保底切片绝不淘汰，未真实裁掉可选切片时不记 L3）
+    if (state.maxOptionalRecallCount > 0) {
+        while (state.maxOptionalRecallCount > 0 && totalTokens > budget) {
+            state.maxOptionalRecallCount -= 1;
+            dynamicTail = renderDynamicTail(draft, state, partitioned);
             totalTokens = calcTotal(dynamicTail);
         }
-        appliedEvictions.push(`L3:缩减召回切片至${state.maxRecallCount}条`);
+        if (state.maxOptionalRecallCount < partitioned.optionalIndices.length) {
+            evictionLevel = 3;
+            const remainingTotal =
+                partitioned.guaranteedIndices.size + state.maxOptionalRecallCount;
+            appliedEvictions.push(
+                `L3:缩减可选召回切片至${state.maxOptionalRecallCount}条(总计${remainingTotal}条)`
+            );
+        }
         if (totalTokens <= budget) {
             return {
                 dynamicTail,
@@ -386,7 +536,7 @@ export function evictDynamicTailToBudget(
         evictionLevel = 4;
         while (state.maxLoreCount > 0 && totalTokens > budget) {
             state.maxLoreCount -= 1;
-            dynamicTail = renderDynamicTail(draft, state);
+            dynamicTail = renderDynamicTail(draft, state, partitioned);
             totalTokens = calcTotal(dynamicTail);
         }
         appliedEvictions.push(`L4:缩减外围设定至${state.maxLoreCount}条`);

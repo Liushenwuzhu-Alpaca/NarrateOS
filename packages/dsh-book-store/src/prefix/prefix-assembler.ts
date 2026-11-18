@@ -1,5 +1,5 @@
 import { hashStaticPrefix, type CleanroomRequest } from '../ports/llm.js';
-import type { SlicedView } from '../slicer/view-slicer.js';
+import { sanitizeLoreForWriter, type SlicedView } from '../slicer/view-slicer.js';
 import type { EntityProfile } from '../store/schemas.js';
 import {
     evictDynamicTailToBudget,
@@ -17,28 +17,34 @@ import type {
 } from './types.js';
 import { sampleVoiceLru } from './voice-sampler.js';
 
-const DEFAULT_SYSTEM_BASELINE =
-    '你是长篇小说创作引擎净室执行单元，仅基于当前请求提供的确定性上下文单轮作答。';
-
 /**
  * 构建同卷零字节变动的静态前缀块列表：
  * - Planner 与 Writer 共享此函数，保证同卷内字节与 hashStaticPrefix() 100% 一致；
+ * - 未传 systemBaseline 时不注入硬编码单轮冲突话术；
  * - 绝不混入单章动态状态（如章号、日期、POV、声纹标本、临时缓冲等）。
  */
 export function buildStaticPrefixBlocks(input: StaticPrefixInput): string[] {
     const blocks: string[] = [];
 
-    const baselineParts: string[] = [
-        `## 净室系统基准 (Volume ${input.volumeNumber})`,
-        sanitizePositiveText(input.systemBaseline ?? DEFAULT_SYSTEM_BASELINE)
-    ];
+    const baselineParts: string[] = [];
+    if (input.systemBaseline) {
+        const cleanBaseline = sanitizePositiveText(input.systemBaseline);
+        if (cleanBaseline) {
+            baselineParts.push(`## 净室系统基准 (Volume ${input.volumeNumber})`, cleanBaseline);
+        }
+    }
     if (input.staticBaseAndVoice) {
         const cleanVoice = sanitizePositiveText(input.staticBaseAndVoice);
         if (cleanVoice) {
+            if (baselineParts.length === 0) {
+                baselineParts.push(`## 净室系统基准 (Volume ${input.volumeNumber})`);
+            }
             baselineParts.push(`### 抽象文风纪律锁\n${cleanVoice}`);
         }
     }
-    blocks.push(baselineParts.join('\n\n'));
+    if (baselineParts.length > 0) {
+        blocks.push(baselineParts.join('\n\n'));
+    }
 
     const worldParts: string[] = [];
     if (input.currentArcEnvelope) {
@@ -75,7 +81,7 @@ export function buildStaticPrefixBlocks(input: StaticPrefixInput): string[] {
     return blocks;
 }
 
-/** 根据 focusCastIds / backgroundCastIds / povCharIds 切分焦点与旁观角色 */
+/** 根据 focusCastIds / backgroundCastIds / povCharIds 切分焦点与旁观角色（未列入 focus_cast 者全部兜底归入 backgroundCast） */
 function partitionCast(
     slicedView: SlicedView,
     focusCastIds?: string[],
@@ -85,21 +91,35 @@ function partitionCast(
     const focusSet = new Set(
         focusCastIds && focusCastIds.length > 0 ? focusCastIds : slicedView.povCharIds
     );
-    const bgSet = backgroundCastIds ? new Set(backgroundCastIds) : null;
+    const bgOrder = new Map<string, number>();
+    if (backgroundCastIds) {
+        backgroundCastIds.forEach((id, index) => {
+            if (!bgOrder.has(id)) {
+                bgOrder.set(id, index);
+            }
+        });
+    }
 
     const focusCast: EntityProfile[] = [];
-    const backgroundCast: EntityProfile[] = [];
+    const explicitBg: EntityProfile[] = [];
+    const fallbackBg: EntityProfile[] = [];
 
     for (const profile of allEntities) {
         const id = profile.metadata.entity_id;
         if (focusSet.has(id)) {
             focusCast.push(profile);
-        } else if (!bgSet || bgSet.has(id)) {
-            backgroundCast.push(profile);
+        } else if (bgOrder.has(id)) {
+            explicitBg.push(profile);
+        } else {
+            fallbackBg.push(profile);
         }
     }
 
-    return { focusCast, backgroundCast };
+    explicitBg.sort(
+        (a, b) => (bgOrder.get(a.metadata.entity_id) ?? 0) - (bgOrder.get(b.metadata.entity_id) ?? 0)
+    );
+
+    return { focusCast, backgroundCast: [...explicitBg, ...fallbackBg] };
 }
 
 /**
@@ -148,7 +168,8 @@ export class PrefixAssembler {
             recallSlices: input.recallSlices ?? [],
             loreEntries: input.loreEntries ?? [],
             previousChapter: input.previousChapter,
-            stripWarped: false
+            stripWarped: false,
+            cleanroomDisplay: false
         };
 
         const eviction = evictDynamicTailToBudget(
@@ -181,8 +202,14 @@ export class PrefixAssembler {
         };
     }
 
-    /** 拼装 Prose Writer 净室请求（强制正向槽位、零 WARPED 残留、支持声纹 LRU 与四级预算降级） */
+    /** 拼装 Prose Writer 净室请求（强制 writer 视图守卫、正向槽位、零 WARPED 残留、声纹 LRU 与四级预算降级） */
     assembleWriterRequest(input: WriterAssembleInput): AssembleResult {
+        if (input.slicedView.forRole !== 'writer') {
+            throw new Error(
+                `assembleWriterRequest 仅接受 forRole === 'writer' 的净室裁剪视图，当前收到: ${input.slicedView.forRole}`
+            );
+        }
+
         const staticPrefixBlocks = buildStaticPrefixBlocks(input.staticPrefix);
         const { focusCast, backgroundCast } = partitionCast(
             input.slicedView,
@@ -217,6 +244,10 @@ export class PrefixAssembler {
             cleanOutline
         ].join('\n');
 
+        const cleanLoreEntries = (input.loreEntries ?? [])
+            .map((entry) => sanitizeLoreForWriter(entry))
+            .filter((entry) => entry.length > 0);
+
         const draft: DynamicTailDraft = {
             opsStyleAmendments: input.opsStyleAmendments?.trim() ?? '',
             craftPluginsSection,
@@ -229,9 +260,10 @@ export class PrefixAssembler {
             memoryWakeupLines: input.slicedView.memoryWakeupHints.map((h) => `- ${h.formattedHint}`),
             parallelBroadcastLines: input.slicedView.parallelBroadcast.map((b) => `- ${b.text}`),
             recallSlices: input.recallSlices ?? [],
-            loreEntries: input.loreEntries ?? [],
+            loreEntries: cleanLoreEntries,
             previousChapter: input.previousChapter,
-            stripWarped: true
+            stripWarped: true,
+            cleanroomDisplay: true
         };
 
         const budget = input.config.writer_token_budget ?? null;
