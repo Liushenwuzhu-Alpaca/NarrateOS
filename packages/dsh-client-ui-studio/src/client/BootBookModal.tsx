@@ -187,6 +187,24 @@ export function BootBookModal({
 
     const handleSelectStep = (target: BootWizardStep) => {
         if (submitting) return;
+        if (target > activeStep) {
+            if (target > 1) {
+                const step1Err = validateStepOne();
+                if (step1Err) {
+                    setActiveStep(1);
+                    setErrorMessage(step1Err);
+                    return;
+                }
+            }
+            if (target > 2) {
+                const step2Err = validateStepTwo();
+                if (step2Err) {
+                    setActiveStep(2);
+                    setErrorMessage(step2Err);
+                    return;
+                }
+            }
+        }
         setErrorMessage(null);
         setActiveStep(target);
     };
@@ -595,8 +613,8 @@ export function BootBookModal({
                     const isActive = activeStep === item.step;
                     const isCompleted =
                         (item.step === 1 && isStep1Ready && activeStep > 1) ||
-                        (item.step === 2 && isStep2Ready && activeStep > 2) ||
-                        (item.step === 3 && activeStep > 3);
+                        (item.step === 2 && isStep1Ready && isStep2Ready && activeStep > 2) ||
+                        (item.step === 3 && isStep1Ready && isStep2Ready && activeStep > 3);
 
                     return (
                         <React.Fragment key={item.step}>

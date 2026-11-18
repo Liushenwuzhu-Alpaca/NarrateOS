@@ -113,6 +113,41 @@ function renderNextIdeasPanel(options: {
     );
 }
 
+function renderSlashMenu(options: {
+    isSlashOpen: boolean;
+    filteredSlash: ReadonlyArray<(typeof NOTE_KIND_OPTIONS)[number]>;
+    activeSlashIndex: number;
+    onHoverIndex: (idx: number) => void;
+    onApplyCommand: (item: (typeof NOTE_KIND_OPTIONS)[number]) => void;
+}): React.ReactNode {
+    if (!options.isSlashOpen) return null;
+    return (
+        <div className="ns-slash-menu" role="listbox" aria-label="导演指令联想">
+            {options.filteredSlash.map((item, idx) => {
+                const isItemActive = idx === options.activeSlashIndex;
+                return (
+                    <button
+                        key={item.key}
+                        type="button"
+                        role="option"
+                        aria-selected={isItemActive}
+                        className={`ns-slash-item${isItemActive ? ' is-active' : ''}`}
+                        onMouseEnter={() => options.onHoverIndex(idx)}
+                        onMouseDown={(e: React.MouseEvent<HTMLButtonElement>) => {
+                            e.preventDefault();
+                            options.onApplyCommand(item);
+                        }}
+                    >
+                        <span className="ns-slash-cmd">{item.command}</span>
+                        <span className="ns-slash-alias">{item.label}</span>
+                        <span className="ns-slash-desc">{item.desc}</span>
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
 /**
  * 底部纵向走向建议与一体式导演便签舱（ISS-060, ISS-062）：
  * - 可收折纵向 nextChapterOptions 建议：点文字填入微调，点「直接写 ->」立即推进指定目标
@@ -141,6 +176,7 @@ export function DirectorNoteDock({
     const [ideasExpanded, setIdeasExpanded] = useState(false);
     const [kindMenuOpen, setKindMenuOpen] = useState(false);
     const [slashDismissed, setSlashDismissed] = useState(false);
+    const [slashIndex, setSlashIndex] = useState(0);
 
     const activeKindMeta =
         NOTE_KIND_OPTIONS.find((item) => item.key === noteKind) ?? NOTE_KIND_OPTIONS[0]!;
@@ -165,6 +201,16 @@ export function DirectorNoteDock({
         );
     }, [slashQueryMatch]);
     const isSlashOpen = slashQueryMatch !== null && !slashDismissed && filteredSlash.length > 0;
+    const activeSlashIndex =
+        filteredSlash.length > 0 ? Math.min(slashIndex, filteredSlash.length - 1) : 0;
+
+    const applySlashCommand = (item: (typeof NOTE_KIND_OPTIONS)[number]): void => {
+        onChangeNoteKind(item.key);
+        onChangeNoteText(noteText.replace(/^\/\S*\s*/, ''));
+        setSlashDismissed(false);
+        setSlashIndex(0);
+        inputRef.current?.focus();
+    };
 
     const triggerSubmit = async (runAfter: boolean) => {
         const trimmed = noteText.trim();
@@ -255,7 +301,10 @@ export function DirectorNoteDock({
                                             inputRef.current?.focus();
                                         }}
                                     >
-                                        <b>{item.label}</b>
+                                        <div className="ns-menu-row-head">
+                                            <b>{item.label}</b>
+                                            <code className="ns-mono ns-menu-cmd">{item.command}</code>
+                                        </div>
                                         <span>{item.desc}</span>
                                     </button>
                                 ))}
@@ -263,30 +312,13 @@ export function DirectorNoteDock({
                         ) : null}
                     </div>
 
-                    {isSlashOpen ? (
-                        <div className="ns-slash-menu" role="listbox" aria-label="导演指令联想">
-                            {filteredSlash.map((item) => (
-                                <button
-                                    key={item.key}
-                                    type="button"
-                                    role="option"
-                                    aria-selected={item.key === noteKind}
-                                    className="ns-slash-item"
-                                    onMouseDown={(e: React.MouseEvent<HTMLButtonElement>) => {
-                                        e.preventDefault();
-                                        onChangeNoteKind(item.key);
-                                        onChangeNoteText(noteText.replace(/^\/\S*\s*/, ''));
-                                        setSlashDismissed(false);
-                                        inputRef.current?.focus();
-                                    }}
-                                >
-                                    <span className="ns-slash-cmd">{item.command}</span>
-                                    <span className="ns-slash-alias">{item.label}</span>
-                                    <span className="ns-slash-desc">{item.desc}</span>
-                                </button>
-                            ))}
-                        </div>
-                    ) : null}
+                    {renderSlashMenu({
+                        isSlashOpen,
+                        filteredSlash,
+                        activeSlashIndex,
+                        onHoverIndex: setSlashIndex,
+                        onApplyCommand: applySlashCommand
+                    })}
 
                     {noteKind === 'SPOTLIGHT_TRIGGER' && entities.length > 0 ? (
                         <select
@@ -328,16 +360,42 @@ export function DirectorNoteDock({
                         onChange={(e) => {
                             onChangeNoteText(e.target.value);
                             setSlashDismissed(false);
+                            setSlashIndex(0);
                         }}
                         onKeyDown={(e) => {
                             const nativeEvent = (
                                 e as unknown as { nativeEvent?: { isComposing?: boolean } }
                             ).nativeEvent;
                             if (nativeEvent?.isComposing) return;
-                            if (e.key === 'Escape' && isSlashOpen) {
-                                e.preventDefault();
-                                setSlashDismissed(true);
-                                return;
+                            if (isSlashOpen) {
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setSlashIndex((prev) => (prev + 1) % filteredSlash.length);
+                                    return;
+                                }
+                                if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setSlashIndex(
+                                        (prev) => (prev - 1 + filteredSlash.length) % filteredSlash.length
+                                    );
+                                    return;
+                                }
+                                if (
+                                    (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) ||
+                                    e.key === 'Tab'
+                                ) {
+                                    const selected = filteredSlash[activeSlashIndex];
+                                    if (selected) {
+                                        e.preventDefault();
+                                        applySlashCommand(selected);
+                                        return;
+                                    }
+                                }
+                                if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setSlashDismissed(true);
+                                    return;
+                                }
                             }
                             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                                 e.preventDefault();
@@ -347,7 +405,7 @@ export function DirectorNoteDock({
                                 void triggerSubmit(false);
                             }
                         }}
-                        placeholder="给下一章递张导演便签（写完下一章自动生效并清空）"
+                        placeholder="给下一章递张导演便签（输入 / 唤出 /plot /spotlight /flashback /retcon）"
                     />
 
                     <button

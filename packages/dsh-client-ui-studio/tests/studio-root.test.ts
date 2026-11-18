@@ -102,6 +102,7 @@ function saveResponse(chapterNumber: number): PutChapterResponse {
 
 beforeEach(() => {
     vi.resetAllMocks();
+    window.localStorage?.clear();
     activeBookRoot = '/books/a';
     manuscripts = new Map([
         [manuscriptKey('/books/a', 1), '甲书第一章服务器原稿。'],
@@ -437,7 +438,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(cleanEv.defaultPrevented).toBe(false);
     });
 
-    it('容器感知三栏布局：>=1200px 常驻左栏，<1200px 收进顶栏浮层，<820px 右栏变抽屉', async () => {
+    it('容器感知三栏布局：>=1100px 常驻左栏，<1100px 收进顶栏浮层，<820px 右栏变抽屉', async () => {
         let roCallback: ResizeObserverCallback | null = null;
         const disconnectSpy = vi.fn();
         class MockResizeObserver {
@@ -462,29 +463,38 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         );
         expect(rightTabs).toEqual(['思考过程', '运行状态', '模型分配']);
 
-        // 缩放至 1000px (<1200px)：左栏收进顶栏目录浮层，右栏保持常驻
+        // 1100px 仍为三栏常驻态
         act(() => {
-            roCallback?.([{ contentRect: { width: 1000 } } as ResizeObserverEntry], {} as ResizeObserver);
+            roCallback?.([{ contentRect: { width: 1100 } } as ResizeObserverEntry], {} as ResizeObserver);
+        });
+        expect(shell.classList.contains('ns-layout-wide')).toBe(true);
+        expect(container.querySelector('aside.ns-left-pane')).not.toBeNull();
+
+        // 缩放至 1099px (<1100px)：左栏收进顶栏目录浮层，右栏保持常驻
+        act(() => {
+            roCallback?.([{ contentRect: { width: 1099 } } as ResizeObserverEntry], {} as ResizeObserver);
         });
         expect(shell.classList.contains('ns-layout-medium')).toBe(true);
         expect(container.querySelector('aside.ns-left-pane')).toBeNull();
         expect(container.textContent).toContain('目录与设定集');
 
-        // 缩放至 760px (<820px)：右栏转为浮层抽屉
+        // 缩放至 760px (<820px)：右栏转为浮层抽屉，且不再渲染右侧拖拽分隔条
         act(() => {
             roCallback?.([{ contentRect: { width: 760 } } as ResizeObserverEntry], {} as ResizeObserver);
         });
         expect(shell.classList.contains('ns-layout-compact')).toBe(true);
+        expect(container.querySelector('[role="separator"][aria-label="调整右侧状态栏宽度"]')).toBeNull();
     });
 
-    it('在「模型分配」页签修改第一层底座与第二层覆盖并保存，调用 saveModelRouting 并刷新 status', async () => {
+    it('在「模型分配」页签通过双池与单角色原生 <select> 修改并保存，调用 saveModelRouting 并刷新 status', async () => {
         const baseStatus = statusPayload('/books/a');
         let currentStatus: NarrateStatusPayload = {
             ...baseStatus,
+            defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' },
+            poolOverrides: {},
             modelRouting: {
                 strong_creative: 'anthropic:claude-sonnet-4-5',
-                fast_retrieval: 'deepseek:deepseek-chat',
-                audit: 'openai:gpt-4.1'
+                fast_retrieval: 'deepseek:deepseek-chat'
             },
             roleRouting: {},
             roleDefinitions: [
@@ -497,10 +507,10 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 },
                 {
                     id: 'fact_checker',
-                    defaultPool: 'audit',
-                    effectivePool: 'audit',
-                    effectiveProvider: 'openai',
-                    effectiveModel: 'gpt-4.1'
+                    defaultPool: 'strong_creative',
+                    effectivePool: 'strong_creative',
+                    effectiveProvider: 'anthropic',
+                    effectiveModel: 'claude-sonnet-4-5'
                 },
                 {
                     id: 'writer',
@@ -511,6 +521,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 }
             ],
             availableModels: [
+                { provider: 'anthropic', model: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
                 { provider: 'openai', model: 'gpt-4.1', label: 'GPT-4.1' },
                 { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat' }
             ]
@@ -520,10 +531,13 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             currentStatus = {
                 ...currentStatus,
                 modelRouting: payload.model_routing ?? currentStatus.modelRouting,
+                poolOverrides: payload.model_routing ?? {},
                 roleRouting: payload.role_routing ?? {}
             };
             return {
                 status: 'ok',
+                defaultModel: currentStatus.defaultModel,
+                poolOverrides: currentStatus.poolOverrides,
                 modelRouting: currentStatus.modelRouting,
                 roleRouting: currentStatus.roleRouting,
                 roleDefinitions: currentStatus.roleDefinitions
@@ -533,25 +547,25 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         const container = await mountStudio();
         await click(buttonByText(container, '模型分配'));
 
-        // fact_checker 界面展示统一为 Checker
+        // fact_checker 界面展示统一为 Checker，且不存在第 3 个 audit 池
         expect(container.textContent).toContain('Checker');
         expect(container.textContent).not.toContain('Fact Check');
+        expect(container.textContent).not.toContain('独立挑错池');
 
         // 修改第一层强模型池与展开 librarian/writer 行并修改第二层覆盖
-        const strongPoolInput = container.querySelector<HTMLInputElement>('input[aria-label="强模型池"]')!;
+        const strongPoolSelect = container.querySelector<HTMLSelectElement>('select[aria-label="强模型池"]')!;
         await click(container.querySelector<HTMLButtonElement>('[data-role-id="librarian"] button.ns-role-summary')!);
         await click(container.querySelector<HTMLButtonElement>('[data-role-id="writer"] button.ns-role-summary')!);
 
         const librarianTier = container.querySelector<HTMLSelectElement>('select[aria-label="librarian 档位覆盖"]')!;
-        const writerModel = container.querySelector<HTMLInputElement>('input[aria-label="writer 指定模型"]')!;
-        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const writerModel = container.querySelector<HTMLSelectElement>('select[aria-label="writer 指定模型"]')!;
         await act(async () => {
-            inputSetter?.call(strongPoolInput, 'anthropic:claude-opus-4-5');
-            strongPoolInput.dispatchEvent(new Event('input', { bubbles: true }));
+            strongPoolSelect.value = 'anthropic:claude-opus-4-5';
+            strongPoolSelect.dispatchEvent(new Event('change', { bubbles: true }));
             librarianTier.value = 'strong';
             librarianTier.dispatchEvent(new Event('change', { bubbles: true }));
-            inputSetter?.call(writerModel, 'openai:gpt-4.1');
-            writerModel.dispatchEvent(new Event('input', { bubbles: true }));
+            writerModel.value = 'openai:gpt-4.1';
+            writerModel.dispatchEvent(new Event('change', { bubbles: true }));
         });
 
         const statusCallsBeforeSave = vi.mocked(api.fetchStatus).mock.calls.length;
@@ -563,8 +577,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(api.saveModelRouting).toHaveBeenCalledExactlyOnceWith({
             model_routing: {
                 strong_creative: 'anthropic:claude-opus-4-5',
-                fast_retrieval: 'deepseek:deepseek-chat',
-                audit: 'openai:gpt-4.1'
+                fast_retrieval: ''
             },
             role_routing: {
                 librarian: { tier: 'strong' },
@@ -973,5 +986,183 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(container.querySelector('#ns-right-tab-trace')?.getAttribute('aria-selected')).toBe('true');
         expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBeNull();
         expect(container.textContent).toContain('未选择工种会话节点');
+    });
+
+    it('无书态调用 fetchStatus 加载双池模型并支持下拉保存、default_model_changed SSE 实时刷新及扉页开启 BootBookModal', async () => {
+        activeBookRoot = '';
+        vi.mocked(api.fetchBooks).mockResolvedValue({ currentBookRoot: null, books: [] });
+        let currentNoBookStatus: NarrateStatusPayload = {
+            bookRoot: '',
+            bookSlug: '',
+            title: '',
+            walPhase: 'IDLE',
+            activeChapter: null,
+            lastCommittedChapter: 0,
+            latestChapter: 0,
+            chapterCount: 0,
+            entityCount: 0,
+            coldArchiveCount: 0,
+            worldState: { story_day: 0, current_chapter: 0, timeline_mode: 'MAINLINE' },
+            pendingSignalsCount: 0,
+            yolo: { running: false, completedChapters: 0, targetChapters: 0, currentStage: null },
+            runtime: { activeTask: 'IDLE', haltRequested: false },
+            defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' },
+            poolOverrides: {},
+            modelRouting: {
+                strong_creative: 'deepseek-official:deepseek-flash',
+                fast_retrieval: 'deepseek-official:deepseek-flash'
+            },
+            roleDefinitions: [
+                {
+                    id: 'writer',
+                    defaultPool: 'strong_creative',
+                    effectivePool: 'strong_creative',
+                    effectiveProvider: 'deepseek-official',
+                    effectiveModel: 'deepseek-flash'
+                }
+            ],
+            availableModels: [
+                { provider: 'deepseek-official', model: 'deepseek-flash', label: 'DeepSeek Flash' },
+                { provider: 'deepseek-official', model: 'deepseek-reasoner', label: 'DeepSeek R1' }
+            ]
+        };
+        vi.mocked(api.fetchStatus).mockImplementation(async () => currentNoBookStatus);
+        vi.mocked(api.saveModelRouting).mockImplementation(async (payload) => {
+            currentNoBookStatus = {
+                ...currentNoBookStatus,
+                poolOverrides: { strong_creative: payload.model_routing?.['strong_creative'] ?? '' },
+                modelRouting: {
+                    strong_creative: payload.model_routing?.['strong_creative'] || 'deepseek-official:deepseek-flash',
+                    fast_retrieval: payload.model_routing?.['fast_retrieval'] || 'deepseek-official:deepseek-flash'
+                }
+            };
+            return {
+                status: 'ok',
+                defaultModel: currentNoBookStatus.defaultModel,
+                poolOverrides: currentNoBookStatus.poolOverrides,
+                modelRouting: currentNoBookStatus.modelRouting,
+                roleDefinitions: currentNoBookStatus.roleDefinitions
+            };
+        });
+
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+        await act(async () => {
+            root.render(createElement(NarrateStudioRoot));
+        });
+
+        expect(api.fetchStatus).toHaveBeenCalledTimes(1);
+
+        // 扉页主按钮为「开启新作品」，点击后弹出 BootBookModal
+        await click(buttonByText(container, '开启新作品'));
+        expect(document.body.querySelector('[role="dialog"][aria-label="开新书编译引导"]')).not.toBeNull();
+        await click(document.body.querySelector<HTMLButtonElement>('[aria-label="关闭弹窗"]')!);
+
+        // 切至模型分配：第一层首项为跟随 DSH 本体默认，可选并保存
+        await click(buttonByText(container, '模型分配'));
+        const strongSelect = container.querySelector<HTMLSelectElement>('select[aria-label="强模型池"]')!;
+        expect(strongSelect.options[0]?.textContent).toBe('跟随 DSH 本体默认（deepseek-official:deepseek-flash）');
+        expect(strongSelect.value).toBe('');
+
+        await act(async () => {
+            strongSelect.value = 'deepseek-official:deepseek-reasoner';
+            strongSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        await click(buttonByText(container, '保存工种模型配置'));
+        expect(api.saveModelRouting).toHaveBeenCalledWith({
+            model_routing: {
+                strong_creative: 'deepseek-official:deepseek-reasoner',
+                fast_retrieval: ''
+            },
+            role_routing: {}
+        });
+
+        // 接收 default_model_changed SSE 实时更新首项文案
+        currentNoBookStatus = {
+            ...currentNoBookStatus,
+            defaultModel: { provider: 'openai', model: 'gpt-4.1' }
+        };
+        await emit({
+            event: 'default_model_changed',
+            data: {
+                defaultModel: { provider: 'openai', model: 'gpt-4.1' }
+            }
+        });
+        expect(strongSelect.options[0]?.textContent).toBe('跟随 DSH 本体默认（openai:gpt-4.1）');
+    });
+
+    it('支持左栏独立折叠/展开、左右 separator 拖拽调整宽度、双击恢复与键盘微调并持久化至 localStorage', async () => {
+        const container = await mountStudio();
+        const shell = container.querySelector<HTMLElement>('.ns-studio-shell')!;
+
+        // 1. 顶栏书名左侧存在收起左栏按钮，点击收起并持久化到 localStorage
+        const leftToggleBtn = container.querySelector<HTMLButtonElement>('button[aria-label="收起左侧目录栏"]')!;
+        expect(leftToggleBtn).not.toBeNull();
+        const headerLeftChildren = Array.from(container.querySelector('.ns-header-left')!.children);
+        expect(headerLeftChildren[0]).toBe(leftToggleBtn);
+
+        await click(leftToggleBtn);
+        expect(container.querySelector('aside.ns-left-pane')).toBeNull();
+        expect(shell.classList.contains('ns-left-closed')).toBe(true);
+        expect(window.localStorage.getItem('narrateos.studio.leftOpen')).toBe('false');
+
+        // 再次点击展开左栏
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="展开左侧目录栏"]')!);
+        expect(container.querySelector('aside.ns-left-pane')).not.toBeNull();
+        expect(window.localStorage.getItem('narrateos.studio.leftOpen')).toBe('true');
+
+        // 2. 左栏分隔条：pointer 拖拽（含 setPointerCapture 与 ns-resizing）、边界钳位、双击复位、键盘微调
+        const leftSep = container.querySelector<HTMLElement>('[role="separator"][aria-label="调整左侧目录栏宽度"]')!;
+        expect(leftSep).not.toBeNull();
+        const setPointerCaptureSpy = vi.fn();
+        leftSep.setPointerCapture = setPointerCaptureSpy;
+
+        act(() => {
+            leftSep.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 224, button: 0 }));
+        });
+        expect(setPointerCaptureSpy).toHaveBeenCalled();
+        expect(shell.classList.contains('ns-resizing')).toBe(true);
+
+        act(() => {
+            leftSep.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 300 }));
+        });
+        expect(shell.style.getPropertyValue('--ns-left-w')).toBe('300px');
+
+        // 超出上限 380px 钳位
+        act(() => {
+            leftSep.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 600 }));
+            leftSep.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 600 }));
+        });
+        expect(shell.classList.contains('ns-resizing')).toBe(false);
+        expect(shell.style.getPropertyValue('--ns-left-w')).toBe('380px');
+        expect(window.localStorage.getItem('narrateos.studio.leftWidth')).toBe('380');
+
+        // 键盘 ArrowLeft 微调与双击恢复默认 224px
+        act(() => {
+            leftSep.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+        });
+        expect(Number.parseInt(shell.style.getPropertyValue('--ns-left-w'), 10)).toBeLessThan(380);
+        act(() => {
+            leftSep.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+        });
+        expect(shell.style.getPropertyValue('--ns-left-w')).toBe('224px');
+
+        // 3. 右栏分隔条：向左拖宽（280~540）、双击恢复 340px
+        const rightSep = container.querySelector<HTMLElement>('[role="separator"][aria-label="调整右侧状态栏宽度"]')!;
+        expect(rightSep).not.toBeNull();
+        act(() => {
+            rightSep.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 1100, button: 0 }));
+            rightSep.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 1000 }));
+            rightSep.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 1000 }));
+        });
+        expect(shell.style.getPropertyValue('--ns-right-w')).toBe('440px');
+        expect(window.localStorage.getItem('narrateos.studio.rightWidth')).toBe('440');
+
+        act(() => {
+            rightSep.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+        });
+        expect(shell.style.getPropertyValue('--ns-right-w')).toBe('340px');
     });
 });

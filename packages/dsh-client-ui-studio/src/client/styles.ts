@@ -3724,11 +3724,12 @@ details.ns-acc[open] summary {
     animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* 容器感知三栏布局（由 .ns-studio-shell ResizeObserver 实测宽度驱动） */
+/* 容器感知三栏布局（由 .ns-studio-shell ResizeObserver 实测宽度驱动，支持左右栏独立折叠与拖拽缩放） */
 .ns-studio-shell.ns-layout-wide {
-    grid-template-columns: 224px minmax(0, 1fr) var(--ns-right-w, 340px);
+    grid-template-columns: var(--ns-left-w, 224px) minmax(0, 1fr) var(--ns-right-w, 340px);
 }
 
+.ns-studio-shell.ns-layout-wide.ns-left-closed,
 .ns-studio-shell.ns-layout-medium {
     grid-template-columns: minmax(0, 1fr) var(--ns-right-w, 340px);
 }
@@ -3739,6 +3740,41 @@ details.ns-acc[open] summary {
 
 .ns-studio-shell.ns-right-closed {
     --ns-right-w: 0px;
+}
+
+.ns-studio-shell.ns-resizing {
+    user-select: none;
+    cursor: col-resize;
+    transition: none;
+}
+
+.ns-pane-resizer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    z-index: 35;
+    cursor: col-resize;
+    touch-action: none;
+    background: transparent;
+}
+
+.ns-pane-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 2px;
+    width: 2px;
+    border-radius: var(--ns-r-pill);
+    background: transparent;
+    transition: background 0.14s ease;
+}
+
+.ns-pane-resizer:hover::after,
+.ns-pane-resizer:focus-visible::after,
+.ns-pane-resizer.ns-pane-resizer-active::after {
+    background: var(--ns-brand);
 }
 
 .ns-num {
@@ -3940,6 +3976,18 @@ details.ns-acc[open] summary {
 .ns-menu-row span {
     font-size: 11px;
     color: var(--ns-text-3);
+}
+
+.ns-menu-row-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.ns-menu-cmd {
+    font-size: 11px;
+    color: var(--ns-brand-ink);
 }
 
 .ns-menu-row.ns-danger {

@@ -39,7 +39,14 @@ declare namespace React {
 
     interface ChangeEvent<T = Element> extends SyntheticEvent<T> {}
     interface FormEvent<T = Element> extends SyntheticEvent<T> {}
-    interface MouseEvent<T = Element> extends SyntheticEvent<T> {}
+    interface MouseEvent<T = Element> extends SyntheticEvent<T> {
+        button: number;
+        clientX: number;
+        clientY: number;
+    }
+    interface PointerEvent<T = Element> extends MouseEvent<T> {
+        pointerId: number;
+    }
     interface KeyboardEvent<T = Element> extends SyntheticEvent<T> {
         key: string;
         ctrlKey: boolean;
@@ -96,6 +103,7 @@ declare module 'react' {
     export type ChangeEvent<T = Element> = React.ChangeEvent<T>;
     export type FormEvent<T = Element> = React.FormEvent<T>;
     export type MouseEvent<T = Element> = React.MouseEvent<T>;
+    export type PointerEvent<T = Element> = React.PointerEvent<T>;
     export type KeyboardEvent<T = Element> = React.KeyboardEvent<T>;
     export type MutableRefObject<T> = React.MutableRefObject<T>;
     export type RefObject<T> = React.RefObject<T>;

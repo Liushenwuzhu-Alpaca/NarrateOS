@@ -130,7 +130,7 @@ export function fetchStatus(): Promise<NarrateStatusPayload> {
     return requestJson<NarrateStatusPayload>('/api/narrate/status');
 }
 
-/** 更新当前作品的三池或分角色两层模型路由配置 */
+/** 更新双池或分角色两层模型路由配置 */
 export function saveModelRouting(payload: SaveModelRoutingRequest): Promise<SaveModelRoutingResponse> {
     return requestJson<SaveModelRoutingResponse>('/api/narrate/model-routing', {
         method: 'PUT',
@@ -330,6 +330,7 @@ export function stopYolo(): Promise<YoloStopResponse> {
 export const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
     'connected',
     'book_switched',
+    'default_model_changed',
     'halt:requested',
     'halt:waiting',
     'halt:completed',

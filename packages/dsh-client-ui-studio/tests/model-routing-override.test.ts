@@ -57,11 +57,11 @@ const SAMPLE_ROLE_DEFINITIONS: RoleDefinitionItem[] = [
     },
     {
         id: 'fact-checker',
-        defaultPool: 'audit',
+        defaultPool: 'strong_creative',
         defaultReasoningEffort: 'medium',
-        effectivePool: 'audit',
-        effectiveProvider: 'openai',
-        effectiveModel: 'gpt-4.1',
+        effectivePool: 'strong_creative',
+        effectiveProvider: 'anthropic',
+        effectiveModel: 'claude-sonnet-4-5',
         effectiveReasoningEffort: 'medium'
     }
 ];
@@ -96,10 +96,10 @@ afterEach(() => {
 function baseProps(overrides?: Partial<RoleRoutingEditorProps>): RoleRoutingEditorProps {
     return {
         resetKey: '/books/alpha',
+        defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' },
         poolRoutes: {
             strong_creative: 'anthropic:claude-sonnet-4-5',
-            fast_retrieval: 'deepseek:deepseek-chat',
-            audit: 'openai:gpt-4.1'
+            fast_retrieval: 'deepseek:deepseek-chat'
         },
         roleDefinitions: SAMPLE_ROLE_DEFINITIONS,
         ...overrides
@@ -131,16 +131,6 @@ function setSelectValue(select: HTMLSelectElement, value: string): void {
     act(() => {
         select.value = value;
         select.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-}
-
-function setInputValue(input: HTMLInputElement, value: string): void {
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-    if (!setter) throw new Error('jsdom 缺少 input value setter');
-    act(() => {
-        setter.call(input, value);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
     });
 }
 
@@ -307,19 +297,23 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         expect(tierDefaultOpt?.textContent).toBe('继承默认');
         expect(effortDefaultOpt?.textContent).toBe('继承默认');
 
-        const writerModelInput = customContainer.querySelector<HTMLInputElement>(
-            'input[aria-label="writer 指定模型"]'
+        const writerModelSelect = customContainer.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 指定模型"]'
         );
-        expect(writerModelInput?.value).toBe('openai:gpt-4.1');
-        const listId = writerModelInput?.getAttribute('list');
-        expect(listId).toBeTruthy();
-        const options = Array.from(
-            customContainer.querySelectorAll<HTMLOptionElement>(`#${listId} option`)
-        ).map((opt) => opt.value);
-        expect(options).toEqual(['anthropic:claude-sonnet-4-5', 'openai:gpt-4.1']);
+        expect(writerModelSelect).not.toBeNull();
+        expect(writerModelSelect?.value).toBe('openai:gpt-4.1');
+        const options = Array.from(writerModelSelect?.options ?? []).map((opt) => ({
+            value: opt.value,
+            text: opt.textContent
+        }));
+        expect(options).toEqual([
+            { value: '', text: '继承第一层底座' },
+            { value: 'anthropic:claude-sonnet-4-5', text: 'Claude Sonnet 4.5 (anthropic:claude-sonnet-4-5)' },
+            { value: 'openai:gpt-4.1', text: 'GPT-4.1 (openai:gpt-4.1)' }
+        ]);
     });
 
-    it('支持选择 Layer 1 强/弱档位、填写 Layer 2 具体模型与 reasoning_effort 并提交保存', async () => {
+    it('支持选择 Layer 1 强/弱档位、Layer 2 指定模型下拉与 reasoning_effort 并提交保存', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
         const { container } = mountEditor(
             baseProps({
@@ -333,8 +327,8 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         const librarianTier = container.querySelector<HTMLSelectElement>(
             'select[aria-label="librarian 档位覆盖"]'
         )!;
-        const writerModel = container.querySelector<HTMLInputElement>(
-            'input[aria-label="writer 指定模型"]'
+        const writerModel = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 指定模型"]'
         )!;
         const writerEffort = container.querySelector<HTMLSelectElement>(
             'select[aria-label="writer 推理强度"]'
@@ -344,7 +338,7 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         )!;
 
         setSelectValue(librarianTier, 'strong');
-        setInputValue(writerModel, 'deepseek:deepseek-reasoner');
+        setSelectValue(writerModel, 'deepseek:deepseek-reasoner');
         setSelectValue(writerEffort, 'low');
         setSelectValue(patchTier, 'weak');
 
@@ -369,7 +363,7 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         expect(container.textContent).toContain('工种模型配置已保存');
     });
 
-    it('Layer 2 留空时继承 Layer 1；重置 reasoning_effort 回退到 defaultReasoningEffort 且不残留旧 effectiveReasoningEffort', async () => {
+    it('Layer 2 选回继承第一层底座时继承 Layer 1；重置 reasoning_effort 回退到 defaultReasoningEffort 且不残留旧 effectiveReasoningEffort', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
         const { container } = mountEditor(
             baseProps({
@@ -395,16 +389,18 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         const writerRow = container.querySelector<HTMLElement>('[data-role-id="writer"]');
         expect(writerRow?.textContent).toContain('openai:gpt-4.1 (high)');
 
-        const writerModel = container.querySelector<HTMLInputElement>(
-            'input[aria-label="writer 指定模型"]'
+        const writerModel = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="writer 指定模型"]'
         )!;
+        // 当前值不在 availableModels 时仍保留为选项
+        expect(writerModel.value).toBe('openai:gpt-4.1');
         const writerEffort = container.querySelector<HTMLSelectElement>(
             'select[aria-label="writer 推理强度"]'
         )!;
-        setInputValue(writerModel, '   ');
+        setSelectValue(writerModel, '');
         setSelectValue(writerEffort, '');
 
-        // Layer 2 留空后继承 Layer 1 (weak -> fast_retrieval)，reasoning_effort 回退到 defaultReasoningEffort (medium)
+        // Layer 2 选回继承后继承 Layer 1 (weak -> fast_retrieval)，reasoning_effort 回退到 defaultReasoningEffort (medium)
         expect(writerRow?.textContent).toContain('deepseek:deepseek-chat (medium)');
         expect(writerRow?.textContent).not.toContain('(high)');
 
@@ -427,9 +423,9 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
             baseProps({
                 poolRoutes: {
                     strong_creative: 'claude-sonnet-4-5',
-                    fast_retrieval: 'deepseek-chat',
-                    audit: 'gpt-4.1'
+                    fast_retrieval: 'deepseek-chat'
                 },
+                availableModels: [{ provider: '', model: 'claude-opus-4' }],
                 roleDefinitions: SAMPLE_ROLE_DEFINITIONS
             })
         );
@@ -437,8 +433,8 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         const librarianTier = container.querySelector<HTMLSelectElement>(
             'select[aria-label="librarian 档位覆盖"]'
         )!;
-        const librarianModel = container.querySelector<HTMLInputElement>(
-            'input[aria-label="librarian 指定模型"]'
+        const librarianModel = container.querySelector<HTMLSelectElement>(
+            'select[aria-label="librarian 指定模型"]'
         )!;
 
         setSelectValue(librarianTier, 'strong');
@@ -446,7 +442,7 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         expect(librarianRow?.textContent).toContain('anthropic:claude-sonnet-4-5');
         expect(librarianRow?.textContent).not.toContain('deepseek:claude-sonnet-4-5');
 
-        setInputValue(librarianModel, 'claude-opus-4');
+        setSelectValue(librarianModel, 'claude-opus-4');
         expect(librarianRow?.textContent).toContain('anthropic:claude-opus-4');
         expect(librarianRow?.textContent).not.toContain('deepseek:claude-opus-4');
     });
@@ -540,10 +536,16 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         expect(container.textContent).toContain('保存失败: HTTP 409 事务锁占用');
     });
 
-    it('第一层支持直接编辑强/快/独立挑错三池输入框（关联 datalist），实时联动生效模型并与 role_routing 一并提交', async () => {
+    it('第一层仅保留强/快双池原生 <select> 下拉框（首项跟随 DSH 本体默认），实时联动生效模型并提交保存', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
         const { container } = mountEditor(
             baseProps({
+                defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' },
+                poolOverrides: {},
+                poolRoutes: {
+                    strong_creative: 'deepseek-official:deepseek-flash',
+                    fast_retrieval: 'deepseek-official:deepseek-flash'
+                },
                 availableModels: [
                     { provider: 'deepseek', model: 'deepseek-reasoner', label: 'DeepSeek R1' },
                     { provider: 'openai', model: 'gpt-5.4-high', label: 'GPT-5.4' }
@@ -552,13 +554,17 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
             })
         );
 
-        const strongInput = container.querySelector<HTMLInputElement>('input[aria-label="强模型池"]');
-        const fastInput = container.querySelector<HTMLInputElement>('input[aria-label="快模型池"]');
-        const auditInput = container.querySelector<HTMLInputElement>('input[aria-label="独立挑错池"]');
-        expect(strongInput).not.toBeNull();
-        expect(fastInput).not.toBeNull();
-        expect(auditInput).not.toBeNull();
-        expect(strongInput?.getAttribute('list')).toBeTruthy();
+        const strongSelect = container.querySelector<HTMLSelectElement>('select[aria-label="强模型池"]');
+        const fastSelect = container.querySelector<HTMLSelectElement>('select[aria-label="快模型池"]');
+        const auditSelect = container.querySelector('[aria-label="独立挑错池"]');
+        expect(strongSelect).not.toBeNull();
+        expect(fastSelect).not.toBeNull();
+        expect(auditSelect).toBeNull();
+        expect(container.textContent).not.toContain('独立挑错池');
+
+        expect(strongSelect?.options[0]?.value).toBe('');
+        expect(strongSelect?.options[0]?.textContent).toBe('跟随 DSH 本体默认（deepseek-official:deepseek-flash）');
+        expect(strongSelect?.value).toBe('');
 
         const saveBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
             (btn) => btn.textContent?.includes('保存工种模型配置')
@@ -567,19 +573,21 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         expect(saveBtn.className).not.toContain('ns-btn-primary');
         expect(saveBtn.className).toContain('ns-btn-ghost');
 
-        setInputValue(strongInput!, 'deepseek:deepseek-reasoner');
-        setInputValue(auditInput!, 'openai:gpt-5.4-high');
+        setSelectValue(strongSelect!, 'deepseek:deepseek-reasoner');
+        setSelectValue(fastSelect!, 'openai:gpt-5.4-high');
 
         // 修改后点亮主色实心按钮
         expect(saveBtn.className).toContain('ns-btn-primary');
 
-        // 实时联动 Layer 2 展示生效模型
+        // 实时联动 Layer 2 展示生效模型（fact-checker 归属强模型池）
         const writerRow = container.querySelector<HTMLElement>('[data-role-id="writer"]');
         expect(writerRow?.textContent).toContain('deepseek:deepseek-reasoner');
         const checkerRow = container.querySelector<HTMLElement>('[data-role-id="fact-checker"]');
         expect(checkerRow?.textContent).toContain('Checker');
         expect(checkerRow?.textContent).not.toContain('Fact Checker');
-        expect(checkerRow?.textContent).toContain('openai:gpt-5.4-high');
+        expect(checkerRow?.textContent).toContain('deepseek:deepseek-reasoner');
+        const librarianRow = container.querySelector<HTMLElement>('[data-role-id="librarian"]');
+        expect(librarianRow?.textContent).toContain('openai:gpt-5.4-high');
 
         await act(async () => {
             saveBtn.click();
@@ -588,22 +596,21 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         expect(onSave).toHaveBeenCalledExactlyOnceWith({
             model_routing: {
                 strong_creative: 'deepseek:deepseek-reasoner',
-                fast_retrieval: 'deepseek:deepseek-chat',
-                audit: 'openai:gpt-5.4-high'
+                fast_retrieval: 'openai:gpt-5.4-high'
             },
             role_routing: {}
         });
     });
 
-    it('第二层手风琴支持 fact_checker -> Checker 映射、覆盖项主色高亮与展开收起', async () => {
+    it('第二层手风琴支持 fact_checker -> Checker 映射（归属强模型池）、覆盖项主色高亮与展开收起', async () => {
         const { container } = mountEditor(
             baseProps({
                 roleDefinitions: [
                     {
                         id: 'fact_checker',
-                        defaultPool: 'audit',
+                        defaultPool: 'strong_creative',
                         defaultReasoningEffort: 'medium',
-                        effectivePool: 'audit',
+                        effectivePool: 'strong_creative',
                         effectiveProvider: 'openai',
                         effectiveModel: 'gpt-4.1',
                         effectiveReasoningEffort: 'high'
