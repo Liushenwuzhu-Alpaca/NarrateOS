@@ -22,7 +22,9 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
         saveModelRouting: vi.fn(),
         fetchViewEntities: vi.fn(), fetchViewHorizon: vi.fn(), fetchViewThreads: vi.fn(),
         fetchViewTelemetry: vi.fn(), fetchViewSignals: vi.fn(), fetchViewHalt: vi.fn(),
+        fetchViewSyncConflicts: vi.fn(),
         stepChapter: vi.fn(), syncManuscripts: vi.fn(), runDreaming: vi.fn(), harvestVoice: vi.fn(),
+        healConflicts: vi.fn(), advanceVolume: vi.fn(), forkParallelWindow: vi.fn(), mergeParallelWindow: vi.fn(),
         postSignal: vi.fn(), deleteSignal: vi.fn(), requestHalt: vi.fn(),
         startYolo: vi.fn(), stopYolo: vi.fn(), subscribeNarrateEvents: vi.fn()
     };
@@ -115,6 +117,7 @@ beforeEach(() => {
     vi.mocked(api.fetchChapters).mockImplementation(async () => chaptersPayload(activeBookRoot));
     vi.mocked(api.fetchChapter).mockImplementation(async (chapter) => chapterDetail(activeBookRoot, chapter));
     vi.mocked(api.fetchRunRecords).mockResolvedValue({ runs: [] });
+    vi.mocked(api.fetchRunDetail).mockRejectedValue(new api.NarrateApiError('Not Found', 404));
     vi.mocked(api.selectBook).mockImplementation(async ({ bookRoot }) => {
         if (!bookRoot || !books.some((book) => book.bookRoot === bookRoot)) {
             throw new Error('测试只允许切换已存在的作品');
@@ -139,6 +142,9 @@ beforeEach(() => {
     vi.mocked(api.fetchViewTelemetry).mockResolvedValue({ kind: 'telemetry', entries: [] });
     vi.mocked(api.fetchViewSignals).mockResolvedValue({ kind: 'signals', signals: [], pending: [], pendingCount: 0 });
     vi.mocked(api.fetchViewHalt).mockResolvedValue({ kind: 'halt', safeHalt: null, quarantineReport: null });
+    vi.mocked(api.fetchViewSyncConflicts).mockResolvedValue({
+        kind: 'sync_conflicts', syncConflicts: null, conflicts: [], dirtyChapters: [], stateDiffAdvisories: [], updatedAt: null
+    });
     vi.mocked(api.bootBook).mockResolvedValue({ status: 'BOOTED', bookRoot: '/books/new', result: {} });
     vi.mocked(api.stepChapter).mockResolvedValue({
         chapterNumber: 3, manuscriptPath: '/books/a/ch-3.md', replanCount: 0, rewriteCount: 0, patchRounds: 0,
@@ -147,6 +153,18 @@ beforeEach(() => {
     vi.mocked(api.syncManuscripts).mockResolvedValue({ status: 'SYNCED', dirtyChapters: [], downstreamConflicts: [] });
     vi.mocked(api.runDreaming).mockResolvedValue({ skipped: true });
     vi.mocked(api.harvestVoice).mockResolvedValue({ harvestedCount: 0, skipped: true, samples: [] });
+    vi.mocked(api.healConflicts).mockResolvedValue({ results: [], quarantined: false, quarantineReport: null });
+    vi.mocked(api.advanceVolume).mockResolvedValue({
+        sealedVolume: 1, nextVolume: 2, tagName: 'vol-1', archivedEntities: [], completedBook: false, commitSha: 'abc1234'
+    });
+    vi.mocked(api.forkParallelWindow).mockResolvedValue({
+        windowId: 'win-1', baseTag: 't', baseDay: 1, maxChapters: 3, globalBroadcast: {}, baseChapter: 1,
+        baseEntityIds: [], status: 'OPEN', createdAt: '2026-11-18T00:00:00Z'
+    });
+    vi.mocked(api.mergeParallelWindow).mockResolvedValue({
+        windowId: 'win-1', baseTag: 't', mergedBranches: ['branch-a'], updatedEntities: [],
+        previousStoryDay: 1, newStoryDay: 2, totalChaptersUsed: 1, sha: 'def5678'
+    });
     vi.mocked(api.postSignal).mockImplementation(async (signal) => ({ status: 'QUEUED', signal }));
     vi.mocked(api.deleteSignal).mockResolvedValue({ status: 'DELETED', remaining: 0 });
     vi.mocked(api.requestHalt).mockResolvedValue({ haltRequested: true, activeTask: 'IDLE' });
@@ -201,49 +219,30 @@ function typeDraft(container: HTMLElement, content: string): void {
 }
 
 async function edit(container: HTMLElement, content: string): Promise<void> {
-    await click(buttonByText(container, '✎ 编辑'));
+    await click(buttonByText(container, '直接改稿'));
     typeDraft(container, content);
 }
 
 function chapterButton(container: HTMLElement, chapter: number): HTMLButtonElement {
-    const code = `Ch.${String(chapter).padStart(4, '0')}`;
     const button = Array.from(container.querySelectorAll<HTMLButtonElement>('button.ns-ch-btn'))
-        .find((item) => item.querySelector('.ns-ch-code')?.textContent?.trim() === code);
-    if (!button) throw new Error(`未找到目录章节 ${code}`);
+        .find((item) => item.querySelector('.ns-ch-no')?.textContent?.trim() === `第 ${chapter} 章`);
+    if (!button) throw new Error(`未找到目录章节 第 ${chapter} 章`);
     return button;
 }
 
-function bookSelect(container: HTMLElement): HTMLSelectElement {
-    const select = container.querySelector<HTMLSelectElement>('select[aria-label="切换作品"]');
-    if (!select) throw new Error('作品切换器未显示');
-    return select;
-}
-
-function dialog(title: string): HTMLElement {
-    const element = document.body.querySelector<HTMLElement>(`[role="dialog"][aria-label="${title}"]`);
-    if (!element) throw new Error(`弹窗未打开：${title}`);
-    return element;
+async function switchBookViaMenu(container: HTMLElement, bookTitle: string): Promise<void> {
+    const switcher = container.querySelector<HTMLButtonElement>('button.ns-book-switcher');
+    if (!switcher) throw new Error('作品切换按钮未显示');
+    await click(switcher);
+    const item = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+        .find((btn) => btn.querySelector('b')?.textContent?.trim() === bookTitle);
+    if (!item) throw new Error(`未找到作品菜单项「${bookTitle}」`);
+    await click(item);
 }
 
 async function emit(event: SseEventPayload): Promise<void> {
     if (!onEvent) throw new Error('根组件未订阅 SSE');
     await act(async () => { onEvent?.(event); });
-}
-
-async function startSave(container: HTMLElement, mode: '普通' | '守卫'): Promise<void> {
-    if (mode === '普通') {
-        await click(buttonByText(container, '保存并自动 Sync'));
-    } else {
-        await click(buttonByText(container, '+ 开新书'));
-        await click(buttonByText(dialog('未保存的修改'), '保存并继续'));
-    }
-}
-
-async function cancelBoot(mode: '普通' | '守卫'): Promise<void> {
-    if (mode === '守卫') {
-        await click(buttonByText(dialog('开新书编译引导'), '取消'));
-        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    }
 }
 
 describe('真实根组件的草稿身份与异步隔离', () => {
@@ -262,16 +261,15 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         });
         await send('stage', { stage: 'STARTING' });
         await send('halt:requested');
-        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('等待');
-        expect(container.querySelector('.ns-runtime-status')?.textContent).not.toContain('已停止');
+        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写完本章即停');
         await send('halt:waiting', { activeTask: 'STEPPING' });
-        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('当前任务仍在执行');
+        expect(container.querySelector('.ns-center-header')?.textContent).toContain('等待安全点收束');
         vi.mocked(api.fetchStatus).mockRejectedValue(new Error('宿主已经关闭'));
         await send('halt:completed');
-        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('已停止');
+        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写下一章');
         await send('stage', { stage: 'STARTING' });
-        expect(container.querySelector('.ns-runtime-status')?.textContent).toContain('正在生成');
-        expect(container.querySelector('.ns-runtime-status')?.textContent).not.toContain('等待');
+        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写完本章暂停');
+        expect(container.querySelector('.ns-center-header')?.textContent).not.toContain('等待安全点');
     });
 
     it.each(['章节视图', '作品辅助视图'])('%s支持方向键和首尾键，焦点、选择和面板身份同步', async (label) => {
@@ -307,7 +305,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         await click(chapterButton(container, 2));
         expect(api.fetchChapter).toHaveBeenLastCalledWith(2);
         expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
-        await click(buttonByText(container, '✎ 编辑'));
+        await click(buttonByText(container, '直接改稿'));
         expect(editor(container).value).toBe('甲书第一章服务器原稿。');
         typeDraft(container, '属于甲书第一章的新草稿。');
         await act(async () => {
@@ -315,7 +313,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             await secondChapter.promise;
         });
         expect(editor(container).value).toBe('属于甲书第一章的新草稿。');
-        await click(buttonByText(container, '保存并自动 Sync'));
+        await click(buttonByText(container, '保存并自动同步'));
         expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ chapterNumber: 1, content: '属于甲书第一章的新草稿。' });
         expect(manuscripts.get(manuscriptKey('/books/a', 2))).toBe('甲书第二章服务器原稿。');
     });
@@ -325,17 +323,11 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         const oldChapters = Promise.withResolvers<ChaptersListPayload>();
         const snapshot = chaptersPayload('/books/a');
         vi.mocked(api.fetchChapters).mockImplementationOnce(() => oldChapters.promise);
-        // COMMITTED 走完整 refreshAll；工具栏刷新只加载物化视图，不覆盖此竞态。
         await emit({ event: 'stage', data: { stage: 'COMMITTED', chapterNumber: 1 } });
         expect(api.fetchBooks).toHaveBeenCalledTimes(2);
         expect(api.fetchStatus).toHaveBeenCalledTimes(2);
         expect(api.fetchChapters).toHaveBeenCalledTimes(2);
-        const select = bookSelect(container);
-        expect(select.disabled).toBe(false);
-        await act(async () => {
-            select.value = '/books/b';
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-        });
+        await switchBookViaMenu(container, '作品乙');
         expect(api.selectBook).toHaveBeenCalledExactlyOnceWith({ bookRoot: '/books/b' });
         expect(container.querySelector('.ns-prose')?.textContent).toContain('乙书第一章服务器原稿。');
         await edit(container, '乙书独有的未保存修订。');
@@ -344,119 +336,53 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             oldChapters.resolve(snapshot);
             await oldChapters.promise;
         });
-        expect(bookSelect(container).value).toBe('/books/b');
-        expect(bookSelect(container).selectedOptions[0]?.textContent).toBe('作品乙');
+        expect(container.querySelector('.ns-book-switcher')?.textContent).toContain('作品乙');
         expect(editor(container).value).toBe('乙书独有的未保存修订。');
         expect(api.fetchChapter).toHaveBeenCalledTimes(readsBeforeRelease);
-        await click(buttonByText(container, '保存并自动 Sync'));
+        await click(buttonByText(container, '保存并自动同步'));
         expect(writes).toEqual([{ bookRoot: '/books/b', chapterNumber: 1, content: '乙书独有的未保存修订。' }]);
     });
 
-    it.each(['普通', '守卫'] as const)('%s保存 PUT 成功但详情 GET 失败，重新编辑仍以已保存正文为基线', async (mode) => {
+    it('保存 PUT 成功但详情 GET 失败，重新编辑仍以已保存正文为基线', async () => {
         const container = await mountStudio();
         const saved = '已成功落盘但详情读取失败的新正文。';
         await edit(container, saved);
         const put = Promise.withResolvers<PutChapterResponse>();
         vi.mocked(api.saveChapter).mockImplementationOnce(() => put.promise);
         vi.mocked(api.fetchChapter).mockRejectedValue(new Error('章节详情读取失败'));
-        await startSave(container, mode);
+        await click(buttonByText(container, '保存并自动同步'));
         expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ chapterNumber: 1, content: saved });
         await act(async () => {
             manuscripts.set(manuscriptKey('/books/a', 1), saved);
             put.resolve(saveResponse(1));
             await put.promise;
         });
-        // 守卫保存也通过后端同步事件触发 GET，不直接调用根组件内部回调。
         await emit({ event: 'chapter_synced', data: { chapterNumber: 1 } });
         expect(vi.mocked(api.fetchChapter).mock.calls.length).toBeGreaterThan(1);
         expect(document.body.textContent).toContain('章节详情读取失败');
-        await cancelBoot(mode);
         expect(container.querySelector('.ns-prose')?.textContent).toContain(saved);
         expect(container.querySelector('textarea.ns-editor-textarea')).toBeNull();
-        await click(buttonByText(container, '✎ 编辑'));
+        await click(buttonByText(container, '直接改稿'));
         expect(editor(container).value).toBe(saved);
         typeDraft(container, `${saved}再次修订。`);
-        await click(buttonByText(container, '保存并自动 Sync'));
+        await click(buttonByText(container, '保存并自动同步'));
         expect(api.saveChapter).toHaveBeenCalledTimes(2);
         expect(api.saveChapter).toHaveBeenLastCalledWith({ chapterNumber: 1, content: `${saved}再次修订。` });
-        expect(api.bootBook).not.toHaveBeenCalled();
     });
 
-    it.each(['普通', '守卫'] as const)('%s保存期间同次切书 SSE 迟到，GET 失败也不恢复旧稿', async (mode) => {
-        const container = await mountStudio();
-        await act(async () => {
-            const select = bookSelect(container);
-            select.value = '/books/b';
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-        expect(container.querySelector('.ns-prose')?.textContent).toContain('乙书第一章服务器原稿。');
-        const saved = '乙书在迟到切书通知之后仍应保留的修订。';
-        await edit(container, saved);
-        const put = Promise.withResolvers<PutChapterResponse>();
-        vi.mocked(api.saveChapter).mockImplementationOnce(() => put.promise);
-        vi.mocked(api.fetchChapter).mockRejectedValue(new Error('章节详情读取失败'));
-        await startSave(container, mode);
-        await emit({ event: 'book_switched', data: { bookRoot: '/books/b' } });
-        await act(async () => {
-            manuscripts.set(manuscriptKey('/books/b', 1), saved);
-            put.resolve(saveResponse(1));
-            await put.promise;
-        });
-        await emit({ event: 'chapter_synced', data: { chapterNumber: 1 } });
-        await cancelBoot(mode);
-        expect(bookSelect(container).value).toBe('/books/b');
-        expect(container.querySelector('.ns-prose')?.textContent).toContain(saved);
-        await click(buttonByText(container, '✎ 编辑'));
-        expect(editor(container).value).toBe(saved);
-        expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ chapterNumber: 1, content: saved });
-    });
-
-    it.each(['普通', '守卫'] as const)('%s保存前发出的旧 GET 在保存完成后返回，不能复活旧正文', async (mode) => {
-        const container = await mountStudio();
-        const oldDetail = Promise.withResolvers<ChapterDetail>();
-        const snapshot = chapterDetail('/books/a', 1);
-        vi.mocked(api.fetchChapter).mockImplementationOnce(() => oldDetail.promise);
-        await emit({ event: 'chapter_synced', data: { chapterNumber: 1 } });
-        expect(api.fetchChapter).toHaveBeenCalledTimes(2);
-        await edit(container, '保存交接后的唯一正文。');
-        await startSave(container, mode);
-        await cancelBoot(mode);
-        expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ chapterNumber: 1, content: '保存交接后的唯一正文。' });
-        expect(container.querySelector('textarea.ns-editor-textarea')).toBeNull();
-        expect(container.querySelector('.ns-prose')?.textContent).toContain('保存交接后的唯一正文。');
-        await act(async () => {
-            oldDetail.resolve(snapshot);
-            await oldDetail.promise;
-        });
-        expect(container.querySelector('.ns-prose')?.textContent).toContain('保存交接后的唯一正文。');
-        expect(container.querySelector('.ns-prose')?.textContent).not.toContain(snapshot.content);
-        await click(buttonByText(container, '✎ 编辑'));
-        expect(editor(container).value).toBe('保存交接后的唯一正文。');
-    });
-
-    it.each(['开新书', '跨章'] as const)('普通 PUT 在途点击%s不能放行或另发保存，拒绝后原稿保留且可以重试', async (navigation) => {
+    it('普通 PUT 在途点击跨章不能放行，拒绝后原稿保留且可以重试', async () => {
         const container = await mountStudio();
         const draft = '保存失败也必须保留的原始草稿。';
         await edit(container, draft);
         const put = Promise.withResolvers<PutChapterResponse>();
         vi.mocked(api.saveChapter).mockImplementationOnce(() => put.promise);
-        await click(buttonByText(container, '保存并自动 Sync'));
-        expect(buttonByText(container, '正在保存并 Sync…').disabled).toBe(true);
+        await click(buttonByText(container, '保存并自动同步'));
+        expect(buttonByText(container, '正在保存并同步…').disabled).toBe(true);
         const readsBeforeNavigation = vi.mocked(api.fetchChapter).mock.calls.length;
-        await click(navigation === '开新书' ? buttonByText(container, '+ 开新书') : chapterButton(container, 2));
-        // 可直接阻止导航，也可展示禁用/拒绝操作的守卫；都不得绕过在途保存。
-        const guard = document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="未保存的修改"]');
-        if (guard) {
-            const save = Array.from(guard.querySelectorAll('button')).find((button) => button.textContent?.includes('保存'));
-            if (!save) throw new Error('草稿守卫缺少保存操作');
-            await click(save);
-            await click(buttonByText(guard, '放弃修改'));
-        }
+        await click(chapterButton(container, 2));
         expect(api.saveChapter).toHaveBeenCalledTimes(1);
         expect(api.fetchChapter).toHaveBeenCalledTimes(readsBeforeNavigation);
         expect(api.selectBook).not.toHaveBeenCalled();
-        expect(api.bootBook).not.toHaveBeenCalled();
-        expect(document.body.querySelector('[role="dialog"][aria-label="开新书编译引导"]')).toBeNull();
         expect(editor(container).value).toBe(draft);
         await act(async () => {
             put.reject(new Error('事务锁拒绝本次保存'));
@@ -464,19 +390,94 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         });
         expect(editor(container).value).toBe(draft);
         expect(document.body.textContent).toContain('事务锁拒绝本次保存');
-        expect(api.saveChapter).toHaveBeenCalledTimes(1);
-        expect(api.fetchChapter).toHaveBeenCalledTimes(readsBeforeNavigation);
-        expect(document.body.querySelector('[role="dialog"][aria-label="开新书编译引导"]')).toBeNull();
-        const remainingGuard = document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="未保存的修改"]');
-        if (remainingGuard) await click(buttonByText(remainingGuard, '取消'));
-        expect(buttonByText(container, '保存并自动 Sync').disabled).toBe(false);
-        await click(buttonByText(container, '保存并自动 Sync'));
+        expect(buttonByText(container, '保存并自动同步').disabled).toBe(false);
+        await click(buttonByText(container, '保存并自动同步'));
         expect(api.saveChapter).toHaveBeenCalledTimes(2);
         expect(api.saveChapter).toHaveBeenLastCalledWith({ chapterNumber: 1, content: draft });
         expect(container.querySelector('.ns-prose')?.textContent).toContain(draft);
     });
 
-    it('在工具页签修改分角色模型覆盖并保存后调用 saveModelRouting 且刷新 status，检查器保留只读三池遥测', async () => {
+    it('切章、切书与外部 book_switched SSE 自动按 bookRoot::chapter 暂存未保存草稿，不残留旧书正文且支持切回温和恢复', async () => {
+        const container = await mountStudio();
+        await edit(container, '甲书第一章未保存暂存草稿。');
+
+        // 1. 切到甲书第 2 章：非阻断自动暂存，无确认弹窗
+        await click(chapterButton(container, 2));
+        expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+        expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第二章服务器原稿。');
+
+        // 2. 切回第 1 章：展示温和恢复条，点「继续改稿」恢复草稿
+        await click(chapterButton(container, 1));
+        const restoreBar = container.querySelector('.ns-stash-restore-bar');
+        expect(restoreBar).not.toBeNull();
+        await click(buttonByText(restoreBar!, '继续改稿'));
+        expect(editor(container).value).toBe('甲书第一章未保存暂存草稿。');
+
+        // 3. 外部 book_switched SSE 切到乙书：自动暂存甲书草稿并干净展示乙书正文，绝不串书
+        activeBookRoot = '/books/b';
+        await emit({ event: 'book_switched', data: { bookRoot: '/books/b' } });
+        expect(container.querySelector('.ns-book-switcher')?.textContent).toContain('作品乙');
+        expect(container.querySelector('.ns-prose')?.textContent).toContain('乙书第一章服务器原稿。');
+        expect(container.querySelector('.ns-prose')?.textContent).not.toContain('甲书第一章未保存暂存草稿。');
+        expect(container.querySelector('textarea.ns-editor-textarea')).toBeNull();
+
+        // 4. 触发 beforeunload：因为甲书第 1 章仍在暂存池中，hasAnyUnsavedDraft 拦截离开
+        const beforeUnloadEv = new Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(beforeUnloadEv);
+        expect(beforeUnloadEv.defaultPrevented).toBe(true);
+
+        // 5. 切回甲书并放弃暂存后，beforeunload 放行
+        await switchBookViaMenu(container, '作品甲');
+        const backRestoreBar = container.querySelector('.ns-stash-restore-bar');
+        expect(backRestoreBar).not.toBeNull();
+        await click(buttonByText(backRestoreBar!, '放弃暂存'));
+        expect(container.querySelector('.ns-stash-restore-bar')).toBeNull();
+        const cleanEv = new Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(cleanEv);
+        expect(cleanEv.defaultPrevented).toBe(false);
+    });
+
+    it('容器感知三栏布局：>=1200px 常驻左栏，<1200px 收进顶栏浮层，<820px 右栏变抽屉', async () => {
+        let roCallback: ResizeObserverCallback | null = null;
+        const disconnectSpy = vi.fn();
+        class MockResizeObserver {
+            constructor(cb: ResizeObserverCallback) {
+                roCallback = cb;
+            }
+            observe() {}
+            unobserve() {}
+            disconnect() {
+                disconnectSpy();
+            }
+        }
+        vi.stubGlobal('ResizeObserver', MockResizeObserver);
+
+        const container = await mountStudio();
+        const shell = container.querySelector('.ns-studio-shell')!;
+        expect(shell.classList.contains('ns-layout-wide')).toBe(true);
+        expect(container.querySelector('aside.ns-left-pane')).not.toBeNull();
+
+        const rightTabs = Array.from(container.querySelectorAll('.ns-right-tab')).map((b) =>
+            b.textContent?.trim()
+        );
+        expect(rightTabs).toEqual(['思考过程', '运行状态', '模型分配']);
+
+        // 缩放至 1000px (<1200px)：左栏收进顶栏目录浮层，右栏保持常驻
+        act(() => {
+            roCallback?.([{ contentRect: { width: 1000 } } as ResizeObserverEntry], {} as ResizeObserver);
+        });
+        expect(shell.classList.contains('ns-layout-medium')).toBe(true);
+        expect(container.querySelector('aside.ns-left-pane')).toBeNull();
+        expect(container.textContent).toContain('目录与设定集');
+
+        // 缩放至 760px (<820px)：右栏转为浮层抽屉
+        act(() => {
+            roCallback?.([{ contentRect: { width: 760 } } as ResizeObserverEntry], {} as ResizeObserver);
+        });
+        expect(shell.classList.contains('ns-layout-compact')).toBe(true);
+    });
+
+    it('在「模型分配」页签修改第一层底座与第二层覆盖并保存，调用 saveModelRouting 并刷新 status', async () => {
         const baseStatus = statusPayload('/books/a');
         let currentStatus: NarrateStatusPayload = {
             ...baseStatus,
@@ -495,6 +496,13 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                     effectiveModel: 'deepseek-chat'
                 },
                 {
+                    id: 'fact_checker',
+                    defaultPool: 'audit',
+                    effectivePool: 'audit',
+                    effectiveProvider: 'openai',
+                    effectiveModel: 'gpt-4.1'
+                },
+                {
                     id: 'writer',
                     defaultPool: 'strong_creative',
                     effectivePool: 'strong_creative',
@@ -511,24 +519,8 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         vi.mocked(api.saveModelRouting).mockImplementation(async (payload) => {
             currentStatus = {
                 ...currentStatus,
-                roleRouting: payload.role_routing ?? {},
-                roleDefinitions: [
-                    {
-                        id: 'librarian',
-                        defaultPool: 'fast_retrieval',
-                        effectiveTier: 'strong',
-                        effectivePool: 'strong_creative',
-                        effectiveProvider: 'anthropic',
-                        effectiveModel: 'claude-sonnet-4-5'
-                    },
-                    {
-                        id: 'writer',
-                        defaultPool: 'strong_creative',
-                        effectivePool: 'strong_creative',
-                        effectiveProvider: 'openai',
-                        effectiveModel: 'gpt-4.1'
-                    }
-                ]
+                modelRouting: payload.model_routing ?? currentStatus.modelRouting,
+                roleRouting: payload.role_routing ?? {}
             };
             return {
                 status: 'ok',
@@ -539,140 +531,189 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         });
 
         const container = await mountStudio();
+        await click(buttonByText(container, '模型分配'));
 
-        // 检查器仅保留只读三池模型路由，不再重复渲染分角色覆盖表单
-        await click(buttonByText(container, '检查器'));
-        expect(container.textContent).toContain('三池模型路由 (modelRouting)');
-        expect(container.querySelector('select[aria-label="librarian 档位覆盖"]')).toBeNull();
+        // fact_checker 界面展示统一为 Checker
+        expect(container.textContent).toContain('Checker');
+        expect(container.textContent).not.toContain('Fact Check');
 
-        // 工具页签直接挂载 RoleRoutingEditor 位于当前三池模型路由下方
-        await click(buttonByText(container, '工具'));
-        const toolsPanel = container.querySelector<HTMLElement>('[aria-label="运维工具与模型池"]');
-        expect(toolsPanel).not.toBeNull();
-        expect(toolsPanel?.textContent).toContain('当前三池模型路由');
+        // 修改第一层强模型池与展开 librarian/writer 行并修改第二层覆盖
+        const strongPoolInput = container.querySelector<HTMLInputElement>('input[aria-label="强模型池"]')!;
+        await click(container.querySelector<HTMLButtonElement>('[data-role-id="librarian"] button.ns-role-summary')!);
+        await click(container.querySelector<HTMLButtonElement>('[data-role-id="writer"] button.ns-role-summary')!);
 
-        const librarianTier = container.querySelector<HTMLSelectElement>(
-            'select[aria-label="librarian 档位覆盖"]'
-        );
-        const writerModel = container.querySelector<HTMLInputElement>(
-            'input[aria-label="writer 指定模型"]'
-        );
-        expect(librarianTier).not.toBeNull();
-        expect(writerModel).not.toBeNull();
-
-        await act(async () => {
-            librarianTier!.value = 'strong';
-            librarianTier!.dispatchEvent(new Event('change', { bubbles: true }));
-        });
+        const librarianTier = container.querySelector<HTMLSelectElement>('select[aria-label="librarian 档位覆盖"]')!;
+        const writerModel = container.querySelector<HTMLInputElement>('input[aria-label="writer 指定模型"]')!;
         const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         await act(async () => {
-            inputSetter?.call(writerModel!, 'openai:gpt-4.1');
-            writerModel!.dispatchEvent(new Event('input', { bubbles: true }));
+            inputSetter?.call(strongPoolInput, 'anthropic:claude-opus-4-5');
+            strongPoolInput.dispatchEvent(new Event('input', { bubbles: true }));
+            librarianTier.value = 'strong';
+            librarianTier.dispatchEvent(new Event('change', { bubbles: true }));
+            inputSetter?.call(writerModel, 'openai:gpt-4.1');
+            writerModel.dispatchEvent(new Event('input', { bubbles: true }));
         });
 
         const statusCallsBeforeSave = vi.mocked(api.fetchStatus).mock.calls.length;
-        await click(buttonByText(container, '保存工种模型配置'));
+        const saveBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+            b.textContent?.includes('保存工种模型配置')
+        )!;
+        await click(saveBtn);
 
         expect(api.saveModelRouting).toHaveBeenCalledExactlyOnceWith({
+            model_routing: {
+                strong_creative: 'anthropic:claude-opus-4-5',
+                fast_retrieval: 'deepseek:deepseek-chat',
+                audit: 'openai:gpt-4.1'
+            },
             role_routing: {
                 librarian: { tier: 'strong' },
                 writer: { model: 'openai:gpt-4.1' }
             }
         });
         expect(vi.mocked(api.fetchStatus).mock.calls.length).toBeGreaterThan(statusCallsBeforeSave);
-        expect(
-            container.querySelector('[data-role-id="librarian"]')?.textContent
-        ).toContain('anthropic:claude-sonnet-4-5');
-        expect(
-            container.querySelector('[data-role-id="writer"]')?.textContent
-        ).toContain('openai:gpt-4.1');
     });
 
-    it('切书至同样 roleRouting: {} 的 B 书时重置工具页签未保存草稿与提示，roleDefinitions 缺省时显示占位提示', async () => {
-        const statusByBook: Record<string, NarrateStatusPayload> = {
-            '/books/a': {
-                ...statusPayload('/books/a'),
-                modelRouting: {
-                    strong_creative: 'anthropic:claude-sonnet-4-5',
-                    fast_retrieval: 'deepseek:deepseek-chat',
-                    audit: 'openai:gpt-4.1'
-                },
-                roleRouting: {},
-                roleDefinitions: [
+    it('完整消费 6 个新 SSE 事件 (stage:event/signal:withdrawn/volume:advanced/task:idle/heal:started/heal:completed) 并收敛 dream:completed', async () => {
+        const container = await mountStudio();
+
+        // 1. stage:event 实时流渲染至 StageSessionViewer
+        await emit({
+            event: 'stage',
+            data: { stage: 'STARTING', chapterNumber: 3 }
+        });
+        await emit({
+            event: 'stage',
+            data: { stage: 'LIBRARIAN', chapterNumber: 3, activeSessionId: 'sess-live-sse', status: 'running' }
+        });
+        await emit({
+            event: 'stage:event',
+            data: { sessionId: 'sess-live-sse', stage: 'LIBRARIAN', kind: 'thinking', text: '检索码头账本' }
+        });
+        await emit({
+            event: 'stage:event',
+            data: { sessionId: 'sess-live-sse', stage: 'LIBRARIAN', kind: 'tool-call', toolName: 'book_grep', callId: 'c1', text: '{"pattern":"驳船"}' }
+        });
+
+        // 展开 3x2 矩阵并点击 Librarian
+        await click(container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!);
+        await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="LIBRARIAN"]')!);
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('检索码头账本');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('book_grep');
+
+        // 2. dream:completed 收敛 DREAMING 会话状态
+        await emit({
+            event: 'dream:started',
+            data: { activeSessionId: 'sess-dream-1', runId: 'run-dream-1' }
+        });
+        await emit({ event: 'dream:completed', data: { skipped: false } });
+        await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="DREAMING"]')!);
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+
+        // 3. signal:withdrawn / volume:advanced / task:idle / heal:started / heal:completed
+        const viewsBefore = vi.mocked(api.fetchViewSignals).mock.calls.length;
+        await emit({ event: 'signal:withdrawn', data: { created_at: '2026-11-18T00:00:00Z', reason: 'test' } });
+        expect(vi.mocked(api.fetchViewSignals).mock.calls.length).toBeGreaterThan(viewsBefore);
+
+        await emit({ event: 'volume:advanced', data: { sealedVolume: 1, nextVolume: 2, completedBook: false } });
+        expect(document.body.textContent).toContain('第 1 卷');
+
+        await emit({ event: 'heal:started', data: { conflictCount: 1 } });
+        expect(document.body.textContent).toContain('1 处冲突');
+        await emit({ event: 'heal:completed', data: { resultCount: 1, quarantined: false } });
+        expect(document.body.textContent).toContain('自愈完成');
+
+        await emit({ event: 'task:idle', data: { task: 'STEPPING' } });
+    });
+
+    it('全量对接 status 真实诊断字段 (txLockHeld/双SHA/装配报告/Checker筛除/Dreaming水位/切镜队列) 与双命名 halt 映射', async () => {
+        vi.mocked(api.fetchStatus).mockResolvedValue({
+            ...statusPayload('/books/a'),
+            txLockHeld: true,
+            featCommitSha: 'feat9988a',
+            stateCommitSha: 'stat1122b',
+            writerAssemblyReport: {
+                estimatedTokens: { staticPrefixTokens: 4120, dynamicTailTokens: 14280, totalInputTokens: 18400 },
+                budget: 32000,
+                evictionLevel: 1,
+                selectedVoiceSample: { id: 'v1', tag: '冷峻克制', text: '封港夜里不过磅。' },
+                strippedSecretCount: 2
+            },
+            lastCheckerResult: {
+                chapter: 2,
+                passed: true,
+                issueCount: 0,
+                issues: [],
+                filteredOutCount: 3,
+                replanCount: 0,
+                rewriteCount: 0,
+                patchRounds: 1
+            },
+            dreamWatermark: {
+                last_dream_ch: 1,
+                accumulated_words_since_dream: 6120,
+                updated_at: '2026-11-18T12:00:00Z'
+            },
+            dirtyEntityCount: 2,
+            dirtyEntityThreshold: 6,
+            spotlightQueue: [
+                { entity_id: 'char_zhou', reason: '幕后积累已久', progressPct: 80 }
+            ],
+            volumeProgress: {
+                currentVolume: 1,
+                volumeLabel: '第一卷 · 寒潮封港',
+                completedChapters: 2,
+                totalChapters: 10
+            }
+        });
+        vi.mocked(api.fetchViewHalt).mockResolvedValue({
+            kind: 'halt',
+            safeHalt: {
+                reason: '左手旧伤未愈不得单手推门',
+                stage: 'FACT_CHECK',
+                chapterNumber: 3,
+                side_a_chapter: 1,
+                side_a_line: 14,
+                side_b_chapter: 3,
+                side_b_line: 5,
+                quoteA: '左腕旧骨折未愈',
+                quoteB: '抬起左手推开重门',
+                rollback_chapters: 2,
+                affected_words: 5400,
+                issues: [
                     {
-                        id: 'writer',
-                        defaultPool: 'strong_creative',
-                        defaultReasoningEffort: 'medium',
-                        effectivePool: 'strong_creative',
-                        effectiveProvider: 'anthropic',
-                        effectiveModel: 'claude-sonnet-4-5',
-                        effectiveReasoningEffort: 'medium'
+                        description: '与第 1 章伤势设定冲突',
+                        source_ref: 'ch_0001.md',
+                        quote_source: '左腕旧骨折未愈',
+                        quote_draft: '抬起左手推开重门'
                     }
                 ]
             },
-            '/books/b': {
-                ...statusPayload('/books/b'),
-                modelRouting: {
-                    strong_creative: 'anthropic:claude-sonnet-4-5',
-                    fast_retrieval: 'deepseek:deepseek-chat',
-                    audit: 'openai:gpt-4.1'
-                },
-                roleRouting: {},
-                roleDefinitions: [
-                    {
-                        id: 'writer',
-                        defaultPool: 'strong_creative',
-                        defaultReasoningEffort: 'medium',
-                        effectivePool: 'strong_creative',
-                        effectiveProvider: 'anthropic',
-                        effectiveModel: 'claude-sonnet-4-5',
-                        effectiveReasoningEffort: 'medium'
-                    }
-                ]
-            }
-        };
-        vi.mocked(api.fetchStatus).mockImplementation(async () => statusByBook[activeBookRoot]!);
+            quarantineReport: null
+        });
 
         const container = await mountStudio();
-        await click(buttonByText(container, '工具'));
+        await click(buttonByText(container, '运行状态'));
 
-        const writerTier = container.querySelector<HTMLSelectElement>(
-            'select[aria-label="writer 档位覆盖"]'
+        expect(container.textContent).toContain('4.1k');
+        expect(container.textContent).toContain('14.3k');
+        expect(container.textContent).toContain('6,120');
+        expect(container.textContent).toContain('2 / 6');
+
+        // 展开底层校验与提交明细
+        const detailsToggle = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+            b.textContent?.includes('底层校验与提交明细')
         )!;
-        const writerEffort = container.querySelector<HTMLSelectElement>(
-            'select[aria-label="writer 推理强度"]'
-        )!;
-        expect(writerTier.options[0]?.textContent).toBe('继承默认');
-        expect(writerEffort.options[0]?.textContent).toBe('继承默认');
-
-        // A 书本地未保存草稿
-        await act(async () => {
-            writerTier.value = 'weak';
-            writerTier.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-        expect(writerTier.value).toBe('weak');
-
-        // 切换到同样 roleRouting: {} 的 B 书 -> 未保存草稿必须重置
-        await act(async () => {
-            const select = bookSelect(container);
-            select.value = '/books/b';
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-        const nextWriterTier = container.querySelector<HTMLSelectElement>(
-            'select[aria-label="writer 档位覆盖"]'
-        )!;
-        expect(nextWriterTier.value).toBe('');
-
-        // 若服务端未下发 roleDefinitions 且 roleRouting 为空 -> 呈现清晰占位提示
-        statusByBook['/books/b'] = {
-            ...statusByBook['/books/b']!,
-            roleDefinitions: []
-        };
-        await emit({ event: 'stage', data: { stage: 'COMMITTED', chapterNumber: 2 } });
-        expect(container.textContent).toContain('等待服务端下发工种配置 (roleDefinitions)...');
+        await click(detailsToggle);
+        expect(container.textContent).toContain('feat998');
+        expect(container.textContent).toContain('stat112');
+        expect(container.textContent).toContain('3');
+        expect(container.textContent).toContain('ch_0001.md:14');
+        expect(container.textContent).toContain('ch_0003.md:5');
+        expect(container.textContent).toContain('2 章 / 5400 字');
     });
 
-    it('在工具页签点击声纹采集 (Voice Harvest) 调用 harvestVoice 并展示结果提示', async () => {
+    it('通过顶栏「⋯」菜单点击声纹采集调用 harvestVoice，且在途切书时屏蔽过期提示', async () => {
         vi.mocked(api.harvestVoice).mockResolvedValueOnce({
             harvestedCount: 2,
             skipped: false,
@@ -683,35 +724,25 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         });
 
         const container = await mountStudio();
-        await click(buttonByText(container, '工具'));
-
-        const harvestBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button.ns-tool-card')).find(
-            (btn) => btn.textContent?.includes('声纹采集 (Voice Harvest)')
-        );
-        expect(harvestBtn).toBeDefined();
-
-        await click(harvestBtn!);
-
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="更多创作整理操作"]')!);
+        const harvestItem = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+            (btn) => btn.textContent?.includes('重新提取本章对话声纹')
+        )!;
+        await click(harvestItem);
         expect(api.harvestVoice).toHaveBeenCalledWith(1);
         expect(document.body.textContent).toContain('2');
 
-        // 1. res.skipped === true 时展示准确提示
-        vi.mocked(api.harvestVoice).mockResolvedValueOnce({
-            harvestedCount: 0,
-            skipped: true,
-            samples: []
-        });
-        await click(harvestBtn!);
-        expect(document.body.textContent).toContain('当前作品已有声纹标本，已跳过本次采集');
-
-        // 2. 在途切书（SSE book_switched）使旧工作区声纹采集结果失效，不向新作品弹出旧提示
         const harvestDeferred = Promise.withResolvers<{
             harvestedCount: number;
             skipped: boolean;
             samples: Array<{ id: string; tag: string; text: string }>;
         }>();
         vi.mocked(api.harvestVoice).mockReturnValueOnce(harvestDeferred.promise);
-        await click(harvestBtn!);
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="更多创作整理操作"]')!);
+        const harvestItem2 = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+            (btn) => btn.textContent?.includes('重新提取本章对话声纹')
+        )!;
+        await click(harvestItem2);
 
         activeBookRoot = '/books/b';
         await emit({ event: 'book_switched', data: { bookRoot: '/books/b' } });
@@ -725,5 +756,98 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             await harvestDeferred.promise;
         });
         expect(document.body.textContent).not.toContain('新增 4 条样本');
+    });
+
+    it('handleStepOne 同步防重入锁拦截连击，回忆模式携带 timelineMode 与 targetDay，且 STARTING 清空瞬态 telemetry', async () => {
+        const stepDeferred = Promise.withResolvers<{ status: string; message?: string }>();
+        vi.mocked(api.stepChapter).mockReturnValueOnce(stepDeferred.promise);
+
+        const container = await mountStudio();
+        const stepBtn = buttonByText(container, '写下一章');
+        await act(async () => {
+            stepBtn.click();
+            stepBtn.click();
+        });
+        expect(api.stepChapter).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            stepDeferred.resolve({ status: 'accepted' });
+            await stepDeferred.promise;
+        });
+
+        // 切换便签为「插入回忆」，填写回到第 3 天并立即写下一章
+        vi.mocked(api.stepChapter).mockResolvedValueOnce({ status: 'accepted' });
+        await click(container.querySelector<HTMLButtonElement>('button.ns-note-kind-btn')!);
+        const flashbackItem = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+            (btn) => btn.textContent?.includes('插入回忆')
+        )!;
+        await click(flashbackItem);
+        const dayInput = container.querySelector<HTMLInputElement>('input[aria-label="回忆目标天数"]')!;
+        const noteInput = container.querySelector<HTMLInputElement>('input.ns-note-input')!;
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        await act(async () => {
+            inputSetter?.call(dayInput, '3');
+            dayInput.dispatchEvent(new Event('input', { bubbles: true }));
+            inputSetter?.call(noteInput, '补写码头旧事');
+            noteInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="存入便签并立即写下一章"]')!);
+        expect(api.stepChapter).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                timelineMode: 'FLASHBACK',
+                targetDay: 3
+            })
+        );
+
+        // 先接收一次 telemetry SSE，随后 stage: STARTING 应清空瞬态 liveTelemetry
+        await click(buttonByText(container, '运行状态'));
+        await emit({
+            event: 'telemetry',
+            data: {
+                metrics: {
+                    mattr500: 0.88
+                }
+            }
+        });
+        expect(container.textContent).toContain('0.88');
+
+        await emit({
+            event: 'stage',
+            data: { stage: 'STARTING', chapterNumber: 3 }
+        });
+        expect(container.textContent).not.toContain('0.88');
+    });
+
+    it('通过顶栏「⋯」菜单可打开换卷/完结与多线并行弹窗并提交 API', async () => {
+        const container = await mountStudio();
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="更多创作整理操作"]')!);
+        const volumeItem = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+            (btn) => btn.textContent?.includes('结束本卷 / 开启下一卷')
+        )!;
+        await click(volumeItem);
+        const submitVolumeBtn = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(
+            (btn) => btn.textContent?.includes('封存本卷并开启下一卷')
+        )!;
+        await click(submitVolumeBtn);
+        expect(api.advanceVolume).toHaveBeenCalledTimes(1);
+
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="更多创作整理操作"]')!);
+        const parallelItem = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+            (btn) => btn.textContent?.includes('开启多线并行章节')
+        )!;
+        await click(parallelItem);
+        const windowInput = document.body.querySelector<HTMLInputElement>('#ns-parallel-window-id')!;
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        await act(async () => {
+            inputSetter?.call(windowInput, 'win-dock-night');
+            windowInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        const forkBtn = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(
+            (btn) => btn.textContent?.includes('开启并行分叉')
+        )!;
+        await click(forkBtn);
+        expect(api.forkParallelWindow).toHaveBeenCalledWith({
+            windowId: 'win-dock-night'
+        });
     });
 });

@@ -87,6 +87,16 @@ function buttonByText(scope: ParentNode, text: string): HTMLButtonElement {
     return btn as HTMLButtonElement;
 }
 
+function menuItemByTitle(scope: ParentNode, title: string): HTMLButtonElement {
+    const btn = Array.from(scope.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+        (b) => b.querySelector('b')?.textContent?.trim() === title
+    );
+    if (!btn) {
+        throw new Error(`未找到菜单项「${title}」`);
+    }
+    return btn;
+}
+
 function click(el: HTMLElement): void {
     act(() => {
         el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -118,7 +128,7 @@ function editorTextarea(container: HTMLElement): HTMLTextAreaElement {
 
 /** 打开编辑器并输入草稿，返回 textarea */
 function openEditorWithDraft(view: MountedWorkbench, draft: string): HTMLTextAreaElement {
-    click(buttonByText(view.container, '✎ 编辑'));
+    click(buttonByText(view.container, '直接改稿'));
     const textarea = editorTextarea(view.container);
     typeDraft(textarea, draft);
     return textarea;
@@ -158,7 +168,7 @@ describe('普通保存：显示章身份与在途状态', () => {
         view.rerender({ selectedChapter: 2 });
         expect(editorTextarea(view.container).value).toBe('第一章的未保存修订。');
 
-        click(buttonByText(view.container, '保存并自动 Sync'));
+        click(buttonByText(view.container, '保存并自动同步'));
         expect(onSaveChapter).toHaveBeenCalledTimes(1);
         expect(onSaveChapter).toHaveBeenCalledWith(1, '第一章的未保存修订。');
 
@@ -166,7 +176,7 @@ describe('普通保存：显示章身份与在途状态', () => {
             saveGate.resolve();
             await saveGate.promise;
         });
-        expect(view.container.textContent).toContain('已保存 Ch.0001');
+        expect(view.container.textContent).toContain('已保存第 1 章');
         expect(view.container.querySelector('textarea.ns-editor-textarea')).toBeNull();
         view.unmount();
     });
@@ -177,8 +187,8 @@ describe('普通保存：显示章身份与在途状态', () => {
         const view = mountWorkbench({ ...baseProps(chapterOneDetail), onSaveChapter });
         openEditorWithDraft(view, '在途保存草稿。');
 
-        click(buttonByText(view.container, '保存并自动 Sync'));
-        const busyButton = buttonByText(view.container, '正在保存并 Sync…');
+        click(buttonByText(view.container, '保存并自动同步'));
+        const busyButton = buttonByText(view.container, '正在保存并同步…');
         expect(busyButton.disabled).toBe(true);
         // 即便绕过 disabled 直接派发点击，也不得重入
         click(busyButton);
@@ -199,17 +209,17 @@ describe('普通保存：显示章身份与在途状态', () => {
         const view = mountWorkbench({ ...baseProps(chapterOneDetail), onSaveChapter });
         const textarea = openEditorWithDraft(view, '必须保留的失败草稿。');
 
-        click(buttonByText(view.container, '保存并自动 Sync'));
+        click(buttonByText(view.container, '保存并自动同步'));
         await act(async () => {
             saveGate.reject(new Error('事务锁被占用'));
             await saveGate.promise.catch(() => undefined);
         });
 
         expect(view.container.textContent).toContain('事务锁被占用');
-        expect(view.container.textContent).not.toContain('已保存 Ch.0001');
+        expect(view.container.textContent).not.toContain('已保存第 1 章');
         expect(editorTextarea(view.container).value).toBe('必须保留的失败草稿。');
         expect(textarea.isConnected).toBe(true);
-        const retryButton = buttonByText(view.container, '保存并自动 Sync');
+        const retryButton = buttonByText(view.container, '保存并自动同步');
         expect(retryButton.disabled).toBe(false);
         view.unmount();
     });
@@ -226,7 +236,7 @@ describe('普通保存：显示章身份与在途状态', () => {
             }
         });
         openEditorWithDraft(view, '在途期间不可被守卫清掉的草稿。');
-        click(buttonByText(view.container, '保存并自动 Sync'));
+        click(buttonByText(view.container, '保存并自动同步'));
         expect(handle).not.toBeNull();
 
         act(() => {
@@ -292,7 +302,7 @@ function planFieldText(container: HTMLElement, fieldName: string): string {
 
 function mountPlanTab(detail: ChapterDetailData, timelineMode: string): MountedWorkbench {
     const view = mountWorkbench({ ...baseProps(detail), timelineMode });
-    click(buttonByText(view.container, '细纲'));
+    click(buttonByText(view.container, '本章细纲'));
     return view;
 }
 
@@ -373,6 +383,429 @@ describe('细纲诚实呈现：缺失元数据不推断', () => {
         expect(planPillText(view.container, 'timeline_mode')).toBe('timeline_mode 未提供');
         expect(planFieldText(view.container, 'pov_character')).toBe('未提供');
         expect(planFieldText(view.container, 'focus_cast')).toContain('林澈');
+        view.unmount();
+    });
+});
+
+describe('Wave 4B 清样画布、3x2 矩阵、独立设定集与动效', () => {
+    it('工具栏解耦「本章正文 | 本章细纲 | 改动对比」，无 .sim-bar，3x2 矩阵统一显示 4. Checker 并联动模型名', () => {
+        const onSelectStageSession = vi.fn();
+        const startViewTransitionSpy = vi.fn((cb: () => void) => {
+            cb();
+            return { finished: Promise.resolve(), ready: Promise.resolve(), updateCallbackDone: Promise.resolve() };
+        });
+        Object.defineProperty(document, 'startViewTransition', {
+            configurable: true,
+            value: startViewTransitionSpy
+        });
+
+        try {
+            const view = mountWorkbench({
+                ...baseProps({
+                    ...chapterOneDetail,
+                    featCommitSha: '81c4a9e',
+                    content: '海风吹过三号栈桥。\n\n周敬山拨动算盘珠子。'
+                }),
+                roleDefinitions: [
+                    {
+                        id: 'librarian',
+                        defaultPool: 'fast_retrieval',
+                        effectivePool: 'fast_retrieval',
+                        effectiveProvider: 'deepseek',
+                        effectiveModel: 'deepseek-chat'
+                    },
+                    {
+                        id: 'fact_checker',
+                        defaultPool: 'audit',
+                        effectivePool: 'audit',
+                        effectiveProvider: 'openai',
+                        effectiveModel: 'gpt-4.1'
+                    }
+                ],
+                poolRoutes: {
+                    strong_creative: 'deepseek:deepseek-reasoner',
+                    fast_retrieval: 'deepseek:deepseek-chat',
+                    audit: 'openai:gpt-4.1'
+                },
+                stages: {
+                    WRITER: { status: 'active', summary: '正在执笔正文', sessionId: 'sess-w1' },
+                    FACT_CHECKER: { status: 'done', summary: '核验通过', sessionId: 'sess-fc1' }
+                },
+                onSelectStageSession
+            });
+
+            expect(view.container.querySelector('.sim-bar')).toBeNull();
+            const tabTexts = Array.from(
+                view.container.querySelectorAll('.ns-seg-tabs [role="tab"]')
+            ).map((el) => (el.textContent ?? '').trim());
+            expect(tabTexts).toEqual(['本章正文', '本章细纲', '改动对比']);
+
+            // 清样刊头、段号 P01、宣纸 SVG 滤镜、-4deg 定稿印与真实 SHA
+            expect(view.container.querySelector('#ns-cinnabar-grain')).not.toBeNull();
+            expect(view.container.querySelector('.ns-editorial-numeral')?.textContent).toBe('01');
+            const folios = Array.from(view.container.querySelectorAll('.ns-prose-folio')).map((el) =>
+                el.textContent?.trim()
+            );
+            expect(folios).toEqual(['P01', 'P02']);
+            expect(view.container.querySelector('.ns-seal-stamp')?.textContent).toBe('定稿');
+            expect(view.container.querySelector('.ns-editorial-endmark')?.textContent).toContain('81c4a9e');
+
+            // 展开 3x2 工序矩阵
+            const toggleBtn = view.container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn');
+            expect(toggleBtn).not.toBeNull();
+            click(toggleBtn!);
+
+            const cards = Array.from(view.container.querySelectorAll<HTMLButtonElement>('.ns-pipe-card'));
+            expect(cards).toHaveLength(6);
+            const matrixText = view.container.querySelector('.ns-pipeline-drawer')?.textContent ?? '';
+            expect(matrixText).toContain('1. Librarian');
+            expect(matrixText).toContain('2. Planner');
+            expect(matrixText).toContain('3. Writer');
+            expect(matrixText).toContain('4. Checker');
+            expect(matrixText).toContain('5. Extractor');
+            expect(matrixText).toContain('6. Dreamer');
+            expect(matrixText).not.toContain('Fact Check');
+            expect(matrixText).toContain('openai:gpt-4.1');
+
+            const writerCard = cards.find((c) => c.dataset.stageId === 'WRITER');
+            expect(writerCard?.classList.contains('ns-running-live')).toBe(true);
+
+            const checkerCard = cards.find((c) => c.dataset.stageId === 'FACT_CHECKER');
+            click(checkerCard!);
+            expect(startViewTransitionSpy).toHaveBeenCalled();
+            expect(onSelectStageSession).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    stageId: 'FACT_CHECKER',
+                    stageLabel: '4. Checker',
+                    sessionId: 'sess-fc1'
+                })
+            );
+
+            view.unmount();
+        } finally {
+            delete (document as unknown as Record<string, unknown>)['startViewTransition'];
+        }
+    });
+
+    it('如实呈现 Patch 校勘签并支持跳转润色思考过程，0 章新书展示开卷扉页', () => {
+        const onSelectStageSession = vi.fn();
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            stages: {
+                WRITER: {
+                    status: 'done',
+                    sessionId: 'sess-patch-1',
+                    sessions: [
+                        { stage: 'WRITER', role: 'writer', sessionId: 'sess-writer-1', status: 'completed', attempt: 1 },
+                        { stage: 'LOCAL_PATCH', role: 'patch', sessionId: 'sess-patch-1', status: 'completed', attempt: 2 }
+                    ]
+                }
+            },
+            gateViolations: [{ rule: 'filler_cliche', detail: '空气仿佛凝固了', patched: true }],
+            onSelectStageSession
+        });
+
+        const colophon = view.container.querySelector('.ns-patch-colophon-bar');
+        expect(colophon).not.toBeNull();
+        expect(colophon?.textContent).toContain('校勘记录');
+        click(buttonByText(colophon!, '查看润色思考过程 →'));
+        expect(onSelectStageSession).toHaveBeenCalledWith(
+            expect.objectContaining({
+                stageId: 'WRITER',
+                sessionId: 'sess-patch-1'
+            })
+        );
+
+        // 0 章新书扉页
+        view.rerender({
+            chapters: [],
+            chapterDetail: null,
+            currentChapter: 0,
+            selectedChapter: undefined
+        });
+        expect(view.container.querySelector('.ns-cover-sheet')?.textContent).toContain('开卷');
+        view.unmount();
+    });
+
+    it('独立全书设定集视图解析实体四区与隐藏底牌，并区分 [WARPED] 与 [PENDING] 预案', () => {
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            externalViewCommand: { viewTab: 'views', materialKind: 'entities', nonce: 1 },
+            materializedViews: {
+                entities: [
+                    {
+                        entityId: 'char_chenyan',
+                        canonicalName: '陈砚',
+                        aliases: ['审计员'],
+                        lastSeenChapter: 2,
+                        markdown: [
+                            '## 1. Innate Locks (先天红线)',
+                            '- [vis: PUBLIC] 左腕旧骨折未愈',
+                            '- [vis: OMNISCIENT_SECRET] 暗中奉命追查三年前沉船案',
+                            '',
+                            '## 2. Acquired State (后天状态)',
+                            '- [vis: PUBLIC] 持有五号驳船过磅单',
+                            '',
+                            '## 3. Irreversible Trajectory (不可逆变迁)',
+                            '- [ch:1] 登船封存五号驳船',
+                            '',
+                            '## 4. Recent Sliding Buffer & Voice (近期缓冲与声纹)',
+                            '- 「封港夜里不过磅。」'
+                        ].join('\n')
+                    }
+                ],
+                horizonMarkdown: [
+                    '- [event:evt_warped | day:1 | status:WARPED] 原定码头工人罢工冲突已作废',
+                    '- [event:evt_pending | day:5 | status:ACTIVE] 东港三号冷库夹层藏有医疗器械'
+                ].join('\n'),
+                threadsMarkdown: '- [thread_01] 五号驳船吃水线异常'
+            }
+        });
+
+        expect(view.container.textContent).toContain('《示例作品》全书设定集');
+        expect(view.container.textContent).toContain('写手不可见');
+        expect(view.container.textContent).toContain('左腕旧骨折未愈');
+        expect(view.container.textContent).toContain('持有五号驳船过磅单');
+
+        click(buttonByText(view.container, '剧情预案与废案 (2)'));
+        expect(view.container.textContent).toContain('已推翻隔离的旧预案');
+        expect(view.container.textContent).toContain('原定码头工人罢工冲突已作废');
+        expect(view.container.textContent).toContain('待推进的后续伏脉预案');
+        expect(view.container.textContent).toContain('东港三号冷库夹层藏有医疗器械');
+
+        const backBtn = buttonByText(view.container, '返回第 1 章正文');
+        expect(backBtn.querySelector('svg')).not.toBeNull();
+        click(backBtn);
+        expect(view.container.querySelector('.ns-prose-body')).not.toBeNull();
+        view.unmount();
+    });
+
+    it('WAAPI 新章段落显影在切章或卸载时自动 cancel() 清理动画句柄', () => {
+        const cancelSpy = vi.fn();
+        const animateSpy = vi.fn(() => ({ cancel: cancelSpy }) as unknown as Animation);
+        const origAnimate = HTMLElement.prototype.animate;
+        HTMLElement.prototype.animate = animateSpy;
+        try {
+            const view = mountWorkbench({
+                ...baseProps(chapterOneDetail),
+                revealNonce: 1
+            });
+            expect(animateSpy).toHaveBeenCalled();
+            view.unmount();
+            expect(cancelSpy).toHaveBeenCalled();
+        } finally {
+            HTMLElement.prototype.animate = origAnimate;
+        }
+    });
+});
+
+describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重入锁', () => {
+    it('已落盘跨章冲突 (sync_conflicts) 展示双侧行号引文并触发 heal/改稿/便签', () => {
+        const onHealConflicts = vi.fn();
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            syncConflict: {
+                conflictId: 'conf-arm-1',
+                description: '左腕骨折未愈却单手推开重门',
+                leftRef: 'entities/char_chenyan.md',
+                leftLine: 12,
+                leftExcerpt: '左腕旧骨折未愈，无法单手推举重物',
+                rightRef: 'ch_0001.md',
+                rightLine: 2,
+                rightExcerpt: '陈砚抬起完好无损的左手推开账房木门。',
+                affectedChapters: 2,
+                affectedWords: 6120
+            },
+            onHealConflicts
+        });
+
+        const card = view.container.querySelector('[data-conflict-mode="sync_conflicts"]');
+        expect(card).not.toBeNull();
+        expect(card?.textContent).toContain('L12');
+        expect(card?.textContent).toContain('L2');
+        expect(card?.textContent).toContain('波及 2 章');
+        expect(card?.textContent).toContain('6,120 字');
+
+        click(buttonByText(card!, '自动修补这句冲突'));
+        expect(onHealConflicts).toHaveBeenCalledTimes(1);
+
+        click(buttonByText(card!, '我自己动手改稿'));
+        expect(view.container.querySelector('textarea.ns-editor-textarea')).not.toBeNull();
+
+        click(buttonByText(card!, '写条便签解释原因'));
+        expect(view.container.querySelector('.ns-note-kind-btn')?.textContent).toContain('圆谎修补');
+        view.unmount();
+    });
+
+    it('未落盘新章拦截 (safe_halt) 展示 issues 与门禁明细，绝不渲染直接改稿或自愈按钮', () => {
+        const onSubmitSignal = vi.fn();
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            safeHalt: {
+                reason: '第 2 章新草稿存在时间线穿帮',
+                stage: 'FACT_CHECK',
+                chapter: 2,
+                affectedChapters: 1,
+                issues: [
+                    {
+                        rule: 'timeline_order',
+                        line: 8,
+                        sourceRef: 'ch_0001.md',
+                        sourceQuote: '夜班交接尚未开始',
+                        quote: '天亮后已查验完所有过磅单',
+                        detail: '时间线早于前一章锚点'
+                    }
+                ]
+            },
+            gateViolations: [{ rule: 'micro_anatomy', line: 14, detail: '含违禁微距词' }],
+            onSubmitSignal
+        });
+
+        const card = view.container.querySelector('[data-conflict-mode="safe_halt"]');
+        expect(card).not.toBeNull();
+        expect(card?.textContent).toContain('timeline_order');
+        expect(card?.textContent).toContain('时间线早于前一章锚点');
+        expect(card?.textContent).toContain('micro_anatomy');
+        expect(card?.textContent).toContain('含违禁微距词');
+        expect(card?.textContent).not.toContain('我自己动手改稿');
+        expect(card?.textContent).not.toContain('自动修补这句冲突');
+
+        click(buttonByText(card!, '带上微调便签重写本章'));
+        expect(onSubmitSignal).toHaveBeenCalledWith(
+            expect.objectContaining({
+                kind: 'RETCON',
+                runAfter: true
+            })
+        );
+        view.unmount();
+    });
+
+    it('纵向走向建议支持填入微调与直接写，顶部写下一章具同步防重入锁且不硬传泛化 goal', async () => {
+        const stepGate = Promise.withResolvers<void>();
+        const onStepOne = vi.fn(() => stepGate.promise);
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            nextChapterOptions: ['陈砚当面对质周敬山', '潜入东港冷库查验封条'],
+            onStepOne
+        });
+
+        // 未填便签直接点「写下一章」不传泛化 goal；连续点击仅发出 1 次请求
+        const stepBtn = buttonByText(view.container, '写下一章');
+        click(stepBtn);
+        click(stepBtn);
+        expect(onStepOne).toHaveBeenCalledTimes(1);
+        expect(onStepOne).toHaveBeenCalledWith(undefined);
+
+        await act(async () => {
+            stepGate.resolve();
+            await stepGate.promise;
+        });
+
+        // 展开走向建议：点文字填入，点直接写传 goal
+        click(view.container.querySelector<HTMLButtonElement>('.ns-next-ideas-header')!);
+        const ideaTexts = Array.from(
+            view.container.querySelectorAll<HTMLButtonElement>('.ns-next-idea-text')
+        );
+        expect(ideaTexts).toHaveLength(2);
+        click(ideaTexts[0]!);
+        const noteInput = view.container.querySelector<HTMLInputElement>('.ns-note-input')!;
+        expect(noteInput.value).toBe('陈砚当面对质周敬山');
+
+        const goBtns = Array.from(
+            view.container.querySelectorAll<HTMLButtonElement>('.ns-next-idea-go')
+        );
+        click(goBtns[1]!);
+        expect(onStepOne).toHaveBeenLastCalledWith({ chapterGoal: '潜入东港冷库查验封条' });
+        view.unmount();
+    });
+
+    it('便签舱精确构造 4 类导演信号（含切换视角 entityId 与插入回忆 targetDay），运行态支持强停撤回草稿', async () => {
+        const onSubmitSignal = vi.fn();
+        const onRequestHalt = vi.fn();
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            materializedViews: {
+                entities: [
+                    { entityId: 'char_chen', canonicalName: '陈砚', markdown: '' },
+                    { entityId: 'char_zhou', canonicalName: '周敬山', markdown: '' }
+                ]
+            },
+            onSubmitSignal,
+            onRequestHalt
+        });
+
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const setInput = (el: HTMLInputElement, val: string) => {
+            act(() => {
+                inputSetter?.call(el, val);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        };
+        const asyncClick = async (el: HTMLElement) => {
+            await act(async () => {
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            });
+        };
+
+        const noteInput = view.container.querySelector<HTMLInputElement>('.ns-note-input')!;
+
+        // 0. 剧情微调 -> DIRECTOR_NOTE
+        setInput(noteInput, '把冲突提前到栈桥');
+        await asyncClick(buttonByText(view.container, '先存便签'));
+        expect(onSubmitSignal).toHaveBeenLastCalledWith({
+            kind: 'DIRECTOR_NOTE',
+            content: '把冲突提前到栈桥',
+            runAfter: false
+        });
+
+        // 1. 切换视角 -> SPOTLIGHT_TRIGGER + entityId
+        await asyncClick(view.container.querySelector<HTMLButtonElement>('.ns-note-kind-btn')!);
+        await asyncClick(menuItemByTitle(view.container, '切换视角'));
+        const entitySelect = view.container.querySelector<HTMLSelectElement>('select[aria-label="选择切镜人物"]')!;
+        act(() => {
+            entitySelect.value = 'char_zhou';
+            entitySelect.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        setInput(noteInput, '切入周敬山密室视角');
+        await asyncClick(buttonByText(view.container, '先存便签'));
+        expect(onSubmitSignal).toHaveBeenLastCalledWith({
+            kind: 'SPOTLIGHT_TRIGGER',
+            entityId: 'char_zhou',
+            content: '切入周敬山密室视角',
+            runAfter: false
+        });
+
+        // 2. 插入回忆 -> FLASHBACK + targetDay
+        await asyncClick(view.container.querySelector<HTMLButtonElement>('.ns-note-kind-btn')!);
+        await asyncClick(menuItemByTitle(view.container, '插入回忆'));
+        const dayInput = view.container.querySelector<HTMLInputElement>('input[aria-label="回忆目标天数"]')!;
+        setInput(dayInput, '3');
+        setInput(noteInput, '回忆三年前沉船夜');
+        await asyncClick(view.container.querySelector<HTMLButtonElement>('button[aria-label="存入便签并立即写下一章"]')!);
+        expect(onSubmitSignal).toHaveBeenLastCalledWith({
+            kind: 'FLASHBACK',
+            targetDay: 3,
+            content: '回忆三年前沉船夜',
+            runAfter: true
+        });
+
+        // 3. 圆谎修补 -> RETCON
+        await asyncClick(view.container.querySelector<HTMLButtonElement>('.ns-note-kind-btn')!);
+        await asyncClick(menuItemByTitle(view.container, '圆谎修补'));
+        setInput(noteInput, '左腕用护腕固定');
+        await asyncClick(buttonByText(view.container, '先存便签'));
+        expect(onSubmitSignal).toHaveBeenLastCalledWith({
+            kind: 'RETCON',
+            content: '左腕用护腕固定',
+            runAfter: false
+        });
+
+        // 4. 运行态强停菜单 -> onRequestHalt({ force: true })
+        view.rerender({ activeTask: 'STEPPING' });
+        await asyncClick(view.container.querySelector<HTMLButtonElement>('button[aria-label="更多停止选项"]')!);
+        await asyncClick(menuItemByTitle(view.container, '立即中断并撤回半截草稿'));
+        expect(onRequestHalt).toHaveBeenCalledWith({ force: true });
         view.unmount();
     });
 });
