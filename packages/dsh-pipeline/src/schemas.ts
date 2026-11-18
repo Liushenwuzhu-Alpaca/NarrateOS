@@ -167,6 +167,8 @@ export interface EngineProgressEvent {
     timestamp: string;
     activeSessionId?: string | undefined;
     runId?: string | undefined;
+    subStage?: string | undefined;
+    attempt?: number | undefined;
 }
 
 /** stepChapter 调用参数 */
@@ -213,6 +215,9 @@ export interface DownstreamConflictReport {
     lineNumber: number | null;
     quote: string;
     description: string;
+    dirtyChapter?: number | undefined;
+    dirtyLineNumber?: number | null | undefined;
+    dirtyQuote?: string | undefined;
 }
 
 /** syncManuscripts 执行结果 */
@@ -226,6 +231,7 @@ export interface SyncManuscriptsResult {
     dirtyChapters: DirtyChapter[];
     updatedEntities: string[];
     downstreamConflicts: DownstreamConflictReport[];
+    stateDiffAdvisories?: string[] | undefined;
     totalUsage: TokenUsage;
 }
 
@@ -266,6 +272,8 @@ export const DownstreamConflictItemSchema = z.object({
     chapter_number: z.number().int().positive(),
     line_number: z.number().int().positive().optional(),
     quote: z.string().default(''),
+    dirty_chapter: z.number().int().positive().optional(),
+    dirty_quote: z.string().default(''),
     description: z.string().min(1)
 });
 
@@ -286,9 +294,10 @@ export const StyleMergeOutputSchema = z.object({
     merged_markdown: z.string().min(1)
 });
 
-/** 换卷 Step 4: 新卷包络与未来惯性输出 Schema */
+/** 换卷 Step 4: 新卷包络、导演底牌与未来惯性输出 Schema */
 export const NextVolumeEnvelopeOutputSchema = z.object({
     current_arc_envelope: z.string().min(1),
+    arc_director_plan: z.string().optional(),
     future_horizon: z.string().min(1)
 });
 
@@ -311,6 +320,7 @@ export type SignalType = z.infer<typeof SignalTypeSchema>;
 
 /** 运维微调与切镜信号结构 */
 export const OpsSignalSchema = z.object({
+    id: z.string().min(1).optional(),
     type: SignalTypeSchema,
     created_at: z.string(),
     chapter: z.number().int().nonnegative(),
@@ -318,7 +328,7 @@ export const OpsSignalSchema = z.object({
     conflict_id: z.string().optional(),
     chapter_a: z.number().int().positive().optional(),
     chapter_b: z.number().int().positive().optional(),
-    suggested_mode: z.enum(['MAINLINE', 'PARALLEL']).optional(),
+    suggested_mode: z.enum(['MAINLINE', 'PARALLEL', 'FLASHBACK']).optional(),
     reason: z.string().min(1)
 });
 export type OpsSignal = z.infer<typeof OpsSignalSchema>;
