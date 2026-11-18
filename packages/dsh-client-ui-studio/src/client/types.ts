@@ -3,7 +3,13 @@
  */
 
 /** 后端运行态排他任务类型 */
-export type RuntimeTaskKind = 'IDLE' | 'STEPPING' | 'SYNCING' | 'DREAMING' | 'BOOTING';
+export type RuntimeTaskKind =
+    | 'IDLE'
+    | 'STEPPING'
+    | 'SYNCING'
+    | 'DREAMING'
+    | 'BOOTING'
+    | 'ADVANCING_VOLUME';
 
 /** 章节时间线模式 */
 export type TimelineMode = 'MAINLINE' | 'PARALLEL' | 'FLASHBACK';
@@ -85,6 +91,104 @@ export interface AvailableModelItem {
     label?: string | undefined;
 }
 
+/** 写手前缀装配 Token 分项统计（兼容对象结构与总数值） */
+export interface WriterAssemblyEstimatedTokens {
+    staticPrefixTokens?: number | undefined;
+    dynamicTailTokens?: number | undefined;
+    totalInputTokens?: number | undefined;
+    [key: string]: unknown;
+}
+
+/** 写手净室前缀装配诊断摘要 */
+export interface WriterAssemblyReportSummary {
+    chapterNumber?: number | undefined;
+    estimatedTokens?: number | WriterAssemblyEstimatedTokens | undefined;
+    budget?: number | null | undefined;
+    evictionLevel?: number | undefined;
+    truncated?: boolean | undefined;
+    appliedEvictions?: string[] | undefined;
+    staticPrefixHash?: string | undefined;
+    selectedVoiceSample?:
+        | {
+              id?: string | undefined;
+              tag?: string | undefined;
+              text?: string | undefined;
+              source?: string | undefined;
+          }
+        | null
+        | undefined;
+    strippedSecretCount?: number | undefined;
+    [key: string]: unknown;
+}
+
+/** Checker 核查单条问题摘要 */
+export interface CheckerIssueSummary {
+    description?: string | undefined;
+    quote_draft?: string | undefined;
+    quote_source?: string | undefined;
+    source_ref?: string | undefined;
+    severity?: string | undefined;
+    [key: string]: unknown;
+}
+
+/** 最近一次 Checker 核查诊断摘要 */
+export interface CheckerStatusSummary {
+    chapter: number;
+    passed: boolean;
+    issueCount: number;
+    issues: CheckerIssueSummary[];
+    filteredOutCount: number;
+    replanCount: number;
+    rewriteCount: number;
+    patchRounds: number;
+}
+
+/** Dreaming 自动整理水位摘要 */
+export interface DreamWatermarkSummary {
+    last_dream_ch: number;
+    accumulated_words_since_dream: number;
+    updated_at: string;
+}
+
+/** 开篇节拍单项进度 */
+export interface OpeningBeatItem {
+    index: number;
+    status: 'PENDING' | 'DONE';
+    rawStatus: string;
+    completedChapter?: string | undefined;
+    text: string;
+}
+
+/** 开篇节拍总体进度摘要 */
+export interface OpeningBeatsSummary {
+    total: number;
+    completed: number;
+    pending: number;
+    beats: OpeningBeatItem[];
+}
+
+/** 当前卷进度摘要 */
+export interface VolumeProgressStatus {
+    currentVolume: number;
+    volumeLabel: string;
+    volumeTitle?: string | undefined;
+    completedChapters: number;
+    totalChapters: number | null;
+    futureHorizon?: string | undefined;
+    milestoneLock?: string | undefined;
+}
+
+/** 跨章自愈断点重跑计划摘要 */
+export interface HealPlanSummary {
+    conflictId?: string | undefined;
+    backupTag: string;
+    fromChapter: number;
+    toChapter: number;
+    nextChapter: number;
+    constraint?: string | undefined;
+    updatedAt: string;
+}
+
 /** 作品全局状态载荷（对应 GET /api/narrate/status） */
 export interface NarrateStatusPayload {
     bookRoot: string;
@@ -105,6 +209,22 @@ export interface NarrateStatusPayload {
     roleRouting?: Record<string, RoleModelOverride> | undefined;
     roleDefinitions?: RoleDefinitionItem[] | undefined;
     availableModels?: AvailableModelItem[] | undefined;
+    txLockHeld?: boolean | undefined;
+    featCommitSha?: string | null | undefined;
+    stateCommitSha?: string | null | undefined;
+    recentCommits?: { featCommitSha: string | null; stateCommitSha: string | null } | undefined;
+    writerAssemblyReport?: WriterAssemblyReportSummary | null | undefined;
+    lastCheckerResult?: CheckerStatusSummary | null | undefined;
+    dreamWatermark?: DreamWatermarkSummary | null | undefined;
+    dirtyEntityCount?: number | undefined;
+    dirtyEntityThreshold?: number | undefined;
+    spotlightQueue?: OpsSignalItem[] | undefined;
+    nextChapterOptions?: string[] | undefined;
+    nextChapterOptionsSourceChapter?: number | null | undefined;
+    openingBeats?: OpeningBeatsSummary | null | undefined;
+    volumeProgress?: VolumeProgressStatus | null | undefined;
+    healPlan?: HealPlanSummary | null | undefined;
+    syncConflictsCount?: number | undefined;
 }
 
 /** 更新模型路由请求（对应 PUT /api/narrate/model-routing） */
@@ -274,9 +394,16 @@ export interface RunDetailPayload {
 export interface OpsSignalItem {
     id?: string | undefined;
     type?: string | undefined;
+    reason?: string | undefined;
     content?: string | undefined;
     instruction?: string | undefined;
+    chapter?: number | undefined;
     target_chapter?: number | undefined;
+    entity_id?: string | undefined;
+    conflict_id?: string | undefined;
+    chapter_a?: number | undefined;
+    chapter_b?: number | undefined;
+    suggested_mode?: TimelineMode | string | undefined;
     created_at?: string | undefined;
     raw?: string | undefined;
     [key: string]: unknown;
@@ -369,6 +496,16 @@ export interface HaltViewPayload {
     quarantineReport: Record<string, unknown> | null;
 }
 
+/** 手改下游同步冲突视图响应载荷（对应 GET /api/narrate/views?kind=sync_conflicts） */
+export interface SyncConflictsViewPayload {
+    kind: 'sync_conflicts';
+    syncConflicts: Record<string, unknown> | null;
+    conflicts: Array<Record<string, unknown>>;
+    dirtyChapters: Array<Record<string, unknown>>;
+    stateDiffAdvisories: unknown[];
+    updatedAt: string | null;
+}
+
 /** 切换作品请求 */
 export interface SelectBookRequest {
     bookRoot?: string | undefined;
@@ -401,10 +538,12 @@ export interface BootBookResponse {
 
 /** 单章推进请求 */
 export interface StepChapterRequest {
-    chapterGoal: string;
+    chapterGoal?: string | undefined;
     chapterNumber?: number | undefined;
     timelineMode?: TimelineMode | undefined;
     targetDay?: number | undefined;
+    parallelWindowId?: string | undefined;
+    parallelBranchId?: string | undefined;
     povCharIds?: string[] | undefined;
 }
 
@@ -417,6 +556,9 @@ export interface StepChapterResponse {
     replanCount: number;
     rewriteCount: number;
     patchRounds: number;
+    nextChapterOptions?: string[] | undefined;
+    writerAssemblyReport?: WriterAssemblyReportSummary | undefined;
+    outline?: Record<string, unknown> | null | undefined;
     telemetry: {
         clicheDensityPer1k: number;
         mattr500: number;
@@ -457,6 +599,13 @@ export interface DreamRequest {
 /** Dreaming 响应 */
 export interface DreamResponse {
     skipped: boolean;
+    summary?: string | undefined;
+    committedPaths?: string[] | undefined;
+    spotlightTriggerCount?: number | undefined;
+    committedTxState?: Record<string, unknown> | null | undefined;
+    sessionId?: string | undefined;
+    runId?: string | undefined;
+    usage?: TelemetryTokenUsage | undefined;
     vacuumedEntities?: number | undefined;
     warpedNodesFlipped?: number | undefined;
     archivedFiles?: number | undefined;
@@ -484,9 +633,16 @@ export interface HarvestVoiceResponse {
 
 /** 投递导演信号请求 */
 export interface PostSignalRequest {
-    type: string;
-    content: string;
+    type?: 'SPOTLIGHT_TRIGGER' | 'RETCON' | 'DIRECTOR_NOTE' | string | undefined;
+    reason?: string | undefined;
+    content?: string | undefined;
+    chapter?: number | undefined;
     target_chapter?: number | undefined;
+    entity_id?: string | undefined;
+    conflict_id?: string | undefined;
+    chapter_a?: number | undefined;
+    chapter_b?: number | undefined;
+    suggested_mode?: TimelineMode | string | undefined;
     created_at?: string | undefined;
     [key: string]: unknown;
 }
@@ -497,10 +653,115 @@ export interface PostSignalResponse {
     signal: OpsSignalItem;
 }
 
+/** 停机请求（对应 POST /api/narrate/halt） */
+export interface HaltRequest {
+    force?: boolean | undefined;
+}
+
 /** Safe-Point 停机响应 */
 export interface HaltResponse {
     haltRequested: boolean;
+    force?: boolean | undefined;
     activeTask: RuntimeTaskKind;
+}
+
+/** 换卷或封笔请求（对应 POST /api/narrate/volume/advance） */
+export interface AdvanceVolumeRequest {
+    companionEntityIds?: string[] | undefined;
+    completeBook?: boolean | undefined;
+}
+
+/** 换卷或封笔响应 */
+export interface AdvanceVolumeResponse {
+    sealedVolume: number;
+    nextVolume: number;
+    tagName: string;
+    archivedEntities: string[];
+    completedBook: boolean;
+    commitSha: string;
+}
+
+/** 并行时间线窗口分叉/合流请求 */
+export interface ParallelWindowRequest {
+    windowId: string;
+}
+
+/** 并行时间线分叉响应（对应 POST /api/narrate/parallel/fork） */
+export interface ParallelForkResponse {
+    windowId: string;
+    baseTag: string;
+    baseDay: number;
+    maxChapters: number;
+    globalBroadcast: Record<string, unknown>;
+    baseChapter: number;
+    baseEntityIds: string[];
+    status: 'OPEN' | 'MERGED' | 'ABORTED';
+    createdAt: string;
+    mergedAt?: string | undefined;
+}
+
+/** 并行时间线合流响应（对应 POST /api/narrate/parallel/merge） */
+export interface ParallelMergeResponse {
+    windowId: string;
+    baseTag: string;
+    mergedBranches: string[];
+    updatedEntities: string[];
+    updatedL2CardPaths?: string[] | undefined;
+    previousStoryDay: number;
+    newStoryDay: number;
+    totalChaptersUsed: number;
+    sha: string;
+}
+
+/** 跨章冲突严重程度分类 */
+export type ConflictSeverity = 'SOFT_MINOR' | 'SINGLE_POINT_HARD' | 'CASCADING_HARD';
+
+/** 跨章自愈疑似冲突输入项 */
+export interface SuspectedConflictInput {
+    conflictId: string;
+    chapterA: number;
+    quoteA: string;
+    chapterB: number;
+    quoteB: string;
+    description: string;
+    hasLegitimateTransfer?: boolean | undefined;
+    severityHint?: ConflictSeverity | undefined;
+    downstreamDependentChapters?: number[] | undefined;
+}
+
+/** 跨章自愈请求（对应 POST /api/narrate/heal） */
+export interface HealConflictsRequest {
+    conflicts?: SuspectedConflictInput[] | undefined;
+    maxAutoRollbackChapters?: number | undefined;
+}
+
+/** 跨章自愈单条处理结果 */
+export interface HealConflictResultItem {
+    conflictId: string;
+    action: string;
+    sideALine?: number | null | undefined;
+    sideBLine?: number | null | undefined;
+    backupTag?: string | undefined;
+    quarantineReport?: Record<string, unknown> | undefined;
+}
+
+/** 跨章自愈汇总响应 */
+export interface HealConflictsResponse {
+    results: HealConflictResultItem[];
+    quarantined: boolean;
+    quarantineReport: Record<string, unknown> | null;
+    usage?: TelemetryTokenUsage | undefined;
+}
+
+/** 工种阶段流式事件 SSE 载荷（event: stage:event） */
+export interface StageStreamSsePayload {
+    sessionId: string;
+    stage: string;
+    kind: 'thinking' | 'text' | 'tool-call' | 'tool-result' | 'status' | 'error';
+    text?: string | undefined;
+    toolName?: string | undefined;
+    callId?: string | undefined;
+    status?: string | undefined;
 }
 
 /** YOLO 启动请求 */
@@ -536,11 +797,17 @@ export type SseEventName =
     | 'chapter:phase'
     | 'stage'
     | 'stage:session'
+    | 'stage:event'
     | 'gate:result'
     | 'checker:result'
     | 'dream:started'
     | 'dream:completed'
     | 'signal:received'
+    | 'signal:withdrawn'
+    | 'volume:advanced'
+    | 'task:idle'
+    | 'heal:started'
+    | 'heal:completed'
     | 'telemetry'
     | 'yolo:stop_requested'
     | 'yolo_halted'

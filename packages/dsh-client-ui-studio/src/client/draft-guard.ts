@@ -56,3 +56,61 @@ export function resolveBackgroundCommitAction(
     }
     return 'refresh-current';
 }
+
+/** 内存暂存的单章草稿快照（按 bookRoot::chapterNumber 索引） */
+export interface StashedDraftEntry {
+    bookRoot: string;
+    chapterNumber: number;
+    content: string;
+    baseSha256?: string | undefined;
+    updatedAt: number;
+}
+
+/** 不可变内存草稿暂存映射表 */
+export type DraftStashMap = Readonly<Record<string, StashedDraftEntry>>;
+
+/** 生成按作品根目录与章号隔离的草稿暂存键 */
+export function makeDraftStashKey(bookRoot: string, chapterNumber: number): string {
+    return `${bookRoot}::${chapterNumber}`;
+}
+
+/** 不可变写入或覆盖指定作品与章节的草稿暂存 */
+export function putStashedDraft(stash: DraftStashMap, entry: StashedDraftEntry): DraftStashMap {
+    const key = makeDraftStashKey(entry.bookRoot, entry.chapterNumber);
+    return {
+        ...stash,
+        [key]: entry
+    };
+}
+
+/** 读取指定作品与章节的草稿暂存；不存在时返回 null */
+export function getStashedDraft(
+    stash: DraftStashMap,
+    bookRoot: string,
+    chapterNumber: number
+): StashedDraftEntry | null {
+    const key = makeDraftStashKey(bookRoot, chapterNumber);
+    if (!Object.hasOwn(stash, key)) {
+        return null;
+    }
+    return stash[key] ?? null;
+}
+
+/** 不可变移除指定作品与章节的草稿暂存 */
+export function removeStashedDraft(
+    stash: DraftStashMap,
+    bookRoot: string,
+    chapterNumber: number
+): DraftStashMap {
+    const key = makeDraftStashKey(bookRoot, chapterNumber);
+    if (!Object.hasOwn(stash, key)) {
+        return stash;
+    }
+    const { [key]: _removed, ...rest } = stash;
+    return rest;
+}
+
+/** 判断是否存在任意未保存草稿（供页面离开前拦截提示使用） */
+export function hasAnyUnsavedDraft(stash: DraftStashMap, activeDirty: boolean): boolean {
+    return activeDirty || Object.keys(stash).length > 0;
+}
