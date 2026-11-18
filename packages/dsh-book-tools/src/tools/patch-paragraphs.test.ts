@@ -84,6 +84,16 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
         ]);
         expect(result.titlePreserved).toBe(false);
         expect(result.passed).toBe(true);
+        expect(result.message).toContain('内存段落替换已完成（未配置 StaticProseGate 实时复检）');
+        expect(result.message).not.toContain('已通过静态文风门禁');
+        expect(session.evaluateGateReport()).toEqual({
+            configured: false,
+            passed: true,
+            violatedParagraphCount: 0,
+            violatedParagraphIndices: [],
+            violations: [],
+            violatedParagraphs: []
+        });
         expect(session.getEditCount()).toBe(2);
         expect(session.getParagraphs()).toEqual([
             '第一段：北港的雪落在铁皮棚顶。',
@@ -297,6 +307,8 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
         cleanups.push(() => roleSet.cleanup());
 
         expect(ctx.narrateStore.staging.has('run-in-memory-patch')).toBe(false);
+        expect(roleSet.bookRoot).toBeUndefined();
+        expect(roleSet.fence).toBeUndefined();
         expect(roleSet.toolMap.has('patch_paragraphs')).toBe(true);
         expect(roleSet.toolMap.has('yield_patched_draft')).toBe(true);
         expect(roleSet.hasYielded()).toBe(false);
@@ -336,5 +348,34 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
             editCount: 1,
             summary: '替换微距动作'
         });
+    });
+
+    it('buildRoleTools({ yieldTool: "yield_patched_draft", draftText }) 缺省 tools 时不挂载磁盘工具且不开启 StagingSession', async () => {
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin);
+        cleanups.push(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin);
+        cleanups.push(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-yield-only-patch',
+            yieldTool: 'yield_patched_draft',
+            draftText: '# 第一章\n\n干净正文段落。'
+        });
+        cleanups.push(() => roleSet.cleanup());
+
+        expect(ctx.narrateStore.staging.has('run-yield-only-patch')).toBe(false);
+        expect(roleSet.bookRoot).toBeUndefined();
+        expect(roleSet.fence).toBeUndefined();
+        expect(roleSet.tools.map((t) => t.name)).toEqual(['yield_patched_draft']);
+        for (const diskTool of ['book_read', 'book_grep', 'book_glob', 'book_edit']) {
+            expect(roleSet.toolMap.has(diskTool)).toBe(false);
+        }
+
+        await roleSet.toolMap.get('yield_patched_draft')!.execute(
+            { summary: '直接提交' },
+            createMockExec('yield_patched_draft', { summary: '直接提交' })
+        );
+        expect(roleSet.hasYielded()).toBe(true);
     });
 });

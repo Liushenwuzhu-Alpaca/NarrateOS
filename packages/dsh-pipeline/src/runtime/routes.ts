@@ -17,7 +17,8 @@ import {
     AdmissionClosedError,
     NotFoundError,
     PathValidationError,
-    TaskConflictError
+    TaskConflictError,
+    ValidationError
 } from '../errors.js';
 import { CHAPTER_FILE_RE, readOptionalText } from '../pipeline/helpers.js';
 import type {
@@ -225,6 +226,21 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
     return result;
 }
 
+function parsePositiveChapterNumber(
+    raw: unknown,
+    fieldName = 'chapterNumber'
+): number {
+    if (
+        typeof raw !== 'number' ||
+        !Number.isInteger(raw) ||
+        raw <= 0 ||
+        raw > 9999
+    ) {
+        throw new PathValidationError(`${fieldName} 必须为 1 到 9999 的正整数`);
+    }
+    return raw;
+}
+
 function sendErrorResponse(res: ServerResponse, err: unknown): void {
     if (
         err instanceof BookSwitchConflictError ||
@@ -244,6 +260,10 @@ function sendErrorResponse(res: ServerResponse, err: unknown): void {
     }
     if (err instanceof NotFoundError) {
         sendJson(res, 404, { error: err.message });
+        return;
+    }
+    if (err instanceof ValidationError) {
+        sendJson(res, 422, { error: err.message });
         return;
     }
     sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
@@ -761,53 +781,43 @@ export function registerNarrateRoutes(
             return;
         }
 
-        const stepOptions: StepChapterOptions = {
-            chapterGoal: body['chapterGoal']
-        };
-        if (body['chapterNumber'] !== undefined) {
-            const chNum = body['chapterNumber'];
-            if (
-                typeof chNum !== 'number' ||
-                !Number.isInteger(chNum) ||
-                chNum <= 0 ||
-                chNum > 9999
-            ) {
-                sendJson(res, 400, { error: 'chapterNumber 必须为 1 到 9999 的正整数' });
-                return;
-            }
-            stepOptions.chapterNumber = chNum;
-        }
-        if (body['timelineMode'] !== undefined) {
-            const mode = body['timelineMode'];
-            if (mode !== 'MAINLINE' && mode !== 'PARALLEL' && mode !== 'FLASHBACK') {
-                sendJson(res, 400, {
-                    error: 'timelineMode 必须为 MAINLINE | PARALLEL | FLASHBACK'
-                });
-                return;
-            }
-            stepOptions.timelineMode = mode;
-        }
-        if (typeof body['parallelWindowId'] === 'string') {
-            stepOptions.parallelWindowId = body['parallelWindowId'];
-        }
-        if (typeof body['parallelBranchId'] === 'string') {
-            stepOptions.parallelBranchId = body['parallelBranchId'];
-        }
-        if (body['targetDay'] !== undefined) {
-            const targetDay = body['targetDay'];
-            if (typeof targetDay !== 'number' || !Number.isInteger(targetDay)) {
-                sendJson(res, 400, { error: 'targetDay 必须为整数' });
-                return;
-            }
-            stepOptions.targetDay = targetDay;
-        }
-        if (Array.isArray(body['povCharIds'])) {
-            stepOptions.povCharIds = body['povCharIds'].filter(
-                (item): item is string => typeof item === 'string'
-            );
-        }
-
         try {
+            const stepOptions: StepChapterOptions = {
+                chapterGoal: body['chapterGoal']
+            };
+            if (body['chapterNumber'] !== undefined) {
+                stepOptions.chapterNumber = parsePositiveChapterNumber(body['chapterNumber']);
+            }
+            if (body['timelineMode'] !== undefined) {
+                const mode = body['timelineMode'];
+                if (mode !== 'MAINLINE' && mode !== 'PARALLEL' && mode !== 'FLASHBACK') {
+                    sendJson(res, 400, {
+                        error: 'timelineMode 必须为 MAINLINE | PARALLEL | FLASHBACK'
+                    });
+                    return;
+                }
+                stepOptions.timelineMode = mode;
+            }
+            if (typeof body['parallelWindowId'] === 'string') {
+                stepOptions.parallelWindowId = body['parallelWindowId'];
+            }
+            if (typeof body['parallelBranchId'] === 'string') {
+                stepOptions.parallelBranchId = body['parallelBranchId'];
+            }
+            if (body['targetDay'] !== undefined) {
+                const targetDay = body['targetDay'];
+                if (typeof targetDay !== 'number' || !Number.isInteger(targetDay)) {
+                    sendJson(res, 400, { error: 'targetDay 必须为整数' });
+                    return;
+                }
+                stepOptions.targetDay = targetDay;
+            }
+            if (Array.isArray(body['povCharIds'])) {
+                stepOptions.povCharIds = body['povCharIds'].filter(
+                    (item): item is string => typeof item === 'string'
+                );
+            }
+
             const result = await controller.stepChapter(stepOptions);
             sendJson(res, 200, result);
         } catch (err) {
@@ -899,22 +909,11 @@ export function registerNarrateRoutes(
             return;
         }
 
-        let chapterNumber = 1;
-        if (body['chapterNumber'] !== undefined) {
-            const chNum = body['chapterNumber'];
-            if (
-                typeof chNum !== 'number' ||
-                !Number.isInteger(chNum) ||
-                chNum <= 0 ||
-                chNum > 9999
-            ) {
-                sendJson(res, 400, { error: 'chapterNumber 必须为 1 到 9999 的正整数' });
-                return;
-            }
-            chapterNumber = chNum;
-        }
-
         try {
+            const chapterNumber =
+                body['chapterNumber'] !== undefined
+                    ? parsePositiveChapterNumber(body['chapterNumber'])
+                    : 1;
             const result = await controller.harvestVoiceFromChapter(chapterNumber);
             sendJson(res, 200, result);
         } catch (err) {

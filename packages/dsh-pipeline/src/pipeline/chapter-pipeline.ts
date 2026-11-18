@@ -114,23 +114,47 @@ const GATE_POSITIVE_GUIDANCE: Record<string, string> = {
     cross_chapter_simile: '采用贴合当下场景的新鲜具象意象或直接白描，呈现独特的现场质感。'
 };
 
+export const GATE_MAX_PATCH_PARAGRAPHS = 15;
+export const CLEANROOM_PATCH_FALLBACK_REASON =
+    '请紧扣给定自然段与定位提示，重构人物动作细节、对话神态与场景衔接节奏';
+
 const RESTRICTED_DIRECTIVE_CLAUSE_RE =
-    /OMNISCIENT_SECRET|\bWARPED\b|SELF_ONLY_[A-Z0-9_]*SECRET|CHARTER_SECRET|DIRECTOR_SECRET|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale|author_charter|arc_director_plan/i;
+    /OMNISCIENT_SECRET|\bWARPED\b|\bSELF_ONLY(?:_[A-Z0-9_]*)?\b|CHARTER_SECRET|DIRECTOR_SECRET|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale|author_charter|arc_director_plan/i;
 
 /** 剥离全知/废止/禁区信息并正向转写，确保净室写手与修补专员零泄露、零负面黑名单词 */
-function sanitizeTextForCleanroomWriter(raw: string): string {
-    const clauses = raw
-        .split(/(?<=[。；\n])/)
+export function sanitizeTextForCleanroomWriter(raw: string): string {
+    const rawClauses = raw
+        .split(/(?<=[。；;\n])/)
         .map((c) => c.trim())
         .filter((c) => c.length > 0 && !RESTRICTED_DIRECTIVE_CLAUSE_RE.test(c));
-    const joined = clauses.join(' ').trim();
-    return joined
-        .replace(/(?:禁止|严禁|不要|不得|切忌)/g, '请调整')
-        .replace(/(?:必须|务必|千万|绝对)/g, '请确保')
-        .replace(/(?:哪怕|就算|即便)/g, '即使')
-        .replace(/(?:指节|喉结|瞳孔|睫毛|一丝|一抹)/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
+
+    const cleanedClauses: string[] = [];
+    for (const clause of rawClauses) {
+        const rewritten = clause
+            .replace(
+                /(?:请\s*)?(?:禁止|严禁|不要|不得|切忌|绝不|决不|不能|不可|避免|切勿|莫要|勿)/g,
+                '请调整'
+            )
+            .replace(/(?:必须|务必|千万|绝对)/g, '请确保')
+            .replace(/(?:哪怕|就算|即便)/g, '即使')
+            .replace(
+                /(?:指节泛白|喉结(?:上下)?滚动|瞳孔(?:微缩|地震)|睫毛轻颤|指甲陷进掌心|眼眶泛起水汽|青筋暴起|指节|喉结|瞳孔|睫毛|表皮|角质|毛细血管|心率|肾上腺素|一丝|一抹)/g,
+                ''
+            )
+            .replace(/(?:""|''|“”|‘’|「」|『』|（）|\(\)|\[\])/g, '')
+            .replace(/[：:]\s*(?=[。；;\n]|$)/g, '')
+            .replace(/([，,、])\s*[，,、]+/g, '$1')
+            .replace(/^[，,、；;：:\s]+/, '')
+            .replace(/[，,、：:\s]+(?=[。；;\n]|$)/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (/[\p{L}\p{N}]/u.test(rewritten)) {
+            cleanedClauses.push(rewritten);
+        }
+    }
+
+    return cleanedClauses.join(' ').trim();
 }
 
 /** 将静态门禁超标规则正向转写为写手重写的具象写作目标 */
@@ -224,8 +248,8 @@ function extractRecentL2Cards(rawCardContent: string | null, limit = 2): string 
 
 /**
  * 单章 6 阶段生产管线：
- * - 多轮探查工种 (`Librarian`, `Planner`, `Fact Checker`, `Extractor`) 经 RoleRunner (ctx.agents.create + yield_*) 执行；
- * - 文学执笔与局部修补 (`Writer`, `Patch`) 经净室零工具单轮流 (ctx.llm) 执行，物理剥离禁区与隐秘视图；
+ * - 多轮探查工种 (`Librarian`, `Planner`, `Fact Checker`, `Extractor`) 经 RoleRunner.runMultiTurn (ctx.agents.create + yield_*) 执行；
+ * - 文学执笔 (`Writer`, 含 `WRITER` / `REWRITE`) 经 RoleRunner.runCleanroom（零工具单轮净室会话）执行，局部修补 (`Patch`) 经纯内存多轮段落编辑闭环 (`patch_paragraphs` + `yield_patched_draft`) 执行，均物理剥离禁区、隐秘视图与宿主指令；
  * - 完整支持双粒度 WAL 提交与 FEAT_COMMITTED 崩溃恢复、Voice Pool LRU 轮换与 PARALLEL 并行沙盒。
  */
 export class ChapterPipeline {
@@ -516,6 +540,7 @@ export class ChapterPipeline {
             .join('\n\n');
 
         let replanCount = 0;
+        let writerAttempt = 0;
         let rewriteCount = 0;
         let patchRounds = 0;
         let planConflictFeedback: string | undefined;
@@ -528,61 +553,66 @@ export class ChapterPipeline {
 
         outerLoop: while (true) {
             // Step 2: Planner (多轮受控点查 -> yield_outline)
+            const plannerStage: 'PLANNER' | 'REPLAN' = replanCount > 0 ? 'REPLAN' : 'PLANNER';
+            const plannerAttempt = replanCount + 1;
             emit(
-                'PLANNER',
+                plannerStage,
                 chapterNumber,
                 replanCount > 0 ? '改纲重排细纲 v2' : '生成章节细纲'
             );
-            const planned = await this.runPlanner(
+            const planned = await this.runPlanner({
                 snapshot,
                 chapterNumber,
                 targetDay,
                 timelineMode,
                 povCharIds,
-                mergedSelectedEntityIds,
+                selectedEntityIds: mergedSelectedEntityIds,
                 recallSlices,
                 selectedLoreEntries,
-                options.chapterGoal,
-                plannerStaticPrefix,
+                chapterGoal: options.chapterGoal,
+                staticPrefix: plannerStaticPrefix,
                 previousChapter,
                 futureHorizon,
                 openThreads,
                 opsStyleAmendments,
-                authorCharterRaw,
-                arcDirectorPlanRaw,
-                effectivePlannerInjection,
+                authorCharter: authorCharterRaw,
+                arcDirectorPlan: arcDirectorPlanRaw,
+                plannerInjection: effectivePlannerInjection,
                 voicePool,
                 planConflictFeedback,
                 totalUsage,
-                options
-            );
+                stage: plannerStage,
+                attempt: plannerAttempt,
+                triggerReason: replanCount > 0 ? 'FACT_PLAN_CONFLICT' : undefined,
+                signal: options.signal,
+                onStageSession: options.onStageSession
+            });
             activeOutline = planned.outline;
 
             // Step 3: Writer (净室单轮无工具 Agent)
+            writerAttempt += 1;
             emit('WRITER', chapterNumber, '净室单轮 Agent 执笔');
-            const drafted = await this.runWriter(
+            const drafted = await this.runWriter({
                 snapshot,
                 chapterNumber,
                 targetDay,
                 timelineMode,
                 povCharIds,
-                mergedSelectedEntityIds,
+                selectedEntityIds: mergedSelectedEntityIds,
                 recallSlices,
                 selectedLoreEntries,
-                activeOutline,
-                writerStaticPrefix,
+                outline: activeOutline,
+                staticPrefix: writerStaticPrefix,
                 previousChapter,
                 opsStyleAmendments,
                 writerInjection,
                 voicePool,
                 totalUsage,
-                {
-                    traceStage: 'writer',
-                    attempt: 1,
-                    signal: options.signal,
-                    onStageSession: options.onStageSession
-                }
-            );
+                traceStage: 'writer',
+                attempt: writerAttempt,
+                signal: options.signal,
+                onStageSession: options.onStageSession
+            });
             activeProse = drafted.prose;
             updatedVoicePool = drafted.updatedVoicePool;
 
@@ -603,6 +633,7 @@ export class ChapterPipeline {
                     crossChapterSimileWindow:
                         snapshot.config.prose_gate.cross_chapter_simile_window,
                     narrationSubjectivity: snapshot.config.narration_subjectivity,
+                    maxPatchParagraphs: GATE_MAX_PATCH_PARAGRAPHS,
                     rules: gateRules,
                     historicalChapters
                 };
@@ -622,7 +653,7 @@ export class ChapterPipeline {
                     const violatedCount = gateResult.violatedParagraphIndices.length;
                     if (
                         violatedCount > 0 &&
-                        violatedCount <= 15 &&
+                        violatedCount <= GATE_MAX_PATCH_PARAGRAPHS &&
                         violatedCount / paragraphCount <= 0.6 &&
                         patchRounds < 2
                     ) {
@@ -653,33 +684,28 @@ export class ChapterPipeline {
                     if (rewriteCount < 1) {
                         rewriteCount += 1;
                         emit('REWRITE', chapterNumber, 'Gate 触发整章重写');
-                        const rewriteFeedback = buildPositiveGateRewriteFeedback(gateResult);
-                        const triggerReason = `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`;
-                        const rewritten = await this.runWriter(
+                        const rewritten = await this.executeRewrite({
                             snapshot,
                             chapterNumber,
                             targetDay,
                             timelineMode,
                             povCharIds,
-                            mergedSelectedEntityIds,
+                            selectedEntityIds: mergedSelectedEntityIds,
                             recallSlices,
                             selectedLoreEntries,
-                            activeOutline,
-                            writerStaticPrefix,
+                            outline: activeOutline,
+                            staticPrefix: writerStaticPrefix,
                             previousChapter,
                             opsStyleAmendments,
                             writerInjection,
                             voicePool,
                             totalUsage,
-                            {
-                                rewriteFeedback,
-                                traceStage: 'rewrite',
-                                attempt: rewriteCount,
-                                triggerReason,
-                                signal: options.signal,
-                                onStageSession: options.onStageSession
-                            }
-                        );
+                            rewriteFeedback: buildPositiveGateRewriteFeedback(gateResult),
+                            attempt: rewriteCount,
+                            triggerReason: `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`,
+                            signal: options.signal,
+                            onStageSession: options.onStageSession
+                        });
                         activeProse = rewritten.prose;
                         updatedVoicePool = rewritten.updatedVoicePool;
                         continue;
@@ -793,33 +819,28 @@ export class ChapterPipeline {
                 if (rewriteCount < 1) {
                     rewriteCount += 1;
                     emit('REWRITE', chapterNumber, 'Fact Checker 触发整章重写');
-                    const rewriteFeedback = buildPositiveFactRewriteFeedback(verifiedIssues);
-                    const triggerReason = `FACT_CHECKER: ${verifiedIssues.map((i) => i.severity).join(',')}`;
-                    const rewritten = await this.runWriter(
+                    const rewritten = await this.executeRewrite({
                         snapshot,
                         chapterNumber,
                         targetDay,
                         timelineMode,
                         povCharIds,
-                        mergedSelectedEntityIds,
+                        selectedEntityIds: mergedSelectedEntityIds,
                         recallSlices,
                         selectedLoreEntries,
-                        activeOutline,
-                        writerStaticPrefix,
+                        outline: activeOutline,
+                        staticPrefix: writerStaticPrefix,
                         previousChapter,
                         opsStyleAmendments,
                         writerInjection,
                         voicePool,
                         totalUsage,
-                        {
-                            rewriteFeedback,
-                            traceStage: 'rewrite',
-                            attempt: rewriteCount,
-                            triggerReason,
-                            signal: options.signal,
-                            onStageSession: options.onStageSession
-                        }
-                    );
+                        rewriteFeedback: buildPositiveFactRewriteFeedback(verifiedIssues),
+                        attempt: rewriteCount,
+                        triggerReason: `FACT_CHECKER: ${verifiedIssues.map((i) => i.severity).join(',')}`,
+                        signal: options.signal,
+                        onStageSession: options.onStageSession
+                    });
                     activeProse = rewritten.prose;
                     updatedVoicePool = rewritten.updatedVoicePool;
                     continue;
@@ -1034,74 +1055,78 @@ export class ChapterPipeline {
         };
     }
 
-    /** 执行 Step 2: Planner 多轮受控点查 -> yield_outline */
-    private async runPlanner(
-        snapshot: BookSnapshot,
-        chapterNumber: number,
-        targetDay: number,
-        timelineMode: TimelineMode,
-        povCharIds: string[],
-        selectedEntityIds: string[],
-        recallSlices: RecallSlice[],
-        selectedLoreEntries: string[],
-        chapterGoal: string,
-        staticPrefix: StaticPrefixInput,
-        previousChapter: PreviousChapterContext | undefined,
-        futureHorizon: string | undefined,
-        openThreads: string | undefined,
-        opsStyleAmendments: string | undefined,
-        authorCharter: string | null,
-        arcDirectorPlan: string | null,
-        plannerInjection: string,
-        voicePool: VoiceSamplePool | undefined,
-        planConflictFeedback: string | undefined,
-        totalUsage: TokenUsage,
-        options: StepChapterOptions
-    ): Promise<{ outline: PlannerOutline; plannerView: ReturnType<ViewSlicer['slice']> }> {
+    /** 执行 Step 2: Planner / REPLAN 多轮受控点查 -> yield_outline */
+    private async runPlanner(params: {
+        snapshot: BookSnapshot;
+        chapterNumber: number;
+        targetDay: number;
+        timelineMode: TimelineMode;
+        povCharIds: string[];
+        selectedEntityIds: string[];
+        recallSlices: RecallSlice[];
+        selectedLoreEntries: string[];
+        chapterGoal: string;
+        staticPrefix: StaticPrefixInput;
+        previousChapter: PreviousChapterContext | undefined;
+        futureHorizon: string | undefined;
+        openThreads: string | undefined;
+        opsStyleAmendments: string | undefined;
+        authorCharter: string | null;
+        arcDirectorPlan: string | null;
+        plannerInjection: string;
+        voicePool: VoiceSamplePool | undefined;
+        planConflictFeedback: string | undefined;
+        totalUsage: TokenUsage;
+        stage: 'PLANNER' | 'REPLAN';
+        attempt: number;
+        triggerReason?: string | undefined;
+        signal?: AbortSignal | undefined;
+        onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+    }): Promise<{ outline: PlannerOutline; plannerView: ReturnType<ViewSlicer['slice']> }> {
         const plannerView = this.slicer.slice({
-            snapshot,
+            snapshot: params.snapshot,
             forRole: 'planner',
-            targetDay,
-            currentCh: chapterNumber,
-            timelineMode,
-            povCharId: povCharIds,
-            entityIds: selectedEntityIds.length > 0 ? selectedEntityIds : undefined
+            targetDay: params.targetDay,
+            currentCh: params.chapterNumber,
+            timelineMode: params.timelineMode,
+            povCharId: params.povCharIds,
+            entityIds: params.selectedEntityIds.length > 0 ? params.selectedEntityIds : undefined
         });
 
-        const availableVoiceTags = voicePool
+        const availableVoiceTags = params.voicePool
             ? Array.from(
-                  new Set(voicePool.samples.map((s) => s.tag.trim()).filter((t) => t.length > 0))
+                  new Set(params.voicePool.samples.map((s) => s.tag.trim()).filter((t) => t.length > 0))
               )
             : [];
 
         const goalWithFeedback = [
-            chapterGoal,
-            authorCharter ? `\n## 作者契约 (world/author_charter.md)\n${authorCharter.trim()}` : '',
-            arcDirectorPlan
-                ? `\n## 导演禁区计划 (world/arc_director_plan.md)\n${arcDirectorPlan.trim()}`
+            params.chapterGoal,
+            params.authorCharter ? `\n## 作者契约 (world/author_charter.md)\n${params.authorCharter.trim()}` : '',
+            params.arcDirectorPlan
+                ? `\n## 导演禁区计划 (world/arc_director_plan.md)\n${params.arcDirectorPlan.trim()}`
                 : '',
-            openThreads ? `\n## 跨卷未解伏笔 (open_threads.md)\n${openThreads}` : '',
+            params.openThreads ? `\n## 跨卷未解伏笔 (open_threads.md)\n${params.openThreads}` : '',
             availableVoiceTags.length > 0
                 ? `\n## 可用声纹标签枚举 (preferred_voice_tag)\n请从以下标签中择一填入 preferred_voice_tag：${availableVoiceTags.join('、')}`
                 : '',
-            planConflictFeedback
-                ? `\n## 必须修正的物理/因果冲突 (v2 重规划)\n${planConflictFeedback}`
+            params.planConflictFeedback
+                ? `\n## 必须修正的物理/因果冲突 (v2 重规划)\n${params.planConflictFeedback}`
                 : '',
-            plannerInjection ? `\n## 激活文风插件与调度信号\n${plannerInjection}` : ''
+            params.plannerInjection ? `\n## 激活文风插件与调度信号\n${params.plannerInjection}` : ''
         ]
             .filter(Boolean)
             .join('\n');
 
         const assembled = this.assembler.assemblePlannerRequest({
-            config: snapshot.config,
-            staticPrefix,
+            config: params.snapshot.config,
+            staticPrefix: params.staticPrefix,
             slicedView: plannerView,
             chapterGoal: goalWithFeedback,
-            recallSlices,
-            loreEntries: selectedLoreEntries,
-            previousChapter,
-            futureHorizon,
-            opsStyleAmendments,
+            recallSlices: params.recallSlices,
+            loreEntries: params.selectedLoreEntries,
+            previousChapter: params.previousChapter,
+            futureHorizon: params.futureHorizon,
+            opsStyleAmendments: params.opsStyleAmendments,
             pool: 'strong_creative'
         });
 
@@ -1114,15 +1139,17 @@ export class ChapterPipeline {
 
         const runRes = await this.roleRunner.runMultiTurn<PlannerOutline>({
             roleId: 'planner',
-            stage: 'PLANNER',
-            chapterNumber,
+            stage: params.stage,
+            attempt: params.attempt,
+            ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
+            chapterNumber: params.chapterNumber,
             bookRoot: this.store.bookRoot,
-            bookConfig: snapshot.config,
+            bookConfig: params.snapshot.config,
             taskPrompt,
-            signal: options.signal,
-            onStageSession: options.onStageSession
+            signal: params.signal,
+            onStageSession: params.onStageSession
         });
-        addUsage(totalUsage, runRes.usage);
+        addUsage(params.totalUsage, runRes.usage);
 
         return {
             outline: runRes.yieldResult,
@@ -1130,47 +1157,74 @@ export class ChapterPipeline {
         };
     }
 
-    /** 执行 Step 3: Writer 净室单轮执笔 (零工具、零 sessionId、物理隔离禁区) */
-    private async runWriter(
-        snapshot: BookSnapshot,
-        chapterNumber: number,
-        targetDay: number,
-        timelineMode: TimelineMode,
-        povCharIds: string[],
-        selectedEntityIds: string[],
-        recallSlices: RecallSlice[],
-        selectedLoreEntries: string[],
-        outline: PlannerOutline,
-        staticPrefix: StaticPrefixInput,
-        previousChapter: PreviousChapterContext | undefined,
-        opsStyleAmendments: string | undefined,
-        writerInjection: string,
-        voicePool: VoiceSamplePool | undefined,
-        totalUsage: TokenUsage,
-        writeOptions?: {
-            rewriteFeedback?: string | undefined;
-            traceStage?: 'writer' | 'rewrite' | undefined;
-            attempt?: number | undefined;
-            triggerReason?: string | undefined;
-            signal?: AbortSignal | undefined;
-            onStageSession?: ((event: StageSessionEvent) => void) | undefined;
-        }
-    ): Promise<{
+    /** 执行净室整章重写 REWRITE（统一收拢 Gate 与 FactChecker 两条重写路径） */
+    private async executeRewrite(params: {
+        snapshot: BookSnapshot;
+        chapterNumber: number;
+        targetDay: number;
+        timelineMode: TimelineMode;
+        povCharIds: string[];
+        selectedEntityIds: string[];
+        recallSlices: RecallSlice[];
+        selectedLoreEntries: string[];
+        outline: PlannerOutline;
+        staticPrefix: StaticPrefixInput;
+        previousChapter: PreviousChapterContext | undefined;
+        opsStyleAmendments: string | undefined;
+        writerInjection: string;
+        voicePool: VoiceSamplePool | undefined;
+        totalUsage: TokenUsage;
+        rewriteFeedback: string;
+        attempt: number;
+        triggerReason: string;
+        signal?: AbortSignal | undefined;
+        onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+    }) {
+        return await this.runWriter({
+            ...params,
+            traceStage: 'rewrite'
+        });
+    }
+
+    /** 执行 Step 3: Writer 净室单轮执笔（零工具、经 RoleRunner.runCleanroom 创建隔离会话、物理隔离禁区与全知视角） */
+    private async runWriter(params: {
+        snapshot: BookSnapshot;
+        chapterNumber: number;
+        targetDay: number;
+        timelineMode: TimelineMode;
+        povCharIds: string[];
+        selectedEntityIds: string[];
+        recallSlices: RecallSlice[];
+        selectedLoreEntries: string[];
+        outline: PlannerOutline;
+        staticPrefix: StaticPrefixInput;
+        previousChapter: PreviousChapterContext | undefined;
+        opsStyleAmendments: string | undefined;
+        writerInjection: string;
+        voicePool: VoiceSamplePool | undefined;
+        totalUsage: TokenUsage;
+        rewriteFeedback?: string | undefined;
+        traceStage?: 'writer' | 'rewrite' | undefined;
+        attempt?: number | undefined;
+        triggerReason?: string | undefined;
+        signal?: AbortSignal | undefined;
+        onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+    }): Promise<{
         prose: string;
         writerView: ReturnType<ViewSlicer['slice']>;
         updatedVoicePool?: VoiceSamplePool | undefined;
     }> {
         const writerView = this.slicer.slice({
-            snapshot,
+            snapshot: params.snapshot,
             forRole: 'writer',
-            targetDay,
-            currentCh: chapterNumber,
-            timelineMode,
-            povCharId: povCharIds,
-            entityIds: selectedEntityIds.length > 0 ? selectedEntityIds : undefined
+            targetDay: params.targetDay,
+            currentCh: params.chapterNumber,
+            timelineMode: params.timelineMode,
+            povCharId: params.povCharIds,
+            entityIds: params.selectedEntityIds.length > 0 ? params.selectedEntityIds : undefined
         });
 
-        for (const slice of recallSlices) {
+        for (const slice of params.recallSlices) {
             if (slice.requiredEntityId && !writerView.entities[slice.requiredEntityId]) {
                 throw new Error(`写手成对召回缺少可见实体档案: ${slice.requiredEntityId}`);
             }
@@ -1178,58 +1232,58 @@ export class ChapterPipeline {
 
         // 物理丢弃 outline.director_rationale，严禁导演全知内参进入写手窗口
         const outlineText = [
-            `标题：${outline.chapter_title}`,
-            `目标字数：${outline.target_word_count}`,
-            `收尾节拍：${outline.ending_beat}`,
-            `本章实质波折：${outline.chapter_turn}`,
-            outline.outline_text,
-            writerInjection ? `\n文风插件要求：\n${writerInjection}` : '',
-            writeOptions?.rewriteFeedback
-                ? `\n本轮重写正向校准目标：\n${writeOptions.rewriteFeedback}`
+            `标题：${params.outline.chapter_title}`,
+            `目标字数：${params.outline.target_word_count}`,
+            `收尾节拍：${params.outline.ending_beat}`,
+            `本章实质波折：${params.outline.chapter_turn}`,
+            params.outline.outline_text,
+            params.writerInjection ? `\n文风插件要求：\n${params.writerInjection}` : '',
+            params.rewriteFeedback
+                ? `\n本轮重写正向校准目标：\n${params.rewriteFeedback}`
                 : ''
         ]
             .filter(Boolean)
             .join('\n');
 
         const assembled = this.assembler.assembleWriterRequest({
-            config: snapshot.config,
-            staticPrefix,
+            config: params.snapshot.config,
+            staticPrefix: params.staticPrefix,
             slicedView: writerView,
             outline: outlineText,
-            focusCastIds: outline.focus_cast,
-            backgroundCastIds: outline.background_cast,
-            recallSlices,
-            loreEntries: selectedLoreEntries,
-            previousChapter,
-            opsStyleAmendments,
-            voicePool,
-            preferredVoiceTag: outline.preferred_voice_tag,
+            focusCastIds: params.outline.focus_cast,
+            backgroundCastIds: params.outline.background_cast,
+            recallSlices: params.recallSlices,
+            loreEntries: params.selectedLoreEntries,
+            previousChapter: params.previousChapter,
+            opsStyleAmendments: params.opsStyleAmendments,
+            voicePool: params.voicePool,
+            preferredVoiceTag: params.outline.preferred_voice_tag,
             pool: 'strong_creative'
         });
 
-        const traceStage = writeOptions?.traceStage ?? 'writer';
+        const traceStage = params.traceStage ?? 'writer';
         const stage = traceStage === 'rewrite' ? 'REWRITE' : 'WRITER';
         const { response } = await this.roleRunner.runCleanroom({
             roleId: 'writer',
             stage,
-            attempt: writeOptions?.attempt,
-            triggerReason: writeOptions?.triggerReason,
+            attempt: params.attempt,
+            triggerReason: params.triggerReason,
             bookRoot: this.store.bookRoot,
-            bookConfig: snapshot.config,
-            chapterNumber,
+            bookConfig: params.snapshot.config,
+            chapterNumber: params.chapterNumber,
             request: {
                 ...assembled.request,
                 traceStage
             },
-            signal: writeOptions?.signal,
-            onStageSession: writeOptions?.onStageSession
+            signal: params.signal,
+            onStageSession: params.onStageSession
         });
-        addUsage(totalUsage, response.usage);
+        addUsage(params.totalUsage, response.usage);
 
         const cleanProse = ensureChapterHeading(
             stripBlockingTags(response.text).cleanText.trim(),
-            chapterNumber,
-            outline.chapter_title
+            params.chapterNumber,
+            params.outline.chapter_title
         );
         return {
             prose: cleanProse,
@@ -1283,31 +1337,35 @@ export class ChapterPipeline {
             }
         }
 
+        const cleanReason = sanitizeTextForCleanroomWriter(reason);
+        const patchReasonText = cleanReason || CLEANROOM_PATCH_FALLBACK_REASON;
+
         if (!patchRoleCfg.cleanroom) {
-            const cleanReason = sanitizeTextForCleanroomWriter(reason);
             const violationLines = (patchOptions.violations ?? []).map(
                 (v) =>
                     `- [${v.paragraphIndex}] (${v.ruleId}, line ${v.line}:${v.column}) 命中 "${v.matchedText}" | 行内容: ${v.lineText}`
             );
-            const factIssueLines = (patchOptions.factIssues ?? []).map((issue) => {
+            const factIssueLines: string[] = [];
+            for (const issue of patchOptions.factIssues ?? []) {
+                const cleanDesc = sanitizeTextForCleanroomWriter(issue.description);
+                if (!cleanDesc) continue;
                 const indices = [
                     ...(issue.paragraph_index !== undefined ? [issue.paragraph_index] : []),
                     ...(issue.paragraph_indices ?? [])
                 ];
                 const idxLabel = indices.length > 0 ? `[${indices.join(', ')}]` : '[待定位]';
-                const cleanDesc = sanitizeTextForCleanroomWriter(issue.description);
                 const cleanSource = issue.quote_source
                     ? sanitizeTextForCleanroomWriter(issue.quote_source)
                     : '';
                 const quoteInfo = cleanSource ? ` | 参考基准: ${cleanSource}` : '';
-                return `- ${idxLabel} ${cleanDesc}${quoteInfo}`;
-            });
+                factIssueLines.push(`- ${idxLabel} ${cleanDesc}${quoteInfo}`);
+            }
             const numberedParagraphs = paragraphs
                 .map((p, idx) => `[${idx}] ${p}`)
                 .join('\n\n');
 
             const taskPrompt = [
-                `## 修补原因与触发来源\n${cleanReason || reason}`,
+                `## 修补原因与触发来源\n${patchReasonText}`,
                 `## 待修补段落索引 (0-based)\n[${sortedUnique.join(', ')}]`,
                 violationLines.length > 0 ? `## 静态门禁违规定位清单\n${violationLines.join('\n')}` : '',
                 factIssueLines.length > 0 ? `## 事实核查修补清单\n${factIssueLines.join('\n')}` : '',
@@ -1372,7 +1430,7 @@ export class ChapterPipeline {
                     temperature: patchRoleCfg.temperature,
                     staticPrefixBlocks: [patchRoleCfg.promptText],
                     dynamicTail: [
-                        `## 修补原因\n${reason}`,
+                        `## 修补原因\n${patchReasonText}`,
                         beforeContext ? `## 前文衔接参考（只读勿输出）\n${beforeContext}` : '',
                         `## 需重写的目标段落\n${targetSegments.join('\n\n')}`,
                         afterContext ? `## 后文衔接参考（只读勿输出）\n${afterContext}` : ''

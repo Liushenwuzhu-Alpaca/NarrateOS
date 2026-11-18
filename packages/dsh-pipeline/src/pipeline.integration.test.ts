@@ -13,7 +13,12 @@ import { TxLockConflictError } from '@narrateos/dsh-book-store';
 import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from './index.js';
-import { ensureChapterHeading } from './pipeline/chapter-pipeline.js';
+import {
+    CLEANROOM_PATCH_FALLBACK_REASON,
+    ensureChapterHeading,
+    GATE_MAX_PATCH_PARAGRAPHS,
+    sanitizeTextForCleanroomWriter
+} from './pipeline/chapter-pipeline.js';
 import { DshLlmAdapter, resolveRoleReasoningEffort, resolveRoleRoute } from './runner/dsh-llm-adapter.js';
 import { RoleLoader } from './roles/role-loader.js';
 import { RoleRunner } from './runner/role-runner.js';
@@ -3081,5 +3086,360 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             await readFile(join(bookRoot, `.ops/session_logs/${offLibSession!.sessionId}.json`), 'utf8')
         ) as { requestInput?: unknown };
         expect(offLibLog.requestInput).toBeUndefined();
+    });
+
+    it('sanitizeTextForCleanroomWriter 正确切分 ASCII 分号、剔除 SELF_ONLY/禁令/身体解剖词，且 LOCAL_PATCH（含 cleanroom=true）禁止 fail-open 回退原始 reason', async () => {
+        // 1. 单元测试：ASCII `;` 分句 + `\bSELF_ONLY\b` + 扩展否定词 + 空残余子句丢弃
+        expect(
+            sanitizeTextForCleanroomWriter(
+                '请保持码头夜班节奏; 严禁泄露 SELF_ONLY 秘密; 不可写指节、喉结与瞳孔; 切勿泄露 OMNISCIENT_SECRET_X；指节；。'
+            )
+        ).toBe('请保持码头夜班节奏; 请调整写、与;');
+
+        expect(
+            sanitizeTextForCleanroomWriter(
+                '不能、不可、避免、切勿、莫要、绝不、决不、勿泄露; SELF_ONLY 隐秘; 指节；瞳孔；'
+            )
+        ).toBe('请调整、请调整、请调整、请调整、请调整、请调整、请调整、请调整泄露;');
+
+        expect(
+            sanitizeTextForCleanroomWriter('严禁泄露 SELF_ONLY 情报; 禁止触犯 Stage Ceiling。')
+        ).toBe('');
+
+        // 2. 集成测试：cleanroom=false 默认 Patch 模式与 cleanroom=true 单书覆盖模式均禁止回退原始敏感 reason，且不输出空壳 factIssueLines
+        const runPatchSanitizeCheck = async (cleanroomOverride: boolean) => {
+            const bookRoot = await createGitBookWorkspace(
+                tempDirs,
+                `patch-no-failopen-${cleanroomOverride ? 'cleanroom' : 'memory'}`
+            );
+            if (cleanroomOverride) {
+                await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
+                await writeFile(
+                    join(bookRoot, 'world/roles/prompts/patch.md'),
+                    '# 单书 Patch 净室提示词\n\n直接输出改写后的目标段落。',
+                    'utf8'
+                );
+                await writeFile(
+                    join(bookRoot, 'world/roles/patch.yml'),
+                    [
+                        'id: patch',
+                        'pool: strong_creative',
+                        'reasoningEffort: low',
+                        'cleanroom: true',
+                        'promptFile: prompts/patch.md',
+                        'temperature: 0.4',
+                        'maxSteps: 1',
+                        'maxReadCalls: 0',
+                        'tools: []',
+                        'yieldTool: null'
+                    ].join('\n'),
+                    'utf8'
+                );
+            }
+
+            const ctx = new Context();
+            const promptFiber = await ctx.plugin(SystemPrompt);
+            registerCleanup(() => promptFiber.dispose());
+            const toolsFiber = await ctx.plugin(ToolsService);
+            registerCleanup(() => toolsFiber.dispose());
+            const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+            registerCleanup(() => storeFiber.dispose());
+            const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+            registerCleanup(() => bookToolsFiber.dispose());
+
+            let fcCalls = 0;
+            let capturedPatchPrompt = '';
+            let cleanroomCallIndex = 0;
+
+            await createHeadlessMockServices(ctx, {
+                onAgent: async ({ tools, execTool, taskPrompt }) => {
+                    if (tools.has('yield_context_pack')) {
+                        await execTool('yield_context_pack', {
+                            selected_entity_ids: ['char_001'],
+                            recall_queries: [],
+                            selected_lore_files: []
+                        });
+                        return;
+                    }
+                    if (tools.has('yield_outline')) {
+                        await execTool('yield_outline', {
+                            chapter_title: '防泄漏修补',
+                            target_word_count: 1500,
+                            focus_cast: ['char_001'],
+                            background_cast: [],
+                            ending_beat: 'HOOK',
+                            director_rationale: '秘辛',
+                            chapter_turn: '检查栈桥铁门',
+                            scene_plan: [
+                                { scene_index: 1, location: '码头', summary: '巡夜', is_spotlight: true }
+                            ],
+                            outline_text: '沈默核查三号码头铁门锁舌。'
+                        });
+                        return;
+                    }
+                    if (tools.has('yield_patched_draft')) {
+                        capturedPatchPrompt = taskPrompt;
+                        await execTool('patch_paragraphs', {
+                            edits: [
+                                {
+                                    start_paragraph: 1,
+                                    end_paragraph: 1,
+                                    replacement_paragraphs: ['沈默抬手摸到铁门冰凉的锁舌。']
+                                }
+                            ]
+                        });
+                        await execTool('yield_patched_draft', { summary: '安全修补' });
+                        return;
+                    }
+                    if (tools.has('yield_verdict')) {
+                        fcCalls += 1;
+                        if (fcCalls === 1) {
+                            await execTool('yield_verdict', {
+                                passed: false,
+                                issues: [
+                                    {
+                                        severity: 'LOCAL_PATCH',
+                                        paragraph_index: 1,
+                                        description: '严禁泄露 SELF_ONLY 秘密; 禁止触犯 Stage Ceiling。',
+                                        quote_draft: '沈默想起铁箱里的隐秘。',
+                                        quote_source: '驻留节点：三号码头货栈',
+                                        source_ref: 'entities/char_001.md'
+                                    }
+                                ]
+                            });
+                            return;
+                        }
+                        await execTool('yield_verdict', { passed: true, issues: [] });
+                        return;
+                    }
+                    if (tools.has('yield_state_patch')) {
+                        await execTool('yield_state_patch', {
+                            entity_patches: [],
+                            story_day_delta: 0,
+                            chapter_summary: '完成防泄漏局部修补验证。',
+                            next_chapter_options: ['继续']
+                        });
+                    }
+                },
+                onLlmStream: ({ messages }) => {
+                    cleanroomCallIndex += 1;
+                    if (cleanroomOverride && cleanroomCallIndex === 2) {
+                        capturedPatchPrompt = JSON.stringify(messages);
+                        return textToStreamChunks('沈默抬手摸到铁门冰凉的锁舌。');
+                    }
+                    return textToStreamChunks('# 防泄漏修补\n\n沈默想起铁箱里的隐秘。');
+                }
+            });
+
+            const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+            registerCleanup(() => pipeFiber.dispose());
+
+            const res = await ctx.narratePipeline.stepChapter({
+                chapterNumber: 1,
+                chapterGoal: '验证 Patch 不 fail-open'
+            });
+            expect(res.status).toBe('COMMITTED');
+            expect(capturedPatchPrompt).toContain(CLEANROOM_PATCH_FALLBACK_REASON);
+            expect(capturedPatchPrompt).not.toContain('SELF_ONLY');
+            expect(capturedPatchPrompt).not.toContain('Stage Ceiling');
+            expect(capturedPatchPrompt).not.toContain('严禁');
+            expect(capturedPatchPrompt).not.toContain('禁止');
+            if (!cleanroomOverride) {
+                expect(capturedPatchPrompt).not.toContain('## 事实核查修补清单');
+                expect(capturedPatchPrompt).not.toContain('- [1] ');
+            }
+        };
+
+        await runPatchSanitizeCheck(false);
+        await runPatchSanitizeCheck(true);
+    });
+
+    it('PLAN_CONFLICT 触发 REPLAN 记录真实 REPLAN 阶段、递增 writerAttempt，且 StaticProseGate 传入 maxPatchParagraphs=15', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'replan-and-gate-max-patch');
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const capturedGateOptions: Array<number | undefined> = [];
+        const customGate = new bookStorePlugin.StaticProseGate();
+        const origEvaluate = customGate.evaluate.bind(customGate);
+        customGate.evaluate = (text, opts = {}) => {
+            capturedGateOptions.push(opts.maxPatchParagraphs);
+            return origEvaluate(text, opts);
+        };
+
+        let plannerCount = 0;
+        let fcCount = 0;
+        let writerCount = 0;
+        const stageSessions: Array<{ stage: string; attempt?: number; triggerReason?: string }> = [];
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    plannerCount += 1;
+                    await execTool('yield_outline', {
+                        chapter_title: plannerCount === 1 ? '细纲初稿' : '细纲重排',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: plannerCount === 1 ? '初版转折' : '修正后转折',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '排查', is_spotlight: true }
+                        ],
+                        outline_text:
+                            plannerCount === 1
+                                ? '沈默翻找铁箱。'
+                                : '沈默按正常物理路径绕过封锁线检查铁箱。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    fcCount += 1;
+                    if (fcCount === 1) {
+                        await execTool('yield_verdict', {
+                            passed: false,
+                            issues: [
+                                {
+                                    severity: 'PLAN_CONFLICT',
+                                    paragraph_index: 1,
+                                    description: '细纲要求直接穿墙进入封锁区，违背物理连通规则',
+                                    quote_draft: '沈默直接走进内库。',
+                                    quote_source: '驻留节点：三号码头货栈',
+                                    source_ref: 'entities/char_001.md'
+                                }
+                            ]
+                        });
+                        return;
+                    }
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: 'REPLAN 重排并二次出稿通过。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => {
+                writerCount += 1;
+                if (writerCount === 1) {
+                    return textToStreamChunks('# 细纲初稿\n\n沈默直接走进内库。');
+                }
+                return textToStreamChunks('# 细纲重排\n\n沈默沿外廊绕行，验看封条后走进货栈。');
+            }
+        });
+
+        const pipeline = new pipelinePlugin.ChapterPipeline({
+            store: ctx.narrateStore.openStore(bookRoot),
+            roleRunner: new RoleRunner({
+                ctx,
+                storeService: ctx.narrateStore,
+                toolsService: ctx.narrateTools,
+                roleLoader: new RoleLoader(),
+                llmAdapter: new DshLlmAdapter(ctx.llm, {
+                    poolRouting: {
+                        strong_creative: { provider: 'mock', model: 'mock-strong' },
+                        fast_retrieval: { provider: 'mock', model: 'mock-fast' },
+                        audit: { provider: 'mock', model: 'mock-audit' }
+                    }
+                }),
+                poolRouting: {
+                    strong_creative: { provider: 'mock', model: 'mock-strong' },
+                    fast_retrieval: { provider: 'mock', model: 'mock-fast' },
+                    audit: { provider: 'mock', model: 'mock-audit' }
+                }
+            }),
+            roleLoader: new RoleLoader(),
+            llm: new DshLlmAdapter(ctx.llm, {
+                poolRouting: {
+                    strong_creative: { provider: 'mock', model: 'mock-strong' },
+                    fast_retrieval: { provider: 'mock', model: 'mock-fast' },
+                    audit: { provider: 'mock', model: 'mock-audit' }
+                }
+            }),
+            system: ctx.narrateStore.system,
+            gate: customGate
+        });
+
+        const res = await pipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '验证 REPLAN 与 writerAttempt 递增',
+            onStageSession: (evt) => {
+                stageSessions.push({
+                    stage: evt.stage,
+                    ...(evt.attempt !== undefined ? { attempt: evt.attempt } : {}),
+                    ...(evt.triggerReason !== undefined ? { triggerReason: evt.triggerReason } : {})
+                });
+            }
+        });
+
+        expect(res.status).toBe('COMMITTED');
+        expect(res.replanCount).toBe(1);
+        expect(capturedGateOptions.length).toBeGreaterThanOrEqual(2);
+        for (const maxPatch of capturedGateOptions) {
+            expect(maxPatch).toBe(GATE_MAX_PATCH_PARAGRAPHS);
+            expect(maxPatch).toBe(15);
+        }
+
+        // 验证 onStageSession 回调与 .ops/runs.jsonl 均记录 PLANNER(1) -> WRITER(1) -> REPLAN(2, FACT_PLAN_CONFLICT) -> WRITER(2)
+        expect(stageSessions).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ stage: 'PLANNER', attempt: 1 }),
+                expect.objectContaining({ stage: 'WRITER', attempt: 1 }),
+                expect.objectContaining({
+                    stage: 'REPLAN',
+                    attempt: 2,
+                    triggerReason: 'FACT_PLAN_CONFLICT'
+                }),
+                expect.objectContaining({ stage: 'WRITER', attempt: 2 })
+            ])
+        );
+
+        const runsRaw = await readFile(join(bookRoot, '.ops/runs.jsonl'), 'utf8');
+        const runs = runsRaw
+            .split(/\r?\n/)
+            .filter((line) => line.trim().length > 0)
+            .map(
+                (line) =>
+                    JSON.parse(line) as {
+                        stage: string;
+                        status: string;
+                        attempt?: number;
+                        triggerReason?: string;
+                    }
+            );
+        expect(
+            runs.some(
+                (r) =>
+                    r.stage === 'REPLAN' &&
+                    r.status === 'completed' &&
+                    r.attempt === 2 &&
+                    r.triggerReason === 'FACT_PLAN_CONFLICT'
+            )
+        ).toBe(true);
+        const writerCompletedAttempts = runs
+            .filter((r) => r.stage === 'WRITER' && r.status === 'completed')
+            .map((r) => r.attempt);
+        expect(writerCompletedAttempts).toEqual([1, 2]);
     });
 });

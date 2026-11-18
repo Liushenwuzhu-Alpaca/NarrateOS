@@ -1455,5 +1455,191 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             skipped: true,
             samples: []
         });
+
+        // 5. 清空声纹池后验证缺章返回 404，候选全部未通过门禁返回 422（不再返回 500）
+        await writeFile(join(bookRoot, '.ops/voice_samples.yaml'), 'samples: []\n', 'utf8');
+        const missingChapterRes = await web.invoke('POST', '/api/narrate/voice-harvest', {
+            chapterNumber: 99
+        });
+        expect(missingChapterRes.statusCode).toBe(404);
+    });
+
+    it('POST /api/narrate/voice-harvest 候选样本全部未通过门禁时返回 422 且多轮 LOCAL_PATCH SSE 不串用旧 sessionId', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'voice-harvest-422-and-sse-session');
+        const booksRoot = join(bookRoot, '..');
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot, booksRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot, booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+        const web = createMockWebServer(ctx);
+
+        let patchCalls = 0;
+        let fcCalls = 0;
+        let writerCalls = 0;
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '双轮修补测试',
+                        target_word_count: 1200,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '双轮 Patch SSE 时序验证',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '巡检', is_spotlight: true }
+                        ],
+                        outline_text: '沈默巡检码头。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_patched_draft')) {
+                    patchCalls += 1;
+                    if (patchCalls === 1) {
+                        // 第 1 轮（Gate 触发）修补第 2 段（0 索引为自动补全的一级标题），通过 StaticProseGate 门禁
+                        await execTool('patch_paragraphs', {
+                            edits: [
+                                {
+                                    start_paragraph: 2,
+                                    end_paragraph: 2,
+                                    replacement_paragraphs: ['沈默把铜钥匙收进风衣内袋。']
+                                }
+                            ]
+                        });
+                        await execTool('yield_patched_draft', {
+                            summary: '第1轮局部修补'
+                        });
+                        return;
+                    }
+                    // 第 2 轮（FactChecker 触发）修补第 3 段
+                    await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 3,
+                                end_paragraph: 3,
+                                replacement_paragraphs: ['老周把账本推到煤油灯下。']
+                            }
+                        ]
+                    });
+                    await execTool('yield_patched_draft', { summary: '第2轮局部修补' });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    fcCalls += 1;
+                    if (fcCalls === 1) {
+                        await execTool('yield_verdict', {
+                            passed: false,
+                            issues: [
+                                {
+                                    severity: 'LOCAL_PATCH',
+                                    paragraph_index: 3,
+                                    description: '第3段老周位置与三号码头货栈存档不符，请改为在灯下翻账本',
+                                    quote_draft: '老周转身走出大门。',
+                                    quote_source: '驻留节点：三号码头货栈',
+                                    source_ref: 'entities/char_001.md'
+                                }
+                            ]
+                        });
+                        return;
+                    }
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '双轮修补完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                if (opts.system?.includes('Voice Harvest')) {
+                    // 返回全部命中 StaticProseGate 微距词的候选样本，触发 422 ValidationError
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            samples: [
+                                { tag: '套话', text: '他指节泛白，喉结滚动。' }
+                            ]
+                        })
+                    );
+                }
+                writerCalls += 1;
+                if (writerCalls === 1) {
+                    return textToStreamChunks(
+                        [
+                            '沈默走进货栈。',
+                            '',
+                            '他指节泛白地扶住门框。',
+                            '',
+                            '老周转身走出大门。',
+                            '',
+                            '海风从窗缝灌进来。',
+                            '',
+                            '拖轮拉响了低沉的汽笛。'
+                        ].join('\n')
+                    );
+                }
+                return textToStreamChunks('沈默合上账本。');
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { booksRoot, heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+
+        const stepRes = await web.invoke('POST', '/api/narrate/step', {
+            chapterNumber: 1,
+            chapterGoal: '测试多轮 LOCAL_PATCH SSE 事件与 stage:session'
+        });
+        expect(stepRes.statusCode).toBe(200);
+
+        const stageSessionEvents = sse.events.filter((e) => e.event === 'stage:session');
+        const patchSessionEvents = stageSessionEvents.filter(
+            (e) => e.data['stage'] === 'LOCAL_PATCH'
+        );
+        expect(patchSessionEvents).toHaveLength(2);
+        const patchSession1 = patchSessionEvents[0]!.data['sessionId'];
+        const patchSession2 = patchSessionEvents[1]!.data['sessionId'];
+        expect(typeof patchSession1).toBe('string');
+        expect(typeof patchSession2).toBe('string');
+        expect(patchSession1).not.toBe(patchSession2);
+        expect(patchSessionEvents[0]!.data['attempt']).toBe(1);
+        expect(patchSessionEvents[1]!.data['attempt']).toBe(2);
+
+        // 验证第 2 轮 LOCAL_PATCH 进度事件（"Gate 触发第 2 轮局部修补"）未复用第 1 轮旧 sessionId
+        const round2ProgressStage = sse.events.find(
+            (e) =>
+                e.event === 'stage' &&
+                e.data['stage'] === 'LOCAL_PATCH' &&
+                typeof e.data['message'] === 'string' &&
+                e.data['message'].includes('第 2 轮')
+        );
+        expect(round2ProgressStage).toBeDefined();
+        expect(round2ProgressStage!.data['activeSessionId']).toBeUndefined();
+
+        // 验证候选样本全部被 StaticProseGate 拒绝时返回 422
+        const rejectedHarvestRes = await web.invoke('POST', '/api/narrate/voice-harvest', {
+            chapterNumber: 1
+        });
+        expect(rejectedHarvestRes.statusCode).toBe(422);
     });
 });

@@ -41,6 +41,16 @@ export class NotFoundError extends Error {
     }
 }
 
+/** 业务规则或静态门禁校验未通过异常（HTTP 422） */
+export class ValidationError extends Error {
+    public readonly statusCode = 422 as const;
+
+    constructor(message: string) {
+        super(message);
+        this.name = 'ValidationError';
+    }
+}
+
 /** 细纲级物理悖论异常（触发退回 Planner 改纲 v2） */
 export class PlanConflictError extends Error {
     readonly chapterNumber: number;

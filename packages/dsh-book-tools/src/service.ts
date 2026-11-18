@@ -129,8 +129,8 @@ export interface BuildRoleToolsOptions {
 /** 一次运行的受控工具集实例与状态控制器 */
 export interface BuiltRoleToolSet {
     readonly runId: string;
-    readonly bookRoot: string;
-    readonly fence: PathFence;
+    readonly bookRoot: string | undefined;
+    readonly fence: PathFence | undefined;
     readonly quota: ReadQuotaCounter;
     readonly tools: ToolDefinition[];
     readonly toolMap: ReadonlyMap<string, ToolDefinition>;
@@ -164,7 +164,11 @@ export class NarrateToolsService {
             throw new Error('NarrateToolsService 已卸载，拒绝创建工具集');
         }
 
-        const requestedTools = options.tools ?? ['book_read', 'book_grep', 'book_glob', 'book_edit'];
+        const requestedTools =
+            options.tools ??
+            (options.yieldTool === 'yield_patched_draft'
+                ? []
+                : ['book_read', 'book_grep', 'book_glob', 'book_edit']);
         const usesPatchSession =
             requestedTools.includes('patch_paragraphs') || options.yieldTool === 'yield_patched_draft';
         const hasDiskTools =
@@ -185,24 +189,26 @@ export class NarrateToolsService {
         }
 
         const resolvedRoot = options.bookRoot ?? this.narrateStore.bookRoot ?? this.defaultBookRoot;
-        if (!isPureInMemoryPatch && (!resolvedRoot || resolvedRoot.trim().length === 0)) {
+        const bookRoot =
+            resolvedRoot && resolvedRoot.trim().length > 0 ? resolve(resolvedRoot) : undefined;
+        if (!isPureInMemoryPatch && !bookRoot) {
             throw new Error('buildRoleTools 需要有效的 bookRoot（或先通过 narrateStore.switchBook 选书）');
         }
-        const bookRoot =
-            resolvedRoot && resolvedRoot.trim().length > 0
-                ? resolve(resolvedRoot)
-                : resolve('__in_memory_patch__');
         const runId = options.runId ?? randomUUID();
 
-        const createdStaging = !isPureInMemoryPatch && !this.narrateStore.staging.has(runId);
-        if (createdStaging) {
+        const createdStaging =
+            !isPureInMemoryPatch && bookRoot !== undefined && !this.narrateStore.staging.has(runId);
+        if (createdStaging && bookRoot !== undefined) {
             this.narrateStore.staging.begin(runId, bookRoot);
         }
 
-        const fence = new PathFence(bookRoot, {
-            allowedOpsPaths: options.allowedOpsPaths,
-            allowedOpsWritePaths: options.allowedOpsWritePaths
-        });
+        const fence =
+            !isPureInMemoryPatch && bookRoot !== undefined
+                ? new PathFence(bookRoot, {
+                      allowedOpsPaths: options.allowedOpsPaths,
+                      allowedOpsWritePaths: options.allowedOpsWritePaths
+                  })
+                : undefined;
         const quota = new ReadQuotaCounter({
             maxReadCalls: options.maxReadCalls,
             yieldToolHint: options.yieldTool ?? 'yield_*'
@@ -219,7 +225,7 @@ export class NarrateToolsService {
                     createBookReadTool({
                         store: this.narrateStore,
                         runId,
-                        fence,
+                        fence: fence!,
                         quota
                     })
                 );
@@ -228,7 +234,7 @@ export class NarrateToolsService {
                     createBookGrepTool({
                         store: this.narrateStore,
                         runId,
-                        fence,
+                        fence: fence!,
                         quota
                     })
                 );
@@ -237,7 +243,7 @@ export class NarrateToolsService {
                     createBookGlobTool({
                         store: this.narrateStore,
                         runId,
-                        fence,
+                        fence: fence!,
                         quota
                     })
                 );
@@ -246,7 +252,7 @@ export class NarrateToolsService {
                     createBookEditTool({
                         store: this.narrateStore,
                         runId,
-                        fence
+                        fence: fence!
                     })
                 );
             } else if (toolName === 'patch_paragraphs') {
@@ -267,7 +273,7 @@ export class NarrateToolsService {
             toolList.push(
                 createYieldContextPackTool({
                     store: this.narrateStore,
-                    bookRoot,
+                    bookRoot: bookRoot!,
                     runId,
                     targetChapter: options.targetChapter,
                     targetDay: options.targetDay,
@@ -285,9 +291,9 @@ export class NarrateToolsService {
             toolList.push(
                 createYieldVerdictTool({
                     store: this.narrateStore,
-                    bookRoot,
+                    bookRoot: bookRoot!,
                     runId,
-                    fence,
+                    fence: fence!,
                     draftText: options.draftText,
                     draftPath: options.draftPath,
                     onYield: recordYield
@@ -297,7 +303,7 @@ export class NarrateToolsService {
             toolList.push(
                 createYieldStatePatchTool({
                     store: this.narrateStore,
-                    bookRoot,
+                    bookRoot: bookRoot!,
                     chapterNumber: options.chapterNumber ?? 1,
                     timelineMode: options.timelineMode,
                     allowInnateMutation: options.allowInnateMutation,
@@ -312,9 +318,9 @@ export class NarrateToolsService {
             toolList.push(
                 createYieldDreamCommitTool({
                     store: this.narrateStore,
-                    bookRoot,
+                    bookRoot: bookRoot!,
                     runId,
-                    fence,
+                    fence: fence!,
                     onYield: recordYield
                 })
             );

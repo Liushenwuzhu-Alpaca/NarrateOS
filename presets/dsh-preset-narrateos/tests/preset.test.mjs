@@ -467,6 +467,13 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         assert.ok(librarianPrompt.includes(marker), `librarian.md 缺少关键契约锚点: ${marker}`);
     }
     assert.ok(!librarianPrompt.includes('"lore_xxx.md"'), 'librarian.md 示例路径必须补全 lore_library/ 前缀，避免触发 PathFence 拦截');
+    for (const forbiddenNegative of ['不得读取', '不整章', '不在选页职责范围内']) {
+        assert.ok(!librarianPrompt.includes(forbiddenNegative), `librarian.md 应保持纯粹正向陈述，不应包含 "${forbiddenNegative}"`);
+    }
+
+    const factCheckerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/fact-checker.md'), 'utf8');
+    assert.ok(factCheckerPrompt.includes('1-4 个自然段'), 'fact-checker.md LOCAL_PATCH 阈值必须为 1-4 个自然段');
+    assert.ok(factCheckerPrompt.includes('5 个及以上自然段'), 'fact-checker.md MULTI_REWRITE 阈值必须为 5 个及以上自然段');
 
     const plannerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/planner.md'), 'utf8');
     for (const marker of ['实体档案摘要', '上章上下文', '点查']) {

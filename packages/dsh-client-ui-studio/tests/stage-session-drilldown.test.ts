@@ -1142,4 +1142,202 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(liveReqDetails?.textContent).toContain('本章细纲：夜探码头');
         expect(container.textContent).toContain('LIVE_TOOL_RESULT_COMPLETE');
     });
+
+    it('终态不被 isHealing 覆盖、PROSE_GATE 保持 healing、stage:session 同步 selectedStageSession、且 StageSessionViewer 随 status 变更重拉并兼容 turns[].toolCalls 与空 requestInput', async () => {
+        const { container } = await mountStudio();
+        await openStageStrip(container);
+
+        // 1. WRITER 启动 -> LOCAL_PATCH (healing) -> PROSE_GATE 保持 healing 与门禁 Patch 徽标 -> 终态 completed 不被 isHealing 覆盖为 healing
+        await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
+        await emit({
+            event: 'stage:session',
+            data: {
+                stage: 'WRITER',
+                role: 'writer',
+                chapter: 3,
+                runId: 'run-heal-1',
+                sessionId: 'sess-w1',
+                attempt: 1,
+                status: 'running'
+            }
+        });
+        await emit({
+            event: 'stage:session',
+            data: {
+                stage: 'LOCAL_PATCH',
+                role: 'patch',
+                chapter: 3,
+                runId: 'run-heal-1',
+                sessionId: 'sess-p1',
+                attempt: 1,
+                triggerReason: 'PROSE_GATE: micro_anatomy',
+                status: 'running'
+            }
+        });
+        expect(stageNode(container, 'WRITER').classList.contains('ns-stage-healing')).toBe(true);
+        expect(stageNode(container, 'WRITER').textContent).toContain('门禁 Patch');
+
+        // 点击打开 sess-p1 详情面板（此时处于 healing/running 状态）
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-p1',
+            runId: 'run-heal-1',
+            stage: 'LOCAL_PATCH',
+            status: 'running'
+        });
+        await click(stageNode(container, 'WRITER'));
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        // PROSE_GATE 紧随 LOCAL_PATCH 后仍无终态结果 -> 保持 healing 与门禁 Patch 徽标
+        await emit({
+            event: 'stage',
+            data: {
+                stage: 'PROSE_GATE',
+                chapterNumber: 3,
+                message: '运行 0 Token 静态文风门禁'
+            }
+        });
+        expect(stageNode(container, 'WRITER').classList.contains('ns-stage-healing')).toBe(true);
+        expect(stageNode(container, 'WRITER').textContent).toContain('门禁 Patch');
+
+        // LOCAL_PATCH 终态 completed 到达 -> 状态更新为 done（不再被 isHealing 覆盖），且触发 StageSessionViewer 重新拉取完整持久化详情
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-p1',
+            runId: 'run-heal-1',
+            stage: 'LOCAL_PATCH',
+            status: 'completed',
+            modelId: 'openai:gpt-5.4',
+            thinkingChars: 128,
+            requestInput: {
+                pool: 'strong_creative',
+                systemPrompt: '补丁净室提示'
+            },
+            turns: [
+                {
+                    turnIndex: 0,
+                    toolCalls: [
+                        {
+                            id: 'call-turn-1',
+                            name: 'patch_paragraphs',
+                            arguments: { edits: [] },
+                            result: 'FROM_TURN_TOOL_RESULT',
+                            status: 'completed'
+                        }
+                    ]
+                }
+            ]
+        });
+        await emit({
+            event: 'stage:session',
+            data: {
+                stage: 'LOCAL_PATCH',
+                role: 'patch',
+                chapter: 3,
+                runId: 'run-heal-1',
+                sessionId: 'sess-p1',
+                attempt: 1,
+                status: 'completed'
+            }
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(stageNode(container, 'WRITER').classList.contains('ns-stage-done')).toBe(true);
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('openai:gpt-5.4');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('128 chars');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('补丁净室提示');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('FROM_TURN_TOOL_RESULT');
+
+        // 2. 下游阶段激活与 FAILED 事件均同步更新 selectedStageSession.status
+        await emit({
+            event: 'stage:session',
+            data: {
+                stage: 'FACT_CHECKER',
+                role: 'fact-checker',
+                chapter: 3,
+                runId: 'run-heal-1',
+                sessionId: 'sess-fc1',
+                status: 'running'
+            }
+        });
+        await click(stageNode(container, 'FACT_CHECKER'));
+        await emit({
+            event: 'stage',
+            data: {
+                stage: 'EXTRACTOR',
+                chapterNumber: 3,
+                runId: 'run-heal-1',
+                sessionId: 'sess-ext1',
+                status: 'running'
+            }
+        });
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+
+        await click(stageNode(container, 'EXTRACTOR'));
+        await emit({
+            event: 'stage',
+            data: {
+                stage: 'FAILED',
+                error: '模拟失败'
+            }
+        });
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已拦截');
+
+        // 3. StageSessionViewer 对空 requestInput ({}) 不渲染空 <details>，且在原生视图下补充渲染 turns[].toolCalls
+        const singleContainer = document.createElement('div');
+        document.body.appendChild(singleContainer);
+        const singleRoot = createRoot(singleContainer);
+        mountedRoots.push(singleRoot);
+        const mockSessions: StudioSessionsService = {
+            retain: vi.fn((target) => ({
+                sessionId: typeof target === 'string' ? target : target.childSessionId,
+                ready: Promise.resolve(),
+                release: vi.fn()
+            }))
+        };
+        vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
+            sessionId: 'sess-empty-req',
+            runId: 'run-empty-req',
+            stage: 'PLANNER',
+            status: 'completed',
+            requestInput: {},
+            turns: [
+                {
+                    turnIndex: 0,
+                    toolCalls: [
+                        {
+                            id: 'call-sup-turn',
+                            name: 'book_grep',
+                            result: 'SUPPLEMENTARY_FROM_TURNS',
+                            status: 'completed'
+                        }
+                    ]
+                }
+            ]
+        });
+        await act(async () => {
+            singleRoot.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'PLANNER',
+                        stageLabel: '2. Planner',
+                        sessionId: 'sess-empty-req',
+                        runId: 'run-empty-req',
+                        status: 'done'
+                    },
+                    sessionsService: mockSessions,
+                    SessionProvider: ({ children }) => createElement('div', null, children),
+                    renderStageConversation: () => createElement('div', null, 'native')
+                })
+            );
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(singleContainer.querySelector('details[data-session-request-input="true"]')).toBeNull();
+        expect(singleContainer.textContent).toContain('SUPPLEMENTARY_FROM_TURNS');
+    });
 });

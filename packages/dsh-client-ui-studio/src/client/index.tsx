@@ -34,6 +34,7 @@ import { BootBookModal } from './BootBookModal';
 import {
     CenterWorkbench,
     resolveStageId,
+    STAGE_REPAIR_META,
     type CenterWorkbenchProps,
     type CenterWorkbenchDraftHandle,
     type DirectorSignalKind,
@@ -317,16 +318,22 @@ function mapRunStatusToStageStatus(rawStatus: string): StageNodeStatus {
 }
 
 function resolveRepairBadge(stageName: string): string | undefined {
-    const upper = stageName.trim().toUpperCase();
-    if (upper === 'LOCAL_PATCH' || upper === 'PATCH') return '门禁 Patch';
-    if (upper === 'REWRITE') return 'Rewrite';
-    if (upper === 'REPLAN') return 'Replan';
-    return undefined;
+    return STAGE_REPAIR_META[stageName.trim().toUpperCase()]?.badge;
 }
 
 function isRunningSessionStatus(status: string): boolean {
     const normalized = status.trim().toLowerCase();
     return normalized === 'running' || normalized === 'active' || normalized === 'in_progress';
+}
+
+function updateStageSessionsToTerminal(
+    sessions: readonly StageAttemptSession[] | undefined,
+    terminalStatus: 'completed' | 'failed'
+): StageAttemptSession[] | undefined {
+    if (!sessions) return undefined;
+    return sessions.map((item) =>
+        isRunningSessionStatus(item.status) ? { ...item, status: terminalStatus } : item
+    );
 }
 
 function upsertStageSession(
@@ -338,8 +345,7 @@ function upsertStageSession(
     if (existingIdx >= 0) {
         const existing = prev[existingIdx]!;
         const incomingUpper = entry.stage.trim().toUpperCase();
-        const keepExistingStage =
-            incomingUpper === 'PROSE_GATE' || incomingUpper === 'STATIC_GATE';
+        const keepExistingStage = incomingUpper === 'PROSE_GATE';
         prev[existingIdx] = {
             ...existing,
             ...entry,
@@ -481,6 +487,22 @@ export function NarrateStudioRoot({
     const [latestSseStage, setLatestSseStage] = useState<string | null>(null);
     const [haltWaiting, setHaltWaiting] = useState(false);
     const [stageOverrides, setStageOverrides] = useState<Partial<Record<PipelineStageId, StageNodeState>>>({});
+    const stageOverridesRef = useRef<Partial<Record<PipelineStageId, StageNodeState>>>({});
+    const applyStageOverrides = useCallback(
+        (
+            updater:
+                | Partial<Record<PipelineStageId, StageNodeState>>
+                | ((
+                      prev: Partial<Record<PipelineStageId, StageNodeState>>
+                  ) => Partial<Record<PipelineStageId, StageNodeState>>)
+        ) => {
+            const next =
+                typeof updater === 'function' ? updater(stageOverridesRef.current) : updater;
+            stageOverridesRef.current = next;
+            setStageOverrides(next);
+        },
+        []
+    );
     const [historicalRuns, setHistoricalRuns] = useState<StageRunRecord[]>([]);
     const [liveRunChapter, setLiveRunChapter] = useState<number | null>(null);
     const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId | null>(null);
@@ -784,7 +806,7 @@ export function NarrateStudioRoot({
                     seq === refreshRequestRef.current
                 ) {
                     setLiveRunChapter(activeTargetChapter);
-                    setStageOverrides((prev) =>
+                    applyStageOverrides((prev) =>
                         Object.keys(prev).length > 0
                             ? prev
                             : deriveHistoricalStageOverrides(activeRunsRes.runs)
@@ -828,7 +850,7 @@ export function NarrateStudioRoot({
                 runsRequestSeqRef.current += 1;
                 currentBookRootRef.current = bookRoot;
                 setHaltWaiting(false);
-                setStageOverrides({});
+                applyStageOverrides({});
                 setInspectedStageId(null);
                 setHistoricalRuns([]);
                 setLiveRunChapter(null);
@@ -848,7 +870,7 @@ export function NarrateStudioRoot({
 
                 if (stageName === 'STARTING') {
                     setHaltWaiting(false);
-                    setStageOverrides({});
+                    applyStageOverrides({});
                     setInspectedStageId(null);
                     setLiveRunChapter(asNumber(data['chapterNumber']) ?? asNumber(data['chapter']) ?? null);
                     setLatestSseStage('LIBRARIAN');
@@ -866,28 +888,29 @@ export function NarrateStudioRoot({
 
                 if (stageName === 'FAILED') {
                     const errText = asString(data['error']) ?? '章节推进失败';
-                    setStageOverrides((prev) => {
+                    applyStageOverrides((prev) => {
                         const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
                         for (const id of STAGE_SEQUENCE) {
                             const cur = next[id];
                             if (cur && (cur.status === 'active' || cur.status === 'healing')) {
+                                const updatedSessions = updateStageSessionsToTerminal(
+                                    cur.sessions,
+                                    'failed'
+                                );
                                 next[id] = {
                                     ...cur,
                                     status: 'halt',
-                                    ...(cur.sessions
-                                        ? {
-                                              sessions: cur.sessions.map((item) =>
-                                                  isRunningSessionStatus(item.status)
-                                                      ? { ...item, status: 'failed' }
-                                                      : item
-                                              )
-                                          }
-                                        : {})
+                                    ...(updatedSessions ? { sessions: updatedSessions } : {})
                                 };
                             }
                         }
                         return next;
                     });
+                    setSelectedStageSession((prev) =>
+                        prev && (prev.status === 'active' || prev.status === 'healing')
+                            ? { ...prev, status: 'halt' }
+                            : prev
+                    );
                     showToast(errText, 'error');
                     void loadStatus().catch(() => undefined);
                     return;
@@ -911,42 +934,42 @@ export function NarrateStudioRoot({
                 const resolvedStage = resolveStageId(stageName);
                 if (resolvedStage && (message || rawSessionId || runId)) {
                     const upperStage = stageName.trim().toUpperCase();
-                    const repairBadge = resolveRepairBadge(stageName);
-                    // PROSE_GATE 每章例行校验,只是 Writer 运行中;LOCAL_PATCH / REWRITE / REPLAN 属于返修重演
-                    const isHealing =
-                        upperStage === 'LOCAL_PATCH' ||
-                        upperStage === 'PATCH' ||
-                        upperStage === 'REWRITE' ||
-                        upperStage === 'REPLAN';
-                    const nodeStatus: StageNodeStatus = isHealing
-                        ? 'healing'
-                        : rawStatus
-                          ? mapRunStatusToStageStatus(rawStatus)
-                          : 'active';
-                    const sessionStatus = rawStatus ?? (isHealing ? 'running' : 'running');
+                    const repairMeta = STAGE_REPAIR_META[upperStage];
+                    const repairBadge = repairMeta?.badge;
+                    const isHealing = Boolean(repairMeta);
+                    const mappedRawStatus = rawStatus
+                        ? mapRunStatusToStageStatus(rawStatus)
+                        : undefined;
+                    const isTerminalRawStatus =
+                        mappedRawStatus !== undefined && mappedRawStatus !== 'active';
+                    const existingCurrent = stageOverridesRef.current[resolvedStage];
+                    const nodeStatus: StageNodeStatus = isTerminalRawStatus
+                        ? mappedRawStatus
+                        : isHealing ||
+                            (upperStage === 'PROSE_GATE' && existingCurrent?.status === 'healing')
+                          ? 'healing'
+                          : (mappedRawStatus ?? 'active');
+                    const sessionStatus = rawStatus ?? 'running';
                     const sessionId = rawSessionId;
                     const parentSessionId = rawParentSessionId;
                     const mode = rawMode;
-                    setStageOverrides((prev) => {
+                    const resolvedIdx = STAGE_SEQUENCE.indexOf(resolvedStage);
+
+                    applyStageOverrides((prev) => {
                         const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
-                        const resolvedIdx = STAGE_SEQUENCE.indexOf(resolvedStage);
                         for (let i = 0; i < STAGE_SEQUENCE.length; i++) {
                             const id = STAGE_SEQUENCE[i]!;
                             if (id === resolvedStage || id === 'DREAMING') continue;
                             const existing = next[id];
                             if (i < resolvedIdx && existing && (existing.status === 'active' || existing.status === 'healing')) {
+                                const updatedSessions = updateStageSessionsToTerminal(
+                                    existing.sessions,
+                                    'completed'
+                                );
                                 next[id] = {
                                     ...existing,
                                     status: 'done',
-                                    ...(existing.sessions
-                                        ? {
-                                              sessions: existing.sessions.map((item) =>
-                                                  isRunningSessionStatus(item.status)
-                                                      ? { ...item, status: 'completed' }
-                                                      : item
-                                              )
-                                          }
-                                        : {})
+                                    ...(updatedSessions ? { sessions: updatedSessions } : {})
                                 };
                             }
                         }
@@ -969,7 +992,11 @@ export function NarrateStudioRoot({
                         next[resolvedStage] = {
                             ...current,
                             status: nodeStatus,
-                            summary: message ?? current?.summary ?? DEFAULT_STAGE_SUMMARIES[resolvedStage],
+                            summary:
+                                message ??
+                                repairMeta?.defaultSummary ??
+                                current?.summary ??
+                                DEFAULT_STAGE_SUMMARIES[resolvedStage],
                             updatedAt: timestamp ?? current?.updatedAt,
                             ...(repairBadge !== undefined ? { badge: repairBadge } : {}),
                             ...(sessionId !== undefined ? { sessionId } : {}),
@@ -980,13 +1007,30 @@ export function NarrateStudioRoot({
                         };
                         return next;
                     });
-                    if (sessionId !== undefined) {
-                        setSelectedStageSession((prev) =>
-                            prev && prev.sessionId === sessionId
-                                ? { ...prev, status: nodeStatus }
-                                : prev
-                        );
-                    }
+                    setSelectedStageSession((prev) => {
+                        if (!prev) return prev;
+                        if (sessionId !== undefined && prev.sessionId === sessionId) {
+                            return prev.status === nodeStatus ? prev : { ...prev, status: nodeStatus };
+                        }
+                        const prevResolved = resolveStageId(prev.stageId);
+                        if (
+                            prevResolved === resolvedStage &&
+                            sessionId !== undefined &&
+                            prev.sessionId !== sessionId &&
+                            (prev.status === 'active' || prev.status === 'healing')
+                        ) {
+                            return { ...prev, status: 'done' };
+                        }
+                        if (
+                            prevResolved !== null &&
+                            prevResolved !== 'DREAMING' &&
+                            STAGE_SEQUENCE.indexOf(prevResolved) < resolvedIdx &&
+                            (prev.status === 'active' || prev.status === 'healing')
+                        ) {
+                            return { ...prev, status: 'done' };
+                        }
+                        return prev;
+                    });
                 }
 
                 setStatus((prev) =>
@@ -1000,29 +1044,32 @@ export function NarrateStudioRoot({
 
                 if (stageName === 'COMMITTED') {
                     const committedCh = asNumber(data['chapterNumber']);
-                    setStageOverrides((prev) => {
+                    applyStageOverrides((prev) => {
                         const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
                         for (const id of STAGE_SEQUENCE) {
                             if (id === 'DREAMING') continue;
                             const cur = next[id];
                             if (cur && (cur.status === 'active' || cur.status === 'healing')) {
+                                const updatedSessions = updateStageSessionsToTerminal(
+                                    cur.sessions,
+                                    'completed'
+                                );
                                 next[id] = {
                                     ...cur,
                                     status: 'done',
-                                    ...(cur.sessions
-                                        ? {
-                                              sessions: cur.sessions.map((item) =>
-                                                  isRunningSessionStatus(item.status)
-                                                      ? { ...item, status: 'completed' }
-                                                      : item
-                                              )
-                                          }
-                                        : {})
+                                    ...(updatedSessions ? { sessions: updatedSessions } : {})
                                 };
                             }
                         }
                         return next;
                     });
+                    setSelectedStageSession((prev) =>
+                        prev &&
+                        resolveStageId(prev.stageId) !== 'DREAMING' &&
+                        (prev.status === 'active' || prev.status === 'healing')
+                            ? { ...prev, status: 'done' }
+                            : prev
+                    );
                     showToast(
                         committedCh
                             ? `Ch.${String(committedCh).padStart(4, '0')} 已提交至 Git WAL`
@@ -1076,7 +1123,7 @@ export function NarrateStudioRoot({
                             : prev.verifiedPassCount,
                     blockedCount: prev.blockedCount ? prev.blockedCount + replanCount + rewriteCount : replanCount + rewriteCount
                 }));
-                setStageOverrides((prev) => ({
+                applyStageOverrides((prev) => ({
                     ...prev,
                     FACT_CHECKER: {
                         status: replanCount > 0 || rewriteCount > 0 ? 'healing' : 'done',
@@ -1138,7 +1185,7 @@ export function NarrateStudioRoot({
                 const dreamMessage = asString(data['message']);
                 setLatestSseStage('DREAMING');
                 if (dreamSessionId || dreamRunId || dreamMessage) {
-                    setStageOverrides((prev) => ({
+                    applyStageOverrides((prev) => ({
                         ...prev,
                         DREAMING: {
                             ...prev.DREAMING,
@@ -1160,7 +1207,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'dream:completed') {
-                setStageOverrides((prev) =>
+                applyStageOverrides((prev) =>
                     prev.DREAMING
                         ? {
                               ...prev,
@@ -1278,7 +1325,7 @@ export function NarrateStudioRoot({
             setChapterDetail(null);
             setSelectedChapter(null);
             setHistoricalRuns([]);
-            setStageOverrides({});
+            applyStageOverrides({});
             setInspectedStageId(null);
             setLiveRunChapter(null);
             setSelectedStageSession(null);
@@ -1414,6 +1461,8 @@ export function NarrateStudioRoot({
 
     const handleHarvestVoice = useCallback(async () => {
         if (harvestingVoice || switchingBookRef.current) return;
+        const epoch = workspaceEpochRef.current;
+        const bookRoot = currentBookRootRef.current;
         const targetChapter =
             selectedChapterRef.current !== null && selectedChapterRef.current > 0
                 ? selectedChapterRef.current
@@ -1421,18 +1470,24 @@ export function NarrateStudioRoot({
         setHarvestingVoice(true);
         try {
             const res = await harvestVoice(targetChapter);
+            if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
+                return;
+            }
             if (res.skipped) {
-                showToast('声纹采集已跳过（当前章节暂无可采集对白样本）');
+                showToast('当前作品已有声纹标本，已跳过本次采集');
             } else {
                 showToast(`声纹采集完成：新增 ${res.harvestedCount} 条样本`);
             }
             await Promise.allSettled([loadStatus(), loadViews()]);
         } catch (err) {
+            if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
+                return;
+            }
             showToast(err instanceof Error ? err.message : String(err), 'error');
         } finally {
             setHarvestingVoice(false);
         }
-    }, [harvestingVoice, loadStatus, loadViews, showToast]);
+    }, [harvestingVoice, isCurrentWorkspace, loadStatus, loadViews, showToast]);
 
     const handleSaveModelRouting = useCallback(
         async (payload: SaveModelRoutingRequest) => {

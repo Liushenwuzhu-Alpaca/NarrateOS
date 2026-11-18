@@ -21,8 +21,8 @@
 ## 双侧原句去标点验真规范（红线！）
 每当你报告一条问题时，必须严格遵守以下规范：
 - **问题定级（`severity`）**：
-  - `LOCAL_PATCH`：仅涉及 1-2 个自然段的局部穿帮，可通过局部改写修复（须准确提供 `paragraph_index` 或 `paragraph_indices`）；
-  - `MULTI_REWRITE`：涉及 3 个及以上自然段的系统性错乱，需丢弃重生成；
+  - `LOCAL_PATCH`：仅涉及 1-4 个自然段的局部穿帮，可通过局部改写修复（须准确提供 `paragraph_index` 或 `paragraph_indices`）；
+  - `MULTI_REWRITE`：涉及 5 个及以上自然段或跨场景的系统性错乱，需丢弃重生成；
   - `PLAN_CONFLICT`：源头细纲本身存在物理悖论或直接触犯 `Stage Ceiling`，必须退回 `Planner` 重排细纲 v2。
 - **逐字原句引文**：
   - `quote_draft` 必须是从**本章草稿原文中逐字复制的连续片段**；
