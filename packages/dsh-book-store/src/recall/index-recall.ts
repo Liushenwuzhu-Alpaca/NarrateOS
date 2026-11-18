@@ -568,6 +568,26 @@ function isWarpedStatus(status: unknown): boolean {
     return typeof status === 'string' && status.trim().toUpperCase() === 'WARPED';
 }
 
+function extractEntryLinkedChapters(entry: EntityEntry, maxChapter: number): Set<number> {
+    const linkedChapters = new Set<number>();
+    if (entry.chapter !== undefined && entry.chapter > 0 && entry.chapter <= maxChapter) {
+        linkedChapters.add(entry.chapter);
+    }
+    const fullText = [entry.text, ...entry.continuationLines].join('\n');
+    const inlineAnchorRe = /\[锚点\s+ch_(\d{4})\]/g;
+    let anchorMatch: RegExpExecArray | null = inlineAnchorRe.exec(fullText);
+    while (anchorMatch !== null) {
+        if (anchorMatch[1]) {
+            const ch = Number(anchorMatch[1]);
+            if (Number.isInteger(ch) && ch > 0 && ch <= maxChapter) {
+                linkedChapters.add(ch);
+            }
+        }
+        anchorMatch = inlineAnchorRe.exec(fullText);
+    }
+    return linkedChapters;
+}
+
 function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: number): Map<number, {
     entries: EntityEntry[];
     anchors: string[];
@@ -577,7 +597,7 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
         return map;
     }
 
-    const ensure = (ch: number) => {
+    const ensureBucket = (ch: number): { entries: EntityEntry[]; anchors: string[] } => {
         let bucket = map.get(ch);
         if (!bucket) {
             bucket = { entries: [], anchors: [] };
@@ -599,23 +619,8 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
             if (isWarpedStatus(entry.status) || /\bWARPED\b/i.test(fullText)) {
                 continue;
             }
-            const linkedChapters = new Set<number>();
-            if (entry.chapter !== undefined && entry.chapter > 0 && entry.chapter <= maxChapter) {
-                linkedChapters.add(entry.chapter);
-            }
-            const inlineAnchorRe = /\[锚点\s+ch_(\d{4})\]/g;
-            let anchorMatch: RegExpExecArray | null = inlineAnchorRe.exec(fullText);
-            while (anchorMatch !== null) {
-                if (anchorMatch[1]) {
-                    const ch = Number(anchorMatch[1]);
-                    if (Number.isInteger(ch) && ch > 0 && ch <= maxChapter) {
-                        linkedChapters.add(ch);
-                    }
-                }
-                anchorMatch = inlineAnchorRe.exec(fullText);
-            }
-            for (const ch of linkedChapters) {
-                ensure(ch).entries.push(entry);
+            for (const ch of extractEntryLinkedChapters(entry, maxChapter)) {
+                ensureBucket(ch).entries.push(entry);
             }
         }
     }
@@ -624,11 +629,165 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
         if (/\bWARPED\b/i.test(anchor)) continue;
         const ch = parseAnchorChapter(anchor);
         if (ch !== null && ch <= maxChapter) {
-            ensure(ch).anchors.push(anchor);
+            ensureBucket(ch).anchors.push(anchor);
         }
     }
 
     return map;
+}
+
+function parseExplicitChapterDayMap(explicitDays?: Record<number, number>): Map<number, number> {
+    const map = new Map<number, number>();
+    if (!explicitDays) return map;
+    for (const [k, v] of Object.entries(explicitDays)) {
+        const ch = Number(k);
+        if (Number.isInteger(ch) && Number.isInteger(v)) {
+            map.set(ch, v);
+        }
+    }
+    return map;
+}
+
+interface ParsedVolumeCard {
+    volumeNumber: number;
+    fileName: string;
+    content: string;
+}
+
+function partitionActiveVolumeCard(
+    card: ParsedVolumeCard,
+    threshold: number,
+    blockSize: number
+): { frozenBlocks: string[]; dynamicCard: ParsedVolumeCard | null } {
+    const parsedCard = parseL2CardSections(card.content);
+    const sortedSections = [...parsedCard.sections].sort(
+        (a, b) => a.chapterNumber - b.chapterNumber
+    );
+    if (blockSize <= 0 || sortedSections.length <= threshold) {
+        return { frozenBlocks: [], dynamicCard: card };
+    }
+
+    const frozenCount = Math.floor((sortedSections.length - 1) / blockSize) * blockSize;
+    if (frozenCount <= 0) {
+        return { frozenBlocks: [], dynamicCard: card };
+    }
+
+    const frozenSections = sortedSections.slice(0, frozenCount);
+    const unfrozenSections = sortedSections.slice(frozenCount);
+    const frozenBlocks: string[] = [];
+
+    for (let start = 0; start < frozenSections.length; start += blockSize) {
+        const block = frozenSections.slice(start, start + blockSize);
+        const firstCh = block[0]?.chapterId ?? '';
+        const lastCh = block.at(-1)?.chapterId ?? '';
+        const foldedLines = block.map((section) => formatFoldedL2Line(section));
+        frozenBlocks.push(
+            `## Frozen Active Volume Index: ${card.fileName} (${firstCh}-${lastCh})\n${foldedLines.join('\n')}`
+        );
+    }
+
+    const remainingContent = [
+        parsedCard.preamble,
+        ...unfrozenSections.map((section) => section.rawSection)
+    ]
+        .filter(Boolean)
+        .join('\n\n');
+
+    const dynamicCard =
+        remainingContent.trim().length > 0
+            ? { volumeNumber: card.volumeNumber, fileName: card.fileName, content: remainingContent }
+            : null;
+
+    return { frozenBlocks, dynamicCard };
+}
+
+interface RecallSearchTerms {
+    stableIdentityKeys: Set<string>;
+    phraseTerms: Set<string>;
+    queryTerms: Set<string>;
+    extraSearchPatterns: Set<string>;
+}
+
+function buildRecallSearchTerms(query: EntityRecallQuery): RecallSearchTerms {
+    const stableIdentityKeys = new Set<string>();
+    const canonicalName = query.profile.metadata.canonical_name.trim();
+    if (canonicalName.length > 0) {
+        stableIdentityKeys.add(canonicalName);
+    }
+    for (const alias of query.profile.metadata.unique_aliases) {
+        if (alias.trim().length > 0) {
+            stableIdentityKeys.add(alias.trim());
+        }
+    }
+    if (query.includeHistoricalAnchors) {
+        for (const anchor of query.profile.metadata.historical_anchors) {
+            const kw = parseAnchorKeyword(anchor);
+            if (kw) stableIdentityKeys.add(kw);
+        }
+    }
+
+    const phraseTerms = new Set<string>();
+    const queryTerms = new Set<string>();
+    const extraSearchPatterns = new Set<string>();
+
+    for (const rawExtra of query.extraKeywords ?? []) {
+        const trimmed = rawExtra.trim();
+        if (trimmed.length === 0) continue;
+        extraSearchPatterns.add(trimmed);
+        const tokens = trimmed.split(/\s+/).filter((t) => t.length > 0);
+        if (tokens.length <= 1) {
+            queryTerms.add(trimmed);
+            continue;
+        }
+        phraseTerms.add(trimmed);
+        for (const tok of tokens) {
+            queryTerms.add(tok);
+            if (tok.length >= 2) {
+                extraSearchPatterns.add(tok);
+            }
+        }
+    }
+
+    return { stableIdentityKeys, phraseTerms, queryTerms, extraSearchPatterns };
+}
+
+function scoreCorpusText(
+    corpusText: string,
+    chapterNumber: number,
+    inFocusChapter: boolean,
+    chapterIdentityKeys: Set<string>,
+    queryTerms: Set<string>,
+    phraseTerms: Set<string>
+): number {
+    let matchedIdentityCount = 0;
+    for (const key of chapterIdentityKeys) {
+        if (corpusText.includes(key)) matchedIdentityCount++;
+    }
+    let matchedQueryCount = 0;
+    for (const term of queryTerms) {
+        if (corpusText.includes(term)) matchedQueryCount++;
+    }
+    let exactPhraseCount = 0;
+    for (const phrase of phraseTerms) {
+        if (corpusText.includes(phrase)) exactPhraseCount++;
+    }
+    return (
+        (inFocusChapter ? 1000 : 0) +
+        exactPhraseCount * 100 +
+        matchedQueryCount * 30 +
+        matchedIdentityCount * 20 +
+        chapterNumber * 0.01
+    );
+}
+
+function resolvePairedStatus(
+    hasEntityRecord: boolean,
+    hasManuscriptAnchor: boolean
+): PairedRecallStatus {
+    if (hasEntityRecord && hasManuscriptAnchor) return 'paired';
+    if (hasEntityRecord) return 'missing_manuscript_anchor';
+    if (hasManuscriptAnchor) return 'missing_entity_record';
+    return 'missing_both';
 }
 
 function truncateSliceBody(
@@ -813,56 +972,17 @@ export class IndexRecall {
 
     /** 构建「已封旧卷静态区 + 当前活跃卷动态尾目录」双层目录 */
     async buildLibrarianCatalog(bookRoot: string, options: BuildCatalogOptions = {}): Promise<LibrarianCatalog> {
-        let currentVolume = options.currentVolume;
-        if (currentVolume === undefined) {
-            const worldStateRaw = await readTextWithStaging(bookRoot, 'world/world_state.md', options);
-            if (worldStateRaw !== null) {
-                try {
-                    const { rawYaml } = splitFrontmatter(worldStateRaw);
-                    const parsed = WorldStateFrontmatterSchema.parse(parseYaml(rawYaml));
-                    currentVolume = parsed.current_volume;
-                } catch {
-                    currentVolume = undefined;
-                }
-            }
-        }
-
-        const l2Files = await listDirWithStaging(bookRoot, 'index/L2_cards', VOLUME_CARD_FILE_RE, options);
-
-        const parsedVolumeCards: Array<{ volumeNumber: number; fileName: string; content: string }> = [];
-        for (const fileName of l2Files) {
-            const match = VOLUME_CARD_FILE_RE.exec(fileName);
-            if (!match?.[1]) continue;
-            const volumeNumber = Number(match[1]);
-            let content = await readTextWithStaging(bookRoot, `index/L2_cards/${fileName}`, options);
-            if (content !== null && options.chapterFiles) {
-                const allowed = new Set(
-                    options.chapterFiles
-                        .map((file) => parseChapterNumberFromPath(file))
-                        .filter((num): num is number => num !== null)
-                );
-                const parsedCard = parseL2CardSections(content);
-                const keptSections = parsedCard.sections
-                    .filter((section) => allowed.has(section.chapterNumber))
-                    .map((section) => section.rawSection);
-                content = [parsedCard.preamble, ...keptSections].filter(Boolean).join('\n\n');
-            }
-            if (content !== null) {
-                parsedVolumeCards.push({ volumeNumber, fileName, content });
-            }
-        }
-        parsedVolumeCards.sort((a, b) => a.volumeNumber - b.volumeNumber);
+        let currentVolume = await this.resolveCurrentVolume(bookRoot, options);
+        const parsedVolumeCards = await this.loadParsedVolumeCards(bookRoot, options);
 
         if (currentVolume === undefined) {
-            const maxCardVol = parsedVolumeCards.at(-1)?.volumeNumber ?? 1;
-            currentVolume = maxCardVol;
+            currentVolume = parsedVolumeCards.at(-1)?.volumeNumber ?? 1;
         }
 
         // 1. 构建静态区（lore 摘要 + L0 + L1 + 已封旧卷章卡 + 超阈值定长冻结块）
         const staticParts: string[] = [];
 
         const loreFiles = await listDirWithStaging(bookRoot, 'lore_library', LORE_FILE_RE, options);
-
         if (loreFiles.length > 0) {
             const loreSummaries: string[] = ['## Lore Library Index'];
             for (const fileName of loreFiles) {
@@ -886,7 +1006,7 @@ export class IndexRecall {
 
         const sealedVolumes: number[] = [];
         const chapterToVolume = new Map<number, number>();
-        const activeCards: Array<{ volumeNumber: number; fileName: string; content: string }> = [];
+        const activeCards: ParsedVolumeCard[] = [];
 
         for (const card of parsedVolumeCards) {
             for (const ch of extractChaptersInCard(card.content)) {
@@ -904,59 +1024,20 @@ export class IndexRecall {
 
         const threshold = options.l2FullUnfrozenThreshold ?? DEFAULT_L2_FULL_UNFROZEN_THRESHOLD;
         const blockSize = options.l2FreezeBlockChapters ?? DEFAULT_L2_FREEZE_BLOCK_CHAPTERS;
-        const activeDynamicCards: Array<{ volumeNumber: number; fileName: string; content: string }> = [];
+        const activeDynamicCards: ParsedVolumeCard[] = [];
 
         for (const card of activeCards) {
-            const parsedCard = parseL2CardSections(card.content);
-            const sortedSections = [...parsedCard.sections].sort(
-                (a, b) => a.chapterNumber - b.chapterNumber
-            );
-            if (blockSize > 0 && sortedSections.length > threshold) {
-                const frozenCount = Math.floor((sortedSections.length - 1) / blockSize) * blockSize;
-                if (frozenCount > 0) {
-                    const frozenSections = sortedSections.slice(0, frozenCount);
-                    const unfrozenSections = sortedSections.slice(frozenCount);
-                    for (let start = 0; start < frozenSections.length; start += blockSize) {
-                        const block = frozenSections.slice(start, start + blockSize);
-                        const firstCh = block[0]?.chapterId ?? '';
-                        const lastCh = block.at(-1)?.chapterId ?? '';
-                        const foldedLines = block.map((section) => formatFoldedL2Line(section));
-                        staticParts.push(
-                            `## Frozen Active Volume Index: ${card.fileName} (${firstCh}-${lastCh})\n${foldedLines.join('\n')}`
-                        );
-                    }
-                    const remainingContent = [
-                        parsedCard.preamble,
-                        ...unfrozenSections.map((section) => section.rawSection)
-                    ]
-                        .filter(Boolean)
-                        .join('\n\n');
-                    if (remainingContent.trim().length > 0) {
-                        activeDynamicCards.push({
-                            volumeNumber: card.volumeNumber,
-                            fileName: card.fileName,
-                            content: remainingContent
-                        });
-                    }
-                    continue;
-                }
+            const { frozenBlocks, dynamicCard } = partitionActiveVolumeCard(card, threshold, blockSize);
+            staticParts.push(...frozenBlocks);
+            if (dynamicCard) {
+                activeDynamicCards.push(dynamicCard);
             }
-            activeDynamicCards.push(card);
         }
 
         const staticPrefix = staticParts.join('\n\n');
 
         // 2. 扫描手稿章节并构建动态尾目录（走实例章节缓存，避免 O(N) 重复读盘）
-        const manuscriptFiles = options.chapterFiles
-            ? options.chapterFiles
-                .map((file) => normalizeRelativePath(file).split('/').pop() ?? '')
-                .filter((name) => {
-                    if (!CHAPTER_FILE_RE.test(name)) return false;
-                    return options.stagingOverlay?.get(`manuscripts/${name}`) !== null;
-                })
-                .sort((a, b) => a.localeCompare(b))
-            : await listDirWithStaging(bookRoot, 'manuscripts', CHAPTER_FILE_RE, options);
-
+        const manuscriptFiles = await this.resolveCatalogManuscriptFiles(bookRoot, options);
         const chapters: ChapterIndexEntry[] = [];
         const activeChapterLines: string[] = [];
 
@@ -1014,92 +1095,124 @@ export class IndexRecall {
         };
     }
 
+    private async resolveCurrentVolume(
+        bookRoot: string,
+        options: BuildCatalogOptions
+    ): Promise<number | undefined> {
+        if (options.currentVolume !== undefined) {
+            return options.currentVolume;
+        }
+        const worldStateRaw = await readTextWithStaging(bookRoot, 'world/world_state.md', options);
+        if (worldStateRaw === null) {
+            return undefined;
+        }
+        try {
+            const { rawYaml } = splitFrontmatter(worldStateRaw);
+            const parsed = WorldStateFrontmatterSchema.parse(parseYaml(rawYaml));
+            return parsed.current_volume;
+        } catch {
+            return undefined;
+        }
+    }
+
+    private async loadParsedVolumeCards(
+        bookRoot: string,
+        options: BuildCatalogOptions
+    ): Promise<ParsedVolumeCard[]> {
+        const l2Files = await listDirWithStaging(bookRoot, 'index/L2_cards', VOLUME_CARD_FILE_RE, options);
+        const allowedChapters = options.chapterFiles
+            ? new Set(
+                  options.chapterFiles
+                      .map((file) => parseChapterNumberFromPath(file))
+                      .filter((num): num is number => num !== null)
+              )
+            : null;
+
+        const cards: ParsedVolumeCard[] = [];
+        for (const fileName of l2Files) {
+            const match = VOLUME_CARD_FILE_RE.exec(fileName);
+            if (!match?.[1]) continue;
+            let content = await readTextWithStaging(bookRoot, `index/L2_cards/${fileName}`, options);
+            if (content === null) continue;
+
+            if (allowedChapters) {
+                const parsedCard = parseL2CardSections(content);
+                const keptSections = parsedCard.sections
+                    .filter((section) => allowedChapters.has(section.chapterNumber))
+                    .map((section) => section.rawSection);
+                content = [parsedCard.preamble, ...keptSections].filter(Boolean).join('\n\n');
+            }
+            cards.push({ volumeNumber: Number(match[1]), fileName, content });
+        }
+
+        return cards.sort((a, b) => a.volumeNumber - b.volumeNumber);
+    }
+
+    private async resolveCatalogManuscriptFiles(
+        bookRoot: string,
+        options: BuildCatalogOptions
+    ): Promise<string[]> {
+        if (!options.chapterFiles) {
+            return await listDirWithStaging(bookRoot, 'manuscripts', CHAPTER_FILE_RE, options);
+        }
+        return options.chapterFiles
+            .map((file) => normalizeRelativePath(file).split('/').pop() ?? '')
+            .filter(
+                (name) =>
+                    CHAPTER_FILE_RE.test(name) &&
+                    options.stagingOverlay?.get(`manuscripts/${name}`) !== null
+            )
+            .sort((a, b) => a.localeCompare(b));
+    }
+
+    private async collectEntityAppearanceChapters(
+        bookRoot: string,
+        query: EntityRecallQuery
+    ): Promise<number[]> {
+        const appearanceChapters: number[] = [];
+        const l2Files = await listDirWithStaging(
+            bookRoot,
+            'index/L2_cards',
+            VOLUME_CARD_FILE_RE,
+            query
+        );
+        for (const file of l2Files) {
+            const raw = await readTextWithStaging(bookRoot, `index/L2_cards/${file}`, query);
+            if (!raw) continue;
+            const { sections } = parseL2CardSections(raw);
+            for (const section of sections) {
+                if (section.appearedEntityIds.includes(query.profile.metadata.entity_id)) {
+                    appearanceChapters.push(section.chapterNumber);
+                }
+            }
+        }
+        return appearanceChapters;
+    }
+
     /** 多身份键实例缓存原稿检索（支持段级共现排序、focusChapters 优先与限流）并包装时间差信封 */
     async recallEntitySlices(bookRoot: string, query: EntityRecallQuery): Promise<RecallSlice[]> {
         if (query.maxSlicesPerEntity !== undefined && query.maxSlicesPerEntity <= 0) {
             return [];
         }
 
-        let effectiveQuery = query;
-        if (effectiveQuery.appearanceChapters === undefined) {
-            const appearanceChapters: number[] = [];
-            const l2Files = await listDirWithStaging(
-                bookRoot,
-                'index/L2_cards',
-                VOLUME_CARD_FILE_RE,
-                effectiveQuery
-            );
-            for (const file of l2Files) {
-                const raw = await readTextWithStaging(bookRoot, `index/L2_cards/${file}`, effectiveQuery);
-                if (!raw) continue;
-                const { sections } = parseL2CardSections(raw);
-                for (const section of sections) {
-                    if (section.appearedEntityIds.includes(effectiveQuery.profile.metadata.entity_id)) {
-                        appearanceChapters.push(section.chapterNumber);
-                    }
-                }
-            }
-            effectiveQuery = { ...effectiveQuery, appearanceChapters };
-        }
+        const effectiveQuery =
+            query.appearanceChapters !== undefined
+                ? query
+                : {
+                      ...query,
+                      appearanceChapters: await this.collectEntityAppearanceChapters(bookRoot, query)
+                  };
 
         const candidateFiles = await this.resolveCandidateChapterFiles(bookRoot, effectiveQuery);
         if (candidateFiles.length === 0) {
             return [];
         }
 
-        // 1. 整理稳定身份键与查询短语/词项
-        const stableIdentityKeys = new Set<string>();
-        if (effectiveQuery.profile.metadata.canonical_name.trim().length > 0) {
-            stableIdentityKeys.add(effectiveQuery.profile.metadata.canonical_name.trim());
-        }
-        for (const alias of effectiveQuery.profile.metadata.unique_aliases) {
-            if (alias.trim().length > 0) {
-                stableIdentityKeys.add(alias.trim());
-            }
-        }
-        if (effectiveQuery.includeHistoricalAnchors) {
-            for (const anchor of effectiveQuery.profile.metadata.historical_anchors) {
-                const kw = parseAnchorKeyword(anchor);
-                if (kw) stableIdentityKeys.add(kw);
-            }
-        }
-
-        const phraseTerms = new Set<string>();
-        const queryTerms = new Set<string>();
-        const extraSearchPatterns = new Set<string>();
-
-        for (const rawExtra of effectiveQuery.extraKeywords ?? []) {
-            const trimmed = rawExtra.trim();
-            if (trimmed.length === 0) continue;
-            extraSearchPatterns.add(trimmed);
-            const tokens = trimmed.split(/\s+/).filter((t) => t.length > 0);
-            if (tokens.length > 1) {
-                phraseTerms.add(trimmed);
-                for (const tok of tokens) {
-                    queryTerms.add(tok);
-                    if (tok.length >= 2) {
-                        extraSearchPatterns.add(tok);
-                    }
-                }
-            } else {
-                queryTerms.add(trimmed);
-            }
-        }
-
+        const terms = buildRecallSearchTerms(effectiveQuery);
         const activeTitleRules = buildEffectiveRuleList(effectiveQuery).filter(
             (rule) => rule.title.length > 0 && isRuleActiveAtTarget(rule, effectiveQuery)
         );
-
-        const explicitDayMap = new Map<number, number>();
-        if (effectiveQuery.chapterDays) {
-            for (const [k, v] of Object.entries(effectiveQuery.chapterDays)) {
-                const ch = Number(k);
-                if (Number.isInteger(ch) && Number.isInteger(v)) {
-                    explicitDayMap.set(ch, v);
-                }
-            }
-        }
-
+        const explicitDayMap = parseExplicitChapterDayMap(effectiveQuery.chapterDays);
         const focusSet = new Set<number>(
             (effectiveQuery.focusChapters ?? []).filter(
                 (ch) => Number.isInteger(ch) && ch > 0 && ch <= effectiveQuery.targetChapter
@@ -1123,9 +1236,9 @@ export class IndexRecall {
         const useRelevanceSort =
             focusSet.size > 0 ||
             effectiveQuery.maxSlicesPerEntity !== undefined ||
-            queryTerms.size > 0;
+            terms.queryTerms.size > 0;
 
-        const searchChapterBatch = async (files: string[]): Promise<ScoredCandidateSlice[]> => {
+        const searchBatch = async (files: string[]): Promise<ScoredCandidateSlice[]> => {
             const batchResults: ScoredCandidateSlice[] = [];
             for (const file of files) {
                 const chapterNumber = parseChapterNumberFromPath(file);
@@ -1140,35 +1253,36 @@ export class IndexRecall {
                     .map((rule) => rule.title);
 
                 const chapterIdentityKeys = new Set<string>([
-                    ...stableIdentityKeys,
+                    ...terms.stableIdentityKeys,
                     ...eligibleTitleKeys
                 ]);
                 const searchPatterns = Array.from(
-                    new Set<string>([...chapterIdentityKeys, ...extraSearchPatterns])
+                    new Set<string>([...chapterIdentityKeys, ...terms.extraSearchPatterns])
                 );
                 if (searchPatterns.length === 0) continue;
 
-                const matched = this.searchChapterSlices(
-                    file,
-                    chapterNumber,
-                    chapterDay,
-                    chapterData,
-                    effectiveQuery,
-                    focusSet.has(chapterNumber),
-                    searchPatterns,
-                    chapterIdentityKeys,
-                    queryTerms,
-                    phraseTerms,
-                    useParagraphMode
+                batchResults.push(
+                    ...this.searchChapterSlices(
+                        file,
+                        chapterNumber,
+                        chapterDay,
+                        chapterData,
+                        effectiveQuery,
+                        focusSet.has(chapterNumber),
+                        searchPatterns,
+                        chapterIdentityKeys,
+                        terms.queryTerms,
+                        terms.phraseTerms,
+                        useParagraphMode
+                    )
                 );
-                batchResults.push(...matched);
             }
             return batchResults;
         };
 
         const scoredSlices: ScoredCandidateSlice[] = [];
         if (focusFiles.length > 0) {
-            scoredSlices.push(...(await searchChapterBatch(focusFiles)));
+            scoredSlices.push(...(await searchBatch(focusFiles)));
         }
 
         const hasEnoughFromFocus =
@@ -1177,24 +1291,15 @@ export class IndexRecall {
             scoredSlices.length >= effectiveQuery.maxSlicesPerEntity;
 
         if (!hasEnoughFromFocus && otherFiles.length > 0) {
-            scoredSlices.push(...(await searchChapterBatch(otherFiles)));
+            scoredSlices.push(...(await searchBatch(otherFiles)));
         }
 
-        if (useRelevanceSort) {
-            scoredSlices.sort((a, b) => {
-                if (b.score !== a.score) {
-                    return b.score - a.score;
-                }
-                return a.slice.line - b.slice.line;
-            });
-        } else {
-            scoredSlices.sort((a, b) => {
-                if (a.slice.chapterNumber !== b.slice.chapterNumber) {
-                    return a.slice.chapterNumber - b.slice.chapterNumber;
-                }
-                return a.slice.line - b.slice.line;
-            });
-        }
+        scoredSlices.sort((a, b) => {
+            if (useRelevanceSort) {
+                return b.score - a.score || a.slice.line - b.slice.line;
+            }
+            return a.slice.chapterNumber - b.slice.chapterNumber || a.slice.line - b.slice.line;
+        });
 
         const ordered = scoredSlices.map((item) => item.slice);
         if (effectiveQuery.maxSlicesPerEntity !== undefined) {
@@ -1226,92 +1331,155 @@ export class IndexRecall {
             query.targetDay
         );
 
-        const computeScore = (corpusText: string): {
-            score: number;
-            matchedIdentityCount: number;
-            matchedQueryCount: number;
-            exactPhraseCount: number;
-        } => {
-            let matchedIdentityCount = 0;
-            for (const key of chapterIdentityKeys) {
-                if (corpusText.includes(key)) matchedIdentityCount++;
-            }
-            let matchedQueryCount = 0;
-            for (const term of queryTerms) {
-                if (corpusText.includes(term)) matchedQueryCount++;
-            }
-            let exactPhraseCount = 0;
-            for (const phrase of phraseTerms) {
-                if (corpusText.includes(phrase)) exactPhraseCount++;
-            }
-            const score =
-                (inFocusChapter ? 1000 : 0) +
-                exactPhraseCount * 100 +
-                matchedQueryCount * 30 +
-                matchedIdentityCount * 20 +
-                chapterNumber * 0.01;
-            return { score, matchedIdentityCount, matchedQueryCount, exactPhraseCount };
-        };
-
-        const results: ScoredCandidateSlice[] = [];
+        const computeScore = (corpusText: string): number =>
+            scoreCorpusText(
+                corpusText,
+                chapterNumber,
+                inFocusChapter,
+                chapterIdentityKeys,
+                queryTerms,
+                phraseTerms
+            );
 
         if (useParagraphMode) {
-            const contextParagraphs = Math.max(0, query.sliceContextParagraphs ?? 1);
-            for (let pIdx = 0; pIdx < chapterData.paragraphs.length; pIdx++) {
-                const paragraph = chapterData.paragraphs[pIdx];
-                if (!paragraph) continue;
-                const matchedKeys = searchPatterns.filter((pat) => paragraph.text.includes(pat));
-                if (matchedKeys.length === 0) continue;
+            return this.searchParagraphSlices({
+                file,
+                chapterId,
+                chapterNumber,
+                chapterDay,
+                deltaChapters,
+                deltaDays,
+                envelope,
+                chapterData,
+                query,
+                searchPatterns,
+                computeScore
+            });
+        }
 
-                let firstMatchLine = paragraph.startLine;
-                for (let lineOffset = 0; lineOffset < paragraph.lines.length; lineOffset++) {
-                    const lineText = paragraph.lines[lineOffset] ?? '';
-                    if (matchedKeys.some((pat) => lineText.includes(pat))) {
-                        firstMatchLine = paragraph.startLine + lineOffset;
-                        break;
-                    }
+        return this.searchLineSlices({
+            file,
+            chapterId,
+            chapterNumber,
+            chapterDay,
+            deltaChapters,
+            deltaDays,
+            envelope,
+            chapterData,
+            query,
+            searchPatterns,
+            computeScore
+        });
+    }
+
+    private searchParagraphSlices(params: {
+        file: string;
+        chapterId: string;
+        chapterNumber: number;
+        chapterDay: number | null;
+        deltaChapters: number;
+        deltaDays: number | null;
+        envelope: string;
+        chapterData: ParsedChapterContent;
+        query: EntityRecallQuery;
+        searchPatterns: string[];
+        computeScore: (corpusText: string) => number;
+    }): ScoredCandidateSlice[] {
+        const {
+            file,
+            chapterId,
+            chapterNumber,
+            chapterDay,
+            deltaChapters,
+            deltaDays,
+            envelope,
+            chapterData,
+            query,
+            searchPatterns,
+            computeScore
+        } = params;
+        const results: ScoredCandidateSlice[] = [];
+        const contextParagraphs = Math.max(0, query.sliceContextParagraphs ?? 1);
+
+        for (let pIdx = 0; pIdx < chapterData.paragraphs.length; pIdx++) {
+            const paragraph = chapterData.paragraphs[pIdx];
+            if (!paragraph) continue;
+            const matchedKeys = searchPatterns.filter((pat) => paragraph.text.includes(pat));
+            if (matchedKeys.length === 0) continue;
+
+            let firstMatchLine = paragraph.startLine;
+            for (let lineOffset = 0; lineOffset < paragraph.lines.length; lineOffset++) {
+                const lineText = paragraph.lines[lineOffset] ?? '';
+                if (matchedKeys.some((pat) => lineText.includes(pat))) {
+                    firstMatchLine = paragraph.startLine + lineOffset;
+                    break;
                 }
+            }
 
-                const contextBefore = chapterData.paragraphs
-                    .slice(Math.max(0, pIdx - contextParagraphs), pIdx)
-                    .map((p) => p.text);
-                const contextAfter = chapterData.paragraphs
-                    .slice(pIdx + 1, pIdx + 1 + contextParagraphs)
-                    .map((p) => p.text);
+            const contextBefore = chapterData.paragraphs
+                .slice(Math.max(0, pIdx - contextParagraphs), pIdx)
+                .map((p) => p.text);
+            const contextAfter = chapterData.paragraphs
+                .slice(pIdx + 1, pIdx + 1 + contextParagraphs)
+                .map((p) => p.text);
 
-                const snippet = buildSnippetWithMaxChars(
-                    envelope,
-                    paragraph.text,
+            results.push({
+                score: computeScore(paragraph.text),
+                slice: {
+                    file,
+                    chapterId,
+                    chapterNumber,
+                    chapterDay,
+                    targetChapter: query.targetChapter,
+                    targetDay: query.targetDay,
+                    deltaChapters,
+                    deltaDays,
+                    line: firstMatchLine,
+                    text: paragraph.text,
                     contextBefore,
                     contextAfter,
                     matchedKeys,
-                    query.sliceMaxChars
-                );
-                const { score } = computeScore(paragraph.text);
-
-                results.push({
-                    score,
-                    slice: {
-                        file,
-                        chapterId,
-                        chapterNumber,
-                        chapterDay,
-                        targetChapter: query.targetChapter,
-                        targetDay: query.targetDay,
-                        deltaChapters,
-                        deltaDays,
-                        line: firstMatchLine,
-                        text: paragraph.text,
+                    snippet: buildSnippetWithMaxChars(
+                        envelope,
+                        paragraph.text,
                         contextBefore,
                         contextAfter,
                         matchedKeys,
-                        snippet
-                    }
-                });
-            }
-            return results;
+                        query.sliceMaxChars
+                    )
+                }
+            });
         }
 
+        return results;
+    }
+
+    private searchLineSlices(params: {
+        file: string;
+        chapterId: string;
+        chapterNumber: number;
+        chapterDay: number | null;
+        deltaChapters: number;
+        deltaDays: number | null;
+        envelope: string;
+        chapterData: ParsedChapterContent;
+        query: EntityRecallQuery;
+        searchPatterns: string[];
+        computeScore: (corpusText: string) => number;
+    }): ScoredCandidateSlice[] {
+        const {
+            file,
+            chapterId,
+            chapterNumber,
+            chapterDay,
+            deltaChapters,
+            deltaDays,
+            envelope,
+            chapterData,
+            query,
+            searchPatterns,
+            computeScore
+        } = params;
         // 传统行级 -C 2 模式（向后兼容既有行号与 contextBefore/contextAfter 语义），评分基于所在自然段共现
         const paragraphByLine = new Map<number, CachedParagraph>();
         for (const p of chapterData.paragraphs) {
@@ -1320,6 +1488,7 @@ export class IndexRecall {
             }
         }
 
+        const results: ScoredCandidateSlice[] = [];
         for (let lineIdx = 0; lineIdx < chapterData.lines.length; lineIdx++) {
             const lineText = chapterData.lines[lineIdx] ?? '';
             const matchedKeys = searchPatterns.filter((pat) => lineText.includes(pat));
@@ -1328,14 +1497,11 @@ export class IndexRecall {
             const lineNumber = lineIdx + 1;
             const contextBefore = chapterData.lines.slice(Math.max(0, lineIdx - 2), lineIdx);
             const contextAfter = chapterData.lines.slice(lineIdx + 1, lineIdx + 3);
-            const bodyLines = [...contextBefore, lineText, ...contextAfter];
-            const snippet = `${envelope}\n${bodyLines.join('\n')}`;
-
+            const snippet = `${envelope}\n${[...contextBefore, lineText, ...contextAfter].join('\n')}`;
             const containingParagraph = paragraphByLine.get(lineNumber);
-            const { score } = computeScore(containingParagraph?.text ?? lineText);
 
             results.push({
-                score,
+                score: computeScore(containingParagraph?.text ?? lineText),
                 slice: {
                     file,
                     chapterId,
@@ -1398,18 +1564,7 @@ export class IndexRecall {
                 declared && (declared.entries.length > 0 || declared.anchors.length > 0)
             );
             const chapterSlices = slicesByChapter.get(chapterNumber) ?? [];
-            const hasManuscriptAnchor = chapterSlices.length > 0;
-
-            let status: PairedRecallStatus;
-            if (hasEntityRecord && hasManuscriptAnchor) {
-                status = 'paired';
-            } else if (hasEntityRecord && !hasManuscriptAnchor) {
-                status = 'missing_manuscript_anchor';
-            } else if (!hasEntityRecord && hasManuscriptAnchor) {
-                status = 'missing_entity_record';
-            } else {
-                status = 'missing_both';
-            }
+            const status = resolvePairedStatus(hasEntityRecord, chapterSlices.length > 0);
 
             const evidence: PairedChapterEvidence = {
                 chapterNumber,
@@ -1470,15 +1625,7 @@ export class IndexRecall {
         explicitDays?: Record<number, number>,
         options?: RecallReadOptions
     ): Promise<Map<number, number>> {
-        const map = new Map<number, number>();
-        if (explicitDays) {
-            for (const [k, v] of Object.entries(explicitDays)) {
-                const ch = Number(k);
-                if (Number.isInteger(ch) && Number.isInteger(v)) {
-                    map.set(ch, v);
-                }
-            }
-        }
+        const map = parseExplicitChapterDayMap(explicitDays);
 
         for (const file of chapterFiles) {
             const normalized = normalizeChapterRelativePath(file);

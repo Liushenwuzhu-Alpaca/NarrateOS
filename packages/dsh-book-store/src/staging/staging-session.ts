@@ -68,19 +68,51 @@ function assertNormalizedRealTargetInsideRoot(
     return realTarget;
 }
 
+function isEnoent(err: unknown): boolean {
+    return (err as { code?: string }).code === 'ENOENT';
+}
+
+function stepParentSegment(
+    probe: string,
+    suffixSegments: string[],
+    rawRelPath: string
+): string {
+    const parent = dirname(probe);
+    suffixSegments.unshift(probe.slice(parent.length).replace(/^[\\/]/, ''));
+    if (parent === probe) {
+        throw new Error(`无法定位路径的已存在父目录: ${rawRelPath}`);
+    }
+    return parent;
+}
+
+function throwUnresolvableRealpath(
+    isSymbolicLink: boolean,
+    isAncestor: boolean,
+    rawRelPath: string
+): never {
+    if (isAncestor) {
+        throw new Error(
+            isSymbolicLink
+                ? `父目录符号链接目标不存在或无法解析: ${rawRelPath}`
+                : `无法解析父目录真实路径: ${rawRelPath}`
+        );
+    }
+    throw new Error(`符号链接目标不存在或无法解析: ${rawRelPath}`);
+}
+
 async function resolveTargetRealPathAsync(absPath: string, rawRelPath: string): Promise<string> {
     try {
         const st = await lstat(absPath);
-        if (st.isSymbolicLink()) {
-            try {
-                return await realpath(absPath);
-            } catch {
-                throw new Error(`符号链接目标不存在或无法解析: ${rawRelPath}`);
+        try {
+            return await realpath(absPath);
+        } catch (err) {
+            if (st.isSymbolicLink()) {
+                throwUnresolvableRealpath(true, false, rawRelPath);
             }
+            throw err;
         }
-        return await realpath(absPath);
     } catch (err: unknown) {
-        if ((err as { code?: string }).code !== 'ENOENT') {
+        if (!isEnoent(err)) {
             throw err;
         }
     }
@@ -88,27 +120,18 @@ async function resolveTargetRealPathAsync(absPath: string, rawRelPath: string): 
     const suffixSegments: string[] = [];
     let probe = absPath;
     while (true) {
-        suffixSegments.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]/, ''));
-        const parent = dirname(probe);
-        if (parent === probe) {
-            throw new Error(`无法定位路径的已存在父目录: ${rawRelPath}`);
-        }
-        probe = parent;
+        probe = stepParentSegment(probe, suffixSegments, rawRelPath);
         try {
             const st = await lstat(probe);
             let realAncestor: string;
             try {
                 realAncestor = await realpath(probe);
             } catch {
-                throw new Error(
-                    st.isSymbolicLink()
-                        ? `父目录符号链接目标不存在或无法解析: ${rawRelPath}`
-                        : `无法解析父目录真实路径: ${rawRelPath}`
-                );
+                throwUnresolvableRealpath(st.isSymbolicLink(), true, rawRelPath);
             }
             return resolve(realAncestor, ...suffixSegments);
         } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') {
+            if (!isEnoent(err)) {
                 throw err;
             }
         }
@@ -118,16 +141,16 @@ async function resolveTargetRealPathAsync(absPath: string, rawRelPath: string): 
 function resolveTargetRealPathSync(absPath: string, rawRelPath: string): string {
     try {
         const st = lstatSync(absPath);
-        if (st.isSymbolicLink()) {
-            try {
-                return realpathSync(absPath);
-            } catch {
-                throw new Error(`符号链接目标不存在或无法解析: ${rawRelPath}`);
+        try {
+            return realpathSync(absPath);
+        } catch (err) {
+            if (st.isSymbolicLink()) {
+                throwUnresolvableRealpath(true, false, rawRelPath);
             }
+            throw err;
         }
-        return realpathSync(absPath);
     } catch (err: unknown) {
-        if ((err as { code?: string }).code !== 'ENOENT') {
+        if (!isEnoent(err)) {
             throw err;
         }
     }
@@ -135,27 +158,18 @@ function resolveTargetRealPathSync(absPath: string, rawRelPath: string): string 
     const suffixSegments: string[] = [];
     let probe = absPath;
     while (true) {
-        suffixSegments.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]/, ''));
-        const parent = dirname(probe);
-        if (parent === probe) {
-            throw new Error(`无法定位路径的已存在父目录: ${rawRelPath}`);
-        }
-        probe = parent;
+        probe = stepParentSegment(probe, suffixSegments, rawRelPath);
         try {
             const st = lstatSync(probe);
             let realAncestor: string;
             try {
                 realAncestor = realpathSync(probe);
             } catch {
-                throw new Error(
-                    st.isSymbolicLink()
-                        ? `父目录符号链接目标不存在或无法解析: ${rawRelPath}`
-                        : `无法解析父目录真实路径: ${rawRelPath}`
-                );
+                throwUnresolvableRealpath(st.isSymbolicLink(), true, rawRelPath);
             }
             return resolve(realAncestor, ...suffixSegments);
         } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') {
+            if (!isEnoent(err)) {
                 throw err;
             }
         }

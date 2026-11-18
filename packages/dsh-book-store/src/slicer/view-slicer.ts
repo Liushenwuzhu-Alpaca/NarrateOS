@@ -1,5 +1,4 @@
 import type {
-    BookConfig,
     BookSnapshot,
     EntityEntry,
     EntityProfile,
@@ -92,9 +91,12 @@ type SectionKey = 'innateLocks' | 'acquiredState' | 'irreversibleTrajectory' | '
 const DEFAULT_WAKEUP_GAP_THRESHOLD = 30;
 const WARPED_TAG_RE = /\bWARPED\b/i;
 const WRITER_RESTRICTED_DIRECTIVE_RE = /\bWARPED\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
-const CLEANROOM_LORE_RESTRICTED_RE =
-    /\bWARPED\b|\bOMNISCIENT_SECRET\b|\bSELF_ONLY\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
-const VALID_VISIBILITIES = new Set(['PUBLIC', 'SELF_ONLY', 'OMNISCIENT_SECRET', 'READER_KNOWN']);
+export const CLEANROOM_ENTRY_RESTRICTED_RE =
+    /\b(?:WARPED|OMNISCIENT_SECRET)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+export const CLEANROOM_LORE_RESTRICTED_RE =
+    /\b(?:WARPED|OMNISCIENT_SECRET|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+export const VALID_VISIBILITIES = new Set(['PUBLIC', 'SELF_ONLY', 'OMNISCIENT_SECRET', 'READER_KNOWN']);
+const LORE_ALLOWED_INLINE_VIS = new Set(['PUBLIC', 'READER_KNOWN']);
 const UNKNOWN_VIS_TAG_KEY_RE =
     /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis|rawinvalidvisibility|raw_invalid_visibility)$/i;
 const INLINE_VIS_TAG_RE = /(?:^|[\[\s|])(?:vis|visibility)\s*:\s*([^\s|\]]+)/gi;
@@ -103,12 +105,12 @@ const LIST_ITEM_START_RE = /^\s*(?:[-*+]|\d+\.)\s/;
 const TOP_LEVEL_LIST_ITEM_RE = /^(?:[-*+]|\d+\.)\s/;
 const LIST_CONTINUATION_RE = /^(?:\s+\S|>)/;
 
-function hasRestrictedInlineVis(text: string): boolean {
+export function hasDisallowedInlineVis(text: string, allowedVisibilities: ReadonlySet<string>): boolean {
     INLINE_VIS_TAG_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = INLINE_VIS_TAG_RE.exec(text)) !== null) {
         const val = (match[1] ?? '').trim().toUpperCase();
-        if (val !== 'PUBLIC' && val !== 'READER_KNOWN') {
+        if (!allowedVisibilities.has(val)) {
             return true;
         }
     }
@@ -131,8 +133,8 @@ function extractInlineVisibilities(entry: EntityEntry): EntryVisibility[] {
     return found;
 }
 
-function hasUnknownVisibilityTag(entry: EntityEntry): boolean {
-    if (Boolean((entry as { rawInvalidVisibility?: unknown }).rawInvalidVisibility)) {
+export function hasUnknownVisibilityTag(entry: EntityEntry): boolean {
+    if (Boolean(entry.rawInvalidVisibility)) {
         return true;
     }
     if (entry.visibility !== undefined && !VALID_VISIBILITIES.has(entry.visibility.toUpperCase())) {
@@ -146,17 +148,27 @@ function hasUnknownVisibilityTag(entry: EntityEntry): boolean {
         }
     }
     const allLines = [entry.text, ...entry.continuationLines];
-    for (const line of allLines) {
-        INLINE_VIS_TAG_RE.lastIndex = 0;
-        let match: RegExpExecArray | null;
-        while ((match = INLINE_VIS_TAG_RE.exec(line)) !== null) {
-            const upper = (match[1] ?? '').trim().toUpperCase();
-            if (!VALID_VISIBILITIES.has(upper)) {
-                return true;
-            }
+    return allLines.some((line) => hasDisallowedInlineVis(line, VALID_VISIBILITIES));
+}
+
+function consumeMarkdownBlockEnd(lines: string[], startIndex: number, isListBlock: boolean): number {
+    let j = startIndex + 1;
+    while (j < lines.length) {
+        const next = lines[j]!;
+        const nextTrimmed = next.trim();
+        if (nextTrimmed.length === 0 || MARKDOWN_HEADING_RE.test(nextTrimmed)) {
+            break;
         }
+        if (isListBlock) {
+            if (TOP_LEVEL_LIST_ITEM_RE.test(next) || !LIST_CONTINUATION_RE.test(next)) {
+                break;
+            }
+        } else if (LIST_ITEM_START_RE.test(next)) {
+            break;
+        }
+        j += 1;
     }
-    return false;
+    return j;
 }
 
 function stripRestrictedMarkdownBlocks(
@@ -169,7 +181,8 @@ function stripRestrictedMarkdownBlocks(
     let skipSectionLevel: number | null = null;
 
     const isRestrictedLine = (line: string): boolean =>
-        restrictedRe.test(line) || (checkInlineVis && hasRestrictedInlineVis(line));
+        restrictedRe.test(line) ||
+        (checkInlineVis && hasDisallowedInlineVis(line, LORE_ALLOWED_INLINE_VIS));
 
     let i = 0;
     while (i < lines.length) {
@@ -178,14 +191,8 @@ function stripRestrictedMarkdownBlocks(
         const headingMatch = MARKDOWN_HEADING_RE.exec(trimmed);
 
         if (skipSectionLevel !== null) {
-            if (headingMatch?.[1]) {
-                const level = headingMatch[1].length;
-                if (level <= skipSectionLevel) {
-                    skipSectionLevel = null;
-                } else {
-                    i += 1;
-                    continue;
-                }
+            if (headingMatch?.[1] && headingMatch[1].length <= skipSectionLevel) {
+                skipSectionLevel = null;
             } else {
                 i += 1;
                 continue;
@@ -193,13 +200,11 @@ function stripRestrictedMarkdownBlocks(
         }
 
         if (headingMatch?.[1] && headingMatch[2]) {
-            const level = headingMatch[1].length;
             if (isRestrictedLine(headingMatch[2]) || isRestrictedLine(line)) {
-                skipSectionLevel = level;
-                i += 1;
-                continue;
+                skipSectionLevel = headingMatch[1].length;
+            } else {
+                kept.push(line);
             }
-            kept.push(line);
             i += 1;
             continue;
         }
@@ -210,42 +215,12 @@ function stripRestrictedMarkdownBlocks(
             continue;
         }
 
-        if (LIST_ITEM_START_RE.test(line)) {
-            let j = i + 1;
-            while (j < lines.length) {
-                const next = lines[j]!;
-                const nextTrimmed = next.trim();
-                if (nextTrimmed.length === 0) break;
-                if (MARKDOWN_HEADING_RE.test(nextTrimmed)) break;
-                if (TOP_LEVEL_LIST_ITEM_RE.test(next)) break;
-                if (LIST_CONTINUATION_RE.test(next)) {
-                    j += 1;
-                    continue;
-                }
-                break;
-            }
-            const block = lines.slice(i, j);
-            if (!block.some(isRestrictedLine)) {
-                kept.push(...block);
-            }
-            i = j;
-            continue;
-        }
-
-        let j = i + 1;
-        while (j < lines.length) {
-            const next = lines[j]!;
-            const nextTrimmed = next.trim();
-            if (nextTrimmed.length === 0) break;
-            if (MARKDOWN_HEADING_RE.test(nextTrimmed)) break;
-            if (LIST_ITEM_START_RE.test(next)) break;
-            j += 1;
-        }
-        const block = lines.slice(i, j);
+        const nextIndex = consumeMarkdownBlockEnd(lines, i, LIST_ITEM_START_RE.test(line));
+        const block = lines.slice(i, nextIndex);
         if (!block.some(isRestrictedLine)) {
             kept.push(...block);
         }
-        i = j;
+        i = nextIndex;
     }
 
     return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -352,7 +327,7 @@ function shouldStripWarped(forRole: SlicerRole): boolean {
 }
 
 /** 判定单条实体记录是否被标记为 WARPED 废止（兼容标签状态、文本内联与续行） */
-function isWarpedEntry(entry: EntityEntry): boolean {
+export function isWarpedEntry(entry: EntityEntry): boolean {
     if (entry.status === 'WARPED') return true;
     if (WARPED_TAG_RE.test(entry.text)) return true;
     if (entry.continuationLines.some((line) => WARPED_TAG_RE.test(line))) return true;
@@ -380,9 +355,7 @@ export class ViewSlicer {
         const rawPov = request.povCharId ?? frontmatter.pov_character;
         const povCharIds = Array.isArray(rawPov) ? [...rawPov] : [rawPov];
         const povSet = new Set(povCharIds);
-        const configWakeupGap = (
-            snapshot.config as BookConfig & { context_assembly?: { wakeup_gap_chapters?: number } }
-        ).context_assembly?.wakeup_gap_chapters;
+        const configWakeupGap = snapshot.config.context_assembly?.wakeup_gap_chapters;
         const wakeupThreshold =
             request.wakeupGapChapters ??
             request.wakeupGapThreshold ??
@@ -659,7 +632,7 @@ export class ViewSlicer {
                 (line) =>
                     line.length > 0 &&
                     !CLEANROOM_LORE_RESTRICTED_RE.test(line) &&
-                    !hasRestrictedInlineVis(line)
+                    !hasDisallowedInlineVis(line, LORE_ALLOWED_INLINE_VIS)
             );
         const fullText =
             cleanContinuations.length > 0

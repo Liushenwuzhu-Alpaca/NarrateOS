@@ -3,6 +3,12 @@ import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promise
 import { dirname, join } from 'node:path';
 import { SystemPort } from '../ports/system.js';
 import {
+    assertForeignKeysReachable,
+    collectReachableKeys,
+    formatChapterKey,
+    isEnoentError
+} from '../store/bookstore.js';
+import {
     BookStore,
     BookSnapshot,
     ENTITY_ID_RE,
@@ -10,7 +16,6 @@ import {
     EntityEntryInput,
     EntityPatch,
     EntityProfile,
-    ForeignKeyError,
     TimelineMode,
     mergeEntityProfilePatch,
     parseEntityMarkdown,
@@ -134,12 +139,26 @@ function assertSafeId(value: string, label: string): void {
     }
 }
 
-function applySingleEntityPatch(
-    existing: EntityProfile | null,
-    patch: EntityPatch,
-    allowInnateMutation: boolean
-): EntityProfile {
-    return mergeEntityProfilePatch(existing, patch, allowInnateMutation);
+function getOrCreateMap<K, V>(outer: Map<string, Map<K, V>>, key: string): Map<K, V> {
+    let inner = outer.get(key);
+    if (!inner) {
+        inner = new Map<K, V>();
+        outer.set(key, inner);
+    }
+    return inner;
+}
+
+function formatBroadcastValue(value: unknown): string {
+    if (typeof value === 'string') {
+        return value;
+    }
+    if (value === null || value === undefined) {
+        return '';
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return String(value);
+    }
+    return JSON.stringify(value);
 }
 
 function upsertParallelL2CardContent(rawCardContent: string | null, entry: ParallelL2CardEntry): string {
@@ -147,7 +166,7 @@ function upsertParallelL2CardContent(rawCardContent: string | null, entry: Paral
         rawCardContent && rawCardContent.trim().length > 0
             ? rawCardContent.replace(/\r\n/g, '\n')
             : `# 第 ${entry.volumeNumber} 卷双轨章卡\n\n`;
-    const chKey = `ch_${String(entry.chapterNumber).padStart(4, '0')}`;
+    const chKey = formatChapterKey(entry.chapterNumber);
     const lines = [
         `## ${chKey} (day:${entry.storyDay})`,
         `- 主干剧情：${entry.plotSummary.trim()}`
@@ -174,14 +193,7 @@ function toParallelBroadcastEntries(
 ): EntityEntry[] {
     const entries: EntityEntry[] = [];
     for (const [key, value] of Object.entries(globalBroadcast)) {
-        const textValue =
-            typeof value === 'string'
-                ? value
-                : value === null || value === undefined
-                  ? ''
-                  : typeof value === 'number' || typeof value === 'boolean'
-                    ? String(value)
-                    : JSON.stringify(value);
+        const textValue = formatBroadcastValue(value);
         if (!textValue) continue;
         entries.push({
             storyDay: baseDay,
@@ -302,33 +314,193 @@ function collectItemClaimsFromEntry(
 /** 提取角色补丁中声明获取/持有/损毁的唯一道具 ID（覆盖第 2/3/4 全区） */
 function extractClaimedItemIds(patch: EntityPatch): Array<{ itemId: string; slotKey?: string | undefined; summary: string }> {
     const claims: Array<{ itemId: string; slotKey?: string | undefined; summary: string }> = [];
+    const slotAwareOps = [
+        ...(patch.acquired_state_ops ?? []),
+        ...(patch.buffer_ops ?? []),
+        ...(patch.trajectory_ops ?? [])
+    ];
 
-    for (const op of patch.acquired_state_ops ?? []) {
+    for (const op of slotAwareOps) {
         if (op.op !== 'upsert_slot' && op.op !== 'append') continue;
-        collectItemClaimsFromEntry(
-            patch.entity_id,
-            op.entry,
-            op.op === 'upsert_slot' ? op.slot_key : op.entry.slotKey,
-            claims
-        );
-    }
-
-    for (const op of patch.trajectory_ops ?? []) {
-        if (op.op !== 'append') continue;
-        collectItemClaimsFromEntry(patch.entity_id, op.entry, op.entry.slotKey, claims);
-    }
-
-    for (const op of patch.buffer_ops ?? []) {
-        if (op.op !== 'upsert_slot' && op.op !== 'append') continue;
-        collectItemClaimsFromEntry(
-            patch.entity_id,
-            op.entry,
-            op.op === 'upsert_slot' ? op.slot_key : op.entry.slotKey,
-            claims
-        );
+        const explicitSlotKey = op.op === 'upsert_slot' ? op.slot_key : op.entry.slotKey;
+        collectItemClaimsFromEntry(patch.entity_id, op.entry, explicitSlotKey, claims);
     }
 
     return claims;
+}
+
+function hasAnyItemStateMutation(patch: EntityPatch): boolean {
+    return (
+        (patch.acquired_state_ops !== undefined && patch.acquired_state_ops.length > 0) ||
+        (patch.trajectory_ops !== undefined && patch.trajectory_ops.length > 0) ||
+        (patch.buffer_ops !== undefined && patch.buffer_ops.length > 0) ||
+        (patch.innate_locks_ops !== undefined && patch.innate_locks_ops.length > 0) ||
+        (patch.add_unique_aliases !== undefined && patch.add_unique_aliases.length > 0) ||
+        (patch.add_contextual_titles !== undefined && patch.add_contextual_titles.length > 0) ||
+        (patch.add_historical_anchors !== undefined && patch.add_historical_anchors.length > 0) ||
+        patch.canonical_name !== undefined
+    );
+}
+
+interface BranchMutationAccumulator {
+    itemMutationsByEntity: Map<string, Map<string, { summary: string; signatures: string[] }>>;
+    itemClaimsAcrossBranches: Map<string, Map<string, ParallelConflictDetail>>;
+    slotMutations: Map<string, Map<string, { branchId: string; signature: string; summary: string }>>;
+    ledgerMutations: Map<string, Map<string, { branchId: string; value: string }>>;
+}
+
+function collectBranchMutations(deltas: ParallelBranchDelta[]): BranchMutationAccumulator {
+    const itemMutationsByEntity = new Map<
+        string,
+        Map<string, { summary: string; signatures: string[] }>
+    >();
+    const itemClaimsAcrossBranches = new Map<string, Map<string, ParallelConflictDetail>>();
+    const slotMutations = new Map<
+        string,
+        Map<string, { branchId: string; signature: string; summary: string }>
+    >();
+    const ledgerMutations = new Map<string, Map<string, { branchId: string; value: string }>>();
+
+    for (const delta of deltas) {
+        for (const patch of delta.patches) {
+            if (patch.entity_id.startsWith('item_')) {
+                if (hasAnyItemStateMutation(patch)) {
+                    const branchMap = getOrCreateMap(itemMutationsByEntity, patch.entity_id);
+                    const sig = buildItemMutationSignature(patch);
+                    const summary = buildItemMutationSummary(patch);
+                    const prev = branchMap.get(delta.branchId);
+                    if (prev) {
+                        prev.signatures.push(sig);
+                        prev.summary = `${prev.summary}; ${summary}`;
+                    } else {
+                        branchMap.set(delta.branchId, { summary, signatures: [sig] });
+                    }
+                }
+            } else {
+                for (const claim of extractClaimedItemIds(patch)) {
+                    const claimMap = getOrCreateMap(itemClaimsAcrossBranches, claim.itemId);
+                    claimMap.set(delta.branchId, {
+                        branchId: delta.branchId,
+                        slotKey: claim.slotKey,
+                        summary: claim.summary
+                    });
+                }
+            }
+
+            for (const op of patch.acquired_state_ops ?? []) {
+                if (op.op === 'upsert_slot' || op.op === 'remove_slot') {
+                    const byBranch = getOrCreateMap(slotMutations, `${patch.entity_id}::${op.slot_key}`);
+                    byBranch.set(delta.branchId, {
+                        branchId: delta.branchId,
+                        signature: buildSlotOpSignature(op),
+                        summary:
+                            op.op === 'remove_slot'
+                                ? `移除槽位 ${op.slot_key}`
+                                : `写入槽位 ${op.slot_key}: ${op.entry.text}`
+                    });
+                } else if (op.op === 'upsert_ledger') {
+                    for (const [ledgerKey, val] of Object.entries(op.entries)) {
+                        const byBranch = getOrCreateMap(
+                            ledgerMutations,
+                            `${patch.entity_id}::ledger::${ledgerKey}`
+                        );
+                        byBranch.set(delta.branchId, {
+                            branchId: delta.branchId,
+                            value: String(val)
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    return { itemMutationsByEntity, itemClaimsAcrossBranches, slotMutations, ledgerMutations };
+}
+
+function assertNoItemConflicts(
+    itemMutationsByEntity: BranchMutationAccumulator['itemMutationsByEntity'],
+    itemClaimsAcrossBranches: BranchMutationAccumulator['itemClaimsAcrossBranches']
+): void {
+    const allInvolvedItemIds = new Set([
+        ...itemMutationsByEntity.keys(),
+        ...itemClaimsAcrossBranches.keys()
+    ]);
+
+    for (const itemId of allInvolvedItemIds) {
+        const mutationMap = itemMutationsByEntity.get(itemId);
+        const claimMap = itemClaimsAcrossBranches.get(itemId);
+        const involvedBranches = new Set<string>([
+            ...(mutationMap ? mutationMap.keys() : []),
+            ...(claimMap ? claimMap.keys() : [])
+        ]);
+
+        if (involvedBranches.size < 2) {
+            continue;
+        }
+
+        const hasCrossPath = Boolean(mutationMap && mutationMap.size > 0 && claimMap && claimMap.size > 0);
+        const hasMultiClaim = Boolean(claimMap && claimMap.size >= 2);
+        const hasDivergentEntityMutations = Boolean(
+            mutationMap &&
+                mutationMap.size >= 2 &&
+                new Set([...mutationMap.values()].map((v) => v.signatures.join('|'))).size > 1
+        );
+
+        if (!hasCrossPath && !hasMultiClaim && !hasDivergentEntityMutations) {
+            continue;
+        }
+
+        const details: ParallelConflictDetail[] = [];
+        for (const branchId of involvedBranches) {
+            const mut = mutationMap?.get(branchId);
+            const clm = claimMap?.get(branchId);
+            const summaryParts: string[] = [];
+            if (mut) summaryParts.push(mut.summary);
+            if (clm) summaryParts.push(clm.summary);
+            details.push({
+                branchId,
+                ...(clm?.slotKey ? { slotKey: clm.slotKey } : {}),
+                summary: summaryParts.join(' | ')
+            });
+        }
+        throw new ParallelConflictError(itemId, details);
+    }
+}
+
+function assertNoSlotConflicts(
+    slotMutations: BranchMutationAccumulator['slotMutations']
+): void {
+    for (const [compositeKey, byBranch] of slotMutations.entries()) {
+        if (byBranch.size < 2) continue;
+        const uniqueSigs = new Set([...byBranch.values()].map((v) => v.signature));
+        if (uniqueSigs.size <= 1) continue;
+
+        const [entityId, slotKey] = compositeKey.split('::') as [string, string];
+        const details: ParallelConflictDetail[] = [...byBranch.values()].map((v) => ({
+            branchId: v.branchId,
+            slotKey,
+            summary: v.summary
+        }));
+        throw new ParallelConflictError(entityId, details, slotKey);
+    }
+}
+
+function assertNoLedgerConflicts(
+    ledgerMutations: BranchMutationAccumulator['ledgerMutations']
+): void {
+    for (const [compositeKey, byBranch] of ledgerMutations.entries()) {
+        if (byBranch.size < 2) continue;
+        const uniqueVals = new Set([...byBranch.values()].map((v) => v.value));
+        if (uniqueVals.size <= 1) continue;
+
+        const [entityId, , ledgerKey] = compositeKey.split('::') as [string, string, string];
+        const details: ParallelConflictDetail[] = [...byBranch.values()].map((v) => ({
+            branchId: v.branchId,
+            slotKey: ledgerKey,
+            summary: `账本项 ${ledgerKey}=${v.value}`
+        }));
+        throw new ParallelConflictError(entityId, details, ledgerKey);
+    }
 }
 
 /** PARALLEL 三态时间线分叉暂存与 3-Way Merge 沙盒 */
@@ -370,7 +542,7 @@ export class ParallelSandbox {
                     throw new Error(`PARALLEL 时间窗 ${options.windowId} 已处于 OPEN 状态`);
                 }
             } catch (err: unknown) {
-                if ((err as { code?: string }).code !== 'ENOENT') throw err;
+                if (!isEnoentError(err)) throw err;
             }
 
             const [config, worldState] = await Promise.all([
@@ -418,14 +590,10 @@ export class ParallelSandbox {
 
             await mkdir(this.windowDir(options.windowId), { recursive: true });
             await writeFile(metaPath, JSON.stringify(metadata, null, 2), 'utf8');
-            try {
-                await this.system.commitPaths(this.store.bookRoot, forkPaths, `parallel(${options.windowId}): persist window`);
-            } catch (error) {
-                await this.system.restorePaths(this.store.bookRoot, forkPaths);
-                await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
-                throw error;
-            }
-            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
+            await this.commitPathsWithRollback(
+                forkPaths,
+                `parallel(${options.windowId}): persist window`
+            );
             return metadata;
         }));
     }
@@ -462,7 +630,7 @@ export class ParallelSandbox {
             const baseProfile =
                 entities[patch.entity_id] ??
                 (await this.loadBaseProfile(metadata.baseTag, patch.entity_id));
-            entities[patch.entity_id] = applySingleEntityPatch(baseProfile, patch, false);
+            entities[patch.entity_id] = mergeEntityProfilePatch(baseProfile, patch, false);
         }
         const chapterFiles = snapshot.chapterFiles.filter((file) => {
             const chapter = Number(file.slice(3, -3));
@@ -612,13 +780,18 @@ export class ParallelSandbox {
             throw new ParallelWindowExceededError(input.windowId, totalChapters, windowMeta.maxChapters);
         }
         const profiles = new Map<string, EntityProfile>();
-        const reachable = await this.buildReachableKeySet(new Set(input.patches.map((patch) => patch.entity_id)));
+        const reachable = await collectReachableKeys(
+            this.store.bookRoot,
+            new Set(input.patches.map((patch) => patch.entity_id))
+        );
         for (const patch of input.patches) {
             if (!ENTITY_ID_RE.test(patch.entity_id)) throw new Error(`非法 entity_id: ${patch.entity_id}`);
-            const base = profiles.get(patch.entity_id) ?? await this.loadBaseProfile(windowMeta.baseTag, patch.entity_id);
-            const profile = applySingleEntityPatch(base, patch, false);
+            const base =
+                profiles.get(patch.entity_id) ??
+                (await this.loadBaseProfile(windowMeta.baseTag, patch.entity_id));
+            const profile = mergeEntityProfilePatch(base, patch, false);
             profiles.set(patch.entity_id, profile);
-            this.assertForeignKeysReachable(patch.entity_id, serializeEntityMarkdown(profile), reachable);
+            assertForeignKeysReachable(patch.entity_id, serializeEntityMarkdown(profile), reachable);
         }
 
         const normalizedL2Cards =
@@ -687,16 +860,19 @@ export class ParallelSandbox {
                             pendingNewEntityIds.add(patch.entity_id);
                         }
                     }
-                    const nextProfile = applySingleEntityPatch(baseProfile, patch, allowInnate);
+                    const nextProfile = mergeEntityProfilePatch(baseProfile, patch, allowInnate);
                     mergedProfiles.set(patch.entity_id, nextProfile);
                 }
             }
 
             // 第三阶段：外键可达性校验（含新建实体与已有冷归档/章节）
-            const reachableKeys = await this.buildReachableKeySet(pendingNewEntityIds);
+            const reachableKeys = await collectReachableKeys(
+                this.store.bookRoot,
+                pendingNewEntityIds
+            );
             for (const [entityId, profile] of mergedProfiles.entries()) {
                 const serialized = serializeEntityMarkdown(profile);
-                this.assertForeignKeysReachable(entityId, serialized, reachableKeys);
+                assertForeignKeysReachable(entityId, serialized, reachableKeys);
             }
 
             // 准备分支 L2 章卡合并映射
@@ -741,7 +917,7 @@ export class ParallelSandbox {
                     await unlink(join(this.store.bookRoot, coldRelPath));
                     commitPaths.push(coldRelPath);
                 } catch (err: unknown) {
-                    if ((err as { code?: string }).code !== 'ENOENT') throw err;
+                    if (!isEnoentError(err)) throw err;
                 }
             }
 
@@ -755,7 +931,7 @@ export class ParallelSandbox {
                 try {
                     existingCard = await readFile(cardAbsPath, 'utf8');
                 } catch (err: unknown) {
-                    if ((err as { code?: string }).code !== 'ENOENT') throw err;
+                    if (!isEnoentError(err)) throw err;
                 }
                 let nextCard = existingCard;
                 for (const entry of entries) {
@@ -791,18 +967,10 @@ export class ParallelSandbox {
             await writeFile(this.windowMetaPath(options.windowId), JSON.stringify(updatedMeta, null, 2), 'utf8');
             commitPaths.push(`.ops/parallel_deltas/${options.windowId}/window.json`);
 
-            let commitRes;
-            try {
-                commitRes = await this.system.commitPaths(
-                    this.store.bookRoot, commitPaths,
-                    `merge(parallel-${options.windowId}): 3-way merge ${deltas.length} branches`
-                );
-            } catch (error) {
-                await this.system.restorePaths(this.store.bookRoot, commitPaths);
-                await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
-                throw error;
-            }
-            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
+            const commitRes = await this.commitPathsWithRollback(
+                commitPaths,
+                `merge(parallel-${options.windowId}): 3-way merge ${deltas.length} branches`
+            );
 
             return {
                 windowId: options.windowId,
@@ -818,13 +986,29 @@ export class ParallelSandbox {
         }));
     }
 
+    private async commitPathsWithRollback(
+        commitPaths: string[],
+        message: string
+    ): Promise<{ sha: string }> {
+        const pendingPath = join(this.store.bookRoot, '.ops/pending_writes.json');
+        try {
+            const commitRes = await this.system.commitPaths(this.store.bookRoot, commitPaths, message);
+            await rm(pendingPath, { force: true });
+            return commitRes;
+        } catch (error) {
+            await this.system.restorePaths(this.store.bookRoot, commitPaths);
+            await rm(pendingPath, { force: true });
+            throw error;
+        }
+    }
+
     private async readBranchDeltas(windowId: string): Promise<ParallelBranchDelta[]> {
         const dir = this.windowDir(windowId);
         let files: string[];
         try {
             files = await readdir(dir);
         } catch (err: unknown) {
-            if ((err as { code?: string }).code === 'ENOENT') return [];
+            if (isEnoentError(err)) return [];
             throw err;
         }
 
@@ -838,178 +1022,16 @@ export class ParallelSandbox {
     }
 
     private detectConflicts(deltas: ParallelBranchDelta[]): void {
-        // 1. 唯一道具自身实体 (item_*) 双线互斥变更检测
-        const itemMutationsByEntity = new Map<
-            string,
-            Map<string, { summary: string; signatures: string[] }>
-        >();
+        const {
+            itemMutationsByEntity,
+            itemClaimsAcrossBranches,
+            slotMutations,
+            ledgerMutations
+        } = collectBranchMutations(deltas);
 
-        // 2. 角色补丁中对同一唯一道具 (item_*) 的双线获取/持有声明检测
-        const itemClaimsAcrossBranches = new Map<string, Map<string, ParallelConflictDetail>>();
-
-        // 3. 任意实体的互斥槽位 / 数值账本双线变更检测
-        const slotMutations = new Map<
-            string,
-            Map<string, { branchId: string; signature: string; summary: string }>
-        >();
-        const ledgerMutations = new Map<string, Map<string, { branchId: string; value: string }>>();
-
-        for (const delta of deltas) {
-            for (const patch of delta.patches) {
-                const isItemEntity = patch.entity_id.startsWith('item_');
-
-                if (isItemEntity) {
-                    const hasStateMutation =
-                        (patch.acquired_state_ops && patch.acquired_state_ops.length > 0) ||
-                        (patch.trajectory_ops && patch.trajectory_ops.length > 0) ||
-                        (patch.buffer_ops && patch.buffer_ops.length > 0) ||
-                        (patch.innate_locks_ops && patch.innate_locks_ops.length > 0) ||
-                        (patch.add_unique_aliases && patch.add_unique_aliases.length > 0) ||
-                        (patch.add_contextual_titles && patch.add_contextual_titles.length > 0) ||
-                        (patch.add_historical_anchors && patch.add_historical_anchors.length > 0) ||
-                        patch.canonical_name !== undefined;
-
-                    if (hasStateMutation) {
-                        let branchMap = itemMutationsByEntity.get(patch.entity_id);
-                        if (!branchMap) {
-                            branchMap = new Map();
-                            itemMutationsByEntity.set(patch.entity_id, branchMap);
-                        }
-                        const sig = buildItemMutationSignature(patch);
-                        const summary = buildItemMutationSummary(patch);
-                        const prev = branchMap.get(delta.branchId);
-                        if (prev) {
-                            prev.signatures.push(sig);
-                            prev.summary = `${prev.summary}; ${summary}`;
-                        } else {
-                            branchMap.set(delta.branchId, { summary, signatures: [sig] });
-                        }
-                    }
-                } else {
-                    for (const claim of extractClaimedItemIds(patch)) {
-                        let claimMap = itemClaimsAcrossBranches.get(claim.itemId);
-                        if (!claimMap) {
-                            claimMap = new Map();
-                            itemClaimsAcrossBranches.set(claim.itemId, claimMap);
-                        }
-                        claimMap.set(delta.branchId, {
-                            branchId: delta.branchId,
-                            slotKey: claim.slotKey,
-                            summary: claim.summary
-                        });
-                    }
-                }
-
-                if (patch.acquired_state_ops) {
-                    for (const op of patch.acquired_state_ops) {
-                        if (op.op === 'upsert_slot' || op.op === 'remove_slot') {
-                            const key = `${patch.entity_id}::${op.slot_key}`;
-                            let byBranch = slotMutations.get(key);
-                            if (!byBranch) {
-                                byBranch = new Map();
-                                slotMutations.set(key, byBranch);
-                            }
-                            byBranch.set(delta.branchId, {
-                                branchId: delta.branchId,
-                                signature: buildSlotOpSignature(op),
-                                summary:
-                                    op.op === 'remove_slot'
-                                        ? `移除槽位 ${op.slot_key}`
-                                        : `写入槽位 ${op.slot_key}: ${op.entry.text}`
-                            });
-                        } else if (op.op === 'upsert_ledger') {
-                            for (const [ledgerKey, val] of Object.entries(op.entries)) {
-                                const key = `${patch.entity_id}::ledger::${ledgerKey}`;
-                                let byBranch = ledgerMutations.get(key);
-                                if (!byBranch) {
-                                    byBranch = new Map();
-                                    ledgerMutations.set(key, byBranch);
-                                }
-                                byBranch.set(delta.branchId, {
-                                    branchId: delta.branchId,
-                                    value: String(val)
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 统一检查所有涉事唯一道具（含直接修改 item_* 实体与在 char_* 补丁中声明持有 item_* 的双路径交叉冲突）
-        const allInvolvedItemIds = new Set([
-            ...itemMutationsByEntity.keys(),
-            ...itemClaimsAcrossBranches.keys()
-        ]);
-
-        for (const itemId of allInvolvedItemIds) {
-            const mutationMap = itemMutationsByEntity.get(itemId);
-            const claimMap = itemClaimsAcrossBranches.get(itemId);
-
-            const involvedBranches = new Set<string>([
-                ...(mutationMap ? mutationMap.keys() : []),
-                ...(claimMap ? claimMap.keys() : [])
-            ]);
-
-            if (involvedBranches.size < 2) {
-                continue;
-            }
-
-            const hasCrossPath = Boolean(mutationMap && mutationMap.size > 0 && claimMap && claimMap.size > 0);
-            const hasMultiClaim = Boolean(claimMap && claimMap.size >= 2);
-            const hasDivergentEntityMutations = Boolean(
-                mutationMap &&
-                    mutationMap.size >= 2 &&
-                    new Set([...mutationMap.values()].map((v) => v.signatures.join('|'))).size > 1
-            );
-
-            if (hasCrossPath || hasMultiClaim || hasDivergentEntityMutations) {
-                const details: ParallelConflictDetail[] = [];
-                for (const branchId of involvedBranches) {
-                    const mut = mutationMap?.get(branchId);
-                    const clm = claimMap?.get(branchId);
-                    const summaryParts: string[] = [];
-                    if (mut) summaryParts.push(mut.summary);
-                    if (clm) summaryParts.push(clm.summary);
-                    details.push({
-                        branchId,
-                        ...(clm?.slotKey ? { slotKey: clm.slotKey } : {}),
-                        summary: summaryParts.join(' | ')
-                    });
-                }
-                throw new ParallelConflictError(itemId, details);
-            }
-        }
-
-        for (const [compositeKey, byBranch] of slotMutations.entries()) {
-            if (byBranch.size >= 2) {
-                const uniqueSigs = new Set([...byBranch.values()].map((v) => v.signature));
-                if (uniqueSigs.size > 1) {
-                    const [entityId, slotKey] = compositeKey.split('::') as [string, string];
-                    const details: ParallelConflictDetail[] = [...byBranch.values()].map((v) => ({
-                        branchId: v.branchId,
-                        slotKey,
-                        summary: v.summary
-                    }));
-                    throw new ParallelConflictError(entityId, details, slotKey);
-                }
-            }
-        }
-
-        for (const [compositeKey, byBranch] of ledgerMutations.entries()) {
-            if (byBranch.size >= 2) {
-                const uniqueVals = new Set([...byBranch.values()].map((v) => v.value));
-                if (uniqueVals.size > 1) {
-                    const [entityId, , ledgerKey] = compositeKey.split('::') as [string, string, string];
-                    const details: ParallelConflictDetail[] = [...byBranch.values()].map((v) => ({
-                        branchId: v.branchId,
-                        slotKey: ledgerKey,
-                        summary: `账本项 ${ledgerKey}=${v.value}`
-                    }));
-                    throw new ParallelConflictError(entityId, details, ledgerKey);
-                }
-            }
-        }
+        assertNoItemConflicts(itemMutationsByEntity, itemClaimsAcrossBranches);
+        assertNoSlotConflicts(slotMutations);
+        assertNoLedgerConflicts(ledgerMutations);
     }
 
     private async loadBaseProfile(baseTag: string, entityId: string): Promise<EntityProfile | null> {
@@ -1032,48 +1054,6 @@ export class ParallelSandbox {
             return { profile: parseEntityMarkdown(coldAtTag), fromColdArchive: true };
         }
         return null;
-    }
-
-    private async buildReachableKeySet(pendingNewEntityIds: Set<string>): Promise<Set<string>> {
-        const keys = new Set<string>(pendingNewEntityIds);
-        const dirs = [
-            join(this.store.bookRoot, 'entities'),
-            join(this.store.bookRoot, 'entities/cold_archive'),
-            join(this.store.bookRoot, 'manuscripts')
-        ];
-
-        await Promise.all(
-            dirs.map(async (dirPath) => {
-                try {
-                    const files = await readdir(dirPath);
-                    for (const file of files) {
-                        if (!file.endsWith('.md')) continue;
-                        const base = file.slice(0, -3);
-                        keys.add(base);
-                        const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
-                        if (sagaMatch?.[1]) {
-                            keys.add(sagaMatch[1]);
-                        }
-                    }
-                } catch (err: unknown) {
-                    if ((err as { code?: string }).code !== 'ENOENT') throw err;
-                }
-            })
-        );
-        return keys;
-    }
-
-    private assertForeignKeysReachable(sourceEntityId: string, content: string, reachableKeys: Set<string>): void {
-        const missing = new Set<string>();
-        for (const match of content.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
-            const refId = match[1];
-            if (refId && !reachableKeys.has(refId)) {
-                missing.add(refId);
-            }
-        }
-        if (missing.size > 0) {
-            throw new ForeignKeyError([...missing], sourceEntityId);
-        }
     }
 }
 

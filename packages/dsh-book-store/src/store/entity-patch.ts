@@ -35,24 +35,6 @@ function toEntityEntry(input: EntityEntryInput): EntityEntry {
     return entry;
 }
 
-function cloneStoredEntry(entry: EntityEntry): EntityEntry {
-    const cloned: EntityEntry = {
-        text: entry.text,
-        continuationLines: [...entry.continuationLines]
-    };
-    if (entry.storyDay !== undefined) cloned.storyDay = entry.storyDay;
-    if (entry.chapter !== undefined) cloned.chapter = entry.chapter;
-    if (entry.visibility !== undefined) cloned.visibility = entry.visibility;
-    if (entry.rawInvalidVisibility !== undefined) cloned.rawInvalidVisibility = entry.rawInvalidVisibility;
-    if (entry.owner !== undefined) cloned.owner = entry.owner;
-    if (entry.status !== undefined) cloned.status = entry.status;
-    if (entry.slotKey !== undefined) cloned.slotKey = entry.slotKey;
-    if (entry.extraTags !== undefined) cloned.extraTags = { ...entry.extraTags };
-    if (entry.isNumericLedger !== undefined) cloned.isNumericLedger = entry.isNumericLedger;
-    if (entry.ledger !== undefined) cloned.ledger = { ...entry.ledger };
-    return cloned;
-}
-
 function mergeUniqueStrings(existing: string[], additions?: string[]): string[] {
     if (!additions || additions.length === 0) return existing;
     const seen = new Set(existing);
@@ -89,6 +71,135 @@ function upsertSlotInSection(
     }
 }
 
+function createBaseProfile(existing: EntityProfile | null, patch: EntityPatch): EntityProfile {
+    if (!existing) {
+        return {
+            metadata: {
+                entity_id: patch.entity_id,
+                canonical_name: patch.canonical_name!,
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: patch.last_seen_ch ?? 0
+            },
+            sectionHeadings: { ...DEFAULT_SECTION_HEADINGS },
+            innateLocks: [],
+            acquiredState: [],
+            irreversibleTrajectory: [],
+            recentBuffer: []
+        };
+    }
+
+    return {
+        metadata: {
+            ...existing.metadata,
+            unique_aliases: [...existing.metadata.unique_aliases],
+            contextual_titles: [...existing.metadata.contextual_titles],
+            historical_anchors: [...existing.metadata.historical_anchors]
+        },
+        sectionHeadings: { ...existing.sectionHeadings },
+        innateLocks: existing.innateLocks.map(toEntityEntry),
+        acquiredState: existing.acquiredState.map(toEntityEntry),
+        irreversibleTrajectory: existing.irreversibleTrajectory.map(toEntityEntry),
+        recentBuffer: existing.recentBuffer.map(toEntityEntry)
+    };
+}
+
+function applyInnateLocksOps(
+    profile: EntityProfile,
+    entityId: string,
+    ops: NonNullable<EntityPatch['innate_locks_ops']>
+): void {
+    for (const op of ops) {
+        if (op.op === 'append') {
+            const visUpper = (op.entry.visibility ?? op.entry.rawInvalidVisibility)?.toUpperCase();
+            const hasInlineOmniscientSecret = [
+                op.entry.text,
+                ...(op.entry.continuationLines ?? [])
+            ].some((line) => /\bOMNISCIENT_SECRET\b/i.test(line));
+            if (visUpper === 'OMNISCIENT_SECRET' || hasInlineOmniscientSecret) {
+                throw new InnateLockViolationError(
+                    entityId,
+                    `第 1 区 Innate Locks 严禁写入 OMNISCIENT_SECRET（${entityId}），可揭晓底牌请放入第 2 区 Acquired State 并绑定 slot_key`
+                );
+            }
+            const nextEntry = toEntityEntry(op.entry);
+            assertEntryTagsSafe(nextEntry);
+            profile.innateLocks.push(nextEntry);
+        } else if (op.op === 'remove_slot') {
+            assertSafeEntityTagValue('slotKey', op.slot_key);
+            profile.innateLocks = profile.innateLocks.filter((e) => inferSlotKey(e) !== op.slot_key);
+        }
+    }
+}
+
+function applyAcquiredStateOps(
+    profile: EntityProfile,
+    ops: NonNullable<EntityPatch['acquired_state_ops']>
+): void {
+    for (const op of ops) {
+        if (op.op === 'upsert_slot') {
+            upsertSlotInSection(profile.acquiredState, op.slot_key, op.entry);
+        } else if (op.op === 'remove_slot') {
+            assertSafeEntityTagValue('slotKey', op.slot_key);
+            profile.acquiredState = profile.acquiredState.filter((e) => inferSlotKey(e) !== op.slot_key);
+        } else if (op.op === 'upsert_ledger') {
+            const ledgerIdx = profile.acquiredState.findIndex((e) => e.isNumericLedger);
+            const existingLedger = ledgerIdx >= 0 ? profile.acquiredState[ledgerIdx]! : undefined;
+            const mergedLedger: Record<string, string> = { ...(existingLedger?.ledger ?? {}) };
+            for (const [k, v] of Object.entries(op.entries)) {
+                assertSafeEntityTagValue('ledger_key', k);
+                const strVal = String(v);
+                assertSafeLedgerValue(strVal);
+                mergedLedger[k] = strVal;
+            }
+            const formattedText = formatNumericLedgerText(mergedLedger);
+            if (existingLedger) {
+                existingLedger.ledger = mergedLedger;
+                existingLedger.text = formattedText;
+            } else {
+                profile.acquiredState.push({
+                    isNumericLedger: true,
+                    ledger: mergedLedger,
+                    text: formattedText,
+                    continuationLines: []
+                });
+            }
+        } else if (op.op === 'append') {
+            const nextEntry = toEntityEntry(op.entry);
+            assertEntryTagsSafe(nextEntry);
+            profile.acquiredState.push(nextEntry);
+        }
+    }
+}
+
+function applyBufferOps(
+    profile: EntityProfile,
+    ops: NonNullable<EntityPatch['buffer_ops']>
+): void {
+    for (const op of ops) {
+        if (op.op === 'upsert_slot') {
+            upsertSlotInSection(profile.recentBuffer, op.slot_key, op.entry);
+        } else if (op.op === 'append') {
+            const nextEntry = toEntityEntry(op.entry);
+            assertEntryTagsSafe(nextEntry);
+            profile.recentBuffer.push(nextEntry);
+        } else if (op.op === 'trim_buffer') {
+            const timedIndices: number[] = [];
+            profile.recentBuffer.forEach((entry, idx) => {
+                if (entry.storyDay !== undefined || entry.chapter !== undefined) {
+                    timedIndices.push(idx);
+                }
+            });
+            if (timedIndices.length > op.max_entries) {
+                const dropCount = timedIndices.length - op.max_entries;
+                const dropSet = new Set(timedIndices.slice(0, dropCount));
+                profile.recentBuffer = profile.recentBuffer.filter((_, idx) => !dropSet.has(idx));
+            }
+        }
+    }
+}
+
 /**
  * 将单个 EntityPatch 合并至现有或新建的四段式实体档案。
  * - 新建实体强校验中文 canonical_name（ISS-008）；
@@ -106,13 +217,15 @@ export function mergeEntityProfilePatch(
     }
 
     if (existing) {
-        if (patch.canonical_name !== undefined && patch.canonical_name !== existing.metadata.canonical_name) {
-            if (!allowInnateMutation) {
-                throw new InnateLockViolationError(
-                    patch.entity_id,
-                    `禁止在未授权情况下篡改实体 canonical_name (${existing.metadata.canonical_name} -> ${patch.canonical_name})`
-                );
-            }
+        if (
+            patch.canonical_name !== undefined &&
+            patch.canonical_name !== existing.metadata.canonical_name &&
+            !allowInnateMutation
+        ) {
+            throw new InnateLockViolationError(
+                patch.entity_id,
+                `禁止在未授权情况下篡改实体 canonical_name (${existing.metadata.canonical_name} -> ${patch.canonical_name})`
+            );
         }
         if (patch.innate_locks_ops && patch.innate_locks_ops.length > 0 && !allowInnateMutation) {
             throw new InnateLockViolationError(
@@ -128,35 +241,7 @@ export function mergeEntityProfilePatch(
         throw new Error(`新建实体 ${patch.entity_id} 必须提供包含中文字符的 canonical_name`);
     }
 
-    const profile: EntityProfile = existing
-        ? {
-              metadata: {
-                  ...existing.metadata,
-                  unique_aliases: [...existing.metadata.unique_aliases],
-                  contextual_titles: [...existing.metadata.contextual_titles],
-                  historical_anchors: [...existing.metadata.historical_anchors]
-              },
-              sectionHeadings: { ...existing.sectionHeadings },
-              innateLocks: existing.innateLocks.map(cloneStoredEntry),
-              acquiredState: existing.acquiredState.map(cloneStoredEntry),
-              irreversibleTrajectory: existing.irreversibleTrajectory.map(cloneStoredEntry),
-              recentBuffer: existing.recentBuffer.map(cloneStoredEntry)
-          }
-        : {
-              metadata: {
-                  entity_id: patch.entity_id,
-                  canonical_name: patch.canonical_name!,
-                  unique_aliases: [],
-                  contextual_titles: [],
-                  historical_anchors: [],
-                  last_seen_ch: patch.last_seen_ch ?? 0
-              },
-              sectionHeadings: { ...DEFAULT_SECTION_HEADINGS },
-              innateLocks: [],
-              acquiredState: [],
-              irreversibleTrajectory: [],
-              recentBuffer: []
-          };
+    const profile = createBaseProfile(existing, patch);
 
     if (patch.canonical_name !== undefined && (allowInnateMutation || !existing)) {
         profile.metadata.canonical_name = patch.canonical_name;
@@ -164,7 +249,10 @@ export function mergeEntityProfilePatch(
     if (patch.last_seen_ch !== undefined) {
         profile.metadata.last_seen_ch = Math.max(profile.metadata.last_seen_ch, patch.last_seen_ch);
     }
-    profile.metadata.unique_aliases = mergeUniqueStrings(profile.metadata.unique_aliases, patch.add_unique_aliases);
+    profile.metadata.unique_aliases = mergeUniqueStrings(
+        profile.metadata.unique_aliases,
+        patch.add_unique_aliases
+    );
     profile.metadata.contextual_titles = mergeUniqueStrings(
         profile.metadata.contextual_titles,
         patch.add_contextual_titles
@@ -175,72 +263,11 @@ export function mergeEntityProfilePatch(
     );
 
     if (patch.innate_locks_ops) {
-        for (const op of patch.innate_locks_ops) {
-            if (op.op === 'append') {
-                const visUpper = (op.entry.visibility ?? op.entry.rawInvalidVisibility)?.toUpperCase();
-                const hasInlineOmniscientSecret = [
-                    op.entry.text,
-                    ...(op.entry.continuationLines ?? [])
-                ].some((line) => /\bOMNISCIENT_SECRET\b/i.test(line));
-                if (visUpper === 'OMNISCIENT_SECRET' || hasInlineOmniscientSecret) {
-                    throw new InnateLockViolationError(
-                        patch.entity_id,
-                        `第 1 区 Innate Locks 严禁写入 OMNISCIENT_SECRET（${patch.entity_id}），可揭晓底牌请放入第 2 区 Acquired State 并绑定 slot_key`
-                    );
-                }
-                const nextEntry = toEntityEntry(op.entry);
-                assertEntryTagsSafe(nextEntry);
-                profile.innateLocks.push(nextEntry);
-            } else if (op.op === 'remove_slot') {
-                assertSafeEntityTagValue('slotKey', op.slot_key);
-                profile.innateLocks = profile.innateLocks.filter((e) => inferSlotKey(e) !== op.slot_key);
-            }
-        }
+        applyInnateLocksOps(profile, patch.entity_id, patch.innate_locks_ops);
     }
-
     if (patch.acquired_state_ops) {
-        for (const op of patch.acquired_state_ops) {
-            if (op.op === 'upsert_slot') {
-                upsertSlotInSection(profile.acquiredState, op.slot_key, op.entry);
-            } else if (op.op === 'remove_slot') {
-                assertSafeEntityTagValue('slotKey', op.slot_key);
-                profile.acquiredState = profile.acquiredState.filter((e) => inferSlotKey(e) !== op.slot_key);
-            } else if (op.op === 'upsert_ledger') {
-                const ledgerIdx = profile.acquiredState.findIndex((e) => e.isNumericLedger);
-                if (ledgerIdx >= 0) {
-                    const existingLedger = profile.acquiredState[ledgerIdx]!;
-                    const mergedLedger: Record<string, string> = { ...(existingLedger.ledger ?? {}) };
-                    for (const [k, v] of Object.entries(op.entries)) {
-                        assertSafeEntityTagValue('ledger_key', k);
-                        const strVal = String(v);
-                        assertSafeLedgerValue(strVal);
-                        mergedLedger[k] = strVal;
-                    }
-                    existingLedger.ledger = mergedLedger;
-                    existingLedger.text = formatNumericLedgerText(mergedLedger);
-                } else {
-                    const newLedger: Record<string, string> = {};
-                    for (const [k, v] of Object.entries(op.entries)) {
-                        assertSafeEntityTagValue('ledger_key', k);
-                        const strVal = String(v);
-                        assertSafeLedgerValue(strVal);
-                        newLedger[k] = strVal;
-                    }
-                    profile.acquiredState.push({
-                        isNumericLedger: true,
-                        ledger: newLedger,
-                        text: formatNumericLedgerText(newLedger),
-                        continuationLines: []
-                    });
-                }
-            } else if (op.op === 'append') {
-                const nextEntry = toEntityEntry(op.entry);
-                assertEntryTagsSafe(nextEntry);
-                profile.acquiredState.push(nextEntry);
-            }
-        }
+        applyAcquiredStateOps(profile, patch.acquired_state_ops);
     }
-
     if (patch.trajectory_ops) {
         for (const op of patch.trajectory_ops) {
             if (op.op === 'append') {
@@ -250,29 +277,8 @@ export function mergeEntityProfilePatch(
             }
         }
     }
-
     if (patch.buffer_ops) {
-        for (const op of patch.buffer_ops) {
-            if (op.op === 'upsert_slot') {
-                upsertSlotInSection(profile.recentBuffer, op.slot_key, op.entry);
-            } else if (op.op === 'append') {
-                const nextEntry = toEntityEntry(op.entry);
-                assertEntryTagsSafe(nextEntry);
-                profile.recentBuffer.push(nextEntry);
-            } else if (op.op === 'trim_buffer') {
-                const timedIndices: number[] = [];
-                profile.recentBuffer.forEach((entry, idx) => {
-                    if (entry.storyDay !== undefined || entry.chapter !== undefined) {
-                        timedIndices.push(idx);
-                    }
-                });
-                if (timedIndices.length > op.max_entries) {
-                    const dropCount = timedIndices.length - op.max_entries;
-                    const dropSet = new Set(timedIndices.slice(0, dropCount));
-                    profile.recentBuffer = profile.recentBuffer.filter((_, idx) => !dropSet.has(idx));
-                }
-            }
-        }
+        applyBufferOps(profile, patch.buffer_ops);
     }
 
     profile.metadata = EntityMetadataSchema.parse(profile.metadata);
