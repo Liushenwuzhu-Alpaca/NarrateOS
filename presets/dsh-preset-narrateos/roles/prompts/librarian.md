@@ -18,8 +18,9 @@
 - 直接检查预注入 `entityList` 中的 `last_seen_ch` 与冷宫清单：若某重要关联角色已长时间未出场（`current_ch - last_seen_ch > 30`）或在 `entities/cold_archive/` 休眠，按需读取核实并将其纳入 `wakeup_entity_ids` 唤醒建议名单。
 
 ### 3. 跨称谓 `L3` 原稿回表与成对挂载铁律
-- 通过 `book_grep` 检索实体在历史章节中的动作或台词现场；若使用通用职务/泛称（`contextual_titles`），必须先从 `L2` 章卡核实该实体确实出场的章号集合，仅在白名单章节内检索。
-- **成对挂载强制规范**：凡本章涉及以下任一情形，必须**同时**挂载对应实体/设定文档 ID 与至少 1 组有效的历史原稿检索指令（`recall_queries`），严禁只挂档案不查原稿、或只查原稿不挂档案：
+- 通过 `book_grep` 检索实体在历史章节中的动作或台词现场，并在 `recall_queries` 中通过 `focus_chapters` 精准指定目标历史章号；若使用通用职务/泛称（`contextual_titles`），必须先从 `L2` 章卡核实该实体确实出场的章号集合，仅在白名单章节内检索。
+- **首次登场实体豁免规则**：尚未在 `< targetChapter` 任何可达定稿手稿或 `L2` 章卡出场过的首次登场实体（如 `last_seen_ch == 0` 的开书预建 `item_*` / `char_*`），只需在 `selected_entity_ids` 中选中其档案 ID 即可，无需强求历史原稿切片（`recall_queries` 可省略该实体）。
+- **成对挂载强制规范**：仅当目标实体在 `< targetChapter` 的可达定稿手稿中确实存在历史出场记录，且本章涉及以下任一情形时，必须**同时**挂载对应实体/设定文档 ID 与至少 1 组有效的历史原稿检索指令（`recall_queries`），严禁只挂档案不查原稿、或只查原稿不挂档案：
   1. 回收或推进 `world/open_threads.md` 中的跨卷伏笔；
   2. 唯一关键道具（`item_*`）重现或发生归属交接；
   3. 角色故地重游或直接援引过往特定事件现场。
@@ -28,4 +29,4 @@
 - 严禁修改任何文件，严禁编造不存在的 `entity_id`、`lore_*` 文件名或未核实的章号引用。
 
 ## 终态交接
-收集齐备所需上下文后，必须调用 `yield_context_pack` 提交最终净菜包（`selected_entity_ids`、`recall_queries`、`selected_lore_files`）。若首次调用因成对挂载校验不通过而被拦截，立即按提示补查对应实体或原稿切片后重新调用 `yield_context_pack`。
+收集齐备所需上下文后，必须调用 `yield_context_pack` 提交最终净菜包（`selected_entity_ids`、`wakeup_entity_ids`、`recall_queries`、`selected_lore_files`）。其中 `wakeup_entity_ids` 用于提交需在本章返场唤醒的 `entities/cold_archive/` 休眠实体 ID 列表（无冷宫唤醒时传 `[]`）。若首次调用因成对挂载校验不通过而被拦截，立即按提示补查对应实体或原稿切片后重新调用 `yield_context_pack`。

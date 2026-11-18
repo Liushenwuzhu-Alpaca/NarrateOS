@@ -13,7 +13,7 @@
 - **不抄录瞬时动作**：邻章尾窗可见的临时站位、端茶坐下等一次性动作不写入长期档案。
 - **只抽取跨章生效状态**：
   - 物品持有变更、数值账本增减（`upsert_ledger`）、新伤势/痊愈、驻留节点迁移（`upsert_slot`）；
-  - 角色认知更新与**解密翻转**：若本章正式公开了某条原本标记为 `OMNISCIENT_SECRET` 的秘密，将其可见性翻转为 `PUBLIC`（公众/出场方已知）或 `READER_KNOWN`（仅读者获知）；
+  - **角色认知更新与解密翻转**：可揭晓的 `OMNISCIENT_SECRET` 底牌均置于第 2 区 `Acquired State` 并绑定明确的 `slot_key`（第 1 区 `Innate Locks` 仅放 `PUBLIC` / `SELF_ONLY` 先天红线）；当本章正式公开某条 `OMNISCIENT_SECRET` 秘密时，在 `acquired_state_ops` 中提交相同 `slot_key` 的 `upsert_slot`，将 `visibility` 原地翻转为 `READER_KNOWN`（仅读者获知）或 `PUBLIC`（公众/出场方已知），可选同时向第 3 区追加公开事件记录；
   - 重大不可逆决定写入第 3 区（`trajectory_ops`）；
   - 近期跨章有效细节写入第 4 区滑动缓冲（`buffer_ops`）。
 
@@ -29,9 +29,11 @@
 - `PARALLEL`：冻结主线时钟累加，`story_day_delta` 必须保持 `0`。
 - `FLASHBACK`：严禁覆写当前 `Acquired State` 或推进主线 `story_day`（`story_day_delta` 保持 `0`），仅将新揭露的历史事实带历史 `story_day` 记入第 3 区履历与对应知情者认知层。
 
-### 4. 双轨 `L2` 章卡与候选方向
-- `chapter_summary` 须简明概括本章主干剧情、反常异象/专有锚点，并准确列出出场实体 ID。
-- `next_chapter_options` 提供 2-3 条自然延续的后续推进候选方向（不含题材套路偏见）。
+### 4. 双轨 `L2` 章卡与候选方向（`Q1` 契约）
+- `plot_summary`：1-2 句简洁客观的因果主干剧情与意图功能义（向后兼容旧字段 `chapter_summary`，优先输出 `plot_summary`）。
+- `prose_anchors`：0-5 个从本章定稿正文中**原文逐字出现**的非角色微物件、空间死角或感官意象短词（宁缺毋滥，单条去空白长度 >= 2，严禁改写加减助词或凭记忆编造；门禁会核对原稿逐字存在性）。
+- `appeared_entity_ids`：本章实际登场交互或推进状态的已建档实体 ID 列表（含未发生永久状态变更的在场实体；仅在远方台词中被提及者不列入）。
+- `next_chapter_options`：提供 2-3 条自然延续的后续推进候选方向（不含题材套路偏见）。
 
 ### 5. `yield_state_patch` 精确 JSON 字段结构示例
 提交 `entity_patches` 时，严格遵守以下字段名与类型（`entry` 必含 `text: string`，`op` 使用精确字面量）：
@@ -97,7 +99,9 @@
         }
     ],
     "story_day_delta": 0,
-    "chapter_summary": "第2章主干摘要...",
+    "plot_summary": "林默在旧港三号库房与陈九达成夜航押运协议，并记下账房暗门铜印线索。",
+    "prose_anchors": ["三号库房", "铜印编号", "左袖口新漆"],
+    "appeared_entity_ids": ["char_linmo", "char_chenjiu"],
     "next_chapter_options": ["候选方向一", "候选方向二"]
 }
 ```

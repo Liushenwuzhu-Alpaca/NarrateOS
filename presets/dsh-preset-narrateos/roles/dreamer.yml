@@ -17,5 +17,4 @@ allowedOpsRead:
     - .ops/telemetry.jsonl
 allowedOpsWrite:
     - .ops/voice_samples.yaml
-    - .ops/signals.jsonl
 yieldTool: yield_dream_commit

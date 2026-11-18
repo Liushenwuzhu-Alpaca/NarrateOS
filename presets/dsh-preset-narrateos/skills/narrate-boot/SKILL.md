@@ -53,14 +53,14 @@ description: 当用户提出开新书、整理脑洞或长文大纲、导入同�
 
 ### Step 3：因果自检与调用 `lock_charter_and_boot`
 1. 对照 [references/t0-causality-checklist.md](references/t0-causality-checklist.md) 完成 4 项因果自检（反派动机经济性、线索物理可达性、主角不可替代手艺、配角自主弧线）与 `T0` 时序零泄露检查。
-2. 声纹池洁净原则：仅当作者提供原文样章时洗净填入 `voice_samples`；**无样章时传 `[]`**。
+2. 声纹池配置（`hybrid_rolling` 混合滚动）：作者提供原文样章时洗净填入 `voice_samples`（标注 `source: 'author_sample'`）；无样章时可传 `[]` 或由编译层生成 3-4 条 15-45 字含硬动作反馈/人物对话交锋的临时种子（标注 `source: 'boot_seed'`，禁纯景物空镜与角色专名），并在前 3 章定稿后由系统滚动置换为真实好句。
 3. 向作者呈报精简契约总览，待作者**显式确认**（绝不把跳过提问当确认）后，按下方 Quick Reference 调用 `lock_charter_and_boot` 完成三把手术刀编译与初始 Git 提交（`last_committed_ch = 0`）。
 
 ### Step 4：建库停机与首章校准交接
 `lock_charter_and_boot` 完成后**立刻停机收口**，向作者诚实说明下一步操作：
-1. 作品仓库已初始化并停机待命；请先在右侧 **Operator Studio 切换并确认当前激活书目**，逐项检阅生成的 `world/`、`entities/` 与 `index/` 资产；
-2. 检阅无误后由作者在 Studio 点击「推进一步」（或聊天栏发送 `/narrate-step`）手动启动第 1 章；首章将消费第 1 拍并以 0 声纹（或已清洗样章声纹）起笔；
-3. 第 1 章归档后系统自动停机校准（润色手改走 `/narrate-sync`，设定微调走 `/narrate-signal`）；作者确认通过时自动触发 **`Voice Harvest`** 从 `ch_0001.md` 采集 3-5 条脱敏纯表达标本入池，之后再手动放行后续推章或 `/narrate-yolo`。
+1. `lock_charter_and_boot` 建库成功后会自动激活并切换至新书（若返回 `switchConflictReason` 提示存在在途任务锁冲突，再请作者待当前任务完成后于右侧 **Operator Studio** 切换激活）；请逐项检阅生成的 `world/`、`entities/` 与 `index/` 资产；
+2. 检阅无误后由作者在 Studio 点击「推进一步」（或聊天栏发送 `/narrate-step`）手动启动第 1 章；首章将消费第 1 拍并以 `author_sample` 或 `boot_seed` 声纹起笔；
+3. 若启用了首章校准停机（`opening.pause_after_chapter_1`），第 1 章归档后自动停机检阅（润色手改走 `/narrate-sync`，设定微调走 `/narrate-signal`）；前 3 章定稿后，`Voice Harvest` 会自动提取脱敏纯表达好句（`chapter_harvest`）滚动替换 `boot_seed` 临时种子。
 
 ---
 
@@ -84,7 +84,7 @@ description: 当用户提出开新书、整理脑洞或长文大纲、导入同�
 | `open_threads` | `snake_case`：`[{ thread_id, title, wakeup_condition }]`，活跃条目 **<= 15 条** |
 | `lore_entries` | `snake_case`：`[{ id: "lore_*", title, summary, content }]` |
 | `future_horizon_events` | `snake_case`：`[{ event_id, story_day (>0), premise, description }]` |
-| `StaticProseGate` 正向写法 | `world_summary`、`static_base_and_voice`、`current_arc_envelope`、`entities[].*` 文本与 `voice_samples[].sample` 必须用具体物象与客观动作结果陈述，禁用思维/HTML 注释标签、人体微距套话（如指节/喉结/瞳孔/睫毛）、空泛修饰（如一丝/一抹/某种难以言喻）或说教收尾 |
+| `StaticProseGate` 正向写法 | `world_summary`、`static_base_and_voice`、`current_arc_envelope`、`entities[].*` 文本与 `voice_samples[].sample` 必须用具体物象与客观动作结果陈述，禁用思维/HTML 注释标签、人体微距套话（如指节/喉结/瞳孔/睫毛）、空泛修饰（如一丝/一抹/某种难以言喻）或说教收尾；`voice_samples[]` 可选 `source`: `'author_sample' \| 'boot_seed' \| 'chapter_harvest'` |
 
 ---
 
@@ -96,6 +96,6 @@ description: 当用户提出开新书、整理脑洞或长文大纲、导入同�
 | :--- | :--- |
 | 「先在对话里试写一段第 1 章给作者看看手感」 | **严禁越权代写正文**。试手感应使用作者提供的原文 `voice_samples`，或建库后在 Studio 启动第 1 章由净室 `Writer` 生成。 |
 | 「用户跳过了 `ask_user_question`（`selected: []` 且无 `custom`），就按我推荐的默认落库吧」 | 跳过等于**未裁决**。必须明确重申待定选项请用户文字确认或再次提问，绝不把空响应当作授权。 |
-| 「作者没给样章，我先编两句高质量 `voice_samples` 占位」 | **严禁伪造声纹**。无作者样章时 `voice_samples` 必须传 `[]`，等第 1 章校准时由 `Voice Harvest` 自动采集。 |
+| 「作者没给样章，我先编两句景物空镜或带人名剧透的句子充当 `voice_samples`」 | **严禁空镜抒情或含专名剧透伪声纹**。无作者样章时可传 `[]`，或仅生成 3-4 条 15-45 字无专名、含硬动作/对话交锋的 `boot_seed` 短拐杖，待前 3 章 `Voice Harvest` 滚动置换。 |
 | 「现在离线/`web_search` 超时，我凭记忆补几条行业规范应付」 | **严禁伪造考据**。检索受限时必须如实告知哪些事实未查证，请作者补充或暂留保守约束。 |
 | 「这是流程 B 改纲，我直接调个工具或用文件工具帮他把 `books/` 改了/回滚了」 | 主会话无改纲/回滚工具，裸写会被 `main-session-guard` 拦截。只许先只读取证，再输出结构化方案引导 `/narrate-signal` 或 Studio 操作。 |

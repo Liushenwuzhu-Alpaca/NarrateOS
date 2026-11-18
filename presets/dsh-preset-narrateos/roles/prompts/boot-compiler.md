@@ -8,7 +8,7 @@
 - `world/author_charter.md`：完整沉淀核心承诺、排雷红线、原话 `T0` 锚点、当前方案与授权边界（对写手物理屏蔽）。
 - `world/arc_director_plan.md`：沉淀当前卷阶段天花板禁区（`Stage Ceiling`）、未揭秘三幕拐点，以及 **3-5 个不绑定固定章号的开篇序列节拍（`Opening Sequence Beats`）**；每拍必须写明：体验/手艺落点、限量放出的 1-2 个线索、达成过拍的可见标志。
 - `world/current_arc_envelope.md`：仅写入对写手安全可见的**正向舞台常态与当前主冲突**，严禁包含未揭底牌或否定禁令词。
-- 实体知情分级：每条实体属性与认知严格标注 `PUBLIC`、`SELF_ONLY`、`READER_KNOWN` 或 `OMNISCIENT_SECRET`（明牌题材允许 0 条 `OMNISCIENT_SECRET`）。
+- 实体知情分级：每条实体属性与认知严格标注 `PUBLIC`、`SELF_ONLY`、`READER_KNOWN` 或 `OMNISCIENT_SECRET`（明牌题材允许 0 条 `OMNISCIENT_SECRET`）。所有可随剧情揭晓的 `OMNISCIENT_SECRET` 底牌统一放入第 2 区 `acquiredState` 并绑定唯一 `slotKey`（第 1 区 `innateLocks` 仅放 `PUBLIC` 或 `SELF_ONLY` 先天红线，严禁放入 `OMNISCIENT_SECRET`）。
 
 ### 2. 时序刀（`T0` 锚点守恒）
 - 以 `T0 / story_day = 0` 为绝对零点：
@@ -19,15 +19,15 @@
 ### 3. 冰山与声纹刀（环境补集与零假句开局）
 - `world/static_base_and_voice.md`（总长 <= 1,500 字）：仅承载世界底层物理/超自然边界、空间连通拓扑、叙述人称与主观度基线、可执行句法纪律（不含具体故事剧透或具象喻体模板）。
 - `lore_library/lore_*.md`：将大体量世界背景、行业规范或同人专有名词分片沉淀为独立词条（每个词条配备唯一 `lore_*` ID 与摘要）。
-- `.ops/voice_samples.yaml`：
-  - 仅当作者显式提供了样章文本时，从中提取经洗净的纯表达示范；
-  - **若作者未提供样章，声纹池必须保持为空数组 `[]`（0 条）**，严禁自行编造中性占位示例句污染首章人物气口。
+- `.ops/voice_samples.yaml`（`voice_samples` 输出，遵循 `hybrid_rolling` 混合滚动声纹）：
+  - **当作者提供了样章或试写确认句时**：从中提取多语域纯表达示范（剥离具体案情与专名，通过 `StaticProseGate`），每条标记 `source: 'author_sample'`；
+  - **当作者未提供样章时**：编译生成 **3-4 条**分属不同语域 `tag` 的 **15-45 字**短句作为启动临时拐杖，标记 `source: 'boot_seed'`（将在前几章定稿后由真实好句滚动置换）；体裁硬约束：**必须包含硬动作反馈或人物对话交锋停顿**，**严禁纯景物空镜抒情或雕琢腔，严禁包含任何角色专名**，且全部通过 `StaticProseGate`。
 
 ## 实体与外键规范
 - 角色 ID 使用 `char_<slug>`，关键唯一道具 ID 使用 `item_<slug>`，全部 `entity_id` 与 `lore_*` ID 必须全局唯一。
 - 每个新建实体必须具备准确中文 `canonical_name`，并按四段式结构组织：
-  1. `Innate Locks`（先天/底层永久红线，永远不被插叙屏蔽）
-  2. `Acquired State & Numeric Ledger`（后天状态与数值账本）
+  1. `Innate Locks`（先天/底层永久红线，永远不被插叙屏蔽；仅允许 `PUBLIC` 或 `SELF_ONLY`，严禁放入 `OMNISCIENT_SECRET`）
+  2. `Acquired State & Numeric Ledger`（后天状态与数值账本；所有可随剧情揭晓的 `OMNISCIENT_SECRET` 底牌均置于此区并绑定唯一 `slotKey`，以便揭秘章原地翻转可见性）
   3. `Irreversible Trajectory`（不可逆变迁史）
   4. `Recent Sliding Buffer & Voice`（近期缓冲与专属对话声纹）
 - 所有跨实体引用（持有物、关系对象）必须指向已存在的合法 `entity_id`。

@@ -24,6 +24,6 @@ packages/*/dist/
 .scratch/
 books/
 
-manuscript
+/manuscript/
 .agents/
 skills-lock.json
