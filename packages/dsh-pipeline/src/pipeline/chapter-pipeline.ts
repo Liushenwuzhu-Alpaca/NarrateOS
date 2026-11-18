@@ -76,14 +76,21 @@ import {
     addUsage,
     buildVerificationCorpus,
     buildVolumeStaticPrefix,
+    collectEntityDisplayNames,
     createEmptyUsage,
     formatChapterKey,
+    formatVolumeCardRelPath,
+    isAbortError,
     normalizeOpenThreads,
-    normalizeOpsStyleAmendments,
+    readCombinedStyleAmendments,
     readOptionalText,
     readSignalsCursorState,
+    resolveConsumedSignalIds,
     resolveSignalId,
+    sanitizeExtractorPatches,
+    splitNonEmptyLines,
     upsertVolumeCardEntry,
+    wakeColdArchiveEntitiesInMemory,
     writeNextChapterOptions,
     writeSignalsCursorState
 } from './helpers.js';
@@ -103,17 +110,23 @@ export interface ChapterPipelineDeps {
     pluginSearchDirs?: string[] | undefined;
 }
 
-function sanitizeExtractorPatches(
-    snapshot: BookSnapshot,
-    patches: EntityPatch[]
-): EntityPatch[] {
-    return patches.map((patch) => {
-        if (snapshot.entities[patch.entity_id] && patch.canonical_name !== undefined) {
-            const { canonical_name: _ignored, ...rest } = patch;
-            return rest;
-        }
-        return patch;
-    });
+function formatOpsSignalLine(signal: OpsSignal): string {
+    if (signal.type === 'SPOTLIGHT_TRIGGER') {
+        return `- [SPOTLIGHT_TRIGGER] 实体 ${signal.entity_id ?? '(未指定)'} (建议模式: ${signal.suggested_mode ?? 'MAINLINE'}): ${signal.reason}（请优先通过前台碰撞让该角色/势力实质介入当前现场，或在必要时切镜呈现，严禁幕后略过）`;
+    }
+    if (signal.type === 'RETCON') {
+        return `- [RETCON 圆回指令] (${signal.conflict_id ?? '细节修正'}): ${signal.reason}（请在本章顺带自然圆回该细节偏差）`;
+    }
+    return `- [DIRECTOR_NOTE 微调指令]: ${signal.reason}`;
+}
+
+function invokeSafeCallback<T>(cb: ((arg: T) => void) | undefined, arg: T): void {
+    if (!cb) return;
+    try {
+        cb(arg);
+    } catch {
+        // 避免诊断回调异常中断主流程
+    }
 }
 
 const GATE_POSITIVE_GUIDANCE: Record<string, string> = {
@@ -142,14 +155,6 @@ const RESTRICTED_DIRECTIVE_CLAUSE_RE =
 
 const RESTRICTED_SOURCE_REF_RE =
     /(?:^|\/)(?:world\/)?(?:author_charter\.md|arc_director_plan\.md|future_horizon\.md)$/i;
-
-function isAbortError(err: unknown): boolean {
-    if (!(err instanceof Error)) return false;
-    if (err.name === 'AbortError') return true;
-    const code = (err as { code?: unknown }).code;
-    if (code === 'ABORT_ERR' || code === 'ABORTED') return true;
-    return err.message === 'SAFE_HALT_REQUESTED' || err.message === 'Aborted';
-}
 
 export function resolveDefaultEngineCraftPluginDir(): string {
     const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -543,111 +548,20 @@ export class ChapterPipeline {
 
         // 崩溃恢复：处于 FEAT_COMMITTED 时跳过生成直接补跑 Extractor 与 state 提交
         if (recovery.action === 'NEEDS_STATE_EXTRACTION' && recovery.activeChapter !== null) {
-            const activeCh = recovery.activeChapter;
-            emit('WAL_RECOVERY', activeCh, `从 FEAT_COMMITTED 恢复第 ${activeCh} 章状态抽取`);
-            const relPath = `manuscripts/${formatChapterKey(activeCh)}.md`;
-            const prose = await readFile(join(this.store.bookRoot, relPath), 'utf8');
-            const targetDay =
-                recoveredContext?.targetDay ??
-                options.targetDay ??
-                snapshot.worldState.frontmatter.story_day;
-
-            const outlineSnap = await this.store.readChapterOutline(activeCh);
-            let recoveredOutline: PlannerOutline | null = null;
-            if (outlineSnap.status === 'available' && outlineSnap.outlineText) {
-                try {
-                    recoveredOutline = PlannerOutlineSchema.parse(JSON.parse(outlineSnap.outlineText));
-                } catch {
-                    recoveredOutline = null;
-                }
-            }
-
-            const wokenColdIds = new Set<string>();
-            const recoveryWakeupIds = [
-                ...povCharIds,
-                ...(recoveredOutline?.focus_cast ?? []),
-                ...(recoveredOutline?.background_cast ?? [])
-            ];
-            snapshot = await this.wakeColdArchiveEntitiesInMemory(
+            return await this.recoverFromFeatCommitted({
+                activeCh: recovery.activeChapter,
                 snapshot,
-                recoveryWakeupIds,
-                wokenColdIds
-            );
-            const recoveryStagingOverlay = this.buildEffectiveStagingOverlay(
-                branchStagingOverlay,
-                snapshot,
-                wokenColdIds
-            );
-
-            const recoveryVoicePool = await this.readVoicePool();
-            let recoveredUpdatedVoicePool: VoiceSamplePool | undefined;
-            if (recoveryVoicePool && recoveryVoicePool.samples.length > 0) {
-                const alreadyRecordedForChapter = recoveryVoicePool.samples.some(
-                    (s) => s.last_used_ch === activeCh
-                );
-                recoveredUpdatedVoicePool = alreadyRecordedForChapter
-                    ? recoveryVoicePool
-                    : sampleVoiceLru(recoveryVoicePool, {
-                          currentCh: activeCh,
-                          preferredTag: recoveredOutline?.preferred_voice_tag
-                      }).updatedPool;
-            }
-
-            const recoverySignals = await this.loadActiveSignals(activeCh, lookbackChapters);
-            const recoverySignalCursorUpdate =
-                !options.chapterGoal.includes('[待响应运维信号]') &&
-                recoverySignals.hasCursorChanges
-                    ? recoverySignals.nextCursorState
-                    : undefined;
-            const featCommitSha = await this.system
-                .currentRevision(this.store.bookRoot)
-                .catch(() => '');
-            const recoveredSelectedIds = Array.from(
-                new Set([
-                    ...povCharIds,
-                    ...(recoveredOutline?.focus_cast ?? []),
-                    ...(recoveredOutline?.background_cast ?? [])
-                ])
-            );
-
-            emit('EXTRACTOR', activeCh, '增量抽取实体状态与四联遥测');
-            const stateRes = await this.runExtractorAndCommitState({
-                snapshot,
-                chapterNumber: activeCh,
-                targetDay,
+                recoveredContext,
                 timelineMode,
                 povCharIds,
-                selectedEntityIds: recoveredSelectedIds,
-                outline: recoveredOutline,
-                prose,
-                replanCount: 0,
-                rewriteCount: 0,
-                patchRounds: 0,
-                updatedVoicePool: recoveredUpdatedVoicePool,
+                lookbackChapters,
                 totalUsage,
                 options,
                 parallel,
                 allowedChapterFiles,
-                stagingOverlay: recoveryStagingOverlay,
-                signalCursorUpdate: recoverySignalCursorUpdate
+                branchStagingOverlay,
+                emit
             });
-
-            return {
-                status: 'COMMITTED',
-                chapterNumber: activeCh,
-                manuscriptPath: relPath,
-                featCommitSha,
-                stateCommitSha: stateRes.stateCommitSha,
-                recoveredFromPhase: 'FEAT_COMMITTED',
-                outline: recoveredOutline,
-                replanCount: 0,
-                rewriteCount: 0,
-                patchRounds: 0,
-                telemetry: stateRes.telemetry,
-                totalUsage,
-                updatedEntities: stateRes.updatedEntities,
-                nextChapterOptions: stateRes.nextChapterOptions
-            };
         }
 
         const chapterNumber =
@@ -753,7 +667,8 @@ export class ChapterPipeline {
 
         const wokenColdIds = new Set<string>();
         // 冷宫返场唤醒：将 Librarian 选中/唤醒及 POV/切镜涉及的冷宫实体临时加载入本章快照与内存覆盖层
-        snapshot = await this.wakeColdArchiveEntitiesInMemory(
+        snapshot = await wakeColdArchiveEntitiesInMemory(
+            this.store,
             snapshot,
             [
                 ...povCharIds,
@@ -781,13 +696,7 @@ export class ChapterPipeline {
             activeSignals.length > 0 && !options.chapterGoal.includes('[待响应运维信号]')
                 ? [
                       '## 待响应运维与切镜信号 (.ops/signals.jsonl)',
-                      ...activeSignals.map((s) =>
-                          s.type === 'SPOTLIGHT_TRIGGER'
-                              ? `- [SPOTLIGHT_TRIGGER] 实体 ${s.entity_id ?? '(未指定)'} (建议模式: ${s.suggested_mode ?? 'MAINLINE'}): ${s.reason}（请优先通过前台碰撞让该角色/势力实质介入当前现场，或在必要时切镜呈现，严禁幕后略过）`
-                              : s.type === 'RETCON'
-                                ? `- [RETCON 圆回指令] (${s.conflict_id ?? '细节修正'}): ${s.reason}（请在本章顺带自然圆回该细节偏差）`
-                                : `- [DIRECTOR_NOTE 微调指令]: ${s.reason}`
-                      )
+                      ...activeSignals.map(formatOpsSignalLine)
                   ].join('\n')
                 : '';
 
@@ -866,7 +775,8 @@ export class ChapterPipeline {
 
             // 将 Planner 点查补入的 focus_cast / background_cast 唤醒并并入下游可见实体集与内存覆盖层
             const plannerCastIds = [...activeOutline.focus_cast, ...activeOutline.background_cast];
-            snapshot = await this.wakeColdArchiveEntitiesInMemory(
+            snapshot = await wakeColdArchiveEntitiesInMemory(
+                this.store,
                 snapshot,
                 plannerCastIds,
                 wokenColdIds
@@ -908,11 +818,7 @@ export class ChapterPipeline {
             let activeWriterView = drafted.writerView;
             updatedVoicePool = drafted.updatedVoicePool;
             latestWriterAssemblyReport = drafted.assemblyReport;
-            try {
-                options.onWriterAssembled?.(drafted.assemblyReport);
-            } catch {
-                // 避免诊断回调异常中断主流程
-            }
+            invokeSafeCallback(options.onWriterAssembled, drafted.assemblyReport);
 
             while (true) {
                 activeProse = ensureChapterHeading(
@@ -943,17 +849,13 @@ export class ChapterPipeline {
                     );
                     lastGateViolations = gateResult.violations;
                     const gateTelemetry = computeTelemetry(activeProse);
-                    try {
-                        options.onGateResult?.({
-                            chapter: chapterNumber,
-                            passed: gateResult.passed,
-                            violations: gateResult.violations,
-                            recommendedAction: gateResult.recommendedAction,
-                            metrics: gateTelemetry
-                        });
-                    } catch {
-                        // 避免诊断回调异常中断主流程
-                    }
+                    invokeSafeCallback(options.onGateResult, {
+                        chapter: chapterNumber,
+                        passed: gateResult.passed,
+                        violations: gateResult.violations,
+                        recommendedAction: gateResult.recommendedAction,
+                        metrics: gateTelemetry
+                    });
                     await traceArtifact('prose_gate.result', gateResult);
                     await traceEvent('gate.result', {
                         passed: gateResult.passed,
@@ -1043,11 +945,7 @@ export class ChapterPipeline {
                             activeWriterView = rewritten.writerView;
                             updatedVoicePool = rewritten.updatedVoicePool;
                             latestWriterAssemblyReport = rewritten.assemblyReport;
-                            try {
-                                options.onWriterAssembled?.(rewritten.assemblyReport);
-                            } catch {
-                                // 避免诊断回调异常中断主流程
-                            }
+                            invokeSafeCallback(options.onWriterAssembled, rewritten.assemblyReport);
                             continue;
                         }
 
@@ -1088,19 +986,15 @@ export class ChapterPipeline {
                     effectiveStagingOverlay
                 );
                 lastFactIssues = verifiedIssues;
-                try {
-                    options.onCheckerResult?.({
-                        chapter: chapterNumber,
-                        passed: verifiedIssues.length === 0,
-                        issueCount: verifiedIssues.length,
-                        issues: verifiedIssues,
-                        replanCount: totalReplans,
-                        rewriteCount: totalRewrites,
-                        patchRounds: totalPatchRounds
-                    });
-                } catch {
-                    // 避免诊断回调异常中断主流程
-                }
+                invokeSafeCallback(options.onCheckerResult, {
+                    chapter: chapterNumber,
+                    passed: verifiedIssues.length === 0,
+                    issueCount: verifiedIssues.length,
+                    issues: verifiedIssues,
+                    replanCount: totalReplans,
+                    rewriteCount: totalRewrites,
+                    patchRounds: totalPatchRounds
+                });
 
                 if (verifiedIssues.length === 0) {
                     break outerLoop;
@@ -1236,11 +1130,7 @@ export class ChapterPipeline {
                     activeWriterView = rewritten.writerView;
                     updatedVoicePool = rewritten.updatedVoicePool;
                     latestWriterAssemblyReport = rewritten.assemblyReport;
-                    try {
-                        options.onWriterAssembled?.(rewritten.assemblyReport);
-                    } catch {
-                        // 避免诊断回调异常中断主流程
-                    }
+                    invokeSafeCallback(options.onWriterAssembled, rewritten.assemblyReport);
                     continue;
                 }
 
@@ -1327,6 +1217,138 @@ export class ChapterPipeline {
             ...(latestWriterAssemblyReport
                 ? { writerAssemblyReport: latestWriterAssemblyReport }
                 : {})
+        };
+    }
+
+    /** 崩溃恢复：从 FEAT_COMMITTED 相位跳过正文生成直接补跑状态抽取与提交 */
+    private async recoverFromFeatCommitted(params: {
+        activeCh: number;
+        snapshot: BookSnapshot;
+        recoveredContext: BookSnapshot['txState']['chapter_context'];
+        timelineMode: TimelineMode;
+        povCharIds: string[];
+        lookbackChapters: number;
+        totalUsage: TokenUsage;
+        options: StepChapterOptions;
+        parallel?: { windowId: string; branchId: string } | undefined;
+        allowedChapterFiles?: string[] | undefined;
+        branchStagingOverlay?: Map<string, string | null> | undefined;
+        emit: (
+            stage: EngineStageName,
+            chapterNum: number,
+            message: string,
+            extra?: { activeSessionId?: string; runId?: string }
+        ) => void;
+    }): Promise<StepChapterResult> {
+        const {
+            activeCh,
+            recoveredContext,
+            timelineMode,
+            povCharIds,
+            lookbackChapters,
+            totalUsage,
+            options,
+            parallel,
+            allowedChapterFiles,
+            branchStagingOverlay,
+            emit
+        } = params;
+        let snapshot = params.snapshot;
+        emit('WAL_RECOVERY', activeCh, `从 FEAT_COMMITTED 恢复第 ${activeCh} 章状态抽取`);
+        const relPath = `manuscripts/${formatChapterKey(activeCh)}.md`;
+        const prose = await readFile(join(this.store.bookRoot, relPath), 'utf8');
+        const targetDay =
+            recoveredContext?.targetDay ??
+            options.targetDay ??
+            snapshot.worldState.frontmatter.story_day;
+
+        const outlineSnap = await this.store.readChapterOutline(activeCh);
+        let recoveredOutline: PlannerOutline | null = null;
+        if (outlineSnap.status === 'available' && outlineSnap.outlineText) {
+            try {
+                recoveredOutline = PlannerOutlineSchema.parse(JSON.parse(outlineSnap.outlineText));
+            } catch {
+                recoveredOutline = null;
+            }
+        }
+
+        const wokenColdIds = new Set<string>();
+        const recoveryWakeupIds = [
+            ...povCharIds,
+            ...(recoveredOutline?.focus_cast ?? []),
+            ...(recoveredOutline?.background_cast ?? [])
+        ];
+        snapshot = await wakeColdArchiveEntitiesInMemory(
+            this.store,
+            snapshot,
+            recoveryWakeupIds,
+            wokenColdIds
+        );
+        const recoveryStagingOverlay = this.buildEffectiveStagingOverlay(
+            branchStagingOverlay,
+            snapshot,
+            wokenColdIds
+        );
+
+        const recoveryVoicePool = await this.readVoicePool();
+        let recoveredUpdatedVoicePool: VoiceSamplePool | undefined;
+        if (recoveryVoicePool && recoveryVoicePool.samples.length > 0) {
+            const alreadyRecordedForChapter = recoveryVoicePool.samples.some(
+                (s) => s.last_used_ch === activeCh
+            );
+            recoveredUpdatedVoicePool = alreadyRecordedForChapter
+                ? recoveryVoicePool
+                : sampleVoiceLru(recoveryVoicePool, {
+                      currentCh: activeCh,
+                      preferredTag: recoveredOutline?.preferred_voice_tag
+                  }).updatedPool;
+        }
+
+        const recoverySignals = await this.loadActiveSignals(activeCh, lookbackChapters);
+        const recoverySignalCursorUpdate =
+            !options.chapterGoal.includes('[待响应运维信号]') && recoverySignals.hasCursorChanges
+                ? recoverySignals.nextCursorState
+                : undefined;
+        const featCommitSha = await this.system.currentRevision(this.store.bookRoot).catch(() => '');
+        const recoveredSelectedIds = Array.from(new Set(recoveryWakeupIds));
+
+        emit('EXTRACTOR', activeCh, '增量抽取实体状态与四联遥测');
+        const stateRes = await this.runExtractorAndCommitState({
+            snapshot,
+            chapterNumber: activeCh,
+            targetDay,
+            timelineMode,
+            povCharIds,
+            selectedEntityIds: recoveredSelectedIds,
+            outline: recoveredOutline,
+            prose,
+            replanCount: 0,
+            rewriteCount: 0,
+            patchRounds: 0,
+            updatedVoicePool: recoveredUpdatedVoicePool,
+            totalUsage,
+            options,
+            parallel,
+            allowedChapterFiles,
+            stagingOverlay: recoveryStagingOverlay,
+            signalCursorUpdate: recoverySignalCursorUpdate
+        });
+
+        return {
+            status: 'COMMITTED',
+            chapterNumber: activeCh,
+            manuscriptPath: relPath,
+            featCommitSha,
+            stateCommitSha: stateRes.stateCommitSha,
+            recoveredFromPhase: 'FEAT_COMMITTED',
+            outline: recoveredOutline,
+            replanCount: 0,
+            rewriteCount: 0,
+            patchRounds: 0,
+            telemetry: stateRes.telemetry,
+            totalUsage,
+            updatedEntities: stateRes.updatedEntities,
+            nextChapterOptions: stateRes.nextChapterOptions
         };
     }
 
@@ -2059,62 +2081,16 @@ export class ChapterPipeline {
         const fullThreshold = retrievalCfg?.extractor_full_entity_threshold ?? 15;
         const recentL2Window = retrievalCfg?.extractor_recent_l2_window ?? 2;
 
-        const allExtractorEntities = Object.values(extractorView.entities);
-        let entitySummary: string;
-        if (allExtractorEntities.length <= fullThreshold) {
-            entitySummary = allExtractorEntities
-                .map((profile) => serializeEntityMarkdown(profile))
-                .join('\n\n');
-        } else {
-            const focusedIds = new Set<string>([...povCharIds, ...selectedEntityIds]);
-            for (const profile of allExtractorEntities) {
-                const id = profile.metadata.entity_id;
-                if (focusedIds.has(id)) continue;
-                const namesToCheck = [
-                    profile.metadata.canonical_name,
-                    ...profile.metadata.unique_aliases
-                ]
-                    .map((n) => n.trim())
-                    .filter((n) => n.length >= 2);
-                if (
-                    prose.includes(id) ||
-                    namesToCheck.some((name) => prose.includes(name))
-                ) {
-                    focusedIds.add(id);
-                }
-            }
-            const fullBlocks: string[] = [];
-            const compactIndexLines: string[] = [];
-            for (const profile of allExtractorEntities) {
-                if (focusedIds.has(profile.metadata.entity_id)) {
-                    fullBlocks.push(serializeEntityMarkdown(profile));
-                } else {
-                    const aliases = profile.metadata.unique_aliases.join('、') || '无';
-                    const slotKeys = Array.from(
-                        new Set(
-                            profile.acquiredState
-                                .map((entry) => entry.slotKey)
-                                .filter((k): k is string => Boolean(k))
-                        )
-                    );
-                    compactIndexLines.push(
-                        `- ${profile.metadata.entity_id}: ${profile.metadata.canonical_name} | 别名: ${aliases} | slot_keys: ${slotKeys.join(', ') || '无'}`
-                    );
-                }
-            }
-            entitySummary = [
-                ...fullBlocks,
-                ...(compactIndexLines.length > 0
-                    ? [
-                          '### 其余活跃实体精简名录（如需修订请先用 book_read 读取完整档案）',
-                          compactIndexLines.join('\n')
-                      ]
-                    : [])
-            ].join('\n\n');
-        }
+        const entitySummary = this.buildExtractorEntitySummary(
+            Object.values(extractorView.entities),
+            fullThreshold,
+            povCharIds,
+            selectedEntityIds,
+            prose
+        );
 
         const currentVolume = snapshot.worldState.frontmatter.current_volume;
-        const cardRelPath = `index/L2_cards/vol_${String(currentVolume).padStart(2, '0')}_cards.md`;
+        const cardRelPath = formatVolumeCardRelPath(currentVolume);
         const [worldStateRaw, openThreadsRaw, diskVolumeCards] = await Promise.all([
             readOptionalText(join(this.store.bookRoot, 'world/world_state.md')),
             readOptionalText(join(this.store.bookRoot, 'world/open_threads.md')),
@@ -2183,52 +2159,14 @@ export class ChapterPipeline {
             : undefined;
 
         // Q2: 前 voice_rolling_warmup_chapters 章 MAINLINE 定稿锁内，在 applyStatePatch 前基于内存声纹池置换 boot_seed
-        let effectiveVoicePool = updatedVoicePool;
-        const openingCfg = snapshot.config.opening;
-        const warmupChapters = openingCfg?.voice_rolling_warmup_chapters ?? 3;
-        const voiceSeedMode = openingCfg?.voice_seed_mode ?? 'hybrid_rolling';
-        if (
-            timelineMode === 'MAINLINE' &&
-            voiceSeedMode === 'hybrid_rolling' &&
-            chapterNumber <= warmupChapters
-        ) {
-            const memoryBasePool = effectiveVoicePool ?? (await this.readVoicePool());
-            if (memoryBasePool && memoryBasePool.samples.some((s) => s.source === 'boot_seed')) {
-                const entityNames = Array.from(
-                    new Set(
-                        Object.values(snapshot.entities).flatMap((p) => [
-                            p.metadata.canonical_name,
-                            ...p.metadata.unique_aliases
-                        ])
-                    )
-                );
-                try {
-                    const harvested = await harvestVoiceWithPool({
-                        store: this.store,
-                        llm: this.llm,
-                        gate: this.gate,
-                        chapterNumber,
-                        chapterText: prose,
-                        currentPool: memoryBasePool,
-                        entityNames,
-                        rollingReplaceBootSeeds: true,
-                        writeToDisk: false,
-                        signal: options.signal
-                    });
-                    if (!harvested.skipped) {
-                        effectiveVoicePool = harvested.updatedPool;
-                    }
-                } catch (err: unknown) {
-                    if (options.signal?.aborted || isAbortError(err)) {
-                        throw err;
-                    }
-                    void traceEvent('voice.rolling_replace.skipped', {
-                        chapter: chapterNumber,
-                        reason: err instanceof Error ? err.message : String(err)
-                    });
-                }
-            }
-        }
+        const effectiveVoicePool = await this.resolveWarmupRollingVoicePool({
+            snapshot,
+            chapterNumber,
+            timelineMode,
+            prose,
+            updatedVoicePool,
+            signal: options.signal
+        });
 
         const plannedPaths = [
             '.ops/telemetry.jsonl',
@@ -2378,6 +2316,112 @@ export class ChapterPipeline {
         };
     }
 
+    private buildExtractorEntitySummary(
+        allExtractorEntities: readonly EntityProfile[],
+        fullThreshold: number,
+        povCharIds: readonly string[],
+        selectedEntityIds: readonly string[],
+        prose: string
+    ): string {
+        if (allExtractorEntities.length <= fullThreshold) {
+            return allExtractorEntities
+                .map((profile) => serializeEntityMarkdown(profile))
+                .join('\n\n');
+        }
+        const focusedIds = new Set<string>([...povCharIds, ...selectedEntityIds]);
+        for (const profile of allExtractorEntities) {
+            const id = profile.metadata.entity_id;
+            if (focusedIds.has(id)) continue;
+            const namesToCheck = [
+                profile.metadata.canonical_name,
+                ...profile.metadata.unique_aliases
+            ]
+                .map((n) => n.trim())
+                .filter((n) => n.length >= 2);
+            if (prose.includes(id) || namesToCheck.some((name) => prose.includes(name))) {
+                focusedIds.add(id);
+            }
+        }
+        const fullBlocks: string[] = [];
+        const compactIndexLines: string[] = [];
+        for (const profile of allExtractorEntities) {
+            if (focusedIds.has(profile.metadata.entity_id)) {
+                fullBlocks.push(serializeEntityMarkdown(profile));
+                continue;
+            }
+            const aliases = profile.metadata.unique_aliases.join('、') || '无';
+            const slotKeys = Array.from(
+                new Set(
+                    profile.acquiredState
+                        .map((entry) => entry.slotKey)
+                        .filter((k): k is string => Boolean(k))
+                )
+            );
+            compactIndexLines.push(
+                `- ${profile.metadata.entity_id}: ${profile.metadata.canonical_name} | 别名: ${aliases} | slot_keys: ${slotKeys.join(', ') || '无'}`
+            );
+        }
+        return [
+            ...fullBlocks,
+            ...(compactIndexLines.length > 0
+                ? [
+                      '### 其余活跃实体精简名录（如需修订请先用 book_read 读取完整档案）',
+                      compactIndexLines.join('\n')
+                  ]
+                : [])
+        ].join('\n\n');
+    }
+
+    private async resolveWarmupRollingVoicePool(params: {
+        snapshot: BookSnapshot;
+        chapterNumber: number;
+        timelineMode: TimelineMode;
+        prose: string;
+        updatedVoicePool: VoiceSamplePool | undefined;
+        signal?: AbortSignal | undefined;
+    }): Promise<VoiceSamplePool | undefined> {
+        const { snapshot, chapterNumber, timelineMode, prose, updatedVoicePool, signal } = params;
+        const openingCfg = snapshot.config.opening;
+        const warmupChapters = openingCfg?.voice_rolling_warmup_chapters ?? 3;
+        const voiceSeedMode = openingCfg?.voice_seed_mode ?? 'hybrid_rolling';
+        if (
+            timelineMode !== 'MAINLINE' ||
+            voiceSeedMode !== 'hybrid_rolling' ||
+            chapterNumber > warmupChapters
+        ) {
+            return updatedVoicePool;
+        }
+        const memoryBasePool = updatedVoicePool ?? (await this.readVoicePool());
+        if (!memoryBasePool || !memoryBasePool.samples.some((s) => s.source === 'boot_seed')) {
+            return updatedVoicePool;
+        }
+        const entityNames = collectEntityDisplayNames(snapshot.entities);
+        try {
+            const harvested = await harvestVoiceWithPool({
+                store: this.store,
+                llm: this.llm,
+                gate: this.gate,
+                chapterNumber,
+                chapterText: prose,
+                currentPool: memoryBasePool,
+                entityNames,
+                rollingReplaceBootSeeds: true,
+                writeToDisk: false,
+                signal
+            });
+            return harvested.skipped ? updatedVoicePool : harvested.updatedPool;
+        } catch (err: unknown) {
+            if (signal?.aborted || isAbortError(err)) {
+                throw err;
+            }
+            void traceEvent('voice.rolling_replace.skipped', {
+                chapter: chapterNumber,
+                reason: err instanceof Error ? err.message : String(err)
+            });
+            return updatedVoicePool;
+        }
+    }
+
     private async loadActivePlugins(config: BookSnapshot['config']): Promise<{
         plugins: LoadedCraftPlugin[];
         gateRules: Partial<Record<GateRuleId, GateRuleConfig>>;
@@ -2435,16 +2479,10 @@ export class ChapterPipeline {
     }
 
     private async readOpsStyleAmendments(): Promise<string | undefined> {
-        const worldAmendment = normalizeOpsStyleAmendments(
-            await this.store.readOpsStyleAmendments()
+        const { combined } = await readCombinedStyleAmendments(this.store.bookRoot, () =>
+            this.store.readOpsStyleAmendments()
         );
-        const opsAmendment = normalizeOpsStyleAmendments(
-            await readOptionalText(join(this.store.bookRoot, '.ops/style_amendments.md'))
-        );
-        const parts = Array.from(
-            new Set([worldAmendment, opsAmendment].filter((s): s is string => Boolean(s)))
-        );
-        return parts.length > 0 ? parts.join('\n\n') : undefined;
+        return combined;
     }
 
     private async loadSelectedLoreEntries(selectedFiles: string[]): Promise<string[]> {
@@ -2501,10 +2539,7 @@ export class ChapterPipeline {
         const candidateVolumes =
             currentVolume > 1 ? [currentVolume, currentVolume - 1] : [currentVolume];
         for (const vol of candidateVolumes) {
-            const cardPath = join(
-                this.store.bookRoot,
-                `index/L2_cards/vol_${String(vol).padStart(2, '0')}_cards.md`
-            );
+            const cardPath = join(this.store.bookRoot, formatVolumeCardRelPath(vol));
             const raw = await readOptionalText(cardPath);
             if (!raw) continue;
             const match = raw.match(sectionRe);
@@ -2543,41 +2578,6 @@ export class ChapterPipeline {
             chapterNumber: prevCh,
             fullText: prevText,
             ...(summary ? { summary } : {})
-        };
-    }
-
-    private async wakeColdArchiveEntitiesInMemory(
-        snapshot: BookSnapshot,
-        candidateIds: readonly string[],
-        wokenColdIds?: Set<string>
-    ): Promise<BookSnapshot> {
-        if (snapshot.coldArchiveIds.length === 0 || candidateIds.length === 0) {
-            return snapshot;
-        }
-        const coldSet = new Set(snapshot.coldArchiveIds);
-        const toLoad = Array.from(
-            new Set(
-                candidateIds.filter((id) => coldSet.has(id) && !snapshot.entities[id])
-            )
-        );
-        if (toLoad.length === 0) {
-            return snapshot;
-        }
-        const loaded = await this.store.readColdArchivedEntities(toLoad);
-        if (Object.keys(loaded).length === 0) {
-            return snapshot;
-        }
-        if (wokenColdIds) {
-            for (const id of Object.keys(loaded)) {
-                wokenColdIds.add(id);
-            }
-        }
-        return {
-            ...snapshot,
-            entities: {
-                ...snapshot.entities,
-                ...loaded
-            }
         };
     }
 
@@ -2640,7 +2640,7 @@ export class ChapterPipeline {
             ...branchL2Cards.map((c) => c.volumeNumber)
         ]);
         for (const vol of volumesToStage) {
-            const cardRelPath = `index/L2_cards/vol_${String(vol).padStart(2, '0')}_cards.md`;
+            const cardRelPath = formatVolumeCardRelPath(vol);
             const diskCard = await readOptionalText(join(this.store.bookRoot, cardRelPath));
             const filtered = filterL2CardByAllowedChapters(diskCard, allowedChapterNums, vol);
             const merged = mergeParallelCardEntries(filtered, vol, branchL2Cards);
@@ -2670,27 +2670,8 @@ export class ChapterPipeline {
                 hasCursorChanges: false
             };
         }
-        const nonEmptyLines = raw
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0);
-
-        const alreadyConsumedIds = new Set<string>(cursorState.consumedIds);
-        // 兼容仅写 consumedLines 的旧游标：将前 consumedLines 行纳入已消费集合
-        if (
-            cursorState.consumedIds.length === 0 &&
-            cursorState.consumedLines > 0 &&
-            cursorState.consumedLines <= nonEmptyLines.length
-        ) {
-            for (let idx = 0; idx < cursorState.consumedLines; idx += 1) {
-                try {
-                    const obj = JSON.parse(nonEmptyLines[idx]!) as Record<string, unknown>;
-                    alreadyConsumedIds.add(resolveSignalId(obj));
-                } catch {
-                    // 忽略损坏行
-                }
-            }
-        }
+        const nonEmptyLines = splitNonEmptyLines(raw);
+        const alreadyConsumedIds = resolveConsumedSignalIds(cursorState, nonEmptyLines);
 
         const signals: OpsSignal[] = [];
         const newlyConsumedIds: string[] = [];

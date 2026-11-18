@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
@@ -46,12 +46,19 @@ import {
     appendJsonlLineSafe,
     CHAPTER_FILE_RE,
     clearHealPlan,
+    collectEntityDisplayNames,
     createEmptyUsage,
+    formatChapterKey,
+    formatVolumeCardRelPath,
+    parseJsonLines,
     readHealPlan,
     readNextChapterOptions,
     readOptionalText,
     readSignalsCursorState,
+    resolveConsumedSignalIds,
     resolveSignalId,
+    sha256Hex,
+    splitNonEmptyLines,
     writeHealPlan,
     type HealPlan
 } from '../pipeline/helpers.js';
@@ -62,7 +69,8 @@ import { RoleLoader } from '../roles/role-loader.js';
 import {
     DshLlmAdapter,
     resolveRoleReasoningEffort,
-    resolveRoleRoute
+    resolveRoleRoute,
+    resolveTierPool
 } from '../runner/dsh-llm-adapter.js';
 import { RoleRunner } from '../runner/role-runner.js';
 import {
@@ -184,19 +192,39 @@ export type StepChapterInputOptions = Omit<StepChapterOptions, 'chapterGoal'> & 
     chapterGoal?: string | undefined;
 };
 
-function parseJsonLines(raw: string | null): unknown[] {
-    if (raw === null) return [];
-    const results: unknown[] = [];
-    for (const line of raw.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed.length === 0) continue;
-        try {
-            results.push(JSON.parse(trimmed));
-        } catch {
-            results.push({ raw: trimmed });
+function extractNonEmptyStringField(
+    record: Record<string, unknown>,
+    keys: readonly string[]
+): string | undefined {
+    for (const key of keys) {
+        const val = record[key];
+        if (typeof val === 'string') {
+            const trimmed = val.trim();
+            if (trimmed.length > 0) {
+                return trimmed;
+            }
         }
     }
-    return results;
+    return undefined;
+}
+
+function extractIntegerField(
+    record: Record<string, unknown>,
+    keys: readonly string[]
+): number | undefined {
+    for (const key of keys) {
+        const val = record[key];
+        if (typeof val === 'number' && Number.isInteger(val)) {
+            return val;
+        }
+    }
+    return undefined;
+}
+
+function extractModelId(info: { id?: unknown; model?: unknown } | null | undefined): string {
+    if (typeof info?.id === 'string') return info.id;
+    if (typeof info?.model === 'string') return info.model;
+    return '';
 }
 
 function extractToolResultTextPreview(content: unknown): string | undefined {
@@ -1238,19 +1266,8 @@ export class NarrateRuntimeController {
                 const stepRes = await this.stepChapter({ chapterGoal }, true);
                 this.yoloState.completedChapters += 1;
 
-                if (
-                    this.yoloState.stopRequested ||
-                    this.shuttingDown ||
-                    this.haltRequested
-                ) {
-                    if (!this.shuttingDown) {
-                        this.haltRequested = false;
-                    }
-                    this.emitEvent('yolo_halted', {
-                        reason: 'STOP_REQUESTED',
-                        completedChapters: this.yoloState.completedChapters,
-                        timestamp: new Date().toISOString()
-                    });
+                if (this.shouldStopYoloLoop()) {
+                    this.finalizeStopRequestedYolo();
                     return;
                 }
 
@@ -1279,19 +1296,8 @@ export class NarrateRuntimeController {
                     true
                 );
 
-                if (
-                    this.yoloState.stopRequested ||
-                    this.shuttingDown ||
-                    this.haltRequested
-                ) {
-                    if (!this.shuttingDown) {
-                        this.haltRequested = false;
-                    }
-                    this.emitEvent('yolo_halted', {
-                        reason: 'STOP_REQUESTED',
-                        completedChapters: this.yoloState.completedChapters,
-                        timestamp: new Date().toISOString()
-                    });
+                if (this.shouldStopYoloLoop()) {
+                    this.finalizeStopRequestedYolo();
                     return;
                 }
             }
@@ -1326,6 +1332,21 @@ export class NarrateRuntimeController {
                 this.yoloState.loopPromise = null;
             }
         }
+    }
+
+    private shouldStopYoloLoop(): boolean {
+        return this.yoloState.stopRequested || this.shuttingDown || this.haltRequested;
+    }
+
+    private finalizeStopRequestedYolo(): void {
+        if (!this.shuttingDown) {
+            this.haltRequested = false;
+        }
+        this.emitEvent('yolo_halted', {
+            reason: 'STOP_REQUESTED',
+            completedChapters: this.yoloState.completedChapters,
+            timestamp: new Date().toISOString()
+        });
     }
 
     /** 请求在本章安全点优雅停止 YOLO */
@@ -1428,7 +1449,7 @@ export class NarrateRuntimeController {
             throw new PathValidationError('chapterNumber 必须为 1 到 9999 的整数');
         }
 
-        const fileName = `ch_${String(chapterNumber).padStart(4, '0')}.md`;
+        const fileName = `${formatChapterKey(chapterNumber)}.md`;
         const fullPath = resolve(bookRoot, 'manuscripts', fileName);
         if (!isSubPath(bookRoot, fullPath)) {
             throw new PathValidationError('非法章节路径');
@@ -1746,14 +1767,7 @@ export class NarrateRuntimeController {
         const store = this.requireBookStore();
         return await this.runExclusiveTask('SYNCING', async (signal) => {
             const snapshot = await store.loadSnapshot();
-            const entityNames = Array.from(
-                new Set(
-                    Object.values(snapshot.entities).flatMap((profile) => [
-                        profile.metadata.canonical_name,
-                        ...profile.metadata.unique_aliases
-                    ])
-                )
-            );
+            const entityNames = collectEntityDisplayNames(snapshot.entities);
             return await harvestVoiceFromChapter({
                 store,
                 llm: this.llmAdapter,
@@ -2057,20 +2071,8 @@ export class NarrateRuntimeController {
                 ? rawInput['type']
                 : 'DIRECTOR_NOTE';
 
-        const reason =
-            typeof rawInput['reason'] === 'string' && rawInput['reason'].trim().length > 0
-                ? rawInput['reason'].trim()
-                : typeof rawInput['content'] === 'string' && rawInput['content'].trim().length > 0
-                  ? rawInput['content'].trim()
-                  : '';
-
-        const chapter =
-            typeof rawInput['chapter'] === 'number' && Number.isInteger(rawInput['chapter'])
-                ? rawInput['chapter']
-                : typeof rawInput['target_chapter'] === 'number' &&
-                    Number.isInteger(rawInput['target_chapter'])
-                  ? rawInput['target_chapter']
-                  : defaultChapter;
+        const reason = extractNonEmptyStringField(rawInput, ['reason', 'content']) ?? '';
+        const chapter = extractIntegerField(rawInput, ['chapter', 'target_chapter']) ?? defaultChapter;
 
         const signalId =
             typeof rawInput['id'] === 'string' && rawInput['id'].trim().length > 0
@@ -2124,26 +2126,9 @@ export class NarrateRuntimeController {
                 return null;
             }
 
-            const nonEmptyLines = raw
-                .split(/\r?\n/)
-                .map((line) => line.trim())
-                .filter((line) => line.length > 0);
+            const nonEmptyLines = splitNonEmptyLines(raw);
             const cursorState = await readSignalsCursorState(bookRoot);
-            const consumedIds = new Set<string>(cursorState.consumedIds);
-            if (
-                consumedIds.size === 0 &&
-                cursorState.consumedLines > 0 &&
-                cursorState.consumedLines <= nonEmptyLines.length
-            ) {
-                for (let idx = 0; idx < cursorState.consumedLines; idx += 1) {
-                    try {
-                        const obj = JSON.parse(nonEmptyLines[idx]!) as Record<string, unknown>;
-                        consumedIds.add(resolveSignalId(obj));
-                    } catch {
-                        // 忽略损坏行
-                    }
-                }
-            }
+            const consumedIds = resolveConsumedSignalIds(cursorState, nonEmptyLines);
 
             const kept: string[] = [];
             let removedIdx = -1;
@@ -2153,14 +2138,11 @@ export class NarrateRuntimeController {
                 if (removedIdx < 0) {
                     try {
                         const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-                        const parsedReason =
-                            typeof parsed['reason'] === 'string'
-                                ? parsed['reason']
-                                : typeof parsed['content'] === 'string'
-                                  ? parsed['content']
-                                  : typeof parsed['instruction'] === 'string'
-                                    ? parsed['instruction']
-                                    : null;
+                        const parsedReason = extractNonEmptyStringField(parsed, [
+                            'reason',
+                            'content',
+                            'instruction'
+                        ]) ?? null;
                         if (parsed['created_at'] === createdAt && parsedReason === reason) {
                             removedIdx = idx;
                             removedSigId = resolveSignalId(parsed);
@@ -2457,7 +2439,7 @@ export class NarrateRuntimeController {
                 fileName: item.fileName,
                 title: extractChapterTitle(content, item.chapterNumber),
                 charCount: content.length,
-                sha256: computeSha256(content),
+                sha256: sha256Hex(content),
                 dirty: dirtySet.has(item.chapterNumber),
                 commitSha: null as string | null
             });
@@ -2490,12 +2472,7 @@ export class NarrateRuntimeController {
                 roleOverride?.tier === 'strong' || roleOverride?.tier === 'weak'
                     ? roleOverride.tier
                     : null;
-            const effectivePool: LlmPool =
-                effectiveTier === 'strong'
-                    ? 'strong_creative'
-                    : effectiveTier === 'weak'
-                      ? 'fast_retrieval'
-                      : defaultPool;
+            const effectivePool = resolveTierPool(effectiveTier ?? undefined, defaultPool);
             const route = resolveRoleRoute(this.poolRouting, roleId, defaultPool, bookConfig);
             const effectiveReasoningEffort = resolveRoleReasoningEffort(
                 roleId,
@@ -2577,12 +2554,7 @@ export class NarrateRuntimeController {
                             const models = await llm.listModels(providerId);
                             if (!Array.isArray(models)) continue;
                             for (const modelInfo of models) {
-                                const modelId =
-                                    typeof modelInfo?.id === 'string'
-                                        ? modelInfo.id
-                                        : typeof modelInfo?.model === 'string'
-                                          ? modelInfo.model
-                                          : '';
+                                const modelId = extractModelId(modelInfo);
                                 const modelName =
                                     typeof modelInfo?.name === 'string' ? modelInfo.name : undefined;
                                 if (modelId.trim().length > 0) {
@@ -2622,12 +2594,7 @@ export class NarrateRuntimeController {
                     CANONICAL_ROLE_DEFAULT_POOLS[
                         roleId as (typeof CANONICAL_ROLE_IDS)[number]
                     ] ?? 'strong_creative';
-                const effectivePool: LlmPool =
-                    override.tier === 'strong'
-                        ? 'strong_creative'
-                        : override.tier === 'weak'
-                          ? 'fast_retrieval'
-                          : defaultPool;
+                const effectivePool = resolveTierPool(override.tier, defaultPool);
                 addCandidate(this.poolRouting[effectivePool].provider, override.model);
             }
         }
@@ -2830,10 +2797,9 @@ export class NarrateRuntimeController {
         snapshot: BookSnapshot
     ): Promise<VolumeProgressSummary> {
         const currentVolume = snapshot.worldState.frontmatter.current_volume;
-        const volPad = String(currentVolume).padStart(2, '0');
         const [l1Raw, cardRaw, horizonRaw] = await Promise.all([
             readOptionalText(join(store.bookRoot, 'index/L1_volumes.md')),
-            readOptionalText(join(store.bookRoot, `index/L2_cards/vol_${volPad}_cards.md`)),
+            readOptionalText(join(store.bookRoot, formatVolumeCardRelPath(currentVolume))),
             readOptionalText(join(store.bookRoot, 'world/future_horizon.md'))
         ]);
 
@@ -3000,10 +2966,6 @@ export class NarrateRuntimeController {
         this.activePromise = promise;
         return await promise;
     }
-}
-
-function computeSha256(text: string): string {
-    return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 function extractChapterTitle(content: string, chapterNumber: number): string {

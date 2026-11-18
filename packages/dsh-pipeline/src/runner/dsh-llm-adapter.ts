@@ -17,6 +17,7 @@ import {
     type ReasoningEffortLevel,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
+import { isAbortError } from '../pipeline/helpers.js';
 import type { LlmPoolRouting, LlmRouteTarget } from '../schemas.js';
 
 const DEFAULT_MAX_RETRIES = 3;
@@ -63,15 +64,11 @@ export class DshStreamError extends Error {
     }
 }
 
-function isAbortError(err: unknown, signal?: AbortSignal): boolean {
-    if (signal?.aborted) {
+function isStreamAbortError(err: unknown, signal?: AbortSignal): boolean {
+    if (isAbortError(err, signal)) {
         return true;
     }
-    if (err instanceof Error) {
-        if (err.name === 'AbortError') return true;
-        if (err instanceof DshStreamError && err.failure.code === 'ABORTED') return true;
-    }
-    return false;
+    return err instanceof DshStreamError && err.failure.code === 'ABORTED';
 }
 
 function isTransientError(err: unknown, retryableCodes: ReadonlySet<string>): boolean {
@@ -151,6 +148,13 @@ export function resolvePoolRoute(
     return parseProviderModelSpec(override, base.provider);
 }
 
+/** 将角色层级覆盖 (strong/weak) 映射为对应模型池 */
+export function resolveTierPool(tier: string | undefined, fallbackPool: LlmPool): LlmPool {
+    if (tier === 'strong') return 'strong_creative';
+    if (tier === 'weak') return 'fast_retrieval';
+    return fallbackPool;
+}
+
 /**
  * 解析单个工种的最终 provider 与 model：
  * 优先级：Layer 2 role_routing[roleId].model -> Layer 1 role_routing[roleId].tier -> poolOverride ?? defaultPool -> model_routing/poolRouting
@@ -163,12 +167,7 @@ export function resolveRoleRoute(
     poolOverride?: LlmPool | undefined
 ): LlmRouteTarget {
     const roleOverride = roleId ? bookConfig?.role_routing?.[roleId] : undefined;
-    const effectivePool: LlmPool =
-        roleOverride?.tier === 'strong'
-            ? 'strong_creative'
-            : roleOverride?.tier === 'weak'
-              ? 'fast_retrieval'
-              : (poolOverride ?? defaultPool);
+    const effectivePool = resolveTierPool(roleOverride?.tier, poolOverride ?? defaultPool);
     const baseRoute = resolvePoolRoute(poolRouting, effectivePool, bookConfig);
     const modelOverride = roleOverride?.model?.trim();
     if (!modelOverride) {
@@ -367,7 +366,7 @@ export class DshLlmAdapter implements LlmPort {
                 return await this.consumeStream(options, options.model, signal);
             } catch (err: unknown) {
                 lastError = err;
-                if (isAbortError(err, signal)) {
+                if (isStreamAbortError(err, signal)) {
                     throw err;
                 }
                 if (attempt >= this.maxRetries || !isTransientError(err, this.retryableCodes)) {

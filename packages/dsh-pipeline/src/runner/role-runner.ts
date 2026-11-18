@@ -36,7 +36,8 @@ import {
     DshLlmAdapter,
     resolveCompatibleReasoningEffort,
     resolveRoleReasoningEffort,
-    resolveRoleRoute
+    resolveRoleRoute,
+    resolveTierPool
 } from './dsh-llm-adapter.js';
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -221,6 +222,100 @@ async function appendExtendedRunRecord(
     const opsDir = join(bookRoot, '.ops');
     await mkdir(opsDir, { recursive: true });
     await appendFile(join(opsDir, 'runs.jsonl'), `${JSON.stringify(validated)}\n`, 'utf8');
+}
+
+function buildRunRecord(params: {
+    runId: string;
+    chapter: number;
+    stage: string;
+    roleId: string;
+    sessionIdStr: string;
+    status: 'running' | 'completed' | 'failed';
+    startedAt: string;
+    parentSessionId?: string | undefined;
+    agentMode?: string | undefined;
+    attemptMeta: { attempt?: number; triggerReason?: string };
+    finishedAt?: string | undefined;
+    error?: string | undefined;
+}): ExtendedRunRecord {
+    return {
+        runId: params.runId,
+        chapter: params.chapter,
+        stage: params.stage,
+        role: params.roleId,
+        sessionId: params.sessionIdStr,
+        status: params.status,
+        startedAt: params.startedAt,
+        ...(params.finishedAt !== undefined ? { finishedAt: params.finishedAt } : {}),
+        ...(params.error !== undefined ? { error: params.error } : {}),
+        ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+        ...(params.agentMode ? { mode: params.agentMode } : {}),
+        ...params.attemptMeta
+    };
+}
+
+function wrapObservedTool(
+    tool: ToolDefinition,
+    recordSessionEvent: (item: Omit<StageSessionEventItem, 'seq'>) => void
+): ToolDefinition {
+    return {
+        ...tool,
+        async execute(args, exec) {
+            recordSessionEvent({
+                timestamp: new Date().toISOString(),
+                kind: 'tool-call',
+                toolName: tool.name,
+                callId: String(exec.callId),
+                text: JSON.stringify(args),
+                status: 'running'
+            });
+            try {
+                const out = await tool.execute(args, exec);
+                const preview =
+                    typeof out === 'string'
+                        ? out.slice(0, MAX_TOOL_RESULT_LOG_CHARS)
+                        : JSON.stringify(out).slice(0, MAX_TOOL_RESULT_LOG_CHARS);
+                recordSessionEvent({
+                    timestamp: new Date().toISOString(),
+                    kind: 'tool-result',
+                    toolName: tool.name,
+                    callId: String(exec.callId),
+                    text: preview,
+                    status: 'completed'
+                });
+                return out;
+            } catch (err) {
+                recordSessionEvent({
+                    timestamp: new Date().toISOString(),
+                    kind: 'tool-result',
+                    toolName: tool.name,
+                    callId: String(exec.callId),
+                    text: err instanceof Error ? err.message : String(err),
+                    status: 'error'
+                });
+                throw err;
+            }
+        }
+    };
+}
+
+async function persistSessionLog(
+    bookRoot: string,
+    sessionIdStr: string,
+    sessionDetail: StageSessionDetail
+): Promise<void> {
+    if (!SESSION_ID_SAFE_RE.test(sessionIdStr)) return;
+    try {
+        const logsDir = join(bookRoot, '.ops/session_logs');
+        await mkdir(logsDir, { recursive: true });
+        await writeFile(
+            join(logsDir, `${sessionIdStr}.json`),
+            `${JSON.stringify(sessionDetail, null, 2)}\n`,
+            'utf8'
+        );
+    } catch {
+        // 会话日志落盘失败不阻断业务主流程
+    }
 }
 
 /**
@@ -582,18 +677,21 @@ export class RoleRunner {
                 });
             }
 
-            await appendExtendedRunRecord(params.bookRoot, {
-                runId,
-                chapter,
-                stage: params.stage,
-                role: params.roleId,
-                sessionId: sessionIdStr,
-                status: 'running',
-                startedAt,
-                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-                ...(params.agentMode ? { mode: params.agentMode } : {}),
-                ...attemptMeta
-            });
+            await appendExtendedRunRecord(
+                params.bookRoot,
+                buildRunRecord({
+                    runId,
+                    chapter,
+                    stage: params.stage,
+                    roleId: params.roleId,
+                    sessionIdStr,
+                    status: 'running',
+                    startedAt,
+                    parentSessionId: params.parentSessionId,
+                    agentMode: params.agentMode,
+                    attemptMeta
+                })
+            );
 
             try {
                 params.onStageSession?.({
@@ -674,12 +772,10 @@ export class RoleRunner {
 
             if (params.bookConfig?.trace_level !== 'off') {
                 const roleOverride = params.bookConfig?.role_routing?.[params.roleId];
-                const effectivePool =
-                    roleOverride?.tier === 'strong'
-                        ? 'strong_creative'
-                        : roleOverride?.tier === 'weak'
-                          ? 'fast_retrieval'
-                          : (params.poolOverride ?? roleCfg.pool);
+                const effectivePool = resolveTierPool(
+                    roleOverride?.tier,
+                    params.poolOverride ?? roleCfg.pool
+                );
                 sessionDetail.requestInput = {
                     systemPrompt: roleCfg.promptText,
                     taskPromptBlocks: [...params.taskPromptBlocks],
@@ -711,46 +807,7 @@ export class RoleRunner {
                         agentCtx.tools.restrict({ allow: [] });
                         if (builtToolset) {
                             for (const tool of builtToolset.tools) {
-                                const observedTool: ToolDefinition = {
-                                    ...tool,
-                                    async execute(args, exec) {
-                                        recordSessionEvent({
-                                            timestamp: new Date().toISOString(),
-                                            kind: 'tool-call',
-                                            toolName: tool.name,
-                                            callId: String(exec.callId),
-                                            text: JSON.stringify(args),
-                                            status: 'running'
-                                        });
-                                        try {
-                                            const out = await tool.execute(args, exec);
-                                            const preview =
-                                                typeof out === 'string'
-                                                    ? out.slice(0, MAX_TOOL_RESULT_LOG_CHARS)
-                                                    : JSON.stringify(out).slice(0, MAX_TOOL_RESULT_LOG_CHARS);
-                                            recordSessionEvent({
-                                                timestamp: new Date().toISOString(),
-                                                kind: 'tool-result',
-                                                toolName: tool.name,
-                                                callId: String(exec.callId),
-                                                text: preview,
-                                                status: 'completed'
-                                            });
-                                            return out;
-                                        } catch (err) {
-                                            recordSessionEvent({
-                                                timestamp: new Date().toISOString(),
-                                                kind: 'tool-result',
-                                                toolName: tool.name,
-                                                callId: String(exec.callId),
-                                                text: err instanceof Error ? err.message : String(err),
-                                                status: 'error'
-                                            });
-                                            throw err;
-                                        }
-                                    }
-                                };
-                                agentCtx.tools.register(observedTool);
+                                agentCtx.tools.register(wrapObservedTool(tool, recordSessionEvent));
                             }
                         }
                     }
@@ -957,19 +1014,22 @@ export class RoleRunner {
             }
 
             sessionDetail.status = 'completed';
-            await appendExtendedRunRecord(params.bookRoot, {
-                runId,
-                chapter,
-                stage: params.stage,
-                role: params.roleId,
-                sessionId: sessionIdStr,
-                status: 'completed',
-                startedAt,
-                finishedAt: new Date().toISOString(),
-                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-                ...(params.agentMode ? { mode: params.agentMode } : {}),
-                ...attemptMeta
-            });
+            await appendExtendedRunRecord(
+                params.bookRoot,
+                buildRunRecord({
+                    runId,
+                    chapter,
+                    stage: params.stage,
+                    roleId: params.roleId,
+                    sessionIdStr,
+                    status: 'completed',
+                    startedAt,
+                    finishedAt: new Date().toISOString(),
+                    parentSessionId: params.parentSessionId,
+                    agentMode: params.agentMode,
+                    attemptMeta
+                })
+            );
 
             return {
                 runId,
@@ -986,26 +1046,30 @@ export class RoleRunner {
             if (sessionDetail) {
                 sessionDetail.status = 'failed';
             }
+            const errMessage = err instanceof Error ? err.message : String(err);
             recordSessionEvent({
                 timestamp: new Date().toISOString(),
                 kind: 'error',
-                text: err instanceof Error ? err.message : String(err),
+                text: errMessage,
                 status: 'failed'
             });
-            await appendExtendedRunRecord(params.bookRoot, {
-                runId,
-                chapter,
-                stage: params.stage,
-                role: params.roleId,
-                sessionId: sessionIdStr,
-                status: 'failed',
-                startedAt,
-                finishedAt: new Date().toISOString(),
-                error: err instanceof Error ? err.message : String(err),
-                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-                ...(params.agentMode ? { mode: params.agentMode } : {}),
-                ...attemptMeta
-            }).catch(() => {});
+            await appendExtendedRunRecord(
+                params.bookRoot,
+                buildRunRecord({
+                    runId,
+                    chapter,
+                    stage: params.stage,
+                    roleId: params.roleId,
+                    sessionIdStr,
+                    status: 'failed',
+                    startedAt,
+                    finishedAt: new Date().toISOString(),
+                    error: errMessage,
+                    parentSessionId: params.parentSessionId,
+                    agentMode: params.agentMode,
+                    attemptMeta
+                })
+            ).catch(() => {});
             throw err;
         } finally {
             disposeSessionEventListener?.();
@@ -1018,19 +1082,7 @@ export class RoleRunner {
                 sessionDetail.usage = { ...multiTurnUsage };
                 sessionDetail.reasoning = latestReasoningText;
                 sessionDetail.thinkingChars = latestReasoningText.length;
-                if (SESSION_ID_SAFE_RE.test(sessionIdStr)) {
-                    try {
-                        const logsDir = join(params.bookRoot, '.ops/session_logs');
-                        await mkdir(logsDir, { recursive: true });
-                        await writeFile(
-                            join(logsDir, `${sessionIdStr}.json`),
-                            `${JSON.stringify(sessionDetail, null, 2)}\n`,
-                            'utf8'
-                        );
-                    } catch {
-                        // 会话日志落盘失败不阻断业务主流程
-                    }
-                }
+                await persistSessionLog(params.bookRoot, sessionIdStr, sessionDetail);
             }
             this.liveSessionDetails.delete(sessionIdStr);
             if (handle) {

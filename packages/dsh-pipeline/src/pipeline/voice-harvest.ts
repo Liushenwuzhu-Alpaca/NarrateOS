@@ -54,6 +54,40 @@ function containsEntityProperNoun(text: string, entityNames: readonly string[]):
     return false;
 }
 
+function buildVoiceHarvestPrompt(params: {
+    chapterNumber: number;
+    isRollingMode: boolean;
+    bootSeedCount: number;
+    bootSeedTags: readonly string[];
+    existingRealTags: readonly string[];
+}): string {
+    if (!params.isRollingMode) {
+        return [
+            '你是长篇小说表达声纹采集器 (Voice Harvest)。请从已确认的开篇正文提取 3-5 句纯语言表达与动作白描示范，写入 JSON 字段 samples（每条含 tag 与 text）。',
+            '严格纪律：',
+            '1. 仅保留句子骨架、感官动作与对话气口示范，必须脱敏剥离特定案情结论、人名私密真相与具体账目数字；',
+            '2. 拒绝空泛套话与心理总结句；',
+            '3. 输出合法 JSON 对象 {"samples": [{"tag": "...", "text": "..."}]}。'
+        ].join('\n');
+    }
+
+    return [
+        `你是长篇小说表达声纹采集器 (Voice Harvest)。请从第 ${params.chapterNumber} 章已定稿正文提取 1-${Math.min(params.bootSeedCount, 2)} 句真实好句，替换临时启动拐杖标本，写入 JSON 字段 samples（每条含 tag 与 text）。`,
+        params.bootSeedTags.length > 0
+            ? `待替换的临时语域标签参考：${params.bootSeedTags.join('、')}。`
+            : '',
+        params.existingRealTags.length > 0
+            ? `既有真实标本语域（尽量互补）：${params.existingRealTags.join('、')}。`
+            : '',
+        '严格纪律：',
+        '1. 仅保留句子骨架、感官动作与对话气口示范，必须脱敏剥离所有人名/实体专名、特定案情结论与具体账目数字；',
+        '2. 拒绝空泛套话与心理总结句；',
+        '3. 输出合法 JSON 对象 {"samples": [{"tag": "...", "text": "..."}]}。'
+    ]
+        .filter(Boolean)
+        .join('\n');
+}
+
 /**
  * 首章校准与 Q2 滚动声纹采集（含内存声纹池与置换详情，供管线事务内原子落盘）。
  */
@@ -122,25 +156,13 @@ export async function harvestVoiceWithPool(
         )
     );
 
-    const promptInstruction = isRollingMode
-        ? [
-              `你是长篇小说表达声纹采集器 (Voice Harvest)。请从第 ${chapterNumber} 章已定稿正文提取 1-${Math.min(bootSeedIndices.length, 2)} 句真实好句，替换临时启动拐杖标本，写入 JSON 字段 samples（每条含 tag 与 text）。`,
-              bootSeedTags.length > 0 ? `待替换的临时语域标签参考：${bootSeedTags.join('、')}。` : '',
-              existingRealTags.length > 0 ? `既有真实标本语域（尽量互补）：${existingRealTags.join('、')}。` : '',
-              '严格纪律：',
-              '1. 仅保留句子骨架、感官动作与对话气口示范，必须脱敏剥离所有人名/实体专名、特定案情结论与具体账目数字；',
-              '2. 拒绝空泛套话与心理总结句；',
-              '3. 输出合法 JSON 对象 {"samples": [{"tag": "...", "text": "..."}]}。'
-          ]
-              .filter(Boolean)
-              .join('\n')
-        : [
-              '你是长篇小说表达声纹采集器 (Voice Harvest)。请从已确认的开篇正文提取 3-5 句纯语言表达与动作白描示范，写入 JSON 字段 samples（每条含 tag 与 text）。',
-              '严格纪律：',
-              '1. 仅保留句子骨架、感官动作与对话气口示范，必须脱敏剥离特定案情结论、人名私密真相与具体账目数字；',
-              '2. 拒绝空泛套话与心理总结句；',
-              '3. 输出合法 JSON 对象 {"samples": [{"tag": "...", "text": "..."}]}。'
-          ].join('\n');
+    const promptInstruction = buildVoiceHarvestPrompt({
+        chapterNumber,
+        isRollingMode,
+        bootSeedCount: bootSeedIndices.length,
+        bootSeedTags,
+        existingRealTags
+    });
 
     const res = await generateStructuredJson(
         options.llm,

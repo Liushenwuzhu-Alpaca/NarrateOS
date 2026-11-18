@@ -18,7 +18,12 @@ import {
     type AdvanceVolumeOptions,
     type AdvanceVolumeResult
 } from '../schemas.js';
-import { normalizeOpsStyleAmendments, readOptionalText } from './helpers.js';
+import {
+    formatVolumeCardRelPath,
+    listOpenParallelWindows,
+    readCombinedStyleAmendments,
+    readOptionalText
+} from './helpers.js';
 
 const DEFAULT_STATIC_BASE_MAX_CHARS = 1500;
 const DEFAULT_SAGA_FOLD_VOLUME_INTERVAL = 10;
@@ -298,7 +303,7 @@ export class VolumePipeline {
                     (await readOptionalText(l1Path)) ?? '# L1 活跃卷级总表\n\n';
                 const sealedCardsPath = join(
                     this.store.bookRoot,
-                    `index/L2_cards/vol_${sealedVolPad}_cards.md`
+                    formatVolumeCardRelPath(sealedVolume)
                 );
                 const sealedCardsText = (await readOptionalText(sealedCardsPath)) ?? '';
 
@@ -314,7 +319,7 @@ export class VolumePipeline {
                         dynamicTail: [
                             `## 当前卷号\n第 ${sealedVolume} 卷 (当前 story_day: ${worldState.frontmatter.story_day})`,
                             `## index/L1_volumes.md\n${l1Current}`,
-                            `## index/L2_cards/vol_${sealedVolPad}_cards.md\n${sealedCardsText || '(暂无章卡记录)'}`
+                            `## ${formatVolumeCardRelPath(sealedVolume)}\n${sealedCardsText || '(暂无章卡记录)'}`
                         ].join('\n\n')
                     },
                     VolumeSealOutputSchema,
@@ -328,7 +333,7 @@ export class VolumePipeline {
                 ].join('\n');
                 const updatedL1Text = `${l1Current.trimEnd()}\n\n${sealBlock}\n`;
 
-                const nextCardsRelPath = `index/L2_cards/vol_${nextVolPad}_cards.md`;
+                const nextCardsRelPath = formatVolumeCardRelPath(nextVolume);
                 const shouldCreateNextCards =
                     !completeBook &&
                     (await readOptionalText(join(this.store.bookRoot, nextCardsRelPath))) === null;
@@ -340,106 +345,28 @@ export class VolumePipeline {
                 ]);
                 const entitiesDir = join(this.store.bookRoot, 'entities');
                 const coldArchiveDir = join(entitiesDir, 'cold_archive');
-                let entityFiles: string[] = [];
-                try {
-                    entityFiles = await readdir(entitiesDir);
-                } catch (err: unknown) {
-                    if ((err as { code?: string }).code !== 'ENOENT') {
-                        throw err;
-                    }
-                }
-
-                const entitiesToArchive: Array<{
-                    entityId: string;
-                    fileName: string;
-                    trackedInHead: boolean;
-                }> = [];
-                const survivingEntityFiles: string[] = [];
-                for (const fileName of entityFiles.sort()) {
-                    if (!fileName.endsWith('.md')) continue;
-                    const charMatch = CHAR_ENTITY_FILE_RE.exec(fileName);
-                    if (charMatch?.[1]) {
-                        const entityId = charMatch[1];
-                        if (!keepSet.has(entityId)) {
-                            const raw = await readFile(join(entitiesDir, fileName), 'utf8');
-                            parseEntityMarkdown(raw);
-                            const trackedInHead =
-                                (await this.system.readFileAtRef(
-                                    this.store.bookRoot,
-                                    'HEAD',
-                                    `entities/${fileName}`
-                                )) !== null;
-                            entitiesToArchive.push({ entityId, fileName, trackedInHead });
-                            continue;
-                        }
-                    }
-                    survivingEntityFiles.push(fileName);
-                }
+                const { entitiesToArchive, survivingEntityFiles } =
+                    await this.planColdArchiveEntities(entitiesDir, keepSet);
 
                 // Step 3: 提炼风格修订 -> 合入 static_base_and_voice.md (<= static_base_max_chars)，禁止暴力硬截断
                 const opsStyleRelPath = '.ops/style_amendments.md';
                 const worldStyleRelPath = 'world/ops_style_amendments.md';
                 const voiceBaseRelPath = 'world/static_base_and_voice.md';
-                const opsStyleExisting = await readOptionalText(
-                    join(this.store.bookRoot, opsStyleRelPath)
-                );
-                const worldStyleExisting = await readOptionalText(
-                    join(this.store.bookRoot, worldStyleRelPath)
-                );
-                const opsAmendment = normalizeOpsStyleAmendments(opsStyleExisting);
-                const worldAmendment = normalizeOpsStyleAmendments(worldStyleExisting);
-                const combinedAmendments = [opsAmendment, worldAmendment]
-                    .filter((s): s is string => Boolean(s))
-                    .join('\n\n');
+                const {
+                    combined: combinedAmendments,
+                    opsRaw: opsStyleExisting,
+                    worldRaw: worldStyleExisting
+                } = await readCombinedStyleAmendments(this.store.bookRoot);
 
-                let nextVoiceBaseText: string | null = null;
-                if (combinedAmendments.length > 0) {
-                    const currentVoiceBase =
-                        (await readOptionalText(join(this.store.bookRoot, voiceBaseRelPath))) ?? '';
-                    const mergeRes = await generateStructuredJson(
-                        this.llm,
-                        {
-                            pool: 'fast_retrieval',
-                            traceStage: 'volume.style',
-                            staticPrefixBlocks: [
-                                `你是长篇小说文风基线提炼器。请将卷中风格修订去重压缩并合入 static_base_and_voice.md，输出 JSON 字段 merged_markdown，总字数严格控制在 ${staticBaseMaxChars} 字以内。`
-                            ],
-                            dynamicTail: [
-                                `## 当前 world/static_base_and_voice.md\n${currentVoiceBase || '(空)'}`,
-                                `## 新增风格修订\n${combinedAmendments}`
-                            ].join('\n\n')
-                        },
-                        StyleMergeOutputSchema,
-                        retryOptions,
-                        options.signal
-                    );
-
-                    let refined = mergeRes.data.merged_markdown.trim();
-                    if (refined.length > staticBaseMaxChars) {
-                        const condenseRes = await generateStructuredJson(
-                            this.llm,
-                            {
-                                pool: 'fast_retrieval',
-                                traceStage: 'volume.style_condense',
-                                staticPrefixBlocks: [
-                                    `你是文风基线精简器。请在不丢失核心句法规则与人称基线的前提下，将如下文档精简至严格 <= ${staticBaseMaxChars} 字，输出 JSON 字段 merged_markdown。`
-                                ],
-                                dynamicTail: refined
-                            },
-                            StyleMergeOutputSchema,
-                            retryOptions,
-                            options.signal
-                        );
-                        refined = condenseRes.data.merged_markdown.trim();
-                    }
-
-                    if (refined.length > staticBaseMaxChars) {
-                        throw new ValidationError(
-                            `提炼后的 static_base_and_voice.md 长度 (${refined.length}) 超过上限 ${staticBaseMaxChars} 字，请精简风格修订后重试`
-                        );
-                    }
-                    nextVoiceBaseText = `${refined}\n`;
-                }
+                const nextVoiceBaseText = combinedAmendments
+                    ? await this.refineStyleAmendments(
+                          voiceBaseRelPath,
+                          combinedAmendments,
+                          staticBaseMaxChars,
+                          retryOptions,
+                          options.signal
+                      )
+                    : null;
 
                 // Step 4: 纪元折叠 & 完结封笔 vs 新卷双文件包络编译
                 const threadsRelPath = 'world/open_threads.md';
@@ -679,27 +606,109 @@ export class VolumePipeline {
         );
     }
 
-    private async assertNoOpenParallelWindow(): Promise<void> {
-        const deltasDir = join(this.store.bookRoot, '.ops/parallel_deltas');
-        let entries;
+    private async planColdArchiveEntities(
+        entitiesDir: string,
+        keepSet: ReadonlySet<string>
+    ): Promise<{
+        entitiesToArchive: Array<{ entityId: string; fileName: string; trackedInHead: boolean }>;
+        survivingEntityFiles: string[];
+    }> {
+        let entityFiles: string[] = [];
         try {
-            entries = await readdir(deltasDir, { withFileTypes: true });
+            entityFiles = await readdir(entitiesDir);
         } catch (err: unknown) {
-            if ((err as { code?: string }).code === 'ENOENT') return;
-            throw err;
-        }
-        for (const entry of entries) {
-            if (!entry.isDirectory()) continue;
-            const raw = await readOptionalText(join(deltasDir, entry.name, 'window.json'));
-            if (!raw) continue;
-            try {
-                const parsed = JSON.parse(raw) as { status?: string };
-                if (parsed.status === 'OPEN') {
-                    throw new ValidationError(`并行窗口 ${entry.name} 处于活跃 OPEN 状态，换卷前必须先合并`);
-                }
-            } catch (err: unknown) {
-                if (err instanceof ValidationError) throw err;
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
             }
+        }
+
+        const entitiesToArchive: Array<{
+            entityId: string;
+            fileName: string;
+            trackedInHead: boolean;
+        }> = [];
+        const survivingEntityFiles: string[] = [];
+        for (const fileName of entityFiles.sort()) {
+            if (!fileName.endsWith('.md')) continue;
+            const charMatch = CHAR_ENTITY_FILE_RE.exec(fileName);
+            if (charMatch?.[1] && !keepSet.has(charMatch[1])) {
+                const entityId = charMatch[1];
+                const raw = await readFile(join(entitiesDir, fileName), 'utf8');
+                parseEntityMarkdown(raw);
+                const trackedInHead =
+                    (await this.system.readFileAtRef(
+                        this.store.bookRoot,
+                        'HEAD',
+                        `entities/${fileName}`
+                    )) !== null;
+                entitiesToArchive.push({ entityId, fileName, trackedInHead });
+                continue;
+            }
+            survivingEntityFiles.push(fileName);
+        }
+        return { entitiesToArchive, survivingEntityFiles };
+    }
+
+    private async refineStyleAmendments(
+        voiceBaseRelPath: string,
+        combinedAmendments: string,
+        staticBaseMaxChars: number,
+        retryOptions: StructuredRetryOptions,
+        signal?: AbortSignal
+    ): Promise<string> {
+        const currentVoiceBase =
+            (await readOptionalText(join(this.store.bookRoot, voiceBaseRelPath))) ?? '';
+        const mergeRes = await generateStructuredJson(
+            this.llm,
+            {
+                pool: 'fast_retrieval',
+                traceStage: 'volume.style',
+                staticPrefixBlocks: [
+                    `你是长篇小说文风基线提炼器。请将卷中风格修订去重压缩并合入 static_base_and_voice.md，输出 JSON 字段 merged_markdown，总字数严格控制在 ${staticBaseMaxChars} 字以内。`
+                ],
+                dynamicTail: [
+                    `## 当前 world/static_base_and_voice.md\n${currentVoiceBase || '(空)'}`,
+                    `## 新增风格修订\n${combinedAmendments}`
+                ].join('\n\n')
+            },
+            StyleMergeOutputSchema,
+            retryOptions,
+            signal
+        );
+
+        let refined = mergeRes.data.merged_markdown.trim();
+        if (refined.length > staticBaseMaxChars) {
+            const condenseRes = await generateStructuredJson(
+                this.llm,
+                {
+                    pool: 'fast_retrieval',
+                    traceStage: 'volume.style_condense',
+                    staticPrefixBlocks: [
+                        `你是文风基线精简器。请在不丢失核心句法规则与人称基线的前提下，将如下文档精简至严格 <= ${staticBaseMaxChars} 字，输出 JSON 字段 merged_markdown。`
+                    ],
+                    dynamicTail: refined
+                },
+                StyleMergeOutputSchema,
+                retryOptions,
+                signal
+            );
+            refined = condenseRes.data.merged_markdown.trim();
+        }
+
+        if (refined.length > staticBaseMaxChars) {
+            throw new ValidationError(
+                `提炼后的 static_base_and_voice.md 长度 (${refined.length}) 超过上限 ${staticBaseMaxChars} 字，请精简风格修订后重试`
+            );
+        }
+        return `${refined}\n`;
+    }
+
+    private async assertNoOpenParallelWindow(): Promise<void> {
+        const openWindows = await listOpenParallelWindows(this.store.bookRoot);
+        if (openWindows.length > 0) {
+            throw new ValidationError(
+                `并行窗口 ${openWindows[0]!.windowId} 处于活跃 OPEN 状态，换卷前必须先合并`
+            );
         }
     }
 }

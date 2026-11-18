@@ -46,10 +46,15 @@ import {
     CHAPTER_FILE_RE,
     createEmptyUsage,
     formatChapterKey,
-    readOptionalText
+    formatVolumeCardRelPath,
+    listOpenParallelWindows,
+    parseStoryDayLabel,
+    readOptionalText,
+    sanitizeExtractorPatches,
+    upsertVolumeCardEntry,
+    VOLUME_CARD_FILE_RE
 } from './helpers.js';
 
-const VOLUME_CARD_FILE_RE = /^vol_(\d+)_cards\.md$/;
 const SAGA_SHARD_RE = /_saga_\d+$/;
 const DEFAULT_CONFLICT_SCAN_BATCH_CHARS = 24_000;
 const DEFAULT_EXTRACTOR_FULL_ENTITY_THRESHOLD = 15;
@@ -79,7 +84,9 @@ interface DownstreamChapterData {
 }
 
 /** 构建带新建实体中文 canonical_name 强校验的 Extractor Schema */
-function buildExtractorSchema(snapshot: BookSnapshot) {
+function buildExtractorSchema(
+    snapshot: BookSnapshot
+): z.ZodType<ExtractorOutput, z.ZodTypeDef, unknown> {
     const knownEntityIds = new Set<string>([
         ...Object.keys(snapshot.entities),
         ...snapshot.coldArchiveIds
@@ -100,55 +107,41 @@ function buildExtractorSchema(snapshot: BookSnapshot) {
     });
 }
 
-function sanitizeExtractorPatches(
-    snapshot: BookSnapshot,
-    patches: EntityPatch[]
-): EntityPatch[] {
-    return patches.map((patch) => {
-        if (snapshot.entities[patch.entity_id] && patch.canonical_name !== undefined) {
-            const { canonical_name: _ignored, ...rest } = patch;
-            return rest;
-        }
-        return patch;
-    });
-}
-
-function formatVolumeCardRelPath(volumeNumber: number): string {
-    return `index/L2_cards/vol_${String(volumeNumber).padStart(2, '0')}_cards.md`;
-}
-
-/** 在本文件内格式化标准双轨 L2 章卡（Phase 4 /simplify 将与 helpers.ts 统一收拢） */
-function upsertDualTrackVolumeCardEntry(
-    rawCardContent: string | null,
-    volumeNumber: number,
-    chapterNumber: number,
-    storyDay: number,
-    plotSummary: string,
-    proseAnchors: string[],
-    appearanceEntityIds: string[]
+function resolveSyncCommitMessage(
+    dirtyChapters: readonly DirtyChapter[],
+    prosePolishOnlySingle: boolean,
+    hasFactualHeadOrNext: boolean
 ): string {
-    const baseContent =
-        rawCardContent && rawCardContent.trim().length > 0
-            ? rawCardContent.replace(/\r\n/g, '\n')
-            : `# 第 ${volumeNumber} 卷双轨章卡\n\n`;
-    const chKey = formatChapterKey(chapterNumber);
-    const cleanAnchors = [...new Set(proseAnchors.map((a) => a.trim()).filter(Boolean))];
-    const cleanIds = [...new Set(appearanceEntityIds.map((id) => id.trim()).filter(Boolean))];
-    const entryBlock = [
-        `## ${chKey} (day:${storyDay})`,
-        `- 主干剧情：${plotSummary.trim()}`,
-        `- 异象锚点：${cleanAnchors.length > 0 ? cleanAnchors.join('、') : '无'}`,
-        `- 出场实体：${cleanIds.join(', ')}`
-    ].join('\n');
-    const sectionRe = new RegExp(
-        `^##\\s+${chKey}\\b[^\\n]*\\n[\\s\\S]*?(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
-        'm'
-    );
-    if (sectionRe.test(baseContent)) {
-        const replaced = baseContent.replace(sectionRe, `${entryBlock}\n\n`);
-        return `${replaced.trimEnd()}\n`;
+    if (prosePolishOnlySingle) {
+        return `chore(sync): polish ${dirtyChapters[0]!.chapterKey} prose without state change`;
     }
-    return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
+    const keys = dirtyChapters.map((d) => d.chapterKey).join(', ');
+    if (hasFactualHeadOrNext) {
+        return `state(sync): sync ${keys} views`;
+    }
+    return `chore(sync): refresh ${keys} views`;
+}
+
+function resolveDirtyConflictCandidate(
+    dirtyChapter: number | undefined,
+    historicalMap: ReadonlyMap<number, HistoricalDirtyItem>,
+    historicalItems: readonly HistoricalDirtyItem[],
+    targetChapterNumber: number,
+    dirtyQuote: string,
+    downstreamQuote: string,
+    targetText: string
+): HistoricalDirtyItem | undefined {
+    if (dirtyChapter !== undefined) {
+        return historicalMap.get(dirtyChapter);
+    }
+    if (historicalItems.length === 1) {
+        return historicalItems[0];
+    }
+    return historicalItems.find(
+        (h) =>
+            h.dirty.chapterNumber < targetChapterNumber &&
+            verifyDualQuotes(dirtyQuote, h.currentText, downstreamQuote, targetText).passed
+    );
 }
 
 function parseStoryDayFromChapterText(content: string, fallbackDay: number): number {
@@ -375,14 +368,14 @@ export class SyncPipeline {
 
             stagedCards.set(
                 cardRelPath,
-                upsertDualTrackVolumeCardEntry(
+                upsertVolumeCardEntry(
                     cardContent,
                     targetVol,
                     dirty.chapterNumber,
                     existingDay,
                     plotSummary,
-                    validAnchors,
-                    appearedIds
+                    appearedIds,
+                    validAnchors
                 )
             );
             pendingChapterHashes[dirty.chapterKey] = dirty.actualHash;
@@ -559,14 +552,14 @@ export class SyncPipeline {
 
             stagedCards.set(
                 cardRelPath,
-                upsertDualTrackVolumeCardEntry(
+                upsertVolumeCardEntry(
                     cardContent,
                     targetVol,
                     dirty.chapterNumber,
                     nextStoryDay,
                     plotSummary,
-                    validAnchors,
-                    appearedIds
+                    appearedIds,
+                    validAnchors
                 )
             );
             pendingChapterHashes[dirty.chapterKey] = dirty.actualHash;
@@ -689,11 +682,11 @@ export class SyncPipeline {
             'utf8'
         );
 
-        const commitMsg = prosePolishOnlySingle
-            ? `chore(sync): polish ${dirtyChapters[0]!.chapterKey} prose without state change`
-            : hasFactualHeadOrNext
-              ? `state(sync): sync ${dirtyChapters.map((d) => d.chapterKey).join(', ')} views`
-              : `chore(sync): refresh ${dirtyChapters.map((d) => d.chapterKey).join(', ')} views`;
+        const commitMsg = resolveSyncCommitMessage(
+            dirtyChapters,
+            prosePolishOnlySingle,
+            hasFactualHeadOrNext
+        );
         await this.system.commitPaths(
             this.store.bookRoot,
             [...allManagedPaths, '.ops/tx_state.json'],
@@ -809,30 +802,12 @@ export class SyncPipeline {
     }
 
     private async assertNoOpenParallelConflict(dirtyChapters: DirtyChapter[]): Promise<void> {
-        const deltasDir = join(this.store.bookRoot, '.ops/parallel_deltas');
-        let entries;
-        try {
-            entries = await readdir(deltasDir, { withFileTypes: true });
-        } catch (err: unknown) {
-            if ((err as { code?: string }).code === 'ENOENT') return;
-            throw err;
-        }
-        for (const entry of entries) {
-            if (!entry.isDirectory()) continue;
-            const raw = await readOptionalText(join(deltasDir, entry.name, 'window.json'));
-            if (!raw) continue;
-            try {
-                const parsed = JSON.parse(raw) as { status?: string; baseChapter?: number };
-                if (parsed.status === 'OPEN') {
-                    const baseCh = parsed.baseChapter ?? 0;
-                    if (dirtyChapters.some((d) => d.chapterNumber <= baseCh || baseCh === 0)) {
-                        throw new ValidationError(
-                            `并行窗口 ${entry.name} 处于活跃 OPEN 状态，禁止修改并同步主线章节`
-                        );
-                    }
-                }
-            } catch (err: unknown) {
-                if (err instanceof ValidationError) throw err;
+        const openWindows = await listOpenParallelWindows(this.store.bookRoot);
+        for (const win of openWindows) {
+            if (dirtyChapters.some((d) => d.chapterNumber <= win.baseChapter || win.baseChapter === 0)) {
+                throw new ValidationError(
+                    `并行窗口 ${win.windowId} 处于活跃 OPEN 状态，禁止修改并同步主线章节`
+                );
             }
         }
     }
@@ -909,13 +884,7 @@ export class SyncPipeline {
         if (!cardContent) return fallbackDay;
         const parsed = parseL2CardSections(cardContent);
         const section = parsed.sections.find((s) => s.chapterNumber === chapterNumber);
-        if (!section) return fallbackDay;
-        const m = /^day:(-?\d+)$/.exec(section.dayLabel);
-        if (m?.[1]) {
-            const day = Number(m[1]);
-            if (Number.isInteger(day)) return day;
-        }
-        return fallbackDay;
+        return parseStoryDayLabel(section?.dayLabel, fallbackDay);
     }
 
     private async runExtractorForChapter(params: {
@@ -1271,21 +1240,15 @@ export class SyncPipeline {
                     continue;
                 }
 
-                const dirtyCandidate =
-                    item.dirty_chapter !== undefined
-                        ? historicalMap.get(item.dirty_chapter)
-                        : historicalItems.length === 1
-                          ? historicalItems[0]
-                          : historicalItems.find(
-                                (h) =>
-                                    h.dirty.chapterNumber < item.chapter_number &&
-                                    verifyDualQuotes(
-                                        dirtyQuote,
-                                        h.currentText,
-                                        downstreamQuote,
-                                        target.text
-                                    ).passed
-                            );
+                const dirtyCandidate = resolveDirtyConflictCandidate(
+                    item.dirty_chapter,
+                    historicalMap,
+                    historicalItems,
+                    item.chapter_number,
+                    dirtyQuote,
+                    downstreamQuote,
+                    target.text
+                );
                 if (!dirtyCandidate || dirtyCandidate.dirty.chapterNumber >= item.chapter_number) {
                     continue;
                 }
