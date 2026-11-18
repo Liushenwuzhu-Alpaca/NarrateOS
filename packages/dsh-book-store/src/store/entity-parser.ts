@@ -89,6 +89,63 @@ export function inferSlotKey(entry: EntityEntry): string | undefined {
     return undefined;
 }
 
+function applyEntryMetadataTag(
+    entry: EntityEntry,
+    extraTags: Record<string, string>,
+    key: string,
+    val: string
+): void {
+    if (key === 'day' || key === 'story_day') {
+        const num = Number(val);
+        if (Number.isInteger(num)) {
+            entry.storyDay = num;
+        }
+        return;
+    }
+    if (key === 'ch') {
+        const num = Number(val);
+        if (Number.isInteger(num) && num >= 0) {
+            entry.chapter = num;
+        }
+        return;
+    }
+    if (key === 'vis' || key === 'visibility') {
+        const normalizedVis = val.toUpperCase();
+        if (
+            normalizedVis === 'SELF_ONLY' ||
+            normalizedVis === 'OMNISCIENT_SECRET' ||
+            normalizedVis === 'PUBLIC' ||
+            normalizedVis === 'READER_KNOWN'
+        ) {
+            entry.visibility = normalizedVis as EntryVisibility;
+        } else if (val.length > 0) {
+            entry.rawInvalidVisibility = val;
+            extraTags[key] = val;
+        }
+        return;
+    }
+    if (key === 'owner') {
+        assertSafeEntityTagValue('owner', val);
+        entry.owner = val;
+        return;
+    }
+    if (key === 'status') {
+        const normalizedStatus = val.toUpperCase();
+        if (normalizedStatus === 'ACTIVE' || normalizedStatus === 'WARPED') {
+            entry.status = normalizedStatus as EntryStatus;
+        } else if (val.length > 0) {
+            extraTags[key] = val;
+        }
+        return;
+    }
+    if (key === 'slot') {
+        assertSafeEntityTagValue('slotKey', val);
+        entry.slotKey = val;
+        return;
+    }
+    extraTags[key] = val;
+}
+
 /** 解析单行条目标签与内容 */
 function parseEntryLine(lineContent: string): EntityEntry {
     const trimmed = lineContent.trim();
@@ -99,15 +156,13 @@ function parseEntryLine(lineContent: string): EntityEntry {
         if (rest.length > 0) {
             for (const part of rest.split('|')) {
                 const idx = part.indexOf(':');
-                if (idx > 0) {
-                    const key = part.slice(0, idx).trim();
-                    const val = part.slice(idx + 1).trim();
-                    if (key) {
-                        assertSafeEntityTagValue('ledger_key', key);
-                        assertSafeLedgerValue(val);
-                        ledger[key] = val;
-                    }
-                }
+                if (idx <= 0) continue;
+                const key = part.slice(0, idx).trim();
+                const val = part.slice(idx + 1).trim();
+                if (!key) continue;
+                assertSafeEntityTagValue('ledger_key', key);
+                assertSafeLedgerValue(val);
+                ledger[key] = val;
             }
         }
         return {
@@ -144,46 +199,7 @@ function parseEntryLine(lineContent: string): EntityEntry {
         if (sep === -1) continue;
         const key = token.slice(0, sep).trim().toLowerCase();
         const val = token.slice(sep + 1).trim();
-
-        if (key === 'day' || key === 'story_day') {
-            const num = Number(val);
-            if (Number.isInteger(num)) {
-                entry.storyDay = num;
-            }
-        } else if (key === 'ch') {
-            const num = Number(val);
-            if (Number.isInteger(num) && num >= 0) {
-                entry.chapter = num;
-            }
-        } else if (key === 'vis' || key === 'visibility') {
-            const normalizedVis = val.toUpperCase();
-            if (
-                normalizedVis === 'SELF_ONLY' ||
-                normalizedVis === 'OMNISCIENT_SECRET' ||
-                normalizedVis === 'PUBLIC' ||
-                normalizedVis === 'READER_KNOWN'
-            ) {
-                entry.visibility = normalizedVis as EntryVisibility;
-            } else if (val.length > 0) {
-                entry.rawInvalidVisibility = val;
-                extraTags[key] = val;
-            }
-        } else if (key === 'owner') {
-            assertSafeEntityTagValue('owner', val);
-            entry.owner = val;
-        } else if (key === 'status') {
-            const normalizedStatus = val.toUpperCase();
-            if (normalizedStatus === 'ACTIVE' || normalizedStatus === 'WARPED') {
-                entry.status = normalizedStatus as EntryStatus;
-            } else if (val.length > 0) {
-                extraTags[key] = val;
-            }
-        } else if (key === 'slot') {
-            assertSafeEntityTagValue('slotKey', val);
-            entry.slotKey = val;
-        } else {
-            extraTags[key] = val;
-        }
+        applyEntryMetadataTag(entry, extraTags, key, val);
     }
 
     if (Object.keys(extraTags).length > 0) {

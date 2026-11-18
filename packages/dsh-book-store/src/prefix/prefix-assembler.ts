@@ -1,6 +1,6 @@
 import { hashStaticPrefix, type CleanroomRequest } from '../ports/llm.js';
 import { sanitizeLoreForWriter, type SlicedView } from '../slicer/view-slicer.js';
-import type { BookConfig, EntityProfile } from '../store/schemas.js';
+import type { EntityProfile } from '../store/schemas.js';
 import {
     evictDynamicTailToBudget,
     sanitizePositiveText,
@@ -122,6 +122,78 @@ function partitionCast(
     return { focusCast, backgroundCast: [...explicitBg, ...fallbackBg] };
 }
 
+function finalizeAssembleResult(
+    input: PlannerAssembleInput | WriterAssembleInput,
+    draftParams: {
+        craftPluginsSection: string;
+        taskSection: string;
+        voiceSampleSection: string;
+        futureHorizonSection: string;
+        loreEntries: string[];
+        stripWarped: boolean;
+        cleanroomDisplay: boolean;
+    },
+    budget: number | null,
+    selectedVoiceSample: VoiceSample | null,
+    updatedVoicePool?: VoiceSamplePool
+): AssembleResult {
+    const staticPrefixBlocks = buildStaticPrefixBlocks(input.staticPrefix);
+    const { focusCast, backgroundCast } = partitionCast(
+        input.slicedView,
+        input.focusCastIds,
+        input.backgroundCastIds
+    );
+
+    const draft: DynamicTailDraft = {
+        opsStyleAmendments: input.opsStyleAmendments?.trim() ?? '',
+        craftPluginsSection: draftParams.craftPluginsSection,
+        taskSection: draftParams.taskSection,
+        voiceSampleSection: draftParams.voiceSampleSection,
+        futureHorizonSection: draftParams.futureHorizonSection,
+        focusCast,
+        backgroundCast,
+        dramaticIronyLines: input.slicedView.dramaticIronyHints.map((h) => `- ${h.formattedHint}`),
+        memoryWakeupLines: input.slicedView.memoryWakeupHints.map((h) => `- ${h.formattedHint}`),
+        parallelBroadcastLines: input.slicedView.parallelBroadcast.map((b) => `- ${b.text}`),
+        recallSlices: input.recallSlices ?? [],
+        loreEntries: draftParams.loreEntries,
+        previousChapter: input.previousChapter,
+        fallbackTailChars: input.config.context_assembly?.fallback_tail_chars,
+        stripWarped: draftParams.stripWarped,
+        cleanroomDisplay: draftParams.cleanroomDisplay
+    };
+
+    const eviction = evictDynamicTailToBudget(
+        staticPrefixBlocks,
+        draft,
+        input.config.tokens_per_char,
+        budget
+    );
+
+    const request: CleanroomRequest = {
+        pool: input.pool ?? 'strong_creative',
+        staticPrefixBlocks,
+        dynamicTail: eviction.dynamicTail
+    };
+    if (input.temperature !== undefined) request.temperature = input.temperature;
+    if (input.maxTokens !== undefined) request.maxTokens = input.maxTokens;
+    if (input.reasoningEffort !== undefined) request.reasoningEffort = input.reasoningEffort;
+
+    return {
+        request,
+        diagnostics: {
+            estimatedTokens: eviction.estimatedTokens,
+            budget,
+            evictionLevel: eviction.evictionLevel,
+            truncated: eviction.truncated,
+            appliedEvictions: eviction.appliedEvictions,
+            selectedVoiceSample,
+            ...(updatedVoicePool !== undefined ? { updatedVoicePool } : {}),
+            staticPrefixHash: hashStaticPrefix(staticPrefixBlocks)
+        }
+    };
+}
+
 /**
  * 双池前缀装配器（PrefixAssembler）
  * - 保证同卷内 Planner 与 Writer 静态前缀字节级 100% 一致；
@@ -132,79 +204,34 @@ function partitionCast(
 export class PrefixAssembler {
     /** 拼装 Planner 净室请求 */
     assemblePlannerRequest(input: PlannerAssembleInput): AssembleResult {
-        const staticPrefixBlocks = buildStaticPrefixBlocks(input.staticPrefix);
-        const { focusCast, backgroundCast } = partitionCast(
-            input.slicedView,
-            input.focusCastIds,
-            input.backgroundCastIds
-        );
-
         const craftPluginsSection = resolveCraftPluginsSection(
             input.config.craft_plugins,
             'planner',
             input.customPlugins
         );
-
+        const chapterTag = `ch_${String(input.slicedView.currentCh).padStart(4, '0')}`;
         const taskSection = [
-            `## 本章规划目标 (ch_${String(input.slicedView.currentCh).padStart(4, '0')} | story_day: ${input.slicedView.targetDay} | mode: ${input.slicedView.timelineMode})`,
+            `## 本章规划目标 (${chapterTag} | story_day: ${input.slicedView.targetDay} | mode: ${input.slicedView.timelineMode})`,
             input.chapterGoal.trim()
         ].join('\n');
-
         const futureHorizonSection = input.futureHorizon?.trim()
             ? `## 远景地平线 (future_horizon)\n${input.futureHorizon.trim()}`
             : '';
 
-        const fallbackTailChars = (
-            input.config as BookConfig & { context_assembly?: { fallback_tail_chars?: number } }
-        ).context_assembly?.fallback_tail_chars;
-
-        const draft: DynamicTailDraft = {
-            opsStyleAmendments: input.opsStyleAmendments?.trim() ?? '',
-            craftPluginsSection,
-            taskSection,
-            voiceSampleSection: '',
-            futureHorizonSection,
-            focusCast,
-            backgroundCast,
-            dramaticIronyLines: input.slicedView.dramaticIronyHints.map((h) => `- ${h.formattedHint}`),
-            memoryWakeupLines: input.slicedView.memoryWakeupHints.map((h) => `- ${h.formattedHint}`),
-            parallelBroadcastLines: input.slicedView.parallelBroadcast.map((b) => `- ${b.text}`),
-            recallSlices: input.recallSlices ?? [],
-            loreEntries: input.loreEntries ?? [],
-            previousChapter: input.previousChapter,
-            fallbackTailChars,
-            stripWarped: false,
-            cleanroomDisplay: false
-        };
-
-        const eviction = evictDynamicTailToBudget(
-            staticPrefixBlocks,
-            draft,
-            input.config.tokens_per_char,
+        return finalizeAssembleResult(
+            input,
+            {
+                craftPluginsSection,
+                taskSection,
+                voiceSampleSection: '',
+                futureHorizonSection,
+                loreEntries: input.loreEntries ?? [],
+                stripWarped: false,
+                cleanroomDisplay: false
+            },
+            null,
             null
         );
-
-        const request: CleanroomRequest = {
-            pool: input.pool ?? 'strong_creative',
-            staticPrefixBlocks,
-            dynamicTail: eviction.dynamicTail
-        };
-        if (input.temperature !== undefined) request.temperature = input.temperature;
-        if (input.maxTokens !== undefined) request.maxTokens = input.maxTokens;
-        if (input.reasoningEffort !== undefined) request.reasoningEffort = input.reasoningEffort;
-
-        return {
-            request,
-            diagnostics: {
-                estimatedTokens: eviction.estimatedTokens,
-                budget: null,
-                evictionLevel: eviction.evictionLevel,
-                truncated: eviction.truncated,
-                appliedEvictions: eviction.appliedEvictions,
-                selectedVoiceSample: null,
-                staticPrefixHash: hashStaticPrefix(staticPrefixBlocks)
-            }
-        };
     }
 
     /** 拼装 Prose Writer 净室请求（强制 writer 视图守卫、正向槽位、零 WARPED 残留、声纹 LRU 与四级预算降级） */
@@ -214,13 +241,6 @@ export class PrefixAssembler {
                 `assembleWriterRequest 仅接受 forRole === 'writer' 的净室裁剪视图，当前收到: ${input.slicedView.forRole}`
             );
         }
-
-        const staticPrefixBlocks = buildStaticPrefixBlocks(input.staticPrefix);
-        const { focusCast, backgroundCast } = partitionCast(
-            input.slicedView,
-            input.focusCastIds,
-            input.backgroundCastIds
-        );
 
         let selectedVoiceSample: VoiceSample | null = null;
         let updatedVoicePool: VoiceSamplePool | undefined;
@@ -236,75 +256,34 @@ export class PrefixAssembler {
         const voiceSampleSection = selectedVoiceSample
             ? `## 当章句法声纹参考标本 [${selectedVoiceSample.tag}]\n> ${sanitizePositiveText(selectedVoiceSample.text)}`
             : '';
-
         const craftPluginsSection = resolveCraftPluginsSection(
             input.config.craft_plugins,
             'writer',
             input.customPlugins
         );
-
-        const cleanOutline = sanitizePositiveText(input.outline);
+        const chapterTag = `ch_${String(input.slicedView.currentCh).padStart(4, '0')}`;
         const taskSection = [
-            `## 本章执笔细纲 (ch_${String(input.slicedView.currentCh).padStart(4, '0')} | story_day: ${input.slicedView.targetDay} | mode: ${input.slicedView.timelineMode})`,
-            cleanOutline
+            `## 本章执笔细纲 (${chapterTag} | story_day: ${input.slicedView.targetDay} | mode: ${input.slicedView.timelineMode})`,
+            sanitizePositiveText(input.outline)
         ].join('\n');
-
         const cleanLoreEntries = (input.loreEntries ?? [])
             .map((entry) => sanitizeLoreForWriter(entry))
             .filter((entry) => entry.length > 0);
 
-        const fallbackTailChars = (
-            input.config as BookConfig & { context_assembly?: { fallback_tail_chars?: number } }
-        ).context_assembly?.fallback_tail_chars;
-
-        const draft: DynamicTailDraft = {
-            opsStyleAmendments: input.opsStyleAmendments?.trim() ?? '',
-            craftPluginsSection,
-            taskSection,
-            voiceSampleSection,
-            futureHorizonSection: '',
-            focusCast,
-            backgroundCast,
-            dramaticIronyLines: input.slicedView.dramaticIronyHints.map((h) => `- ${h.formattedHint}`),
-            memoryWakeupLines: input.slicedView.memoryWakeupHints.map((h) => `- ${h.formattedHint}`),
-            parallelBroadcastLines: input.slicedView.parallelBroadcast.map((b) => `- ${b.text}`),
-            recallSlices: input.recallSlices ?? [],
-            loreEntries: cleanLoreEntries,
-            previousChapter: input.previousChapter,
-            fallbackTailChars,
-            stripWarped: true,
-            cleanroomDisplay: true
-        };
-
-        const budget = input.config.writer_token_budget ?? null;
-        const eviction = evictDynamicTailToBudget(
-            staticPrefixBlocks,
-            draft,
-            input.config.tokens_per_char,
-            budget
+        return finalizeAssembleResult(
+            input,
+            {
+                craftPluginsSection,
+                taskSection,
+                voiceSampleSection,
+                futureHorizonSection: '',
+                loreEntries: cleanLoreEntries,
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            input.config.writer_token_budget ?? null,
+            selectedVoiceSample,
+            updatedVoicePool
         );
-
-        const request: CleanroomRequest = {
-            pool: input.pool ?? 'strong_creative',
-            staticPrefixBlocks,
-            dynamicTail: eviction.dynamicTail
-        };
-        if (input.temperature !== undefined) request.temperature = input.temperature;
-        if (input.maxTokens !== undefined) request.maxTokens = input.maxTokens;
-        if (input.reasoningEffort !== undefined) request.reasoningEffort = input.reasoningEffort;
-
-        return {
-            request,
-            diagnostics: {
-                estimatedTokens: eviction.estimatedTokens,
-                budget,
-                evictionLevel: eviction.evictionLevel,
-                truncated: eviction.truncated,
-                appliedEvictions: eviction.appliedEvictions,
-                selectedVoiceSample,
-                updatedVoicePool,
-                staticPrefixHash: hashStaticPrefix(staticPrefixBlocks)
-            }
-        };
     }
 }

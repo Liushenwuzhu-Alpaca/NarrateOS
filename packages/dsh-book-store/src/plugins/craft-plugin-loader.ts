@@ -157,14 +157,12 @@ export class CraftPluginLoader {
             const loadedList = await this.loadFromDirectory(dirPath);
             for (const item of loadedList) {
                 const existing = catalog.get(item.plugin.id);
-                if (existing) {
-                    if (onConflict === 'error') {
-                        throw new CraftPluginConflictError(
-                            item.plugin.id,
-                            existing.sourcePath,
-                            item.sourcePath
-                        );
-                    }
+                if (existing && onConflict === 'error') {
+                    throw new CraftPluginConflictError(
+                        item.plugin.id,
+                        existing.sourcePath,
+                        item.sourcePath
+                    );
                 }
                 catalog.set(item.plugin.id, item);
             }

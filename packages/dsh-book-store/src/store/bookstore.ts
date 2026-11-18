@@ -71,7 +71,16 @@ export interface CommitDraftOptions {
     outline?: z.input<typeof PlannerOutlineSchema> | undefined;
 }
 
-function formatChapterKey(chapterNumber: number): string {
+export function isEnoentError(err: unknown): boolean {
+    return (
+        err !== null &&
+        typeof err === 'object' &&
+        'code' in err &&
+        (err as { code?: unknown }).code === 'ENOENT'
+    );
+}
+
+export function formatChapterKey(chapterNumber: number): string {
     return `ch_${String(chapterNumber).padStart(4, '0')}`;
 }
 
@@ -90,6 +99,59 @@ function isProcessAlive(pid: number): boolean {
     } catch (err: unknown) {
         const code = (err as { code?: string }).code;
         return code !== 'ESRCH';
+    }
+}
+
+/** 收集工作区内所有可达的实体与章节外键集合（活跃实体 + 冷归档 + 已落盘章节 + 本批新建实体） */
+export async function collectReachableKeys(
+    bookRoot: string,
+    pendingNewEntityIds: Set<string>
+): Promise<Set<string>> {
+    const keys = new Set<string>(pendingNewEntityIds);
+    const dirs = [
+        join(bookRoot, 'entities'),
+        join(bookRoot, 'entities/cold_archive'),
+        join(bookRoot, 'manuscripts')
+    ];
+
+    await Promise.all(
+        dirs.map(async (dirPath) => {
+            try {
+                const files = await readdir(dirPath);
+                for (const file of files) {
+                    if (!file.endsWith('.md')) continue;
+                    const base = file.slice(0, -3);
+                    keys.add(base);
+                    // 支持冷归档旧纪元分片命名 char_001_saga_01.md 与 char_lin_daiyu_saga_01.md
+                    const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
+                    if (sagaMatch?.[1]) {
+                        keys.add(sagaMatch[1]);
+                    }
+                }
+            } catch (err: unknown) {
+                if (!isEnoentError(err)) throw err;
+            }
+        })
+    );
+
+    return keys;
+}
+
+/** 校验序列化档案中的全部实体与章节外键引用均可到达 */
+export function assertForeignKeysReachable(
+    sourceEntityId: string,
+    content: string,
+    reachableKeys: Set<string>
+): void {
+    const missing = new Set<string>();
+    for (const match of content.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
+        const refId = match[1];
+        if (refId && !reachableKeys.has(refId)) {
+            missing.add(refId);
+        }
+    }
+    if (missing.size > 0) {
+        throw new ForeignKeyError([...missing], sourceEntityId);
     }
 }
 
@@ -620,9 +682,13 @@ export class BookStore {
         let paths = fallbackPaths;
         try {
             const record = PendingWritesSchema.parse(JSON.parse(await readFile(pendingPath, 'utf8')));
-            paths = record.baseRevision === await this.system.currentRevision(this.bookRoot) && record.baseWal === committedRaw ? record.paths : fallbackPaths;
+            paths =
+                record.baseRevision === (await this.system.currentRevision(this.bookRoot)) &&
+                record.baseWal === committedRaw
+                    ? record.paths
+                    : fallbackPaths;
         } catch (error: unknown) {
-            if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+            if (!isEnoentError(error)) throw error;
         }
         const backupRoot = join(this.opsDir, 'recovery', randomUUID());
         for (const path of paths) {
@@ -632,7 +698,7 @@ export class BookStore {
                 await mkdir(dirname(backupPath), { recursive: true });
                 await writeFile(backupPath, content);
             } catch (error: unknown) {
-                if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+                if (!isEnoentError(error)) throw error;
             }
         }
         await this.system.restorePaths(this.bookRoot, paths);
@@ -778,7 +844,7 @@ export class BookStore {
                         const raw = await readFile(entityPath, 'utf8');
                         existing = parseEntityMarkdown(raw);
                     } catch (err: unknown) {
-                        if ((err as { code?: string }).code !== 'ENOENT') throw err;
+                        if (!isEnoentError(err)) throw err;
 
                         const coldProfile = SAGA_SHARD_RE.test(patch.entity_id)
                             ? null
@@ -797,15 +863,15 @@ export class BookStore {
                     }
                 }
 
-                const merged = this.mergeEntityPatch(existing, patch, allowInnate);
+                const merged = mergeEntityProfilePatch(existing, patch, allowInnate);
                 stagedProfiles.set(patch.entity_id, merged);
             }
 
             // 第二阶段：1ms 跨文件外键可达性校验
-            const reachableKeys = await this.buildReachableKeySet(pendingNewEntityIds);
+            const reachableKeys = await collectReachableKeys(this.bookRoot, pendingNewEntityIds);
             for (const [entityId, profile] of stagedProfiles.entries()) {
                 const serialized = serializeEntityMarkdown(profile);
-                this.assertForeignKeysReachable(entityId, serialized, reachableKeys);
+                assertForeignKeysReachable(entityId, serialized, reachableKeys);
             }
 
             // 第三阶段：全部校验通过后落盘（含冷宫唤醒写回与旧档删除双路径）并提交 Git
@@ -917,7 +983,7 @@ export class BookStore {
                     await stat(join(this.opsDir, 'pending_writes.json'));
                     await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
                 } catch (error: unknown) {
-                    if (!(error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error;
+                    if (!isEnoentError(error)) throw error;
                 }
             }
             if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) !== JSON.stringify(committed)) {
@@ -986,79 +1052,18 @@ export class BookStore {
             const actualHash = sha256Hex(content);
             const recordedHash = txState.chapter_hashes[chapterKey] ?? null;
 
-            if (recordedHash === null) {
-                dirty.push({
-                    chapterKey,
-                    chapterNumber,
-                    relativePath,
-                    recordedHash: null,
-                    actualHash,
-                    reason: 'UNTRACKED'
-                });
-            } else if (recordedHash !== actualHash) {
+            if (recordedHash !== actualHash) {
                 dirty.push({
                     chapterKey,
                     chapterNumber,
                     relativePath,
                     recordedHash,
                     actualHash,
-                    reason: 'MODIFIED'
+                    reason: recordedHash === null ? 'UNTRACKED' : 'MODIFIED'
                 });
             }
         }
 
         return dirty;
-    }
-
-    private mergeEntityPatch(
-        existing: EntityProfile | null,
-        patch: EntityPatch,
-        allowInnateMutation: boolean
-    ): EntityProfile {
-        return mergeEntityProfilePatch(existing, patch, allowInnateMutation);
-    }
-
-    /** 构建 O(1) 外键可达性查找集合（活跃实体 + 冷归档 + 已落盘章节 + 本批新建实体） */
-    private async buildReachableKeySet(pendingNewEntityIds: Set<string>): Promise<Set<string>> {
-        const keys = new Set<string>(pendingNewEntityIds);
-
-        const collectMdIds = async (dirPath: string) => {
-            try {
-                const files = await readdir(dirPath);
-                for (const file of files) {
-                    if (!file.endsWith('.md')) continue;
-                    const base = file.slice(0, -3);
-                    keys.add(base);
-                    // 支持冷归档旧纪元分片命名 char_001_saga_01.md 与 char_lin_daiyu_saga_01.md
-                    const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
-                    if (sagaMatch?.[1]) {
-                        keys.add(sagaMatch[1]);
-                    }
-                }
-            } catch (err: unknown) {
-                if ((err as { code?: string }).code !== 'ENOENT') throw err;
-            }
-        };
-
-        await Promise.all([
-            collectMdIds(this.entitiesDir),
-            collectMdIds(this.coldArchiveDir),
-            collectMdIds(this.manuscriptsDir)
-        ]);
-
-        return keys;
-    }
-
-    private assertForeignKeysReachable(sourceEntityId: string, content: string, reachableKeys: Set<string>): void {
-        const missing = new Set<string>();
-        for (const match of content.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
-            const refId = match[1];
-            if (refId && !reachableKeys.has(refId)) {
-                missing.add(refId);
-            }
-        }
-        if (missing.size > 0) {
-            throw new ForeignKeyError([...missing], sourceEntityId);
-        }
     }
 }
