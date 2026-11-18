@@ -28,6 +28,8 @@ export interface BootBookModalProps {
     onClose: () => void;
     onBootSuccess?: ((data: BootBookResponseData) => void) | undefined;
     onSubmitBoot?: ((payload: BootBookRequestPayload) => Promise<BootBookResponseData>) | undefined;
+    /** 可选：切回主对话使用 /narrate-boot 构思契约 */
+    onSwitchToChatBootHint?: (() => void) | undefined;
 }
 
 type BootWizardStep = 1 | 2 | 3 | 4;
@@ -80,7 +82,8 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
     open,
     onClose,
     onBootSuccess,
-    onSubmitBoot
+    onSubmitBoot,
+    onSwitchToChatBootHint
 }) => {
     const [activeStep, setActiveStep] = useState<BootWizardStep>(1);
     const [mode, setMode] = useState<BootBookMode>('original');
@@ -330,6 +333,22 @@ export const BootBookModal: React.FC<BootBookModalProps> = ({
 
                 <form onSubmit={handleSubmit}>
                     <div className="ns-modal-body ns-b-body">
+                        <div className="ns-b-chat-guide" role="note">
+                            <span className="ns-b-chat-guide-text">
+                                提示：推荐先在主对话使用 <code>/narrate-boot</code> 与 AI 共同推敲《作者契约》；若已有成熟大纲，也可直接在此 4 步编译建库。
+                            </span>
+                            {onSwitchToChatBootHint ? (
+                                <button
+                                    type="button"
+                                    className="ns-btn ns-btn-subtle ns-btn-xs"
+                                    disabled={submitting}
+                                    onClick={onSwitchToChatBootHint}
+                                >
+                                    切回主对话构思
+                                </button>
+                            ) : null}
+                        </div>
+
                         {/* 步骤 1：设定输入与路径切换 */}
                         {activeStep === 1 ? (
                             <>

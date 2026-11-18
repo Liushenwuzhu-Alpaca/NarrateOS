@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 
 /** 作品列表项（对应 GET /api/narrate/books） */
 export interface BookSummaryItem {
@@ -10,7 +10,7 @@ export interface BookSummaryItem {
     walPhase: string;
 }
 
-/** 章节 WAL 状态枚举 */
+/** 章节状态枚举 */
 export type ChapterWalStatus = 'archived' | 'dirty' | 'conflict';
 
 /** 章节列表项（对应 GET /api/narrate/chapters） */
@@ -22,16 +22,16 @@ export interface ChapterNavItem {
     sha256: string;
     dirty: boolean;
     commitSha: string | null;
-    /** 可选卷标识，如 Vol.02 */
-    volumeLabel?: string;
-    /** 是否处于 SAFE_HALT / QUARANTINED 冲突状态 */
-    conflict?: boolean;
+    /** 可选卷标识，如 第一卷 · 寒潮封港 */
+    volumeLabel?: string | undefined;
+    /** 是否处于暂停或冲突状态 */
+    conflict?: boolean | undefined;
 }
 
-/** 只读物化视图类型 */
+/** 全书设定集跨章汇总视图类型 */
 export type MaterializedViewKind = 'entities' | 'horizon' | 'threads';
 
-/** 左栏目录组件 Props */
+/** 左栏目录组件 Props（向后兼容旧版属性，新增属性一律可选） */
 export interface LeftBookNavProps {
     /** 当前激活作品根路径 */
     currentBookRoot: string;
@@ -43,7 +43,7 @@ export interface LeftBookNavProps {
     chapterCount: number;
     /** 当前故事日 */
     storyDay: number;
-    /** 当前 WAL 相位 */
+    /** 当前状态相位 */
     walPhase: string;
     /** 可切换的作品列表 */
     books: BookSummaryItem[];
@@ -53,310 +53,203 @@ export interface LeftBookNavProps {
     selectedChapter: number | null;
     /** 活跃实体数 */
     entityCount: number;
-    /** 冷归档实体数 */
+    /** 冷宫归档实体数 */
     coldArchiveCount: number;
-    /** WARPED 未来视野条目数（可选） */
-    warpedHorizonCount?: number;
-    /** 未完结伏笔数（可选） */
-    openThreadsCount?: number;
-    /** 当前激活的物化视图（可选，用于高亮入口） */
-    activeViewKind?: MaterializedViewKind | null;
+    /** 已推翻旧预案条目数（可选） */
+    warpedHorizonCount?: number | undefined;
+    /** 待推进后续预案条目数（可选） */
+    pendingHorizonCount?: number | undefined;
+    /** 未解伏笔数（可选） */
+    openThreadsCount?: number | undefined;
+    /** 当前激活的设定集视图（可选，用于高亮入口） */
+    activeViewKind?: MaterializedViewKind | null | undefined;
     /** 是否正在切换或加载中 */
-    loading?: boolean;
+    loading?: boolean | undefined;
     /** 切换作品回调 */
     onSelectBook: (bookRoot: string) => void;
-    /** 点击「+ 开新书」回调 */
+    /** 点击「开新书」回调 */
     onNewBook: () => void;
     /** 点击章节回调 */
     onSelectChapter: (chapterNumber: number) => void;
-    /** 是否以嵌入式无头模式渲染（用于右栏「目录」Tab） */
-    embedded?: boolean;
-    /** 点击只读物化视图入口回调 */
+    /** 是否以嵌入式无头模式渲染（供旧版右栏过渡使用） */
+    embedded?: boolean | undefined;
+    /** 点击设定集视图入口回调 */
     onOpenView: (kind: MaterializedViewKind) => void;
+    /** 当前卷名称（可选，优先于章节自带卷标识） */
+    currentVolumeLabel?: string | undefined;
+    /** 抽屉模式下点击条目后关闭抽屉的可选回调 */
+    onCloseDrawer?: (() => void) | undefined;
 }
 
-function formatChapterCode(chapterNumber: number): string {
+function formatLegacyChapterCode(chapterNumber: number): string {
     return `Ch.${String(chapterNumber).padStart(4, '0')}`;
 }
 
-function resolveChapterStatus(chapter: ChapterNavItem): {
+function resolveVolumeLabel(
+    currentVolumeLabel: string | undefined,
+    chapters: readonly ChapterNavItem[]
+): string {
+    if (currentVolumeLabel && currentVolumeLabel.trim().length > 0) {
+        return currentVolumeLabel.trim();
+    }
+    for (let i = chapters.length - 1; i >= 0; i -= 1) {
+        const vol = chapters[i]?.volumeLabel?.trim();
+        if (vol) {
+            return vol;
+        }
+    }
+    return '第一卷';
+}
+
+function resolveChapterBadge(chapter: ChapterNavItem): {
     status: ChapterWalStatus;
     label: string;
-    pillClass: string;
+    badgeClass: string;
 } {
     if (chapter.conflict) {
         return {
             status: 'conflict',
             label: '冲突',
-            pillClass: 'ns-pill ns-pill-red'
+            badgeClass: 'ns-badge ns-badge-danger'
         };
     }
     if (chapter.dirty) {
         return {
             status: 'dirty',
-            label: '有手改',
-            pillClass: 'ns-pill ns-pill-amber'
+            label: '已改',
+            badgeClass: 'ns-badge ns-badge-warn'
         };
     }
     return {
         status: 'archived',
-        label: '已归档',
-        pillClass: 'ns-pill ns-pill-green'
+        label: String(chapter.charCount),
+        badgeClass: 'ns-num ns-ch-chars'
     };
 }
 
-function resolveWalPhasePillClass(walPhase: string): string {
-    const upper = walPhase.toUpperCase();
-    if (upper === 'SAFE_HALT' || upper === 'QUARANTINED') {
-        return 'ns-pill ns-pill-red';
-    }
-    if (upper === 'DRAFTING' || upper === 'FEAT_COMMITTED') {
-        return 'ns-pill ns-pill-brand';
-    }
-    if (upper === 'IDLE' || upper === 'STATE_COMMITTED') {
-        return 'ns-pill ns-pill-green';
-    }
-    return 'ns-pill ns-pill-muted';
-}
-
 /**
- * 左栏作品与章节 WAL 目录组件：
- * - 作品切换器（下拉切换多部作品、展示路径/总章数/story_day/WAL 相位、开新书入口）
- * - 章节 WAL 状态列表（支持正序/倒序切换，展示 Ch.XXXX、标题与已归档/有手改/冲突胶囊）
- * - 只读物化视图快捷入口（entities/、future_horizon、open_threads）
+ * 东方清样左栏导航组件：
+ * - 顶部：当前卷名 + 故事天数胶囊
+ * - 中部：可滚动正文章节目录（章号、标题与字数/已改/冲突胶囊）
+ * - 底部：固定「全书设定集（跨章汇总）」三入口（人物与物品档案 / 未解伏笔清单 / 剧情预案与废案）
  */
 export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
     const {
-        currentBookRoot,
-        currentTitle,
-        currentSlug,
         chapterCount,
         storyDay,
-        walPhase,
-        books,
         chapters,
         selectedChapter,
         entityCount,
         coldArchiveCount,
         warpedHorizonCount,
+        pendingHorizonCount,
         openThreadsCount,
         activeViewKind = null,
         loading = false,
         embedded = false,
-        onSelectBook,
-        onNewBook,
+        currentVolumeLabel,
         onSelectChapter,
-        onOpenView
+        onOpenView,
+        onCloseDrawer
     } = props;
-
-    // 默认按章节号倒序排列，便于直接定位最新章
-    const [sortDesc, setSortDesc] = useState<boolean>(true);
 
     const sortedChapters = useMemo(() => {
         const copy = [...chapters];
-        copy.sort((a, b) => (sortDesc ? b.chapterNumber - a.chapterNumber : a.chapterNumber - b.chapterNumber));
+        copy.sort((a, b) => a.chapterNumber - b.chapterNumber);
         return copy;
-    }, [chapters, sortDesc]);
+    }, [chapters]);
 
-    const totalCharCount = useMemo(
-        () => chapters.reduce((acc, item) => acc + item.charCount, 0),
-        [chapters]
-    );
+    const displayChapterCount = chapterCount > 0 ? chapterCount : sortedChapters.length;
+    const volumeLabel = resolveVolumeLabel(currentVolumeLabel, sortedChapters);
+    const horizonTotal = (warpedHorizonCount ?? 0) + (pendingHorizonCount ?? 0);
 
-    const displayTitle = currentTitle || currentSlug || '未命名作品';
-    const displaySlugPath = currentSlug ? `books/${currentSlug}` : 'books/unknown';
-    const displayChapterCount = chapterCount > 0 ? chapterCount : chapters.length;
+    const handleChapterClick = (chapterNumber: number) => {
+        onSelectChapter(chapterNumber);
+        onCloseDrawer?.();
+    };
 
-    const chapterListSection = (
-        <section className="ns-nav-group" aria-label="章节 WAL 状态列表">
-            <div className="ns-group-title">
-                <span>章节目录 ({sortedChapters.length})</span>
-                <button
-                    type="button"
-                    className="ns-link-btn ns-mono"
-                    onClick={() => setSortDesc((prev) => !prev)}
-                    title="切换章节排序方向"
-                >
-                    {sortDesc ? 'WAL 倒序' : 'WAL 正序'}
-                </button>
+    const handleOpenCodex = (kind: MaterializedViewKind) => {
+        onOpenView(kind);
+        onCloseDrawer?.();
+    };
+
+    const codexSection = (
+        <div className="ns-left-codex" aria-label="全书设定集（跨章汇总）">
+            <div className="ns-left-group-label">
+                <span>全书设定集（跨章汇总）</span>
             </div>
-
-            {sortedChapters.length === 0 ? (
-                <div className="ns-empty-hint">暂无已落盘章节，请先开书或推进第 1 章。</div>
-            ) : (
-                <div className="ns-ch-list">
-                    {sortedChapters.map((chapter) => {
-                        const isSelected = selectedChapter === chapter.chapterNumber;
-                        const badge = resolveChapterStatus(chapter);
-                        return (
-                            <button
-                                key={chapter.fileName}
-                                type="button"
-                                className={`ns-ch-btn${isSelected ? ' ns-active' : ''}`}
-                                onClick={() => onSelectChapter(chapter.chapterNumber)}
-                                title={`${chapter.fileName} (${chapter.charCount} 字)`}
-                            >
-                                <span className="ns-ch-label">
-                                    <span className="ns-mono ns-ch-code">
-                                        {formatChapterCode(chapter.chapterNumber)}
-                                    </span>
-                                    <span className="ns-ch-title"> - {chapter.title}</span>
-                                </span>
-                                <span className={badge.pillClass} data-wal-status={badge.status}>
-                                    {badge.label}
-                                </span>
-                            </button>
-                        );
-                    })}
-                </div>
-            )}
-        </section>
+            <button
+                type="button"
+                className={`ns-codex-row${activeViewKind === 'entities' ? ' ns-active' : ''}`}
+                onClick={() => handleOpenCodex('entities')}
+                aria-current={activeViewKind === 'entities' ? 'page' : undefined}
+                title={`活跃人物与物品 ${entityCount} 项，冷宫归档 ${coldArchiveCount} 项`}
+            >
+                <span>人物与物品档案</span>
+                <span className="ns-badge ns-badge-neutral ns-num">
+                    {entityCount} / 冷宫 {coldArchiveCount}
+                </span>
+            </button>
+            <button
+                type="button"
+                className={`ns-codex-row${activeViewKind === 'threads' ? ' ns-active' : ''}`}
+                onClick={() => handleOpenCodex('threads')}
+                aria-current={activeViewKind === 'threads' ? 'page' : undefined}
+                title="查看跨章未解伏笔清单"
+            >
+                <span>未解伏笔清单</span>
+                <span className="ns-badge ns-badge-neutral ns-num">
+                    {openThreadsCount ?? 0}
+                </span>
+            </button>
+            <button
+                type="button"
+                className={`ns-codex-row${activeViewKind === 'horizon' ? ' ns-active' : ''}`}
+                onClick={() => handleOpenCodex('horizon')}
+                aria-current={activeViewKind === 'horizon' ? 'page' : undefined}
+                title="查看已推翻隔离旧预案与待推进后续预案"
+            >
+                <span>剧情预案与废案</span>
+                <span className="ns-badge ns-badge-neutral ns-num">
+                    {horizonTotal}
+                </span>
+            </button>
+        </div>
     );
 
     if (embedded) {
         return (
-            <div className="ns-toc-embedded" aria-label="章节目录与物化视图">
-                {chapterListSection}
-
-                {/* 底部 3 枚状态小方块：活跃实体 / WARPED / 未收伏笔 */}
-                <div className="ns-views-row" aria-label="物化视图快捷方块">
-                    <button
-                        type="button"
-                        className={`ns-vtile${activeViewKind === 'entities' ? ' ns-active' : ''}`}
-                        onClick={() => onOpenView('entities')}
-                        title={`查看活跃实体（冷档 ${coldArchiveCount}）`}
-                    >
-                        <b>{entityCount}</b>
-                        <span>活跃实体</span>
-                    </button>
-                    <button
-                        type="button"
-                        className={`ns-vtile ns-vtile-warped${activeViewKind === 'horizon' ? ' ns-active' : ''}`}
-                        onClick={() => onOpenView('horizon')}
-                        title="查看 future_horizon 中的 WARPED 条目"
-                    >
-                        <b>{typeof warpedHorizonCount === 'number' ? warpedHorizonCount : 0}</b>
-                        <span>WARPED</span>
-                    </button>
-                    <button
-                        type="button"
-                        className={`ns-vtile${activeViewKind === 'threads' ? ' ns-active' : ''}`}
-                        onClick={() => onOpenView('threads')}
-                        title="查看 open_threads 未收伏笔"
-                    >
-                        <b>{typeof openThreadsCount === 'number' ? openThreadsCount : 0}</b>
-                        <span>未收伏笔</span>
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
-    return (
-        <aside className="ns-book-nav" aria-label="作品与章节真源目录">
-            <div className="ns-nav-head">
-                <strong className="ns-nav-title">作品与章节真源</strong>
-                <button
-                    type="button"
-                    className="ns-btn-ghost ns-btn-sm"
-                    onClick={onNewBook}
-                    disabled={loading}
-                >
-                    + 开新书
-                </button>
-            </div>
-
-            <div className="ns-nav-scroll">
-                {/* 作品切换器卡片 */}
-                <section className="ns-book-card" aria-label="当前作品信息">
-                    <div className="ns-book-card-top">
-                        <div className="ns-book-title" title={displayTitle}>
-                            {displayTitle}
+            <div className="ns-toc-embedded" aria-label="章节目录与全书设定集">
+                <section className="ns-nav-group" aria-label="章节目录">
+                    <div className="ns-left-group-label">
+                        <span>正文目录</span>
+                        <span className="ns-num">共 {displayChapterCount} 章</span>
+                    </div>
+                    {sortedChapters.length === 0 ? (
+                        <div className="ns-empty-hint">
+                            新书契约已就绪，点击右上角「写下一章」开启首章校准。
                         </div>
-                        <span className={resolveWalPhasePillClass(walPhase)}>{walPhase || 'IDLE'}</span>
-                    </div>
-
-                    <div className="ns-mono ns-book-path" title={currentBookRoot}>
-                        {displaySlugPath}
-                    </div>
-
-                    {books.length > 0 && (
-                        <div className="ns-book-switcher">
-                            <select
-                                className="ns-book-select"
-                                aria-label="切换作品"
-                                value={currentBookRoot}
-                                disabled={loading}
-                                onChange={(e) => {
-                                    if (e.target.value && e.target.value !== currentBookRoot) {
-                                        onSelectBook(e.target.value);
-                                    }
-                                }}
-                            >
-                                {books.map((book) => (
-                                    <option key={book.bookRoot} value={book.bookRoot}>
-                                        {book.title || book.slug} ({book.currentChapter} 章)
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                    )}
-
-                    <div className="ns-book-meta">
-                        <span className="ns-pill ns-pill-green">
-                            {displayChapterCount} 章
-                            {totalCharCount > 0 ? ` - ${(totalCharCount / 10000).toFixed(1)}万字` : ''}
-                        </span>
-                        <span className="ns-pill ns-pill-brand">story_day: {storyDay}</span>
-                    </div>
-                </section>
-
-                {/* 章节 WAL 状态列表 */}
-                <section className="ns-nav-group" aria-label="章节 WAL 状态列表">
-                    <div className="ns-group-title">
-                        <span>章节目录 ({sortedChapters.length})</span>
-                        <button
-                            type="button"
-                            className="ns-link-btn ns-mono"
-                            onClick={() => setSortDesc((prev) => !prev)}
-                            title="切换章节排序方向"
-                        >
-                            {sortDesc ? 'WAL 倒序' : 'WAL 正序'}
-                        </button>
-                    </div>
-
-                    {loading && sortedChapters.length === 0 ? (
-                        <div className="ns-ch-list" aria-label="章节目录加载中" role="status">
-                            {Array.from({ length: 6 }, (_, idx) => (
-                                <div key={idx} className="ns-skel-row">
-                                    <span className="ns-skel ns-skel-code" />
-                                    <span className="ns-skel ns-skel-title" />
-                                    <span className="ns-skel ns-skel-pill" />
-                                </div>
-                            ))}
-                        </div>
-                    ) : sortedChapters.length === 0 ? (
-                        <div className="ns-empty-hint">暂无已落盘章节，请先开书或推进第 1 章。</div>
                     ) : (
                         <div className="ns-ch-list">
                             {sortedChapters.map((chapter) => {
-                                const isSelected = selectedChapter === chapter.chapterNumber;
-                                const badge = resolveChapterStatus(chapter);
+                                const isSelected =
+                                    activeViewKind === null && selectedChapter === chapter.chapterNumber;
+                                const badge = resolveChapterBadge(chapter);
                                 return (
                                     <button
                                         key={chapter.fileName}
                                         type="button"
-                                        className={`ns-ch-btn${isSelected ? ' ns-active' : ''}`}
-                                        onClick={() => onSelectChapter(chapter.chapterNumber)}
+                                        className={`ns-ch-item ns-ch-btn${isSelected ? ' ns-active' : ''}`}
+                                        onClick={() => handleChapterClick(chapter.chapterNumber)}
                                         title={`${chapter.fileName} (${chapter.charCount} 字)`}
                                     >
-                                        <span className="ns-ch-label">
-                                            <span className="ns-mono ns-ch-code">
-                                                {formatChapterCode(chapter.chapterNumber)}
+                                        <span className="ns-ch-title-wrap">
+                                            <span className="ns-mono ns-ch-code ns-ch-no ns-num">
+                                                {formatLegacyChapterCode(chapter.chapterNumber)}
                                             </span>
-                                            <span className="ns-ch-title"> - {chapter.title}</span>
+                                            <span>{chapter.title}</span>
                                         </span>
-                                        <span className={badge.pillClass} data-wal-status={badge.status}>
+                                        <span className={badge.badgeClass} data-wal-status={badge.status}>
                                             {badge.label}
                                         </span>
                                     </button>
@@ -365,53 +258,70 @@ export function LeftBookNav(props: LeftBookNavProps): React.ReactElement {
                         </div>
                     )}
                 </section>
-
-                {/* 只读物化视图快捷入口 */}
-                <section className="ns-nav-group" aria-label="物化视图只读入口">
-                    <div className="ns-group-title">
-                        <span>物化视图入口</span>
-                        <span>只读</span>
-                    </div>
-
-                    <div className="ns-view-list">
-                        <button
-                            type="button"
-                            className={`ns-ch-btn${activeViewKind === 'entities' ? ' ns-active' : ''}`}
-                            onClick={() => onOpenView('entities')}
-                        >
-                            <span>
-                                entities/ (活跃 {entityCount} / 冷档 {coldArchiveCount})
-                            </span>
-                            <span className="ns-mono ns-view-badge">MD</span>
-                        </button>
-
-                        <button
-                            type="button"
-                            className={`ns-ch-btn${activeViewKind === 'horizon' ? ' ns-active' : ''}`}
-                            onClick={() => onOpenView('horizon')}
-                        >
-                            <span>
-                                future_horizon
-                                {typeof warpedHorizonCount === 'number'
-                                    ? ` (WARPED:${warpedHorizonCount})`
-                                    : ''}
-                            </span>
-                            <span className="ns-mono ns-view-badge">MD</span>
-                        </button>
-
-                        <button
-                            type="button"
-                            className={`ns-ch-btn${activeViewKind === 'threads' ? ' ns-active' : ''}`}
-                            onClick={() => onOpenView('threads')}
-                        >
-                            <span>open_threads (跨卷伏笔)</span>
-                            <span className="ns-mono ns-view-badge">
-                                {typeof openThreadsCount === 'number' ? openThreadsCount : 'MD'}
-                            </span>
-                        </button>
-                    </div>
-                </section>
+                {codexSection}
             </div>
+        );
+    }
+
+    return (
+        <aside className="ns-left-pane ns-book-nav" aria-label="章节与设定目录">
+            <div className="ns-left-vol-bar">
+                <span className="ns-left-vol-title" title={volumeLabel}>
+                    {volumeLabel}
+                </span>
+                <span className="ns-badge ns-badge-neutral ns-num">第 {storyDay} 天</span>
+            </div>
+
+            <div className="ns-left-list">
+                <div className="ns-left-group-label">
+                    <span>正文目录</span>
+                    <span className="ns-num">共 {displayChapterCount} 章</span>
+                </div>
+
+                {loading && sortedChapters.length === 0 ? (
+                    <div className="ns-ch-list" aria-label="章节目录加载中" role="status">
+                        {Array.from({ length: 6 }, (_, idx) => (
+                            <div key={idx} className="ns-skel-row">
+                                <span className="ns-skel ns-skel-code" />
+                                <span className="ns-skel ns-skel-title" />
+                                <span className="ns-skel ns-skel-pill" />
+                            </div>
+                        ))}
+                    </div>
+                ) : sortedChapters.length === 0 ? (
+                    <div className="ns-empty-hint">
+                        新书契约已就绪，点击右上角「写下一章」开启首章校准。
+                    </div>
+                ) : (
+                    <div className="ns-ch-list">
+                        {sortedChapters.map((chapter) => {
+                            const isSelected =
+                                activeViewKind === null && selectedChapter === chapter.chapterNumber;
+                            const badge = resolveChapterBadge(chapter);
+                            return (
+                                <button
+                                    key={chapter.fileName}
+                                    type="button"
+                                    className={`ns-ch-item ns-ch-btn${isSelected ? ' ns-active' : ''}`}
+                                    onClick={() => handleChapterClick(chapter.chapterNumber)}
+                                    aria-current={isSelected ? 'page' : undefined}
+                                    title={`${chapter.fileName} (${chapter.charCount} 字)`}
+                                >
+                                    <span className="ns-ch-title-wrap">
+                                        <span className="ns-ch-no ns-num">第 {chapter.chapterNumber} 章</span>
+                                        <span>{chapter.title}</span>
+                                    </span>
+                                    <span className={badge.badgeClass} data-wal-status={badge.status}>
+                                        {badge.label}
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+
+            {codexSection}
         </aside>
     );
 }
