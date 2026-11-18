@@ -1,13 +1,28 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { RipgrepMatch, SystemPort } from '../ports/system.js';
+import { SystemPort } from '../ports/system.js';
 import { splitFrontmatter } from '../store/entity-parser.js';
 import { EntityEntry, EntityProfile, WorldStateFrontmatterSchema } from '../store/schemas.js';
 
 const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
 const VOLUME_CARD_FILE_RE = /^vol_(\d+)_cards\.md$/;
 const LORE_FILE_RE = /^lore_.*\.md$/;
+
+const DEFAULT_L2_FULL_UNFROZEN_THRESHOLD = 40;
+const DEFAULT_L2_FREEZE_BLOCK_CHAPTERS = 20;
+
+/** 暂存区只读回调：返回 string 表示覆盖内容，null 表示暂存删除，undefined 表示回落磁盘 */
+export type StagingReadFn = (
+    relativePath: string
+) => string | null | undefined | Promise<string | null | undefined>;
+
+/** 暂存与章节哈希校验透传项 */
+export interface RecallReadOptions {
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
+    stagingRead?: StagingReadFn | undefined;
+    chapterHashes?: Record<string, string> | undefined;
+}
 
 /** 章节索引条目 */
 export interface ChapterIndexEntry {
@@ -19,10 +34,23 @@ export interface ChapterIndexEntry {
     title?: string | undefined;
 }
 
+/** 解析后的 L2 卷级章卡单章结构 */
+export interface L2CardSection {
+    chapterNumber: number;
+    chapterId: string;
+    dayLabel: string;
+    plotSummary: string;
+    anomalyAnchors: string[];
+    appearedEntityIds: string[];
+    rawSection: string;
+}
+
 /** 构建双层目录的可选参数 */
-export interface BuildCatalogOptions {
+export interface BuildCatalogOptions extends RecallReadOptions {
     currentVolume?: number | undefined;
     chapterFiles?: string[];
+    l2FullUnfrozenThreshold?: number | undefined;
+    l2FreezeBlockChapters?: number | undefined;
 }
 
 /** Librarian 双层章节目录 */
@@ -46,7 +74,7 @@ export interface ContextualTitleRule {
 }
 
 /** 实体多身份键检索参数 */
-export interface EntityRecallQuery {
+export interface EntityRecallQuery extends RecallReadOptions {
     profile: EntityProfile;
     targetChapter: number;
     targetDay: number;
@@ -56,6 +84,10 @@ export interface EntityRecallQuery {
     appearanceChapters?: number[] | undefined;
     extraKeywords?: string[] | undefined;
     includeHistoricalAnchors?: boolean | undefined;
+    focusChapters?: number[] | undefined;
+    maxSlicesPerEntity?: number | undefined;
+    sliceContextParagraphs?: number | undefined;
+    sliceMaxChars?: number | undefined;
 }
 
 /** 带时间差信封的原稿召回切片 */
@@ -82,7 +114,8 @@ export interface RecallSlice {
 export type PairedRecallStatus =
     | 'paired'
     | 'missing_manuscript_anchor'
-    | 'missing_entity_record';
+    | 'missing_entity_record'
+    | 'missing_both';
 
 /** 单章成对回表校验明细 */
 export interface PairedChapterEvidence {
@@ -111,6 +144,36 @@ export interface PairedRecallResult {
     unpairedIssues: PairedChapterEvidence[];
 }
 
+interface CachedParagraph {
+    index: number;
+    startLine: number;
+    endLine: number;
+    text: string;
+    lines: string[];
+}
+
+interface ParsedChapterContent {
+    title?: string | undefined;
+    storyDay?: number | undefined;
+    lines: string[];
+    paragraphs: CachedParagraph[];
+}
+
+interface CachedChapterEntry extends ParsedChapterContent {
+    mtimeMs: number;
+    size: number;
+    chapterHash?: string | undefined;
+}
+
+interface ScoredCandidateSlice {
+    slice: RecallSlice;
+    score: number;
+}
+
+function normalizeRelativePath(relPath: string): string {
+    return relPath.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
 async function readOptionalUtf8(filePath: string): Promise<string | null> {
     try {
         return await readFile(filePath, 'utf8');
@@ -127,17 +190,87 @@ async function listOptionalDir(dirPath: string): Promise<string[]> {
     }
 }
 
+async function readTextWithStaging(
+    bookRoot: string,
+    relativePath: string,
+    options?: RecallReadOptions
+): Promise<string | null> {
+    const normalized = normalizeRelativePath(relativePath);
+    if (options?.stagingOverlay && options.stagingOverlay.has(normalized)) {
+        return options.stagingOverlay.get(normalized) ?? null;
+    }
+    if (options?.stagingRead) {
+        const staged = await options.stagingRead(normalized);
+        if (staged !== undefined) {
+            return staged;
+        }
+    }
+    return await readOptionalUtf8(join(bookRoot, normalized));
+}
+
+async function listDirWithStaging(
+    bookRoot: string,
+    relDir: string,
+    fileFilter: RegExp,
+    options?: RecallReadOptions
+): Promise<string[]> {
+    const normalizedDir = normalizeRelativePath(relDir).replace(/\/+$/, '');
+    const names = new Set<string>(
+        (await listOptionalDir(join(bookRoot, normalizedDir))).filter((name) => fileFilter.test(name))
+    );
+
+    if (options?.stagingOverlay) {
+        const prefix = `${normalizedDir}/`;
+        for (const [key, value] of options.stagingOverlay.entries()) {
+            const normKey = normalizeRelativePath(key);
+            if (!normKey.startsWith(prefix)) continue;
+            const fileName = normKey.slice(prefix.length);
+            if (fileName.includes('/') || !fileFilter.test(fileName)) continue;
+            if (value === null) {
+                names.delete(fileName);
+            } else {
+                names.add(fileName);
+            }
+        }
+    }
+
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+}
+
 function formatChapterId(chapterNumber: number): string {
     return `ch_${String(chapterNumber).padStart(4, '0')}`;
 }
 
+function normalizeChapterRelativePath(file: string): string {
+    const normalized = normalizeRelativePath(file);
+    if (!normalized.includes('/') && CHAPTER_FILE_RE.test(normalized)) {
+        return `manuscripts/${normalized}`;
+    }
+    return normalized;
+}
+
 function parseChapterNumberFromPath(relativePath: string): number | null {
-    const normalized = relativePath.replace(/\\/g, '/');
+    const normalized = normalizeRelativePath(relativePath);
     const fileName = normalized.split('/').pop() ?? '';
     const match = CHAPTER_FILE_RE.exec(fileName);
     if (!match?.[1]) return null;
     const num = Number(match[1]);
     return Number.isInteger(num) && num > 0 ? num : null;
+}
+
+function resolveExpectedChapterHash(
+    chapterHashes: Record<string, string> | undefined,
+    normalizedPath: string,
+    chapterNumber: number | null
+): string | undefined {
+    if (!chapterHashes) return undefined;
+    if (chapterNumber !== null) {
+        const chId = formatChapterId(chapterNumber);
+        if (chapterHashes[chId] !== undefined) {
+            return chapterHashes[chId];
+        }
+    }
+    return chapterHashes[normalizedPath];
 }
 
 function extractChapterMetadata(content: string): { title?: string | undefined; storyDay?: number | undefined } {
@@ -179,6 +312,49 @@ function extractChapterMetadata(content: string): { title?: string | undefined; 
     return { title, storyDay };
 }
 
+function parseChapterContent(content: string): ParsedChapterContent {
+    const normalized = content.replace(/\r\n/g, '\n');
+    const lines = normalized.split('\n');
+    const meta = extractChapterMetadata(normalized);
+
+    const paragraphs: CachedParagraph[] = [];
+    let currentLines: string[] = [];
+    let currentStartLine = 0;
+
+    const flushParagraph = (endLine: number) => {
+        if (currentLines.length === 0) return;
+        paragraphs.push({
+            index: paragraphs.length,
+            startLine: currentStartLine,
+            endLine,
+            text: currentLines.join('\n'),
+            lines: currentLines
+        });
+        currentLines = [];
+        currentStartLine = 0;
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? '';
+        if (line.trim().length === 0) {
+            flushParagraph(i);
+        } else {
+            if (currentLines.length === 0) {
+                currentStartLine = i + 1;
+            }
+            currentLines.push(line);
+        }
+    }
+    flushParagraph(lines.length);
+
+    return {
+        title: meta.title,
+        storyDay: meta.storyDay,
+        lines,
+        paragraphs
+    };
+}
+
 function extractLoreSummary(fileName: string, content: string): string {
     let body = content.replace(/\r\n/g, '\n');
     if (body.startsWith('---\n')) {
@@ -197,21 +373,105 @@ function extractLoreSummary(fileName: string, content: string): string {
     return preview ? `- ${fileName}: ${title} | ${preview}` : `- ${fileName}: ${title}`;
 }
 
-function extractChaptersInCard(cardContent: string): Set<number> {
-    const chapters = new Set<number>();
+function splitListField(raw: string | undefined): string[] {
+    if (!raw) return [];
+    return raw
+        .split(/[,，、\s]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0 && item !== '无');
+}
+
+function splitCommaField(raw: string | undefined): string[] {
+    if (!raw) return [];
+    return raw
+        .split(/[,，、;；]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0 && item !== '无');
+}
+
+function extractFirstSentence(text: string): string {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized) return '';
+    const match = /^.+?[。！？!?](?=\s|$|[^0-9])/.exec(normalized);
+    if (match) {
+        return match[0].trim();
+    }
+    const fallback = /^.+?[。！？!?]/.exec(normalized);
+    return (fallback ? fallback[0] : normalized).trim();
+}
+
+/** 解析 L2 卷级章卡为结构化单章列表，同时兼容中文全角与英文半角冒号 */
+export function parseL2CardSections(cardContent: string): {
+    preamble: string;
+    sections: L2CardSection[];
+} {
     const normalized = cardContent.replace(/\r\n/g, '\n');
-    const re = /^##\s+ch_(\d{4})\b/gm;
-    let match: RegExpExecArray | null = re.exec(normalized);
+    const headingRe = /^##\s+ch_(\d{4})\b[^\n]*$/gm;
+    const matches: Array<{ index: number; chapterNumber: number; headingLine: string }> = [];
+
+    let match: RegExpExecArray | null = headingRe.exec(normalized);
     while (match !== null) {
         if (match[1]) {
-            const num = Number(match[1]);
-            if (Number.isInteger(num) && num > 0) {
-                chapters.add(num);
+            const chapterNumber = Number(match[1]);
+            if (Number.isInteger(chapterNumber) && chapterNumber > 0) {
+                matches.push({
+                    index: match.index,
+                    chapterNumber,
+                    headingLine: match[0]
+                });
             }
         }
-        match = re.exec(normalized);
+        match = headingRe.exec(normalized);
     }
-    return chapters;
+
+    if (matches.length === 0) {
+        return { preamble: normalized.trim(), sections: [] };
+    }
+
+    const preamble = normalized.slice(0, matches[0]?.index ?? 0).trim();
+    const sections: L2CardSection[] = [];
+
+    for (let i = 0; i < matches.length; i++) {
+        const cur = matches[i];
+        if (!cur) continue;
+        const nextIndex = matches[i + 1]?.index ?? normalized.length;
+        const rawSection = normalized.slice(cur.index, nextIndex).trimEnd();
+        const dayMatch = /\(day\s*[:：]\s*([^)\s]+)\)/.exec(cur.headingLine);
+        const dayLabel = dayMatch?.[1] ? `day:${dayMatch[1]}` : 'day:unknown';
+
+        const plotMatch = /^-\s*(?:主干剧情|主干)\s*[:：]\s*([^\n]*)/m.exec(rawSection);
+        const anchorMatch = /^-\s*(?:异象锚点|锚点)\s*[:：]\s*([^\n]*)/m.exec(rawSection);
+        const entityMatch = /^-\s*出场实体\s*[:：]\s*([^\n]*)/m.exec(rawSection);
+
+        sections.push({
+            chapterNumber: cur.chapterNumber,
+            chapterId: formatChapterId(cur.chapterNumber),
+            dayLabel,
+            plotSummary: plotMatch?.[1]?.trim() ?? '',
+            anomalyAnchors: splitCommaField(anchorMatch?.[1]),
+            appearedEntityIds: [...new Set(splitListField(entityMatch?.[1]))],
+            rawSection
+        });
+    }
+
+    return { preamble, sections };
+}
+
+function formatFoldedL2Line(section: L2CardSection): string {
+    const firstSentence = extractFirstSentence(section.plotSummary);
+    const parts: string[] = [`- ${section.chapterId} (${section.dayLabel})`];
+    if (firstSentence) {
+        parts.push(firstSentence);
+    }
+    if (section.appearedEntityIds.length > 0) {
+        parts.push(`出场实体: ${section.appearedEntityIds.join(', ')}`);
+    }
+    return parts.join(' | ');
+}
+
+function extractChaptersInCard(cardContent: string): Set<number> {
+    const { sections } = parseL2CardSections(cardContent);
+    return new Set(sections.map((section) => section.chapterNumber));
 }
 
 function formatTimeDeltaEnvelope(
@@ -229,17 +489,13 @@ function formatTimeDeltaEnvelope(
     return `[出自第 ${chStr} 章 (day:${dayStr}) | 距当前第 ${targetChStr} 章 (day:${targetDay}) 已过 ${deltaChapters} 章 / ${deltaDaysStr} 天 - 历史现场非当前归属]`;
 }
 
-function escapeRegExp(input: string): string {
-    return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function parseAnchorKeyword(anchor: string): string | null {
-    const colonIdx = anchor.indexOf(':');
-    if (colonIdx === -1) {
+    const colonMatch = /[:：]/.exec(anchor);
+    if (!colonMatch) {
         const trimmed = anchor.trim();
         return trimmed.length > 0 ? trimmed : null;
     }
-    const keyword = anchor.slice(colonIdx + 1).trim();
+    const keyword = anchor.slice(colonMatch.index + 1).trim();
     return keyword.length > 0 ? keyword : null;
 }
 
@@ -252,7 +508,10 @@ function parseAnchorChapter(anchor: string): number | null {
 
 function buildEffectiveRuleList(query: EntityRecallQuery): ContextualTitleRule[] {
     if (query.contextualTitleRules) {
-        return query.contextualTitleRules.map((rule) => ({ ...rule, appearanceChapters: rule.appearanceChapters ?? query.appearanceChapters ?? [] }));
+        return query.contextualTitleRules.map((rule) => ({
+            ...rule,
+            appearanceChapters: rule.appearanceChapters ?? query.appearanceChapters ?? []
+        }));
     }
 
     return query.profile.metadata.contextual_titles.map((raw) => {
@@ -305,11 +564,19 @@ function isRuleActiveAtTarget(rule: ContextualTitleRule, query: EntityRecallQuer
     return true;
 }
 
+function isWarpedStatus(status: unknown): boolean {
+    return typeof status === 'string' && status.trim().toUpperCase() === 'WARPED';
+}
+
 function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: number): Map<number, {
     entries: EntityEntry[];
     anchors: string[];
 }> {
     const map = new Map<number, { entries: EntityEntry[]; anchors: string[] }>();
+    if (isWarpedStatus(profile.metadata.status)) {
+        return map;
+    }
+
     const ensure = (ch: number) => {
         let bucket = map.get(ch);
         if (!bucket) {
@@ -328,11 +595,14 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
 
     for (const entries of sections) {
         for (const entry of entries) {
+            const fullText = [entry.text, ...entry.continuationLines].join('\n');
+            if (isWarpedStatus(entry.status) || /\bWARPED\b/i.test(fullText)) {
+                continue;
+            }
             const linkedChapters = new Set<number>();
             if (entry.chapter !== undefined && entry.chapter > 0 && entry.chapter <= maxChapter) {
                 linkedChapters.add(entry.chapter);
             }
-            const fullText = [entry.text, ...entry.continuationLines].join('\n');
             const inlineAnchorRe = /\[锚点\s+ch_(\d{4})\]/g;
             let anchorMatch: RegExpExecArray | null = inlineAnchorRe.exec(fullText);
             while (anchorMatch !== null) {
@@ -351,6 +621,7 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
     }
 
     for (const anchor of profile.metadata.historical_anchors) {
+        if (/\bWARPED\b/i.test(anchor)) continue;
         const ch = parseAnchorChapter(anchor);
         if (ch !== null && ch <= maxChapter) {
             ensure(ch).anchors.push(anchor);
@@ -360,15 +631,191 @@ function collectEntityDeclaredChapters(profile: EntityProfile, maxChapter: numbe
     return map;
 }
 
-/** 确定性双层目录构建、多身份键 rg -C 2 回表与成对校验引擎 */
+function truncateSliceBody(
+    matchedText: string,
+    contextBefore: string[],
+    contextAfter: string[],
+    matchedPatterns: string[],
+    maxBodyChars: number
+): string {
+    if (maxBodyChars <= 0) return '';
+
+    let core = matchedText;
+    if (core.length > maxBodyChars) {
+        let firstHit = -1;
+        for (const pat of matchedPatterns) {
+            const idx = core.indexOf(pat);
+            if (idx !== -1 && (firstHit === -1 || idx < firstHit)) {
+                firstHit = idx;
+            }
+        }
+        if (maxBodyChars === 1) {
+            return core.slice(0, 1);
+        }
+        const windowLen = maxBodyChars - 1;
+        const start = firstHit > windowLen ? Math.max(0, firstHit - Math.floor(windowLen / 3)) : 0;
+        const end = Math.min(core.length, start + windowLen);
+        const prefix = start > 0 ? '…' : '';
+        const suffix = end < core.length ? '…' : '';
+        const budget = Math.max(1, maxBodyChars - prefix.length - suffix.length);
+        core = `${prefix}${core.slice(start, start + budget)}${suffix}`;
+        return core.slice(0, maxBodyChars);
+    }
+
+    const beforeAcc: string[] = [];
+    const afterAcc: string[] = [];
+    let currentLen = core.length;
+
+    const maxCtxLen = Math.max(contextBefore.length, contextAfter.length);
+    for (let offset = 0; offset < maxCtxLen; offset++) {
+        const prevIdx = contextBefore.length - 1 - offset;
+        if (prevIdx >= 0) {
+            const prev = contextBefore[prevIdx] ?? '';
+            if (currentLen + 1 + prev.length <= maxBodyChars) {
+                beforeAcc.unshift(prev);
+                currentLen += 1 + prev.length;
+            }
+        }
+        if (offset < contextAfter.length) {
+            const next = contextAfter[offset] ?? '';
+            if (currentLen + 1 + next.length <= maxBodyChars) {
+                afterAcc.push(next);
+                currentLen += 1 + next.length;
+            }
+        }
+    }
+
+    return [...beforeAcc, core, ...afterAcc].join('\n');
+}
+
+function buildSnippetWithMaxChars(
+    envelope: string,
+    matchedText: string,
+    contextBefore: string[],
+    contextAfter: string[],
+    matchedPatterns: string[],
+    sliceMaxChars: number | undefined
+): string {
+    const fullBody = [...contextBefore, matchedText, ...contextAfter].join('\n');
+    const fullSnippet = `${envelope}\n${fullBody}`;
+    if (sliceMaxChars === undefined) {
+        return fullSnippet;
+    }
+    if (sliceMaxChars <= 0) {
+        return '';
+    }
+    if (fullSnippet.length <= sliceMaxChars) {
+        return fullSnippet;
+    }
+    const maxBodyChars = sliceMaxChars - envelope.length - 1;
+    if (maxBodyChars <= 0) {
+        return fullSnippet.slice(0, sliceMaxChars);
+    }
+    const truncatedBody = truncateSliceBody(
+        matchedText,
+        contextBefore,
+        contextAfter,
+        matchedPatterns,
+        maxBodyChars
+    );
+    return `${envelope}\n${truncatedBody}`.slice(0, sliceMaxChars);
+}
+
+/** 确定性双层目录构建、实例缓存内存回表与成对校验引擎 */
 export class IndexRecall {
-    constructor(private readonly system: SystemPort) {}
+    private readonly chapterCacheByBook = new Map<string, Map<string, CachedChapterEntry>>();
+
+    constructor(private readonly system?: SystemPort) {
+        void this.system;
+    }
+
+    /** 清空章节解析缓存（指定 bookRoot 时仅清该书，否则清空全部实例缓存） */
+    clearCache(bookRoot?: string): void {
+        if (bookRoot !== undefined) {
+            this.chapterCacheByBook.delete(resolve(bookRoot));
+            return;
+        }
+        this.chapterCacheByBook.clear();
+    }
+
+    private getBookCache(bookRoot: string): Map<string, CachedChapterEntry> {
+        const key = resolve(bookRoot);
+        let cache = this.chapterCacheByBook.get(key);
+        if (!cache) {
+            cache = new Map<string, CachedChapterEntry>();
+            this.chapterCacheByBook.set(key, cache);
+        }
+        return cache;
+    }
+
+    private async loadChapterData(
+        bookRoot: string,
+        relativePath: string,
+        options?: RecallReadOptions
+    ): Promise<ParsedChapterContent | null> {
+        const normalizedPath = normalizeRelativePath(relativePath);
+        if (options?.stagingOverlay && options.stagingOverlay.has(normalizedPath)) {
+            const staged = options.stagingOverlay.get(normalizedPath) ?? null;
+            return staged === null ? null : parseChapterContent(staged);
+        }
+        if (options?.stagingRead) {
+            const staged = await options.stagingRead(normalizedPath);
+            if (staged !== undefined) {
+                return staged === null ? null : parseChapterContent(staged);
+            }
+        }
+
+        const absPath = join(bookRoot, normalizedPath);
+        const bookCache = this.getBookCache(bookRoot);
+        let fileStat;
+        try {
+            fileStat = await stat(absPath);
+        } catch {
+            bookCache.delete(normalizedPath);
+            return null;
+        }
+        if (!fileStat.isFile()) {
+            bookCache.delete(normalizedPath);
+            return null;
+        }
+
+        const chapterNumber = parseChapterNumberFromPath(normalizedPath);
+        const expectedHash = resolveExpectedChapterHash(options?.chapterHashes, normalizedPath, chapterNumber);
+        const cached = bookCache.get(normalizedPath);
+
+        if (
+            cached &&
+            cached.mtimeMs === fileStat.mtimeMs &&
+            cached.size === fileStat.size &&
+            (expectedHash === undefined || cached.chapterHash === expectedHash)
+        ) {
+            return cached;
+        }
+
+        let rawContent: string;
+        try {
+            rawContent = await readFile(absPath, 'utf8');
+        } catch {
+            bookCache.delete(normalizedPath);
+            return null;
+        }
+
+        const parsed = parseChapterContent(rawContent);
+        const entry: CachedChapterEntry = {
+            ...parsed,
+            mtimeMs: fileStat.mtimeMs,
+            size: fileStat.size,
+            chapterHash: expectedHash
+        };
+        bookCache.set(normalizedPath, entry);
+        return entry;
+    }
 
     /** 构建「已封旧卷静态区 + 当前活跃卷动态尾目录」双层目录 */
     async buildLibrarianCatalog(bookRoot: string, options: BuildCatalogOptions = {}): Promise<LibrarianCatalog> {
         let currentVolume = options.currentVolume;
         if (currentVolume === undefined) {
-            const worldStateRaw = await readOptionalUtf8(join(bookRoot, 'world/world_state.md'));
+            const worldStateRaw = await readTextWithStaging(bookRoot, 'world/world_state.md', options);
             if (worldStateRaw !== null) {
                 try {
                     const { rawYaml } = splitFrontmatter(worldStateRaw);
@@ -380,20 +827,25 @@ export class IndexRecall {
             }
         }
 
-        const l2Files = (await listOptionalDir(join(bookRoot, 'index/L2_cards')))
-            .filter((name) => VOLUME_CARD_FILE_RE.test(name))
-            .sort((a, b) => a.localeCompare(b));
+        const l2Files = await listDirWithStaging(bookRoot, 'index/L2_cards', VOLUME_CARD_FILE_RE, options);
 
         const parsedVolumeCards: Array<{ volumeNumber: number; fileName: string; content: string }> = [];
         for (const fileName of l2Files) {
             const match = VOLUME_CARD_FILE_RE.exec(fileName);
             if (!match?.[1]) continue;
             const volumeNumber = Number(match[1]);
-            let content = await readOptionalUtf8(join(bookRoot, 'index/L2_cards', fileName));
+            let content = await readTextWithStaging(bookRoot, `index/L2_cards/${fileName}`, options);
             if (content !== null && options.chapterFiles) {
-                const allowed = new Set(options.chapterFiles.map((file) => Number(file.slice(3, -3))));
-                content = content.replace(/^##\s+ch_(\d+)[^\n]*\n[\s\S]*?(?=^##\s+ch_\d+\b|(?![\s\S]))/gm,
-                    (section: string, chapter: string) => allowed.has(Number(chapter)) ? section : '');
+                const allowed = new Set(
+                    options.chapterFiles
+                        .map((file) => parseChapterNumberFromPath(file))
+                        .filter((num): num is number => num !== null)
+                );
+                const parsedCard = parseL2CardSections(content);
+                const keptSections = parsedCard.sections
+                    .filter((section) => allowed.has(section.chapterNumber))
+                    .map((section) => section.rawSection);
+                content = [parsedCard.preamble, ...keptSections].filter(Boolean).join('\n\n');
             }
             if (content !== null) {
                 parsedVolumeCards.push({ volumeNumber, fileName, content });
@@ -406,17 +858,15 @@ export class IndexRecall {
             currentVolume = maxCardVol;
         }
 
-        // 1. 构建静态区（lore 摘要 + L0 + L1 + 已封旧卷章卡，严格按确定性顺序）
+        // 1. 构建静态区（lore 摘要 + L0 + L1 + 已封旧卷章卡 + 超阈值定长冻结块）
         const staticParts: string[] = [];
 
-        const loreFiles = (await listOptionalDir(join(bookRoot, 'lore_library')))
-            .filter((name) => LORE_FILE_RE.test(name))
-            .sort((a, b) => a.localeCompare(b));
+        const loreFiles = await listDirWithStaging(bookRoot, 'lore_library', LORE_FILE_RE, options);
 
         if (loreFiles.length > 0) {
             const loreSummaries: string[] = ['## Lore Library Index'];
             for (const fileName of loreFiles) {
-                const content = await readOptionalUtf8(join(bookRoot, 'lore_library', fileName));
+                const content = await readTextWithStaging(bookRoot, `lore_library/${fileName}`, options);
                 if (content !== null) {
                     loreSummaries.push(extractLoreSummary(fileName, content));
                 }
@@ -424,12 +874,12 @@ export class IndexRecall {
             staticParts.push(loreSummaries.join('\n'));
         }
 
-        const l0Content = await readOptionalUtf8(join(bookRoot, 'index/L0_sagas.md'));
+        const l0Content = await readTextWithStaging(bookRoot, 'index/L0_sagas.md', options);
         if (l0Content !== null && l0Content.trim().length > 0) {
             staticParts.push(l0Content.trimEnd());
         }
 
-        const l1Content = await readOptionalUtf8(join(bookRoot, 'index/L1_volumes.md'));
+        const l1Content = await readTextWithStaging(bookRoot, 'index/L1_volumes.md', options);
         if (l1Content !== null && l1Content.trim().length > 0) {
             staticParts.push(l1Content.trimEnd());
         }
@@ -452,12 +902,60 @@ export class IndexRecall {
             }
         }
 
+        const threshold = options.l2FullUnfrozenThreshold ?? DEFAULT_L2_FULL_UNFROZEN_THRESHOLD;
+        const blockSize = options.l2FreezeBlockChapters ?? DEFAULT_L2_FREEZE_BLOCK_CHAPTERS;
+        const activeDynamicCards: Array<{ volumeNumber: number; fileName: string; content: string }> = [];
+
+        for (const card of activeCards) {
+            const parsedCard = parseL2CardSections(card.content);
+            const sortedSections = [...parsedCard.sections].sort(
+                (a, b) => a.chapterNumber - b.chapterNumber
+            );
+            if (blockSize > 0 && sortedSections.length > threshold) {
+                const frozenCount = Math.floor((sortedSections.length - 1) / blockSize) * blockSize;
+                if (frozenCount > 0) {
+                    const frozenSections = sortedSections.slice(0, frozenCount);
+                    const unfrozenSections = sortedSections.slice(frozenCount);
+                    for (let start = 0; start < frozenSections.length; start += blockSize) {
+                        const block = frozenSections.slice(start, start + blockSize);
+                        const firstCh = block[0]?.chapterId ?? '';
+                        const lastCh = block.at(-1)?.chapterId ?? '';
+                        const foldedLines = block.map((section) => formatFoldedL2Line(section));
+                        staticParts.push(
+                            `## Frozen Active Volume Index: ${card.fileName} (${firstCh}-${lastCh})\n${foldedLines.join('\n')}`
+                        );
+                    }
+                    const remainingContent = [
+                        parsedCard.preamble,
+                        ...unfrozenSections.map((section) => section.rawSection)
+                    ]
+                        .filter(Boolean)
+                        .join('\n\n');
+                    if (remainingContent.trim().length > 0) {
+                        activeDynamicCards.push({
+                            volumeNumber: card.volumeNumber,
+                            fileName: card.fileName,
+                            content: remainingContent
+                        });
+                    }
+                    continue;
+                }
+            }
+            activeDynamicCards.push(card);
+        }
+
         const staticPrefix = staticParts.join('\n\n');
 
-        // 2. 扫描手稿章节并构建动态尾目录（仅含当前活跃卷章节 + 活跃卷章卡 + open_threads）
-        const manuscriptFiles = (options.chapterFiles ?? await listOptionalDir(join(bookRoot, 'manuscripts')))
-            .filter((name) => CHAPTER_FILE_RE.test(name))
-            .sort((a, b) => a.localeCompare(b));
+        // 2. 扫描手稿章节并构建动态尾目录（走实例章节缓存，避免 O(N) 重复读盘）
+        const manuscriptFiles = options.chapterFiles
+            ? options.chapterFiles
+                .map((file) => normalizeRelativePath(file).split('/').pop() ?? '')
+                .filter((name) => {
+                    if (!CHAPTER_FILE_RE.test(name)) return false;
+                    return options.stagingOverlay?.get(`manuscripts/${name}`) !== null;
+                })
+                .sort((a, b) => a.localeCompare(b))
+            : await listDirWithStaging(bookRoot, 'manuscripts', CHAPTER_FILE_RE, options);
 
         const chapters: ChapterIndexEntry[] = [];
         const activeChapterLines: string[] = [];
@@ -467,8 +965,8 @@ export class IndexRecall {
             const chapterNumber = parseChapterNumberFromPath(relativePath);
             if (chapterNumber === null) continue;
 
-            const content = await readOptionalUtf8(join(bookRoot, relativePath));
-            const meta = content !== null ? extractChapterMetadata(content) : {};
+            const cached = await this.loadChapterData(bookRoot, relativePath, options);
+            if (!cached) continue;
             const volumeNumber = chapterToVolume.get(chapterNumber) ?? currentVolume;
 
             const entry: ChapterIndexEntry = {
@@ -476,14 +974,14 @@ export class IndexRecall {
                 chapterId: formatChapterId(chapterNumber),
                 relativePath,
                 volumeNumber,
-                storyDay: meta.storyDay,
-                title: meta.title
+                storyDay: cached.storyDay,
+                title: cached.title
             };
             chapters.push(entry);
 
             if (volumeNumber >= currentVolume) {
-                const dayPart = meta.storyDay !== undefined ? `day:${meta.storyDay}` : 'day:unknown';
-                const titlePart = meta.title ? ` | ${meta.title}` : '';
+                const dayPart = cached.storyDay !== undefined ? `day:${cached.storyDay}` : 'day:unknown';
+                const titlePart = cached.title ? ` | ${cached.title}` : '';
                 activeChapterLines.push(`- ${entry.chapterId} (${dayPart})${titlePart}`);
             }
         }
@@ -491,14 +989,14 @@ export class IndexRecall {
         chapters.sort((a, b) => a.chapterNumber - b.chapterNumber);
 
         const dynamicParts: string[] = [];
-        for (const card of activeCards) {
+        for (const card of activeDynamicCards) {
             dynamicParts.push(`## Active Volume Card: ${card.fileName}\n${card.content.trimEnd()}`);
         }
         if (activeChapterLines.length > 0) {
             dynamicParts.push(`## Active Volume Chapters (Vol ${currentVolume})\n${activeChapterLines.join('\n')}`);
         }
 
-        const openThreads = await readOptionalUtf8(join(bookRoot, 'world/open_threads.md'));
+        const openThreads = await readTextWithStaging(bookRoot, 'world/open_threads.md', options);
         if (openThreads !== null && openThreads.trim().length > 0) {
             dynamicParts.push(`## Open Threads\n${openThreads.trimEnd()}`);
         }
@@ -516,149 +1014,357 @@ export class IndexRecall {
         };
     }
 
-    /** 多身份键 rg -C 2 原稿检索并包装时间差信封 */
+    /** 多身份键实例缓存原稿检索（支持段级共现排序、focusChapters 优先与限流）并包装时间差信封 */
     async recallEntitySlices(bookRoot: string, query: EntityRecallQuery): Promise<RecallSlice[]> {
-        if (query.appearanceChapters === undefined) {
+        if (query.maxSlicesPerEntity !== undefined && query.maxSlicesPerEntity <= 0) {
+            return [];
+        }
+
+        let effectiveQuery = query;
+        if (effectiveQuery.appearanceChapters === undefined) {
             const appearanceChapters: number[] = [];
-            const cardDir = join(bookRoot, 'index/L2_cards');
-            for (const file of await listOptionalDir(cardDir)) {
-                if (!VOLUME_CARD_FILE_RE.test(file)) continue;
-                const raw = await readOptionalUtf8(join(cardDir, file));
-                for (const section of raw?.split(/^##\s+ch_/m).slice(1) ?? []) {
-                    const chapter = Number(section.match(/^\d+/)?.[0]);
-                    const ids = section.match(/^-\s*出场实体：([^\n]*)/m)?.[1]?.split(/[,，\s]+/) ?? [];
-                    if (ids.includes(query.profile.metadata.entity_id) && Number.isSafeInteger(chapter)) appearanceChapters.push(chapter);
+            const l2Files = await listDirWithStaging(
+                bookRoot,
+                'index/L2_cards',
+                VOLUME_CARD_FILE_RE,
+                effectiveQuery
+            );
+            for (const file of l2Files) {
+                const raw = await readTextWithStaging(bookRoot, `index/L2_cards/${file}`, effectiveQuery);
+                if (!raw) continue;
+                const { sections } = parseL2CardSections(raw);
+                for (const section of sections) {
+                    if (section.appearedEntityIds.includes(effectiveQuery.profile.metadata.entity_id)) {
+                        appearanceChapters.push(section.chapterNumber);
+                    }
                 }
             }
-            query = { ...query, appearanceChapters };
+            effectiveQuery = { ...effectiveQuery, appearanceChapters };
         }
-        const candidateFiles = await this.resolveCandidateChapterFiles(bookRoot, query);
+
+        const candidateFiles = await this.resolveCandidateChapterFiles(bookRoot, effectiveQuery);
         if (candidateFiles.length === 0) {
             return [];
         }
 
-        const chapterDayMap = await this.resolveChapterDayMap(bookRoot, candidateFiles, query.chapterDays);
-
-        // 1. 稳定身份键（实名 + 唯一别名 + 可选历史锚点关键词 + 额外关键词）
-        const stablePatterns = new Set<string>();
-        if (query.profile.metadata.canonical_name.trim().length > 0) {
-            stablePatterns.add(query.profile.metadata.canonical_name.trim());
+        // 1. 整理稳定身份键与查询短语/词项
+        const stableIdentityKeys = new Set<string>();
+        if (effectiveQuery.profile.metadata.canonical_name.trim().length > 0) {
+            stableIdentityKeys.add(effectiveQuery.profile.metadata.canonical_name.trim());
         }
-        for (const alias of query.profile.metadata.unique_aliases) {
+        for (const alias of effectiveQuery.profile.metadata.unique_aliases) {
             if (alias.trim().length > 0) {
-                stablePatterns.add(alias.trim());
+                stableIdentityKeys.add(alias.trim());
             }
         }
-        if (query.includeHistoricalAnchors) {
-            for (const anchor of query.profile.metadata.historical_anchors) {
+        if (effectiveQuery.includeHistoricalAnchors) {
+            for (const anchor of effectiveQuery.profile.metadata.historical_anchors) {
                 const kw = parseAnchorKeyword(anchor);
-                if (kw) stablePatterns.add(kw);
-            }
-        }
-        for (const extra of query.extraKeywords ?? []) {
-            if (extra.trim().length > 0) {
-                stablePatterns.add(extra.trim());
+                if (kw) stableIdentityKeys.add(kw);
             }
         }
 
-        const allMatches: Array<{ match: RipgrepMatch; candidatePatterns: string[] }> = [];
+        const phraseTerms = new Set<string>();
+        const queryTerms = new Set<string>();
+        const extraSearchPatterns = new Set<string>();
 
-        if (stablePatterns.size > 0) {
-            const patterns = Array.from(stablePatterns);
-            const matches = await this.system.ripgrepSearch(bookRoot, patterns, candidateFiles, 2);
-            for (const match of matches) {
-                allMatches.push({ match, candidatePatterns: patterns });
-            }
-        }
-
-        // 2. 限章/限时间窗职务称谓（按 active_ch / story_day 过滤后分组执行 rg -C 2）
-        const titleRules = buildEffectiveRuleList(query).filter((rule) =>
-            rule.title.length > 0 && isRuleActiveAtTarget(rule, query)
-        );
-
-        for (const rule of titleRules) {
-            const eligibleFiles = candidateFiles.filter((file) => {
-                const ch = parseChapterNumberFromPath(file);
-                if (ch === null) return false;
-                return isChapterEligibleForRule(rule, ch, chapterDayMap.get(ch));
-            });
-            if (eligibleFiles.length === 0) continue;
-
-            const matches = await this.system.ripgrepSearch(bookRoot, [rule.title], eligibleFiles, 2);
-            for (const match of matches) {
-                allMatches.push({ match, candidatePatterns: [rule.title] });
-            }
-        }
-
-        // 3. 按 (file, line) 去重合并并包装强制时间差信封
-        const merged = new Map<string, RecallSlice>();
-
-        for (const { match, candidatePatterns } of allMatches) {
-            const normalizedFile = match.file.replace(/\\/g, '/');
-            const chapterNumber = parseChapterNumberFromPath(normalizedFile);
-            if (chapterNumber === null) continue;
-
-            const key = `${normalizedFile}:${match.line}`;
-            const hitKeys = candidatePatterns.filter((p) =>
-                new RegExp(escapeRegExp(p)).test(match.text)
-            );
-
-            const existing = merged.get(key);
-            if (existing) {
-                for (const k of hitKeys) {
-                    if (!existing.matchedKeys.includes(k)) {
-                        existing.matchedKeys.push(k);
+        for (const rawExtra of effectiveQuery.extraKeywords ?? []) {
+            const trimmed = rawExtra.trim();
+            if (trimmed.length === 0) continue;
+            extraSearchPatterns.add(trimmed);
+            const tokens = trimmed.split(/\s+/).filter((t) => t.length > 0);
+            if (tokens.length > 1) {
+                phraseTerms.add(trimmed);
+                for (const tok of tokens) {
+                    queryTerms.add(tok);
+                    if (tok.length >= 2) {
+                        extraSearchPatterns.add(tok);
                     }
                 }
-                continue;
+            } else {
+                queryTerms.add(trimmed);
             }
+        }
 
-            const chapterId = formatChapterId(chapterNumber);
-            const chapterDay = chapterDayMap.get(chapterNumber) ?? null;
-            const deltaChapters = query.targetChapter - chapterNumber;
-            const deltaDays = chapterDay !== null ? query.targetDay - chapterDay : null;
-            const envelope = formatTimeDeltaEnvelope(
-                chapterNumber,
-                chapterDay,
-                query.targetChapter,
-                query.targetDay
-            );
+        const activeTitleRules = buildEffectiveRuleList(effectiveQuery).filter(
+            (rule) => rule.title.length > 0 && isRuleActiveAtTarget(rule, effectiveQuery)
+        );
 
-            const contextBefore = match.contextBefore.slice(-2);
-            const contextAfter = match.contextAfter.slice(0, 2);
-            const bodyLines = [...contextBefore, match.text, ...contextAfter];
-            const snippet = `${envelope}\n${bodyLines.join('\n')}`;
+        const explicitDayMap = new Map<number, number>();
+        if (effectiveQuery.chapterDays) {
+            for (const [k, v] of Object.entries(effectiveQuery.chapterDays)) {
+                const ch = Number(k);
+                if (Number.isInteger(ch) && Number.isInteger(v)) {
+                    explicitDayMap.set(ch, v);
+                }
+            }
+        }
 
-            merged.set(key, {
-                file: normalizedFile,
-                chapterId,
-                chapterNumber,
-                chapterDay,
-                targetChapter: query.targetChapter,
-                targetDay: query.targetDay,
-                deltaChapters,
-                deltaDays,
-                line: match.line,
-                text: match.text,
-                contextBefore,
-                contextAfter,
-                matchedKeys: hitKeys.length > 0 ? hitKeys : [...candidatePatterns],
-                snippet
+        const focusSet = new Set<number>(
+            (effectiveQuery.focusChapters ?? []).filter(
+                (ch) => Number.isInteger(ch) && ch > 0 && ch <= effectiveQuery.targetChapter
+            )
+        );
+
+        const focusFiles: string[] = [];
+        const otherFiles: string[] = [];
+        for (const file of candidateFiles) {
+            const ch = parseChapterNumberFromPath(file);
+            if (ch !== null && focusSet.has(ch)) {
+                focusFiles.push(file);
+            } else {
+                otherFiles.push(file);
+            }
+        }
+
+        const useParagraphMode =
+            effectiveQuery.sliceContextParagraphs !== undefined ||
+            effectiveQuery.sliceMaxChars !== undefined;
+        const useRelevanceSort =
+            focusSet.size > 0 ||
+            effectiveQuery.maxSlicesPerEntity !== undefined ||
+            queryTerms.size > 0;
+
+        const searchChapterBatch = async (files: string[]): Promise<ScoredCandidateSlice[]> => {
+            const batchResults: ScoredCandidateSlice[] = [];
+            for (const file of files) {
+                const chapterNumber = parseChapterNumberFromPath(file);
+                if (chapterNumber === null) continue;
+
+                const chapterData = await this.loadChapterData(bookRoot, file, effectiveQuery);
+                if (!chapterData) continue;
+
+                const chapterDay = explicitDayMap.get(chapterNumber) ?? chapterData.storyDay ?? null;
+                const eligibleTitleKeys = activeTitleRules
+                    .filter((rule) => isChapterEligibleForRule(rule, chapterNumber, chapterDay ?? undefined))
+                    .map((rule) => rule.title);
+
+                const chapterIdentityKeys = new Set<string>([
+                    ...stableIdentityKeys,
+                    ...eligibleTitleKeys
+                ]);
+                const searchPatterns = Array.from(
+                    new Set<string>([...chapterIdentityKeys, ...extraSearchPatterns])
+                );
+                if (searchPatterns.length === 0) continue;
+
+                const matched = this.searchChapterSlices(
+                    file,
+                    chapterNumber,
+                    chapterDay,
+                    chapterData,
+                    effectiveQuery,
+                    focusSet.has(chapterNumber),
+                    searchPatterns,
+                    chapterIdentityKeys,
+                    queryTerms,
+                    phraseTerms,
+                    useParagraphMode
+                );
+                batchResults.push(...matched);
+            }
+            return batchResults;
+        };
+
+        const scoredSlices: ScoredCandidateSlice[] = [];
+        if (focusFiles.length > 0) {
+            scoredSlices.push(...(await searchChapterBatch(focusFiles)));
+        }
+
+        const hasEnoughFromFocus =
+            focusSet.size > 0 &&
+            effectiveQuery.maxSlicesPerEntity !== undefined &&
+            scoredSlices.length >= effectiveQuery.maxSlicesPerEntity;
+
+        if (!hasEnoughFromFocus && otherFiles.length > 0) {
+            scoredSlices.push(...(await searchChapterBatch(otherFiles)));
+        }
+
+        if (useRelevanceSort) {
+            scoredSlices.sort((a, b) => {
+                if (b.score !== a.score) {
+                    return b.score - a.score;
+                }
+                return a.slice.line - b.slice.line;
+            });
+        } else {
+            scoredSlices.sort((a, b) => {
+                if (a.slice.chapterNumber !== b.slice.chapterNumber) {
+                    return a.slice.chapterNumber - b.slice.chapterNumber;
+                }
+                return a.slice.line - b.slice.line;
             });
         }
 
-        return Array.from(merged.values()).sort((a, b) => {
-            if (a.chapterNumber !== b.chapterNumber) {
-                return a.chapterNumber - b.chapterNumber;
+        const ordered = scoredSlices.map((item) => item.slice);
+        if (effectiveQuery.maxSlicesPerEntity !== undefined) {
+            return ordered.slice(0, effectiveQuery.maxSlicesPerEntity);
+        }
+        return ordered;
+    }
+
+    private searchChapterSlices(
+        file: string,
+        chapterNumber: number,
+        chapterDay: number | null,
+        chapterData: ParsedChapterContent,
+        query: EntityRecallQuery,
+        inFocusChapter: boolean,
+        searchPatterns: string[],
+        chapterIdentityKeys: Set<string>,
+        queryTerms: Set<string>,
+        phraseTerms: Set<string>,
+        useParagraphMode: boolean
+    ): ScoredCandidateSlice[] {
+        const chapterId = formatChapterId(chapterNumber);
+        const deltaChapters = query.targetChapter - chapterNumber;
+        const deltaDays = chapterDay !== null ? query.targetDay - chapterDay : null;
+        const envelope = formatTimeDeltaEnvelope(
+            chapterNumber,
+            chapterDay,
+            query.targetChapter,
+            query.targetDay
+        );
+
+        const computeScore = (corpusText: string): {
+            score: number;
+            matchedIdentityCount: number;
+            matchedQueryCount: number;
+            exactPhraseCount: number;
+        } => {
+            let matchedIdentityCount = 0;
+            for (const key of chapterIdentityKeys) {
+                if (corpusText.includes(key)) matchedIdentityCount++;
             }
-            return a.line - b.line;
-        });
+            let matchedQueryCount = 0;
+            for (const term of queryTerms) {
+                if (corpusText.includes(term)) matchedQueryCount++;
+            }
+            let exactPhraseCount = 0;
+            for (const phrase of phraseTerms) {
+                if (corpusText.includes(phrase)) exactPhraseCount++;
+            }
+            const score =
+                (inFocusChapter ? 1000 : 0) +
+                exactPhraseCount * 100 +
+                matchedQueryCount * 30 +
+                matchedIdentityCount * 20 +
+                chapterNumber * 0.01;
+            return { score, matchedIdentityCount, matchedQueryCount, exactPhraseCount };
+        };
+
+        const results: ScoredCandidateSlice[] = [];
+
+        if (useParagraphMode) {
+            const contextParagraphs = Math.max(0, query.sliceContextParagraphs ?? 1);
+            for (let pIdx = 0; pIdx < chapterData.paragraphs.length; pIdx++) {
+                const paragraph = chapterData.paragraphs[pIdx];
+                if (!paragraph) continue;
+                const matchedKeys = searchPatterns.filter((pat) => paragraph.text.includes(pat));
+                if (matchedKeys.length === 0) continue;
+
+                let firstMatchLine = paragraph.startLine;
+                for (let lineOffset = 0; lineOffset < paragraph.lines.length; lineOffset++) {
+                    const lineText = paragraph.lines[lineOffset] ?? '';
+                    if (matchedKeys.some((pat) => lineText.includes(pat))) {
+                        firstMatchLine = paragraph.startLine + lineOffset;
+                        break;
+                    }
+                }
+
+                const contextBefore = chapterData.paragraphs
+                    .slice(Math.max(0, pIdx - contextParagraphs), pIdx)
+                    .map((p) => p.text);
+                const contextAfter = chapterData.paragraphs
+                    .slice(pIdx + 1, pIdx + 1 + contextParagraphs)
+                    .map((p) => p.text);
+
+                const snippet = buildSnippetWithMaxChars(
+                    envelope,
+                    paragraph.text,
+                    contextBefore,
+                    contextAfter,
+                    matchedKeys,
+                    query.sliceMaxChars
+                );
+                const { score } = computeScore(paragraph.text);
+
+                results.push({
+                    score,
+                    slice: {
+                        file,
+                        chapterId,
+                        chapterNumber,
+                        chapterDay,
+                        targetChapter: query.targetChapter,
+                        targetDay: query.targetDay,
+                        deltaChapters,
+                        deltaDays,
+                        line: firstMatchLine,
+                        text: paragraph.text,
+                        contextBefore,
+                        contextAfter,
+                        matchedKeys,
+                        snippet
+                    }
+                });
+            }
+            return results;
+        }
+
+        // 传统行级 -C 2 模式（向后兼容既有行号与 contextBefore/contextAfter 语义），评分基于所在自然段共现
+        const paragraphByLine = new Map<number, CachedParagraph>();
+        for (const p of chapterData.paragraphs) {
+            for (let ln = p.startLine; ln <= p.endLine; ln++) {
+                paragraphByLine.set(ln, p);
+            }
+        }
+
+        for (let lineIdx = 0; lineIdx < chapterData.lines.length; lineIdx++) {
+            const lineText = chapterData.lines[lineIdx] ?? '';
+            const matchedKeys = searchPatterns.filter((pat) => lineText.includes(pat));
+            if (matchedKeys.length === 0) continue;
+
+            const lineNumber = lineIdx + 1;
+            const contextBefore = chapterData.lines.slice(Math.max(0, lineIdx - 2), lineIdx);
+            const contextAfter = chapterData.lines.slice(lineIdx + 1, lineIdx + 3);
+            const bodyLines = [...contextBefore, lineText, ...contextAfter];
+            const snippet = `${envelope}\n${bodyLines.join('\n')}`;
+
+            const containingParagraph = paragraphByLine.get(lineNumber);
+            const { score } = computeScore(containingParagraph?.text ?? lineText);
+
+            results.push({
+                score,
+                slice: {
+                    file,
+                    chapterId,
+                    chapterNumber,
+                    chapterDay,
+                    targetChapter: query.targetChapter,
+                    targetDay: query.targetDay,
+                    deltaChapters,
+                    deltaDays,
+                    line: lineNumber,
+                    text: lineText,
+                    contextBefore,
+                    contextAfter,
+                    matchedKeys,
+                    snippet
+                }
+            });
+        }
+
+        return results;
     }
 
     /** 伏笔/唯一道具/关键证据「实体档案 + 原稿切片」成对回表校验 */
     async verifyPairedRecall(bookRoot: string, query: PairedRecallQuery): Promise<PairedRecallResult> {
+        // 成对审计绝不应用 focusChapters/maxSlicesPerEntity 截断，确保跨章证据完整性
         const slices = await this.recallEntitySlices(bookRoot, {
             ...query,
+            focusChapters: undefined,
+            maxSlicesPerEntity: undefined,
             includeHistoricalAnchors: query.includeHistoricalAnchors ?? true
         });
 
@@ -676,9 +1382,10 @@ export class IndexRecall {
             ...slicesByChapter.keys()
         ]);
 
+        const hasFocusChapters = Boolean(query.focusChapters && query.focusChapters.length > 0);
         const targetChapterList = (
-            query.focusChapters && query.focusChapters.length > 0
-                ? query.focusChapters
+            hasFocusChapters
+                ? [...new Set(query.focusChapters)]
                 : Array.from(allChapters)
         ).sort((a, b) => a - b);
 
@@ -698,8 +1405,10 @@ export class IndexRecall {
                 status = 'paired';
             } else if (hasEntityRecord && !hasManuscriptAnchor) {
                 status = 'missing_manuscript_anchor';
-            } else {
+            } else if (!hasEntityRecord && hasManuscriptAnchor) {
                 status = 'missing_entity_record';
+            } else {
+                status = 'missing_both';
             }
 
             const evidence: PairedChapterEvidence = {
@@ -716,7 +1425,7 @@ export class IndexRecall {
             }
         }
 
-        const paired = unpairedIssues.length === 0;
+        const paired = chapterVerifications.length > 0 && unpairedIssues.length === 0;
         return {
             entityId: query.profile.metadata.entity_id,
             canonicalName: query.profile.metadata.canonical_name,
@@ -734,12 +1443,12 @@ export class IndexRecall {
     ): Promise<string[]> {
         let files: string[];
         if (query.chapterFiles !== undefined) {
-            files = query.chapterFiles.map((f) => f.replace(/\\/g, '/'));
+            files = query.chapterFiles
+                .map((f) => normalizeChapterRelativePath(f))
+                .filter((f) => query.stagingOverlay?.get(f) !== null);
         } else {
-            const entries = await listOptionalDir(join(bookRoot, 'manuscripts'));
-            files = entries
-                .filter((name) => CHAPTER_FILE_RE.test(name))
-                .map((name) => `manuscripts/${name}`);
+            const entries = await listDirWithStaging(bookRoot, 'manuscripts', CHAPTER_FILE_RE, query);
+            files = entries.map((name) => `manuscripts/${name}`);
         }
 
         return files
@@ -754,10 +1463,12 @@ export class IndexRecall {
             });
     }
 
-    private async resolveChapterDayMap(
+    /** 按需获取候选章节的故事日映射（优先显式映射，其余直接走实例缓存读取） */
+    async resolveChapterDayMap(
         bookRoot: string,
         chapterFiles: string[],
-        explicitDays?: Record<number, number>
+        explicitDays?: Record<number, number>,
+        options?: RecallReadOptions
     ): Promise<Map<number, number>> {
         const map = new Map<number, number>();
         if (explicitDays) {
@@ -770,14 +1481,12 @@ export class IndexRecall {
         }
 
         for (const file of chapterFiles) {
-            const ch = parseChapterNumberFromPath(file);
+            const normalized = normalizeChapterRelativePath(file);
+            const ch = parseChapterNumberFromPath(normalized);
             if (ch === null || map.has(ch)) continue;
-            const content = await readOptionalUtf8(join(bookRoot, file));
-            if (content !== null) {
-                const meta = extractChapterMetadata(content);
-                if (meta.storyDay !== undefined) {
-                    map.set(ch, meta.storyDay);
-                }
+            const cached = await this.loadChapterData(bookRoot, normalized, options);
+            if (cached?.storyDay !== undefined) {
+                map.set(ch, cached.storyDay);
             }
         }
 
