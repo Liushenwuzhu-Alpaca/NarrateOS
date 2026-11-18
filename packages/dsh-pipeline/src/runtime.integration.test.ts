@@ -2008,7 +2008,19 @@ describe('Wave 3B 收口回归集成测试', () => {
         const cfgText = await readFile(cfgPath, 'utf8');
         await writeFile(
             cfgPath,
-            `${cfgText}\nopening:\n  strategy: hybrid_rolling\n  pause_after_chapter_1: true\n`,
+            `${cfgText}\nopening:\n  voice_seed_mode: hybrid_rolling\n  pause_after_chapter_1: true\n`,
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/arc_director_plan.md'),
+            [
+                '# 导演禁区与开篇节拍计划',
+                '',
+                '## Opening Sequence Beats',
+                '- [DONE ch_0001] 风灯与旧箱（已定稿）',
+                '- [status: DONE ch_0002] 交接对白（兼容旧格式）',
+                '- [PENDING] 拖轮离港'
+            ].join('\n') + '\n',
             'utf8'
         );
 
@@ -2043,11 +2055,19 @@ describe('Wave 3B 收口回归集成测试', () => {
         const checkerEvt = sse.events.find((e) => e.event === 'checker:result');
         expect(checkerEvt).toBeDefined();
         expect(checkerEvt!.data['passed']).toBe(true);
+        expect(Array.isArray(checkerEvt!.data['issues'])).toBe(true);
+        expect(checkerEvt!.data['filteredOutCount']).toBe(0);
         expect(fcRound).toBeGreaterThanOrEqual(1);
 
-        // 验证 GET /api/narrate/status 诊断字段完整
+        // 验证 GET /api/narrate/status 诊断字段完整（含 [DONE ch_XXXX] 与 [status: DONE] 混合节拍解析）
         const statusRes = await web.invoke('GET', '/api/narrate/status');
         expect(statusRes.statusCode).toBe(200);
+        expect(statusRes.json['openingBeats']).toMatchObject({
+            total: 3,
+            completed: 2,
+            pending: 1
+        });
+        expect((statusRes.json['openingBeats'] as { beats: Array<{ completedChapter?: string }> }).beats[0]?.completedChapter).toBe('ch_0001');
         expect(statusRes.json['txLockHeld']).toBe(false);
         expect(typeof statusRes.json['featCommitSha']).toBe('string');
         expect(typeof statusRes.json['stateCommitSha']).toBe('string');
@@ -2475,6 +2495,7 @@ describe('Wave 3B 收口回归集成测试', () => {
     it('ISS-064, 065, 067, 068, 069: 软链拦截、批量 git log、SafeHalt 双套字段与严格 400 入参校验', async () => {
         const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-sec-books-'));
         tempDirs.push(booksRoot);
+        let fcAttemptInTest = 0;
         const { bookRoot, ctx, web } = await setupWave3bWorkspace('security-and-validation', {
             booksRoot,
             exactSlugInBooksRoot: true,
@@ -2504,6 +2525,27 @@ describe('Wave 3B 收口回归集成测试', () => {
                     return;
                 }
                 if (tools.has('yield_verdict')) {
+                    fcAttemptInTest += 1;
+                    if (fcAttemptInTest === 1) {
+                        // 首次刻意提交未在基准语料存在的假原句，触发双原句验真过滤并由下一跳修正
+                        try {
+                            await execTool('yield_verdict', {
+                                passed: false,
+                                issues: [
+                                    {
+                                        severity: 'PLAN_CONFLICT',
+                                        paragraph_index: 0,
+                                        description: '无根据幻觉指控',
+                                        quote_draft: '他推开仓库木门',
+                                        quote_source: '不存在于语料库中的幻觉原句',
+                                        source_ref: 'world/world_state.md'
+                                    }
+                                ]
+                            });
+                        } catch {
+                            // 继续用真实双原句提交以触发 REPLAN -> SAFE_HALT
+                        }
+                    }
                     await execTool('yield_verdict', {
                         passed: false,
                         issues: [
@@ -2536,7 +2578,7 @@ describe('Wave 3B 收口回归集成测试', () => {
             )
         ).toBe(true);
 
-        // 2. 验证 books/ 下软链指向外部目录时被 isSubPath 阻断并返回 400
+        // 2. 验证 books/ 下外部软链与循环软链（ELOOP）均被 isSubPath Fail-Closed 阻断并返回 400
         const outsideDir = await mkdtemp(join(tmpdir(), 'outside-symlink-target-'));
         tempDirs.push(outsideDir);
         await mkdir(join(outsideDir, 'world'), { recursive: true });
@@ -2546,6 +2588,12 @@ describe('Wave 3B 收口回归集成测试', () => {
             slug: 'evil-link'
         });
         expect(evilSelectRes.statusCode).toBe(400);
+
+        await symlink('evil-loop', join(booksRoot, 'evil-loop'));
+        const loopSelectRes = await web.invoke('POST', '/api/narrate/book/select', {
+            slug: 'evil-loop'
+        });
+        expect(loopSelectRes.statusCode).toBe(400);
 
         // 3. 验证严格 Zod 400 参数校验
         expect((await web.invoke('POST', '/api/narrate/yolo/start', { maxChapters: 'abc' })).statusCode).toBe(400);
@@ -2557,7 +2605,7 @@ describe('Wave 3B 收口回归集成测试', () => {
             (await web.invoke('POST', '/api/narrate/heal', { conflicts: [{ conflictId: '' }] })).statusCode
         ).toBe(400);
 
-        // 4. 触发 SAFE_HALT 验证 checker:result 先于 SAFE_HALT 广播，且 views?kind=halt 同时提供 snake_case 与 camelCase
+        // 4. 触发 SAFE_HALT 验证 checker:result 先于 SAFE_HALT 广播（含 issues 与 filteredOutCount），且 views?kind=halt 同时提供双套字段
         const sse = await web.openSse();
         registerCleanup(() => sse.close());
         await expect(
@@ -2566,6 +2614,9 @@ describe('Wave 3B 收口回归集成测试', () => {
 
         const checkerFailEvt = sse.events.find((e) => e.event === 'checker:result' && e.data['passed'] === false);
         expect(checkerFailEvt).toBeDefined();
+        expect(Array.isArray(checkerFailEvt!.data['issues'])).toBe(true);
+        expect((checkerFailEvt!.data['issues'] as unknown[]).length).toBeGreaterThanOrEqual(1);
+        expect(checkerFailEvt!.data['filteredOutCount']).toBeGreaterThanOrEqual(1);
 
         const haltViewRes = await web.invoke('GET', '/api/narrate/views?kind=halt');
         expect(haltViewRes.statusCode).toBe(200);
@@ -2574,5 +2625,158 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(haltObj['halt_reason']).toBeDefined();
         expect(haltObj['chapter']).toBe(2);
         expect(haltObj['chapter_number']).toBe(2);
+    });
+
+    it('ISS-004 & ISS-052 & Q4.2: model-routing WAL 原子提交保持洁净工作区；空闲 halt 不毒化后续 heal；YOLO 单发 dream:completed；多章自愈中断后无参 heal 断点续跑', async () => {
+        let writerSeq = 0;
+        let haltDuringSecondHealChapter = false;
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-heal-resume-books-'));
+        tempDirs.push(booksRoot);
+        let controllerRef: typeof ctx.narratePipeline | undefined;
+
+        const { bookRoot, ctx, web } = await setupWave3bWorkspace('heal-resume-wal', {
+            booksRoot,
+            exactSlugInBooksRoot: true,
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '断点续跑测试章',
+                        target_word_count: 1000,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: taskPrompt.includes('第 2 章') ? 'Ch2' : 'Ch3',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '对账', is_spotlight: true }
+                        ],
+                        outline_text: '他站在码头核对货单。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成一章',
+                        next_chapter_options: ['继续']
+                    });
+                    return;
+                }
+                if (tools.has('yield_dream_commit')) {
+                    await execTool('yield_dream_commit', {
+                        summary: 'Dreaming 整理完成',
+                        chapter_number: 1,
+                        accumulated_words: 100,
+                        spotlight_triggers: []
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                const sys = opts.system ?? '';
+                if (sys.includes('连续性自愈裁判')) {
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            severity: 'CASCADING_HARD',
+                            reason: '连环冲突需回滚重跑 ch2..ch3',
+                            downstream_dependent: true
+                        })
+                    );
+                }
+                writerSeq += 1;
+                if (writerSeq === 1) {
+                    return textToStreamChunks('第一夜，他把蓝皮账本锁进抽屉。');
+                }
+                if (writerSeq === 2) {
+                    return textToStreamChunks('次日清晨，他翻开完好的蓝皮账本记下船号。');
+                }
+                if (writerSeq === 3) {
+                    return textToStreamChunks('第三日午后，账房依然摆放着那本完好的蓝皮账本。');
+                }
+                if (haltDuringSecondHealChapter && writerSeq === 4) {
+                    // 在第 2 章重跑期间发起软停机，验证 ch2 完成后于 ch3 之前停在断点
+                    haltDuringSecondHealChapter = false;
+                    controllerRef?.requestHalt({ force: false });
+                }
+                return textToStreamChunks('他站在石阶前只凭口头密语完成核对，全程未碰账本。');
+            }
+        });
+        controllerRef = ctx.narratePipeline;
+
+        // 1. 验证 PUT /api/narrate/model-routing 走 WAL 登记 + git commitPaths 提交且工作区洁净
+        const routePutRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+            model_routing: { strong_creative: 'deepseek-chat' }
+        });
+        expect(routePutRes.statusCode).toBe(200);
+        const statusOut = await execFileAsync('git', ['-C', bookRoot, 'status', '--porcelain']);
+        expect(statusOut.stdout.trim()).toBe('');
+        await expect(stat(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+
+        // 2. 验证 YOLO 运行 Dreaming 时只发送单次 dream:completed SSE（不重复发送）
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const cfgText = await readFile(cfgPath, 'utf8');
+        await writeFile(
+            cfgPath,
+            cfgText.replace('word_threshold: 15000', 'word_threshold: 1'),
+            'utf8'
+        );
+        await execFileAsync('git', ['-C', bookRoot, 'add', 'world/book_config.yaml']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'tune dream word threshold for test']);
+
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+        await ctx.narratePipeline.startYolo({ targetChapters: 1 });
+        await sse.waitForEvent((e) => e.event === 'yolo_completed' || e.event === 'yolo_halted');
+        await new Promise((r) => setImmediate(r));
+        expect(sse.events.filter((e) => e.event === 'dream:completed')).toHaveLength(1);
+
+        // 3. 推进 ch2 与 ch3，并在完全空闲时调用 POST /api/narrate/halt（验证不毒化后续 heal）
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 2, chapterGoal: 'Ch2' });
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 3, chapterGoal: 'Ch3' });
+
+        const idleHaltRes = await web.invoke('POST', '/api/narrate/halt', {});
+        expect(idleHaltRes.statusCode).toBe(202);
+
+        // 4. 触发覆盖 ch2..ch3 的 Tier 3 自愈，并在 ch2 重跑时软停机，保留 nextChapter: 3 断点
+        haltDuringSecondHealChapter = true;
+        const interruptedHealRes = await web.invoke('POST', '/api/narrate/heal', {
+            maxAutoRollbackChapters: 3,
+            conflicts: [
+                {
+                    conflictId: 'c-multi-resume',
+                    chapterA: 1,
+                    quoteA: '第一夜，他把蓝皮账本锁进抽屉。',
+                    chapterB: 2,
+                    quoteB: '次日清晨，他翻开完好的蓝皮账本记下船号。',
+                    description: '第 1~3 章账本存在状态连环冲突',
+                    severityHint: 'CASCADING_HARD'
+                }
+            ]
+        });
+        expect(interruptedHealRes.statusCode).toBe(500);
+        const planMidRaw = JSON.parse(
+            await readFile(join(bookRoot, '.ops/heal_plan.json'), 'utf8')
+        ) as { nextChapter: number; toChapter: number };
+        expect(planMidRaw).toMatchObject({ nextChapter: 3, toChapter: 3 });
+        expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(2);
+
+        // 5. 空闲后无参调用 POST /api/narrate/heal，验证从 heal_plan.json 自动续跑第 3 章并清理断点
+        const resumedHealRes = await web.invoke('POST', '/api/narrate/heal', {});
+        expect(resumedHealRes.statusCode).toBe(200);
+        expect(resumedHealRes.json['quarantined']).toBe(false);
+        expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(3);
+        await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
     });
 });

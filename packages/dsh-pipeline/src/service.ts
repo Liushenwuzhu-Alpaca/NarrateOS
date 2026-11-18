@@ -196,23 +196,25 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
                 'narrateos-pipeline:skills'
             );
 
-            void registerPresetBootSkill(skillCtx.skills, controller.roleLoader.presetRoot, {
-                isDisposed
-            })
-                .then((fn) => {
-                    if (isDisposed()) {
-                        fn();
-                    } else {
-                        disposeSkill = fn;
-                    }
+            void controller.trackBackgroundTask(
+                registerPresetBootSkill(skillCtx.skills, controller.roleLoader.presetRoot, {
+                    isDisposed
                 })
-                .catch((err: unknown) => {
-                    const logger = (skillCtx as { logger?: { warn?: (msg: string) => void } })
-                        .logger;
-                    logger?.warn?.(
-                        `narrate-boot Skill 异步注册失败（非致命）: ${err instanceof Error ? err.message : String(err)}`
-                    );
-                });
+                    .then((fn) => {
+                        if (isDisposed()) {
+                            fn();
+                        } else {
+                            disposeSkill = fn;
+                        }
+                    })
+                    .catch((err: unknown) => {
+                        const logger = (skillCtx as { logger?: { warn?: (msg: string) => void } })
+                            .logger;
+                        logger?.warn?.(
+                            `narrate-boot Skill 异步注册失败（非致命）: ${err instanceof Error ? err.message : String(err)}`
+                        );
+                    })
+            );
         });
         yield skillFiber.dispose;
 

@@ -26,6 +26,7 @@ import {
 } from '@narrateos/dsh-book-store';
 import type {
     BootBundleOutput,
+    FactCheckIssue,
     LockCharterAndBootInput,
     LockCharterAndBootResult,
     NarrateToolsService
@@ -45,12 +46,14 @@ import {
     appendJsonlLineSafe,
     CHAPTER_FILE_RE,
     clearHealPlan,
+    createEmptyUsage,
     readHealPlan,
     readNextChapterOptions,
     readOptionalText,
     readSignalsCursorState,
     resolveSignalId,
-    writeHealPlan
+    writeHealPlan,
+    type HealPlan
 } from '../pipeline/helpers.js';
 import { SyncPipeline } from '../pipeline/sync-pipeline.js';
 import { harvestVoiceFromChapter } from '../pipeline/voice-harvest.js';
@@ -273,9 +276,9 @@ export function mapRawSessionEventsToItems(
     return items;
 }
 
-function resolveRealPathWithFallback(targetPath: string, depth = 0): string {
+function resolveRealPathWithFallback(targetPath: string, depth = 0): string | null {
     if (depth > MAX_SYMLINK_DEPTH) {
-        return resolve(targetPath);
+        return null;
     }
     let current = resolve(targetPath);
     const suffixParts: string[] = [];
@@ -287,6 +290,9 @@ function resolveRealPathWithFallback(targetPath: string, depth = 0): string {
                 const linkTarget = readlinkSync(current);
                 const nextTarget = resolve(dirname(current), linkTarget);
                 const resolvedTarget = resolveRealPathWithFallback(nextTarget, depth + 1);
+                if (resolvedTarget === null) {
+                    return null;
+                }
                 return suffixParts.length > 0
                     ? join(resolvedTarget, ...suffixParts)
                     : resolvedTarget;
@@ -296,8 +302,7 @@ function resolveRealPathWithFallback(targetPath: string, depth = 0): string {
         } catch (err: unknown) {
             const code = (err as { code?: string }).code;
             if (code !== 'ENOENT') {
-                const fallback = resolve(current);
-                return suffixParts.length > 0 ? join(fallback, ...suffixParts) : fallback;
+                return null;
             }
             const parent = dirname(current);
             if (parent === current) {
@@ -312,6 +317,9 @@ function resolveRealPathWithFallback(targetPath: string, depth = 0): string {
 export function isSubPath(parentDir: string, candidatePath: string): boolean {
     const parent = resolveRealPathWithFallback(parentDir);
     const target = resolveRealPathWithFallback(candidatePath);
+    if (parent === null || target === null) {
+        return false;
+    }
     const rel = relative(parent, target);
     return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
 }
@@ -388,6 +396,17 @@ export class NarrateRuntimeController {
     private bookSwitchHandledByEvent = false;
     private ensureDefaultBookPromise: Promise<string | null> | null = null;
     private lastWriterAssemblyReport: WriterAssemblyReport | null = null;
+    private currentFactCheckerFilteredOutCount = 0;
+    private lastCheckerResult: {
+        chapter: number;
+        passed: boolean;
+        issueCount: number;
+        issues: FactCheckIssue[];
+        filteredOutCount: number;
+        replanCount: number;
+        rewriteCount: number;
+        patchRounds: number;
+    } | null = null;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     private readonly yoloState: YoloRuntimeState = {
@@ -453,6 +472,14 @@ export class NarrateRuntimeController {
             llmAdapter: this.llmAdapter,
             poolRouting: config.poolRouting,
             onStageEvent: (evt) => {
+                if (
+                    evt.stage === 'FACT_CHECKER' &&
+                    evt.kind === 'tool-result' &&
+                    evt.toolName === 'yield_verdict' &&
+                    evt.status === 'error'
+                ) {
+                    this.currentFactCheckerFilteredOutCount += 1;
+                }
                 this.emitEvent('stage:event', evt);
             }
         });
@@ -674,6 +701,8 @@ export class NarrateRuntimeController {
         this.signalsConsumedLines = cursorState.consumedLines;
         this.activeStageSessions.clear();
         this.lastWriterAssemblyReport = null;
+        this.lastCheckerResult = null;
+        this.currentFactCheckerFilteredOutCount = 0;
 
         this.emitEvent('book_switched', {
             bookRoot: nextBookRoot,
@@ -977,6 +1006,7 @@ export class NarrateRuntimeController {
 
             let emittedGateInChapter = false;
             let emittedCheckerInChapter = false;
+            this.currentFactCheckerFilteredOutCount = 0;
 
             const pipeline = this.createChapterPipeline(store);
             try {
@@ -1018,14 +1048,20 @@ export class NarrateRuntimeController {
                     },
                     onCheckerResult: (checkerEvt) => {
                         emittedCheckerInChapter = true;
-                        this.emitEvent('checker:result', {
+                        const filteredOutCount = this.currentFactCheckerFilteredOutCount;
+                        this.currentFactCheckerFilteredOutCount = 0;
+                        const checkerPayload = {
                             chapter: checkerEvt.chapter,
                             passed: checkerEvt.passed,
                             issueCount: checkerEvt.issueCount,
+                            issues: checkerEvt.issues,
+                            filteredOutCount,
                             replanCount: checkerEvt.replanCount,
                             rewriteCount: checkerEvt.rewriteCount,
                             patchRounds: checkerEvt.patchRounds
-                        });
+                        };
+                        this.lastCheckerResult = checkerPayload;
+                        this.emitEvent('checker:result', checkerPayload);
                         options.onCheckerResult?.(checkerEvt);
                     },
                     onProgress: (evt) => {
@@ -1086,14 +1122,20 @@ export class NarrateRuntimeController {
                     });
                 }
                 if (!emittedCheckerInChapter) {
-                    this.emitEvent('checker:result', {
+                    const filteredOutCount = this.currentFactCheckerFilteredOutCount;
+                    this.currentFactCheckerFilteredOutCount = 0;
+                    const fallbackChecker = {
                         chapter: resData.chapterNumber,
                         passed: true,
                         issueCount: 0,
+                        issues: [] as FactCheckIssue[],
+                        filteredOutCount,
                         replanCount: resData.replanCount,
                         rewriteCount: resData.rewriteCount,
                         patchRounds: resData.patchRounds
-                    });
+                    };
+                    this.lastCheckerResult = fallbackChecker;
+                    this.emitEvent('checker:result', fallbackChecker);
                 }
                 this.emitEvent('chapter:phase', {
                     phase: 'COMMITTED',
@@ -1232,17 +1274,10 @@ export class NarrateRuntimeController {
                 }
 
                 this.yoloState.currentStage = 'DREAMING';
-                const dreamRes = await this.runDreaming(
+                await this.runDreaming(
                     { currentChapter: stepRes.chapterNumber },
                     true
                 );
-                if (!dreamRes.skipped) {
-                    this.emitEvent('dream:completed', {
-                        skipped: dreamRes.skipped,
-                        committedPaths: dreamRes.committedPaths,
-                        spotlightTriggerCount: dreamRes.spotlightTriggerCount
-                    });
-                }
 
                 if (
                     this.yoloState.stopRequested ||
@@ -1480,6 +1515,118 @@ export class NarrateRuntimeController {
         );
     }
 
+    private async rerunFromHealPlan(
+        store: BookStore,
+        plan: HealPlan,
+        effectiveSignal: AbortSignal
+    ): Promise<void> {
+        const startChapter = plan.nextChapter;
+        const endChapter = Math.max(startChapter, plan.toChapter);
+
+        for (let ch = startChapter; ch <= endChapter; ch += 1) {
+            if (this.haltRequested || this.shuttingDown || effectiveSignal.aborted) {
+                await writeHealPlan(store.bookRoot, {
+                    conflictId: plan.conflictId,
+                    backupTag: plan.backupTag,
+                    fromChapter: plan.fromChapter,
+                    toChapter: plan.toChapter,
+                    nextChapter: ch,
+                    constraint: plan.constraint
+                });
+                if (!this.shuttingDown) {
+                    this.haltRequested = false;
+                }
+                const haltErr = new Error('HEAL_HALT_REQUESTED');
+                haltErr.name = 'AbortError';
+                throw haltErr;
+            }
+
+            const baseGoal = await this.resolveEffectiveChapterGoal(store);
+            const chapterGoal = `${baseGoal}\n\n[跨章自愈重跑约束 (${plan.conflictId})]\n${plan.constraint}`;
+            await this.stepChapter(
+                {
+                    chapterNumber: ch,
+                    chapterGoal,
+                    signal: effectiveSignal
+                },
+                { fromHeal: true }
+            );
+
+            await writeHealPlan(store.bookRoot, {
+                conflictId: plan.conflictId,
+                backupTag: plan.backupTag,
+                fromChapter: plan.fromChapter,
+                toChapter: plan.toChapter,
+                nextChapter: ch + 1,
+                constraint: plan.constraint
+            });
+        }
+
+        await clearHealPlan(store.bookRoot);
+    }
+
+    private async clearSyncConflictsFile(bookRoot: string): Promise<void> {
+        const filePath = join(bookRoot, '.ops/sync_conflicts.json');
+        const raw = await readOptionalText(filePath);
+        if (raw === null) return;
+        await writeFile(
+            filePath,
+            `${JSON.stringify(
+                {
+                    updatedAt: new Date().toISOString(),
+                    dirtyChapters: [],
+                    conflicts: []
+                },
+                null,
+                4
+            )}\n`,
+            'utf8'
+        );
+    }
+
+    private async executeHealCrossChapterConflictsInTask(
+        store: BookStore,
+        conflicts: SuspectedConflict[],
+        options: HealConflictsOptions,
+        signal: AbortSignal
+    ): Promise<HealConflictsResult> {
+        this.emitEvent('heal:started', {
+            conflictCount: conflicts.length,
+            timestamp: new Date().toISOString()
+        });
+        const pipeline = this.createDreamingPipeline(store);
+        const effectiveSignal = options.signal ?? signal;
+
+        const defaultOnAutoRerun: NonNullable<HealConflictsOptions['onAutoRerun']> = async (
+            ctx
+        ) => {
+            const diskPlan = await readHealPlan(store.bookRoot);
+            const effectivePlan: HealPlan = diskPlan ?? {
+                conflictId: ctx.conflict.conflictId,
+                backupTag: ctx.backupTag,
+                fromChapter: ctx.conflict.chapterB,
+                toChapter: ctx.conflict.chapterB,
+                nextChapter: ctx.conflict.chapterB,
+                constraint: ctx.constraint,
+                updatedAt: new Date().toISOString()
+            };
+            await this.rerunFromHealPlan(store, effectivePlan, effectiveSignal);
+            return { success: true, stillConflicting: false };
+        };
+
+        const res = await pipeline.healCrossChapterConflicts(conflicts, {
+            ...options,
+            onAutoRerun: options.onAutoRerun ?? defaultOnAutoRerun,
+            signal: effectiveSignal
+        });
+        this.emitEvent('heal:completed', {
+            resultCount: res.results.length,
+            quarantined: res.quarantined,
+            timestamp: new Date().toISOString()
+        });
+        return res;
+    }
+
     /** 触发三级跨章自愈（默认挂载基于 .ops/heal_plan.json 的自动重跑闭环） */
     async healCrossChapterConflicts(
         conflicts: SuspectedConflict[],
@@ -1487,154 +1634,110 @@ export class NarrateRuntimeController {
     ): Promise<HealConflictsResult> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
-        return await this.runExclusiveTask('DREAMING', async (signal) => {
-            this.emitEvent('heal:started', {
-                conflictCount: conflicts.length,
-                timestamp: new Date().toISOString()
-            });
-            const pipeline = this.createDreamingPipeline(store);
-            const effectiveSignal = options.signal ?? signal;
-
-            const defaultOnAutoRerun: NonNullable<HealConflictsOptions['onAutoRerun']> = async (
-                ctx
-            ) => {
-                const plan = await readHealPlan(store.bookRoot);
-                const startChapter = plan?.nextChapter ?? ctx.conflict.chapterB;
-                const endChapter = Math.max(startChapter, plan?.toChapter ?? ctx.conflict.chapterB);
-
-                for (let ch = startChapter; ch <= endChapter; ch += 1) {
-                    if (this.haltRequested || this.shuttingDown || effectiveSignal.aborted) {
-                        if (plan) {
-                            await writeHealPlan(store.bookRoot, {
-                                conflictId: plan.conflictId,
-                                backupTag: plan.backupTag,
-                                fromChapter: plan.fromChapter,
-                                toChapter: plan.toChapter,
-                                nextChapter: ch,
-                                constraint: plan.constraint
-                            });
-                        }
-                        if (!this.shuttingDown) {
-                            this.haltRequested = false;
-                        }
-                        const haltErr = new Error('HEAL_HALT_REQUESTED');
-                        haltErr.name = 'AbortError';
-                        throw haltErr;
-                    }
-
-                    const baseGoal = await this.resolveEffectiveChapterGoal(store);
-                    const chapterGoal = `${baseGoal}\n\n[跨章自愈重跑约束 (${ctx.conflict.conflictId})]\n${ctx.constraint}`;
-                    await this.stepChapter(
-                        {
-                            chapterNumber: ch,
-                            chapterGoal,
-                            signal: effectiveSignal
-                        },
-                        { fromHeal: true }
-                    );
-
-                    if (plan) {
-                        await writeHealPlan(store.bookRoot, {
-                            conflictId: plan.conflictId,
-                            backupTag: plan.backupTag,
-                            fromChapter: plan.fromChapter,
-                            toChapter: plan.toChapter,
-                            nextChapter: ch + 1,
-                            constraint: plan.constraint
-                        });
-                    }
-                }
-
-                await clearHealPlan(store.bookRoot);
-                return { success: true, stillConflicting: false };
-            };
-
-            const res = await pipeline.healCrossChapterConflicts(conflicts, {
-                ...options,
-                onAutoRerun: options.onAutoRerun ?? defaultOnAutoRerun,
-                signal: effectiveSignal
-            });
-            this.emitEvent('heal:completed', {
-                resultCount: res.results.length,
-                quarantined: res.quarantined,
-                timestamp: new Date().toISOString()
-            });
-            return res;
-        });
+        return await this.runExclusiveTask('DREAMING', async (signal) =>
+            await this.executeHealCrossChapterConflictsInTask(store, conflicts, options, signal)
+        );
     }
 
-    /** 从 .ops/sync_conflicts.json 读取下游只读冲突并执行三级跨章自愈 */
+    /** 从 .ops/heal_plan.json 断点或 .ops/sync_conflicts.json 读取并执行三级跨章自愈 */
     async healFromSyncConflicts(
         options: HealConflictsOptions = {}
     ): Promise<HealConflictsResult> {
+        this.assertAdmissionOpen();
         const store = this.requireBookStore();
-        const raw = await readOptionalText(join(store.bookRoot, '.ops/sync_conflicts.json'));
-        let conflicts: SuspectedConflict[] = [];
-        let fromDiskFile = false;
-
-        if (raw !== null) {
-            try {
-                const parsed = JSON.parse(raw) as {
-                    dirtyChapters?: unknown;
-                    conflicts?: unknown;
-                };
-                const dirtyList = Array.isArray(parsed.dirtyChapters)
-                    ? parsed.dirtyChapters.filter((n): n is number => typeof n === 'number' && n > 0)
-                    : [];
-                if (Array.isArray(parsed.conflicts)) {
-                    fromDiskFile = true;
-                    conflicts = parsed.conflicts.flatMap((rawItem, idx) => {
-                        if (!rawItem || typeof rawItem !== 'object') return [];
-                        const item = rawItem as DownstreamConflictReport;
-                        if (
-                            typeof item.chapterNumber !== 'number' ||
-                            typeof item.quote !== 'string' ||
-                            typeof item.description !== 'string'
-                        ) {
-                            return [];
+        return await this.runExclusiveTask('DREAMING', async (signal) => {
+            const effectiveSignal = options.signal ?? signal;
+            const pendingPlan = await readHealPlan(store.bookRoot);
+            if (pendingPlan && pendingPlan.nextChapter <= pendingPlan.toChapter) {
+                this.emitEvent('heal:started', {
+                    conflictCount: 1,
+                    resumedFromPlan: true,
+                    timestamp: new Date().toISOString()
+                });
+                await this.rerunFromHealPlan(store, pendingPlan, effectiveSignal);
+                await this.clearSyncConflictsFile(store.bookRoot);
+                const resumedRes: HealConflictsResult = {
+                    results: [
+                        {
+                            conflictId: pendingPlan.conflictId ?? 'heal-resume',
+                            action: 'AUTO_ROLLED_BACK_AND_RERUN',
+                            backupTag: pendingPlan.backupTag
                         }
-                        const chapterA =
-                            typeof item.dirtyChapter === 'number' && item.dirtyChapter > 0
-                                ? item.dirtyChapter
-                                : (dirtyList[0] ?? 1);
-                        const quoteA =
-                            typeof item.dirtyQuote === 'string' && item.dirtyQuote.trim().length > 0
-                                ? item.dirtyQuote
-                                : item.quote;
-                        return [
-                            {
-                                conflictId: `sync-${chapterA}-ch${item.chapterNumber}-${idx + 1}`,
-                                chapterA,
-                                quoteA,
-                                chapterB: item.chapterNumber,
-                                quoteB: item.quote,
-                                description: item.description
-                            }
-                        ];
-                    });
-                }
-            } catch {
-                throw new PathValidationError('.ops/sync_conflicts.json 格式损坏，无法解析冲突清单');
+                    ],
+                    quarantined: false,
+                    quarantineReport: null,
+                    usage: createEmptyUsage()
+                };
+                this.emitEvent('heal:completed', {
+                    resultCount: resumedRes.results.length,
+                    quarantined: false,
+                    resumedFromPlan: true,
+                    timestamp: new Date().toISOString()
+                });
+                return resumedRes;
             }
-        }
 
-        const res = await this.healCrossChapterConflicts(conflicts, options);
-        if (fromDiskFile && !res.quarantined && conflicts.length > 0) {
-            await writeFile(
-                join(store.bookRoot, '.ops/sync_conflicts.json'),
-                `${JSON.stringify(
-                    {
-                        updatedAt: new Date().toISOString(),
-                        dirtyChapters: [],
-                        conflicts: []
-                    },
-                    null,
-                    4
-                )}\n`,
-                'utf8'
+            const raw = await readOptionalText(join(store.bookRoot, '.ops/sync_conflicts.json'));
+            let conflicts: SuspectedConflict[] = [];
+            let fromDiskFile = false;
+
+            if (raw !== null) {
+                try {
+                    const parsed = JSON.parse(raw) as {
+                        dirtyChapters?: unknown;
+                        conflicts?: unknown;
+                    };
+                    const dirtyList = Array.isArray(parsed.dirtyChapters)
+                        ? parsed.dirtyChapters.filter((n): n is number => typeof n === 'number' && n > 0)
+                        : [];
+                    if (Array.isArray(parsed.conflicts)) {
+                        fromDiskFile = true;
+                        conflicts = parsed.conflicts.flatMap((rawItem, idx) => {
+                            if (!rawItem || typeof rawItem !== 'object') return [];
+                            const item = rawItem as DownstreamConflictReport;
+                            if (
+                                typeof item.chapterNumber !== 'number' ||
+                                typeof item.quote !== 'string' ||
+                                typeof item.description !== 'string'
+                            ) {
+                                return [];
+                            }
+                            const chapterA =
+                                typeof item.dirtyChapter === 'number' && item.dirtyChapter > 0
+                                    ? item.dirtyChapter
+                                    : (dirtyList[0] ?? 1);
+                            const quoteA =
+                                typeof item.dirtyQuote === 'string' && item.dirtyQuote.trim().length > 0
+                                    ? item.dirtyQuote
+                                    : item.quote;
+                            return [
+                                {
+                                    conflictId: `sync-${chapterA}-ch${item.chapterNumber}-${idx + 1}`,
+                                    chapterA,
+                                    quoteA,
+                                    chapterB: item.chapterNumber,
+                                    quoteB: item.quote,
+                                    description: item.description
+                                }
+                            ];
+                        });
+                    }
+                } catch {
+                    throw new PathValidationError('.ops/sync_conflicts.json 格式损坏，无法解析冲突清单');
+                }
+            }
+
+            const res = await this.executeHealCrossChapterConflictsInTask(
+                store,
+                conflicts,
+                options,
+                signal
             );
-        }
-        return res;
+            if (fromDiskFile && !res.quarantined && conflicts.length > 0) {
+                await this.clearSyncConflictsFile(store.bookRoot);
+            }
+            return res;
+        });
     }
 
     /** 首章校准通过后触发 Voice Harvest 采集表达标本 */
@@ -2565,7 +2668,29 @@ export class NarrateRuntimeController {
                 }
             }
 
-            await store.writeBookConfig(nextConfig);
+            let hasGitHead = false;
+            try {
+                await this.system.currentRevision(store.bookRoot);
+                hasGitHead = true;
+            } catch {
+                hasGitHead = false;
+            }
+
+            if (hasGitHead) {
+                await store.recordPendingWrites(['world/book_config.yaml']);
+                try {
+                    await store.writeBookConfig(nextConfig);
+                    await this.system.commitPaths(
+                        store.bookRoot,
+                        ['world/book_config.yaml'],
+                        'chore(config): update model routing'
+                    );
+                } finally {
+                    await rm(join(store.bookRoot, '.ops/pending_writes.json'), { force: true });
+                }
+            } else {
+                await store.writeBookConfig(nextConfig);
+            }
 
             return {
                 status: 'ok',
@@ -2640,7 +2765,9 @@ export class NarrateRuntimeController {
             if (!inSection || !trimmed.startsWith('- ')) continue;
 
             const body = trimmed.slice(2).trim();
-            const statusMatch = /^\[status:\s*([^\]]+)\]\s*(.+)$/i.exec(body);
+            const statusMatch = /^\[(?:status:\s*)?((?:PENDING|DONE)(?:\s+[^\]]*)?)\]\s*(.+)$/i.exec(
+                body
+            );
             const rawStatus = statusMatch?.[1]?.trim() ?? 'PENDING';
             const text = statusMatch?.[2]?.trim() ?? body;
             const isDone = /^DONE\b/i.test(rawStatus);
@@ -2805,6 +2932,7 @@ export class NarrateRuntimeController {
             stateCommitSha: recentCommits.stateCommitSha,
             recentCommits,
             writerAssemblyReport: this.lastWriterAssemblyReport,
+            lastCheckerResult: this.lastCheckerResult,
             dreamWatermark,
             dirtyEntityCount,
             dirtyEntityThreshold,
@@ -2838,7 +2966,15 @@ export class NarrateRuntimeController {
         }
 
         this.activeTask = kind;
-        // 严禁覆写外层已置位的 haltRequested，避免吞掉安全点停机信号
+        // 仅在从完全空闲启动顶层独立任务时清理历史残留 haltRequested；YOLO 章节与 Dreaming 间隙绝不吞掉停机信号
+        if (
+            !options?.allowDuringYolo &&
+            !options?.allowDuringHeal &&
+            !this.yoloState.running &&
+            !this.shuttingDown
+        ) {
+            this.haltRequested = false;
+        }
         const ac = new AbortController();
         this.activeAbortController = ac;
 
