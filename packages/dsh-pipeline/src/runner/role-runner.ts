@@ -697,6 +697,18 @@ export class RoleRunner {
                                 kind: 'text',
                                 text: frame.chunk.text
                             });
+                        } else if (
+                            frame.chunk.type === 'block-end' &&
+                            latestAssistantText.length === 0 &&
+                            frame.chunk.block.type === 'text' &&
+                            frame.chunk.block.text.length > 0
+                        ) {
+                            latestAssistantText = frame.chunk.block.text;
+                            recordSessionEvent({
+                                timestamp: ts,
+                                kind: 'text',
+                                text: frame.chunk.block.text
+                            });
                         }
                     });
                     agentCtx.on('agent/status', ({ status }) => {
@@ -782,6 +794,10 @@ export class RoleRunner {
                 throw new Error(
                     `工种 ${params.roleId} 调用 ${roleCfg.yieldTool} 后未产出有效结构化结果`
                 );
+            }
+
+            if (isCleanroom && !latestAssistantText.trim()) {
+                throw new Error(`净室工种 ${params.roleId} 未输出有效正文文本`);
             }
 
             sessionDetail.status = 'completed';
@@ -959,9 +975,6 @@ export class RoleRunner {
                     }
                     capturedRunId = sessionRes.runId;
                     capturedSessionId = sessionRes.sessionId;
-                    if (!sessionRes.assistantText.trim()) {
-                        throw new Error(`净室工种 ${roleId} 未输出有效正文文本`);
-                    }
                     return {
                         text: sessionRes.assistantText,
                         usage: sessionRes.usage,

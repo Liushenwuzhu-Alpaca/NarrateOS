@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Context } from '@deepseek-ai/cordis';
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { ReasoningEffortId, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import { scopeTarget } from '@deepseek-ai/dsh-scope';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import { ToolsService } from '@deepseek-ai/dsh-tools';
@@ -2290,5 +2290,136 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(extractorPrompt).toContain('RECENT_CARD_CH2_EXPECTED');
         expect(extractorPrompt).toContain('RECENT_CARD_CH3_EXPECTED');
         expect(extractorPrompt).not.toContain('OLDER_CARD_CH1_SHOULD_BE_OMITTED');
+    });
+
+    it('RoleRunner.runCleanroom 空输出在 runAgentSession 记为 failed（runs.jsonl 与 session_logs 一致），且支持仅发 block-end 文本块兜底', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'cleanroom-block-end-and-empty');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let streamMode: 'empty' | 'block-end-only' = 'empty';
+        await createHeadlessMockServices(ctx, {
+            onAgent: async () => {},
+            onLlmStream: () => {
+                if (streamMode === 'empty') {
+                    return (async function* (): AsyncIterable<StreamChunk> {
+                        yield { type: 'block-start', index: 0, blockType: 'text' };
+                        yield { type: 'text-delta', index: 0, text: '   \n  ' };
+                        yield { type: 'block-end', index: 0, block: { type: 'text', text: '   \n  ' } };
+                        yield {
+                            type: 'usage',
+                            usage: {
+                                inputTokens: 10,
+                                outputTokens: 2,
+                                cacheReadTokens: 0,
+                                cacheWriteTokens: 0
+                            }
+                        };
+                        yield { type: 'finish', reason: { kind: 'stop' } };
+                    })();
+                }
+                return (async function* (): AsyncIterable<StreamChunk> {
+                    yield { type: 'block-start', index: 0, blockType: 'text' };
+                    yield {
+                        type: 'block-end',
+                        index: 0,
+                        block: { type: 'text', text: '# 兜底正文\n\n仅通过 block-end 块输出的正文内容。' }
+                    };
+                    yield {
+                        type: 'usage',
+                        usage: {
+                            inputTokens: 20,
+                            outputTokens: 15,
+                            cacheReadTokens: 0,
+                            cacheWriteTokens: 0
+                        }
+                    };
+                    yield { type: 'finish', reason: { kind: 'stop' } };
+                })();
+            }
+        });
+
+        const runner = new RoleRunner({
+            ctx,
+            storeService: ctx.narrateStore,
+            toolsService: ctx.narrateTools,
+            roleLoader: new RoleLoader(),
+            llmAdapter: new DshLlmAdapter(ctx.llm, {
+                poolRouting: {
+                    strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+                    fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
+                    audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
+                }
+            }),
+            poolRouting: {
+                strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+                fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
+                audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
+            }
+        });
+
+        // 1. 净室空输出必须抛出失败，且 runs.jsonl 与 session_logs/*.json 均准确落盘为 failed（无 completed 记录）
+        streamMode = 'empty';
+        await expect(
+            runner.runCleanroom({
+                roleId: 'writer',
+                bookRoot,
+                chapterNumber: 1,
+                request: {
+                    staticPrefixBlocks: ['静态前缀'],
+                    dynamicTail: '第一章写作指令'
+                }
+            })
+        ).rejects.toThrow('净室工种 writer 未输出有效正文文本');
+
+        const runsAfterEmpty = await ctx.narrateStore.openStore().listRunRecords({ chapter: 1 });
+        expect(runsAfterEmpty.some((r) => r.role === 'writer' && r.status === 'failed')).toBe(true);
+        expect(runsAfterEmpty.some((r) => r.role === 'writer' && r.status === 'completed')).toBe(false);
+
+        const logDir = join(bookRoot, '.ops/session_logs');
+        const emptyLogFiles = await readdir(logDir);
+        expect(emptyLogFiles.length).toBe(1);
+        const failedLog = JSON.parse(await readFile(join(logDir, emptyLogFiles[0]!), 'utf8')) as {
+            sessionId: string;
+            status: string;
+        };
+        expect(failedLog.status).toBe('failed');
+
+        // 2. 仅发 block-end 文本块（不发 text-delta）时，兜底收集完整正文并记录为 completed
+        streamMode = 'block-end-only';
+        const blockEndRes = await runner.runCleanroom({
+            roleId: 'writer',
+            bookRoot,
+            chapterNumber: 2,
+            request: {
+                staticPrefixBlocks: ['静态前缀'],
+                dynamicTail: '第二章写作指令'
+            }
+        });
+        expect(blockEndRes.response.text).toBe('# 兜底正文\n\n仅通过 block-end 块输出的正文内容。');
+        expect(blockEndRes.sessionId).toBeTruthy();
+
+        const runsAfterBlockEnd = await ctx.narrateStore.openStore().listRunRecords({ chapter: 2 });
+        expect(runsAfterBlockEnd.some((r) => r.role === 'writer' && r.status === 'completed')).toBe(true);
+
+        const completedLog = JSON.parse(
+            await readFile(join(logDir, `${blockEndRes.sessionId!}.json`), 'utf8')
+        ) as {
+            status: string;
+            events: Array<{ kind: string; text?: string }>;
+        };
+        expect(completedLog.status).toBe('completed');
+        expect(
+            completedLog.events.some(
+                (ev) => ev.kind === 'text' && ev.text === '# 兜底正文\n\n仅通过 block-end 块输出的正文内容。'
+            )
+        ).toBe(true);
     });
 });
