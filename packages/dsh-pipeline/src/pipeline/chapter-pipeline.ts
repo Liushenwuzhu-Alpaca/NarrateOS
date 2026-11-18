@@ -129,6 +129,17 @@ function invokeSafeCallback<T>(cb: ((arg: T) => void) | undefined, arg: T): void
     }
 }
 
+function buildSelectedVoiceSampleSummary(
+    sample: { id: string; tag: string; source?: string | undefined } | null | undefined
+): WriterAssemblyReport['selectedVoiceSample'] {
+    if (!sample) return null;
+    return {
+        id: sample.id,
+        tag: sample.tag,
+        ...(sample.source !== undefined ? { source: sample.source } : {})
+    };
+}
+
 const GATE_POSITIVE_GUIDANCE: Record<string, string> = {
     tag_residue: '直接输出纯粹的小说散文正文，保持段落干净自然。',
     negation_contrast: '直接陈述当下发生的动作、神态与客观场景状态，以正面描摹推进句子。',
@@ -1779,15 +1790,9 @@ export class ChapterPipeline {
             truncated: assembled.diagnostics.truncated,
             appliedEvictions: assembled.diagnostics.appliedEvictions,
             staticPrefixHash: assembled.diagnostics.staticPrefixHash,
-            selectedVoiceSample: assembled.diagnostics.selectedVoiceSample
-                ? {
-                      id: assembled.diagnostics.selectedVoiceSample.id,
-                      tag: assembled.diagnostics.selectedVoiceSample.tag,
-                      ...(assembled.diagnostics.selectedVoiceSample.source !== undefined
-                          ? { source: assembled.diagnostics.selectedVoiceSample.source }
-                          : {})
-                  }
-                : null
+            selectedVoiceSample: buildSelectedVoiceSampleSummary(
+                assembled.diagnostics.selectedVoiceSample
+            )
         };
         return {
             prose: cleanProse,
@@ -2479,9 +2484,11 @@ export class ChapterPipeline {
     }
 
     private async readOpsStyleAmendments(): Promise<string | undefined> {
-        const { combined } = await readCombinedStyleAmendments(this.store.bookRoot, () =>
-            this.store.readOpsStyleAmendments()
-        );
+        const { combined } = await readCombinedStyleAmendments(this.store.bookRoot, {
+            readWorldAmendments: () => this.store.readOpsStyleAmendments(),
+            order: 'world-first',
+            dedupe: true
+        });
         return combined;
     }
 

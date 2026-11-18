@@ -208,6 +208,19 @@ function extractNonEmptyStringField(
     return undefined;
 }
 
+function extractFirstStringField(
+    record: Record<string, unknown>,
+    keys: readonly string[]
+): string | null {
+    for (const key of keys) {
+        const val = record[key];
+        if (typeof val === 'string') {
+            return val;
+        }
+    }
+    return null;
+}
+
 function extractIntegerField(
     record: Record<string, unknown>,
     keys: readonly string[]
@@ -2138,11 +2151,11 @@ export class NarrateRuntimeController {
                 if (removedIdx < 0) {
                     try {
                         const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-                        const parsedReason = extractNonEmptyStringField(parsed, [
+                        const parsedReason = extractFirstStringField(parsed, [
                             'reason',
                             'content',
                             'instruction'
-                        ]) ?? null;
+                        ]);
                         if (parsed['created_at'] === createdAt && parsedReason === reason) {
                             removedIdx = idx;
                             removedSigId = resolveSignalId(parsed);

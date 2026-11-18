@@ -356,7 +356,10 @@ export class VolumePipeline {
                     combined: combinedAmendments,
                     opsRaw: opsStyleExisting,
                     worldRaw: worldStyleExisting
-                } = await readCombinedStyleAmendments(this.store.bookRoot);
+                } = await readCombinedStyleAmendments(this.store.bookRoot, {
+                    order: 'ops-first',
+                    dedupe: false
+                });
 
                 const nextVoiceBaseText = combinedAmendments
                     ? await this.refineStyleAmendments(

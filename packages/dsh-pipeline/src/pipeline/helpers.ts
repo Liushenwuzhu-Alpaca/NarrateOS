@@ -594,12 +594,19 @@ export async function listOpenParallelWindows(
 /** 读取并合并 world/ops_style_amendments.md 与 .ops/style_amendments.md 中的有效风格修订 */
 export async function readCombinedStyleAmendments(
     bookRoot: string,
-    readWorldAmendments?: () => Promise<string | null>
+    options?: {
+        readWorldAmendments?: (() => Promise<string | null>) | undefined;
+        order?: 'world-first' | 'ops-first' | undefined;
+        dedupe?: boolean | undefined;
+    }
 ): Promise<{
     combined: string | undefined;
     opsRaw: string | null;
     worldRaw: string | null;
 }> {
+    const readWorldAmendments = options?.readWorldAmendments;
+    const order = options?.order ?? 'world-first';
+    const dedupe = options?.dedupe ?? true;
     const [worldRaw, opsRaw] = await Promise.all([
         readWorldAmendments
             ? readWorldAmendments()
@@ -608,9 +615,10 @@ export async function readCombinedStyleAmendments(
     ]);
     const worldAmendment = normalizeOpsStyleAmendments(worldRaw);
     const opsAmendment = normalizeOpsStyleAmendments(opsRaw);
-    const parts = Array.from(
-        new Set([opsAmendment, worldAmendment].filter((s): s is string => Boolean(s)))
-    );
+    const ordered =
+        order === 'ops-first' ? [opsAmendment, worldAmendment] : [worldAmendment, opsAmendment];
+    const nonEmpty = ordered.filter((s): s is string => Boolean(s));
+    const parts = dedupe ? Array.from(new Set(nonEmpty)) : nonEmpty;
     return {
         combined: parts.length > 0 ? parts.join('\n\n') : undefined,
         opsRaw,

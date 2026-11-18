@@ -62,6 +62,20 @@ function applyEnvRouteOverride(
     };
 }
 
+function resolvePluginSearchDirs(config: NarratePipelineConfig): string[] {
+    if (config.pluginSearchDirs && config.pluginSearchDirs.length > 0) {
+        return Array.from(new Set(config.pluginSearchDirs.map((dir) => resolve(dir))));
+    }
+    const dirs = [resolveDefaultEngineCraftPluginDir()];
+    if (config.presetRoot) {
+        const presetPluginDir = join(resolve(config.presetRoot), 'plugins/craft');
+        if (existsSync(presetPluginDir)) {
+            dirs.push(presetPluginDir);
+        }
+    }
+    return Array.from(new Set(dirs));
+}
+
 /** @narrateos/dsh-pipeline 插件原生 Schemastery 配置 Schema */
 export const Config = Schema.object({
     bookRoot: Schema.string().description('默认激活作品目录绝对路径（可选）'),
@@ -122,19 +136,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
         )
     };
 
-    const resolvedPluginSearchDirs =
-        config.pluginSearchDirs && config.pluginSearchDirs.length > 0
-            ? Array.from(new Set(config.pluginSearchDirs.map((dir) => resolve(dir))))
-            : Array.from(
-                  new Set([
-                      resolveDefaultEngineCraftPluginDir(),
-                      ...(config.presetRoot
-                          ? [join(resolve(config.presetRoot), 'plugins/craft')].filter((dir) =>
-                                existsSync(dir)
-                            )
-                          : [])
-                  ])
-              );
+    const resolvedPluginSearchDirs = resolvePluginSearchDirs(config);
 
     const controller = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, {
         bookRoot: config.bookRoot,
