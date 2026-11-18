@@ -387,8 +387,8 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         'boot-compiler': { pool: 'strong_creative', reasoningEffort: 'high', cleanroom: false, yieldTool: 'yield_boot_bundle', tools: [] },
         librarian: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_context_pack', tools: ['book_glob', 'book_grep', 'book_read'] },
         planner: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_outline', tools: ['book_read', 'book_grep'] },
-        writer: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: true, yieldTool: null, tools: [] },
-        patch: { pool: 'strong_creative', reasoningEffort: 'low', cleanroom: true, yieldTool: null, tools: [] },
+        writer: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: true, yieldTool: null, tools: [], maxSteps: 1, maxReadCalls: 0 },
+        patch: { pool: 'strong_creative', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_patched_draft', tools: ['patch_paragraphs'], maxSteps: 6, maxReadCalls: 0 },
         'fact-checker': { pool: 'audit', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
         extractor: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_state_patch', tools: ['book_read', 'book_grep'] },
         dreamer: { pool: 'strong_creative', reasoningEffort: 'high', cleanroom: false, yieldTool: 'yield_dream_commit', tools: ['book_read', 'book_grep', 'book_glob', 'book_edit'] }
@@ -407,7 +407,13 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         assert.ok(['off', 'low', 'medium', 'high', 'max'].includes(cfg.reasoningEffort));
         assert.equal(cfg.reasoningEffort, expected.reasoningEffort, `角色 ${roleId} 的 reasoningEffort 应为 ${expected.reasoningEffort}`);
         assert.ok(Number.isInteger(cfg.maxSteps) && cfg.maxSteps >= 1);
+        if (expected.maxSteps !== undefined) {
+            assert.equal(cfg.maxSteps, expected.maxSteps, `角色 ${roleId} 的 maxSteps 应为 ${expected.maxSteps}`);
+        }
         assert.ok(Number.isInteger(cfg.maxReadCalls) && cfg.maxReadCalls >= 0);
+        if (expected.maxReadCalls !== undefined) {
+            assert.equal(cfg.maxReadCalls, expected.maxReadCalls, `角色 ${roleId} 的 maxReadCalls 应为 ${expected.maxReadCalls}`);
+        }
         assert.deepEqual(cfg.tools, expected.tools);
         assert.equal(cfg.yieldTool, expected.yieldTool);
 
@@ -420,7 +426,11 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     // 额外校验写手与局部修补净室正向表达约束（零否定禁令词、零粉红大象反噬样例）
     for (const promptRel of ['prompts/writer.md', 'prompts/patch.md']) {
         const cleanroomPrompt = fs.readFileSync(path.join(rolesDir, promptRel), 'utf8');
-        const forbiddenWriterTokens = ['禁止', '严禁', '不要', '不得', '切忌', '指节', '喉结', '瞳孔', '睫毛', '一丝', '一抹'];
+        const forbiddenWriterTokens = [
+            '禁止', '严禁', '不要', '不得', '切忌',
+            '必须', '务必', '千万', '绝对', '哪怕', '就算', '即便',
+            '指节', '喉结', '瞳孔', '睫毛', '一丝', '一抹'
+        ];
         for (const token of forbiddenWriterTokens) {
             assert.ok(!cleanroomPrompt.includes(token), `${promptRel} 提示词不应包含否定禁令或反噬套词 "${token}"`);
         }
@@ -431,13 +441,37 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     assert.ok(writerPrompt.includes('# 标题名称'), 'writer.md 必须正向说明正文首行输出 `# 标题名称` 一级标题');
 
     const patchPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/patch.md'), 'utf8');
-    assert.ok(patchPrompt.includes('# '), 'patch.md 必须正向约定保留目标段落中的一级标题行');
+    for (const marker of ['# ', '0-based', 'patch_paragraphs', 'StaticProseGate', 'yield_patched_draft']) {
+        assert.ok(patchPrompt.includes(marker), `patch.md 缺少关键正向契约锚点: ${marker}`);
+    }
 
     const librarianPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/librarian.md'), 'utf8');
-    for (const marker of ['已由管线预注入', 'world_state.md', 'open_threads.md', 'last_seen_ch', 'book_read({ paths:', 'lore_library/lore_xxx.md', 'maxReadCalls']) {
+    for (const marker of [
+        '已由管线预注入',
+        'world_state.md',
+        'L1_volumes.md',
+        'L2_cards',
+        'open_threads.md',
+        'last_seen_ch',
+        'book_read({ paths:',
+        'lore_library/lore_xxx.md',
+        'maxReadCalls',
+        'world/arc_director_plan.md',
+        'world/author_charter.md',
+        'world/current_arc_envelope.md',
+        'world/future_horizon.md',
+        'manuscripts/',
+        'book_grep',
+        'recall_queries'
+    ]) {
         assert.ok(librarianPrompt.includes(marker), `librarian.md 缺少关键契约锚点: ${marker}`);
     }
     assert.ok(!librarianPrompt.includes('"lore_xxx.md"'), 'librarian.md 示例路径必须补全 lore_library/ 前缀，避免触发 PathFence 拦截');
+
+    const plannerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/planner.md'), 'utf8');
+    for (const marker of ['实体档案摘要', '上章上下文', '点查']) {
+        assert.ok(plannerPrompt.includes(marker), `planner.md 缺少预注入与点查边界锚点: ${marker}`);
+    }
 
     const extractorPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/extractor.md'), 'utf8');
     for (const marker of [
