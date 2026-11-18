@@ -467,7 +467,7 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
         expect(batchRes.content).toContain('批量暂存可见');
         expect(batchRes.content).toContain('铁门');
 
-        // 支持单路径与 offset/limit 兼容，也支持批量 offset/limit
+        // 支持单路径与 offset/limit 兼容，也支持批量 offset/limit（顶层 endLine 不跨文件失真累加）
         const singleSliced = (await bookRead.execute(
             { path: 'manuscripts/ch_0001.md', offset: 1, limit: 1 },
             createMockExec('book_read', {})
@@ -483,6 +483,47 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
         expect(singleSliced.startLine).toBe(1);
         expect(singleSliced.endLine).toBe(1);
         expect(roleSet.quota.count).toBe(2);
+
+        const batchSliced = (await bookRead.execute(
+            {
+                paths: ['entities/char_001.md', 'manuscripts/ch_0001.md'],
+                offset: 2,
+                limit: 2
+            },
+            createMockExec('book_read', {})
+        )) as {
+            path: string;
+            content: string;
+            totalLines: number;
+            startLine: number;
+            endLine: number;
+            items?: Array<{
+                path: string;
+                content: string;
+                totalLines: number;
+                startLine: number;
+                endLine: number;
+            }>;
+        };
+        expect(roleSet.quota.count).toBe(3);
+        expect(batchSliced.items).toHaveLength(2);
+        // 顶层以首项为准，不把各文件 endLine 相加
+        expect(batchSliced.startLine).toBe(2);
+        expect(batchSliced.endLine).toBe(3);
+        expect(batchSliced.endLine).toBe(batchSliced.items?.[0]?.endLine);
+        expect(batchSliced.items?.[0]).toMatchObject({
+            path: 'entities/char_001.md',
+            startLine: 2,
+            endLine: 3,
+            totalLines: 8
+        });
+        expect(batchSliced.items?.[1]).toMatchObject({
+            path: 'manuscripts/ch_0001.md',
+            startLine: 2,
+            endLine: 3,
+            totalLines: 4
+        });
+        expect(batchSliced.items?.[1]?.content).toContain('沈默推开铁门');
     });
 
     it('book_read 批量校验在扣配额前执行：任意路径越界、空 paths 或超过 8 个路径均不消耗配额', async () => {

@@ -179,11 +179,6 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                     verifiedTargets.push(verified);
                 }
             }
-            if (verifiedTargets.length > MAX_BATCH_READ_PATHS) {
-                throw new Error(
-                    `book_read 单次最多读取 ${MAX_BATCH_READ_PATHS} 个路径，收到 ${verifiedTargets.length} 个`
-                );
-            }
 
             // 3. 全部围栏校验通过后，仅消耗 1 次只读配额
             quota.consume('book_read');
@@ -214,12 +209,13 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                 })
                 .join('\n\n');
 
+            // 多文件批量时顶层 startLine/endLine 以首项为准，避免跨文件行号失真累加；各文件精确范围保留在 items 中
             return {
                 path: items.map((item) => item.path).join(', '),
                 content: combinedContent,
                 totalLines: items.reduce((sum, item) => sum + item.totalLines, 0),
-                startLine: args.offset ?? 1,
-                endLine: items.reduce((sum, item) => sum + item.endLine, 0),
+                startLine: first.startLine,
+                endLine: first.endLine,
                 fromStaging: items.some((item) => item.fromStaging),
                 items
             };
