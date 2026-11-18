@@ -1,21 +1,29 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
     analyzeParagraphs,
     generateStructuredJson,
-    generateTraced,
-    stripBlockingTags,
+    normalizeForQuoteMatch,
+    parseL2CardSections,
+    renderEntityProfile,
+    StaticProseGate,
+    stripWriterRestrictedDirectives,
     TxStateSchema,
     verifyDualQuotes,
+    ViewSlicer,
     withTraceRun,
+    type BookConfig,
     type BookStore,
+    type EntityProfile,
     type LlmPort,
+    type ProseGateOptions,
     type SystemPort,
     type TxState
 } from '@narrateos/dsh-book-store';
-import type { DreamCommitRecord } from '@narrateos/dsh-book-tools';
+import type { DreamCommitRecord, YieldPatchedDraftResult } from '@narrateos/dsh-book-tools';
+import { ValidationError } from '../errors.js';
 import type { RoleRunner } from '../runner/role-runner.js';
 import {
     ConflictClassificationOutputSchema,
@@ -24,6 +32,7 @@ import {
     type HealConflictItemResult,
     type HealConflictsOptions,
     type HealConflictsResult,
+    type OffscreenCharacterProgress,
     type OpsSignal,
     type QuarantineReport,
     type RunDreamingOptions,
@@ -31,19 +40,44 @@ import {
     type SuspectedConflict
 } from '../schemas.js';
 import {
+    CLEANROOM_PATCH_FALLBACK_REASON,
+    sanitizeTextForCleanroomWriter
+} from './chapter-pipeline.js';
+import {
     addUsage,
+    appendJsonlLineSafe,
+    clearHealPlan,
     countNonSpaceChars,
     createEmptyUsage,
     formatChapterKey,
     formatChapterTag,
     readOptionalText,
-    sha256Hex
+    readSignalsCursorState,
+    resolveSignalId,
+    sha256Hex,
+    upsertVolumeCardEntry,
+    writeHealPlan,
+    writeSignalsCursorState
 } from './helpers.js';
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_DREAM_WORD_THRESHOLD = 2000;
-const DEFAULT_DREAM_BUFFER_LIMIT = 4;
+const DEFAULT_DREAM_WORD_THRESHOLD = 15000;
+const DEFAULT_DREAM_BUFFER_LIMIT = 6;
+const DEFAULT_WARPED_ARCHIVE_AFTER_DAYS = 3;
+const DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS = 3;
+const DEFAULT_HEAL_GIT_LOG_MAX_COUNT = 2000;
+
+function isAbortError(err: unknown): boolean {
+    if (err instanceof Error && err.name === 'AbortError') {
+        return true;
+    }
+    return (
+        typeof err === 'object' &&
+        err !== null &&
+        (err as { name?: unknown }).name === 'AbortError'
+    );
+}
 
 export interface DreamingPipelineDeps {
     store: BookStore;
@@ -60,11 +94,179 @@ function isVoiceSpecimenEntry(text: string, continuationLines: string[]): boolea
 }
 
 async function appendSignalJsonl(bookRoot: string, signal: OpsSignal): Promise<string> {
-    const opsDir = join(bookRoot, '.ops');
-    await mkdir(opsDir, { recursive: true });
     const relPath = '.ops/signals.jsonl';
-    await appendFile(join(bookRoot, relPath), `${JSON.stringify(signal)}\n`, 'utf8');
+    await appendJsonlLineSafe(join(bookRoot, relPath), JSON.stringify(signal));
     return relPath;
+}
+
+/** 扫描未来线与实体卡中超过阈值的过期 WARPED 条目（排除已折叠进 Archived WARPED 的历史条目） */
+function scanExpiredWarpedEntries(
+    futureHorizonRaw: string | null | undefined,
+    entities: Readonly<Record<string, EntityProfile>>,
+    currentStoryDay: number,
+    warpedArchiveAfterDays: number
+): string[] {
+    const notes: string[] = [];
+    if (futureHorizonRaw) {
+        const lines = futureHorizonRaw.replace(/\r\n/g, '\n').split('\n');
+        for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (/^##\s+Archived\s+WARPED\b/i.test(line)) {
+                break;
+            }
+            if (!/\bWARPED\b/i.test(line)) continue;
+            const dayMatch = /(?:\bday|故事日)\s*[:：]\s*(-?\d+)/i.exec(line);
+            if (!dayMatch?.[1]) continue;
+            const entryDay = Number(dayMatch[1]);
+            if (Number.isFinite(entryDay) && currentStoryDay - entryDay > warpedArchiveAfterDays) {
+                notes.push(`- [future_horizon] ${line}`);
+            }
+        }
+    }
+
+    for (const profile of Object.values(entities)) {
+        const entityId = profile.metadata.entity_id;
+        for (const entry of [...profile.acquiredState, ...profile.recentBuffer]) {
+            const isWarped =
+                entry.status === 'WARPED' ||
+                /\bWARPED\b/i.test(entry.text) ||
+                entry.continuationLines.some((l) => /\bWARPED\b/i.test(l));
+            if (!isWarped) continue;
+            if (
+                entry.storyDay !== undefined &&
+                entry.storyDay > 0 &&
+                currentStoryDay - entry.storyDay > warpedArchiveAfterDays
+            ) {
+                notes.push(`- [实体 ${entityId}] day:${entry.storyDay} ${entry.text}`);
+            }
+        }
+    }
+    return notes;
+}
+
+/** 扫描尚未出场或退场但仍在伏笔/未来线活跃的角色 */
+function scanOffscreenEntityNotes(
+    explicit: OffscreenCharacterProgress[] | undefined,
+    entities: Readonly<Record<string, EntityProfile>>,
+    watermarkCh: number,
+    currentChapter: number,
+    openThreadsRaw: string | null | undefined,
+    futureHorizonRaw: string | null | undefined
+): OffscreenCharacterProgress[] {
+    const merged: OffscreenCharacterProgress[] = [...(explicit ?? [])];
+    const seen = new Set(merged.map((item) => item.entityId));
+    const horizonBody = (futureHorizonRaw ?? '').split(/^##\s+Archived\s+WARPED\b/im)[0] ?? '';
+    const activePlanningText = `${openThreadsRaw ?? ''}\n${horizonBody}`;
+    if (!activePlanningText.trim()) {
+        return merged;
+    }
+
+    for (const profile of Object.values(entities)) {
+        const entityId = profile.metadata.entity_id;
+        if (seen.has(entityId)) continue;
+        if (
+            profile.metadata.last_seen_ch <= 0 ||
+            profile.metadata.last_seen_ch > watermarkCh ||
+            profile.metadata.last_seen_ch >= currentChapter
+        ) {
+            continue;
+        }
+        const identityKeys = [
+            entityId,
+            profile.metadata.canonical_name,
+            ...profile.metadata.unique_aliases
+        ]
+            .map((k) => k.trim())
+            .filter((k) => k.length >= 2);
+        if (identityKeys.some((key) => activePlanningText.includes(key))) {
+            seen.add(entityId);
+            merged.push({
+                entityId,
+                pendingGoal: '伏笔/未来线存在关联未结动态',
+                progressNote: `距上次出场 (ch_${String(profile.metadata.last_seen_ch).padStart(4, '0')}) 已间隔 ${currentChapter - profile.metadata.last_seen_ch} 章`
+            });
+        }
+    }
+    return merged;
+}
+
+/** 扫描 L2 双轨章卡中跨多章复现但尚未建卡/补别名的异象锚点 */
+async function scanRecurringProseAnchors(
+    bookRoot: string,
+    currentVolume: number,
+    entities: Readonly<Record<string, EntityProfile>>,
+    promoteAnchorMinChapters: number
+): Promise<string[]> {
+    const knownKeys = new Set<string>();
+    for (const profile of Object.values(entities)) {
+        for (const rawKey of [
+            profile.metadata.entity_id,
+            profile.metadata.canonical_name,
+            ...profile.metadata.unique_aliases
+        ]) {
+            const norm = normalizeForQuoteMatch(rawKey);
+            if (norm.length >= 2) {
+                knownKeys.add(norm);
+            }
+        }
+    }
+
+    const l2Dir = join(bookRoot, 'index/L2_cards');
+    let cardFiles: string[] = [];
+    try {
+        cardFiles = (await readdir(l2Dir)).filter((f) => /^vol_\d+_cards\.md$/.test(f)).sort();
+    } catch {
+        cardFiles = [`vol_${String(currentVolume).padStart(2, '0')}_cards.md`];
+    }
+
+    const anchorCounts = new Map<string, { display: string; chapters: Set<number> }>();
+    for (const file of cardFiles) {
+        const raw = await readOptionalText(join(l2Dir, file));
+        if (!raw) continue;
+        const parsed = parseL2CardSections(raw);
+        for (const section of parsed.sections) {
+            for (const anchor of section.anomalyAnchors) {
+                const trimmed = anchor.trim();
+                if (!trimmed || trimmed === '无') continue;
+                const norm = normalizeForQuoteMatch(trimmed);
+                if (norm.length < 2 || knownKeys.has(norm)) continue;
+                const existing = anchorCounts.get(norm);
+                if (existing) {
+                    existing.chapters.add(section.chapterNumber);
+                } else {
+                    anchorCounts.set(norm, {
+                        display: trimmed,
+                        chapters: new Set([section.chapterNumber])
+                    });
+                }
+            }
+        }
+    }
+
+    const candidates: string[] = [];
+    for (const item of anchorCounts.values()) {
+        if (item.chapters.size >= promoteAnchorMinChapters) {
+            const chList = Array.from(item.chapters)
+                .sort((a, b) => a - b)
+                .map((ch) => formatChapterKey(ch))
+                .join(', ');
+            candidates.push(
+                `- "${item.display}" (已在 ${chList} 共 ${item.chapters.size} 章复现，建议评估转为 entities/item_*.md 或补入已有实体 unique_aliases)`
+            );
+        }
+    }
+    return candidates;
+}
+
+function buildDreamProseGateOptions(config: BookConfig): ProseGateOptions {
+    return {
+        enableAntiCliche: config.prose_gate.enable_anti_cliche,
+        enableCrossChapterSimile: config.prose_gate.enable_cross_chapter_simile,
+        crossChapterSimileWindow: config.prose_gate.cross_chapter_simile_window,
+        narrationSubjectivity: config.narration_subjectivity,
+        maxPatchParagraphs: config.repair_loop?.gate_max_patch_paragraphs ?? 15,
+        maxPatchParagraphRatio: config.repair_loop?.gate_max_patch_ratio ?? 0.6
+    };
 }
 
 function extractRecentL2Cards(
@@ -98,12 +300,14 @@ export class DreamingPipeline {
     private readonly roleRunner: RoleRunner;
     private readonly llm: LlmPort;
     private readonly system: SystemPort;
+    private readonly gate: StaticProseGate;
 
     constructor(deps: DreamingPipelineDeps) {
         this.store = deps.store;
         this.roleRunner = deps.roleRunner;
         this.llm = deps.llm;
         this.system = deps.system;
+        this.gate = new StaticProseGate();
     }
 
     /** 启动多轮 Dreamer 睡眠整理 */
@@ -117,8 +321,19 @@ export class DreamingPipeline {
                 throw new Error('并行窗口合并前不能整理主线实体');
             }
 
-            const wordThreshold = options.dreamWordThreshold ?? DEFAULT_DREAM_WORD_THRESHOLD;
-            const bufferLimit = options.dreamBufferLimit ?? DEFAULT_DREAM_BUFFER_LIMIT;
+            const dreamingCfg = snapshot.config.dreaming;
+            const wordThreshold =
+                options.dreamWordThreshold ??
+                dreamingCfg?.word_threshold ??
+                DEFAULT_DREAM_WORD_THRESHOLD;
+            const bufferLimit =
+                options.dreamBufferLimit ??
+                dreamingCfg?.buffer_limit ??
+                DEFAULT_DREAM_BUFFER_LIMIT;
+            const warpedArchiveAfterDays =
+                dreamingCfg?.warped_archive_after_days ?? DEFAULT_WARPED_ARCHIVE_AFTER_DAYS;
+            const promoteAnchorMinChapters =
+                dreamingCfg?.promote_anchor_min_chapters ?? DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS;
             const watermarkObj = await this.store.readDreamWatermark();
             const watermarkCh = watermarkObj?.last_dream_ch ?? 0;
             const currentStoryDay =
@@ -165,10 +380,54 @@ export class DreamingPipeline {
             }
 
             const wordTriggered = recentWordDelta >= wordThreshold;
+            // 若仅由字数达标或强制触发且无实体达到 bufferLimit，仍把水位以来出场实体纳入脏清单避免空转
+            if ((wordTriggered || options.force) && dirtyEntityIds.length === 0) {
+                for (const entityId of candidateIds) {
+                    const profile = snapshot.entities[entityId];
+                    if (!profile) continue;
+                    const eventBufferCount = profile.recentBuffer.filter(
+                        (e) => !isVoiceSpecimenEntry(e.text, e.continuationLines)
+                    ).length;
+                    dirtyEntityIds.push(entityId);
+                    dirtyEntityNotes.push(
+                        `- ${entityId} (${profile.metadata.canonical_name}): last_seen_ch=${profile.metadata.last_seen_ch}, 第4区缓冲条数=${eventBufferCount}`
+                    );
+                }
+            }
+
+            const openThreadsRaw = await readOptionalText(
+                join(this.store.bookRoot, 'world/open_threads.md')
+            );
+            const futureHorizonRaw = await readOptionalText(
+                join(this.store.bookRoot, 'world/future_horizon.md')
+            );
+
+            const offscreenList = scanOffscreenEntityNotes(
+                options.offscreenCharacters,
+                snapshot.entities,
+                watermarkCh,
+                options.currentChapter,
+                openThreadsRaw,
+                futureHorizonRaw
+            );
+            const expiredWarpedNotes = scanExpiredWarpedEntries(
+                futureHorizonRaw,
+                snapshot.entities,
+                currentStoryDay,
+                warpedArchiveAfterDays
+            );
+            const anchorCandidates = await scanRecurringProseAnchors(
+                this.store.bookRoot,
+                snapshot.worldState.frontmatter.current_volume,
+                snapshot.entities,
+                promoteAnchorMinChapters
+            );
+
             const bufferTriggered = dirtyEntityIds.length > 0;
             const hasHorizonWork =
-                (options.offscreenCharacters?.length ?? 0) > 0 ||
-                (options.coldArchiveCandidateIds?.length ?? 0) > 0;
+                offscreenList.length > 0 ||
+                expiredWarpedNotes.length > 0 ||
+                anchorCandidates.length > 0;
 
             if (!options.force && !wordTriggered && !bufferTriggered && !hasHorizonWork) {
                 return {
@@ -191,29 +450,38 @@ export class DreamingPipeline {
                 `- 上次 Dreaming 水位章号: ${watermarkCh}`,
                 `- 水位以来累计新增字数: ${recentWordDelta}`,
                 `- 建议校验/整理的脏实体范围（其余未出场干净实体严禁读取或修改）:`,
-                ...(dirtyEntityNotes.length > 0 ? dirtyEntityNotes : ['- (无达到缓冲上限的脏实体，请重点核对伏笔、未来惯性与节拍)']),
+                ...(dirtyEntityNotes.length > 0
+                    ? dirtyEntityNotes
+                    : ['- (无达到缓冲上限的脏实体，请重点核对伏笔、未来惯性与节拍)']),
                 '',
                 '## 自上次水位以来的 L2 双轨章卡',
                 recentL2Text,
-                ...(options.offscreenCharacters?.length
+                ...(offscreenList.length > 0
                     ? [
                           '',
                           '## 离场重要角色幕后待办',
-                          ...options.offscreenCharacters.map(
+                          ...offscreenList.map(
                               (c) =>
                                   `- ${c.entityId}: 目标="${c.pendingGoal}" | 当前进度="${c.progressNote}"`
                           )
                       ]
                     : []),
-                ...(options.coldArchiveCandidateIds?.length
+                ...(expiredWarpedNotes.length > 0
                     ? [
                           '',
-                          `## 长期退场候选实体 (建议核查归档阈值=${options.coldArchiveInactiveChapters ?? '默认'})`,
-                          options.coldArchiveCandidateIds.join(', ')
+                          `## 超期 WARPED 废止条目待折叠清单（超过 ${warpedArchiveAfterDays} 故事日，请统一折叠至 world/future_horizon.md 底部 ## Archived WARPED 小节，严禁写入 entities/cold_archive/）`,
+                          ...expiredWarpedNotes
+                      ]
+                    : []),
+                ...(anchorCandidates.length > 0
+                    ? [
+                          '',
+                          `## 跨章复现异象锚点建卡/补别名候选（出现 >= ${promoteAnchorMinChapters} 章，尚未匹配已知实体名录）`,
+                          ...anchorCandidates
                       ]
                     : []),
                 '',
-                '请按规范使用 book_read / book_grep / book_glob 核实相关原稿与世界文档，通过 book_edit 在隔离暂存区联动修改脏实体与计划文件（严禁修改 manuscripts/ 或未出场干净实体），最后调用 `yield_dream_commit` 原子提交。'
+                '请按规范使用 book_read / book_grep / book_glob 核实相关原稿与世界文档，通过 book_edit 在隔离暂存区联动修改脏实体与计划文件（严禁修改 manuscripts/、未出场干净实体及 world/current_arc_envelope.md / world/static_base_and_voice.md，冷宫归档仅限换卷时执行），最后调用 `yield_dream_commit` 原子提交。'
             ].join('\n');
 
             const runRes = await this.roleRunner.runMultiTurn<DreamCommitRecord>({
@@ -244,16 +512,15 @@ export class DreamingPipeline {
 
     /**
      * 跨章穿帮三级全自动梯度自愈：
-     * 1. SOFT_MINOR -> 投递 RETCON 信号；
-     * 2. SINGLE_POINT_HARD -> 净室局部 Patch + hash/视图同步刷新；
-     * 3. CASCADING_HARD -> 对照 max_auto_rollback_chapters 自动备份回滚或熔断 QUARANTINED / SAFE_HALT。
+     * 1. SOFT_MINOR -> 短锁内投递 RETCON 信号并提交；
+     * 2. SINGLE_POINT_HARD -> 单次 tx.lock 内净室 RoleRunner('patch') + StaticProseGate 复检 + WAL/L2/hash 原子提交（同步回调在锁外）；
+     * 3. CASCADING_HARD -> 短锁内快照信号/声纹 + 备份回滚 + 写 .ops/heal_plan.json -> 释放 tx.lock 后无锁重跑（失败写 QUARANTINED）。
      */
     async healCrossChapterConflicts(
         conflicts: SuspectedConflict[],
         options: HealConflictsOptions = {}
     ): Promise<HealConflictsResult> {
-        return await withTraceRun(this.store.bookRoot, 'heal', {}, () =>
-            this.store.withTxLock(async () => {
+        return await withTraceRun(this.store.bookRoot, 'heal', {}, async () => {
             const usage = createEmptyUsage();
             const results: HealConflictItemResult[] = [];
             let quarantined = false;
@@ -265,6 +532,12 @@ export class DreamingPipeline {
             };
 
             for (const conflict of conflicts) {
+                if (options.signal?.aborted) {
+                    const abortErr = new Error('跨章自愈已中止');
+                    abortErr.name = 'AbortError';
+                    throw abortErr;
+                }
+
                 const pathA = join(
                     this.store.bookRoot,
                     'manuscripts',
@@ -286,7 +559,7 @@ export class DreamingPipeline {
                     continue;
                 }
 
-                // 第一步：双侧原句去标点存在性代码验真
+                // 第一步：双侧原句去标点存在性代码验真（只读操作在锁外执行）
                 const verification = verifyDualQuotes(
                     conflict.quoteA,
                     textA,
@@ -311,7 +584,6 @@ export class DreamingPipeline {
 
                 let severity: ConflictSeverity;
                 let reason = conflict.description;
-                let patchedSegment: string | undefined;
 
                 if (conflict.severityHint && conflict.severityHint !== 'SINGLE_POINT_HARD') {
                     severity = conflict.severityHint;
@@ -325,7 +597,7 @@ export class DreamingPipeline {
                         '',
                         '请判定冲突级别：',
                         '- SOFT_MINOR: 天气体感口误、次要环境微差，投递 RETCON 信号由下章圆回',
-                        '- SINGLE_POINT_HARD: 生死/唯一物/地理硬冲突，但下游未依赖，需在 patched_segment 中提供替代后文违规句的修正文本',
+                        '- SINGLE_POINT_HARD: 生死/唯一物/地理硬冲突，但下游未依赖',
                         '- CASCADING_HARD: 下游章节已建立在该错误事实之上'
                     ].join('\n');
 
@@ -347,25 +619,26 @@ export class DreamingPipeline {
 
                     severity = conflict.severityHint ?? classified.data.severity;
                     reason = classified.data.reason;
-                    patchedSegment = classified.data.patched_segment;
                 }
 
-                // 级别 1：软微瑕 -> 投递 RETCON 信号
+                // 级别 1：软微瑕 -> 短锁内投递 RETCON 信号
                 if (severity === 'SOFT_MINOR') {
-                    const sigPath = await appendSignalJsonl(this.store.bookRoot, {
-                        type: 'RETCON',
-                        created_at: new Date().toISOString(),
-                        chapter: conflict.chapterB,
-                        conflict_id: conflict.conflictId,
-                        chapter_a: conflict.chapterA,
-                        chapter_b: conflict.chapterB,
-                        reason
+                    await this.store.withTxLock(async () => {
+                        const sigPath = await appendSignalJsonl(this.store.bookRoot, {
+                            type: 'RETCON',
+                            created_at: new Date().toISOString(),
+                            chapter: conflict.chapterB,
+                            conflict_id: conflict.conflictId,
+                            chapter_a: conflict.chapterA,
+                            chapter_b: conflict.chapterB,
+                            reason
+                        });
+                        await this.system.commitPaths(
+                            this.store.bookRoot,
+                            [sigPath],
+                            `fix(${formatChapterTag(conflict.chapterB)}): emit RETCON signal for ${conflict.conflictId}`
+                        );
                     });
-                    await this.system.commitPaths(
-                        this.store.bookRoot,
-                        [sigPath],
-                        `fix(${formatChapterTag(conflict.chapterB)}): emit RETCON signal for ${conflict.conflictId}`
-                    );
                     results.push({
                         conflictId: conflict.conflictId,
                         action: 'RETCON_SIGNAL',
@@ -375,69 +648,230 @@ export class DreamingPipeline {
                     continue;
                 }
 
-                // 级别 2：单点硬穿帮 -> 净室局部 Patch + Sync
+                // 级别 2：单点硬穿帮 -> 单把 tx.lock 内完成净室 RoleRunner('patch') + StaticProseGate + WAL + L2/hash 原子提交
                 if (severity === 'SINGLE_POINT_HARD') {
-                    let replacement = patchedSegment;
-                    if (!replacement || replacement.trim().length === 0) {
-                        const patchRes = await generateTraced(
-                            this.llm,
-                            {
-                                pool: 'strong_creative',
-                                traceStage: 'heal.patch',
-                                temperature: 0.3,
-                                staticPrefixBlocks: [
-                                    '你是小说跨章单点硬穿帮局部修补专员。请仅输出替换目标违规句/段的修正正文，保持人称、语气与前后文连贯。'
-                                ],
-                                dynamicTail: [
-                                    `## 冲突描述\n${reason}`,
-                                    `## 前文锚点 (${formatChapterKey(conflict.chapterA)})\n${conflict.quoteA}`,
-                                    `## 需改写的后文原句 (${formatChapterKey(conflict.chapterB)})\n${conflict.quoteB}`,
-                                    `## 后文完整上下文\n${textB}`
-                                ].join('\n\n')
-                            },
-                            options.signal
+                    const relChapterPath = `manuscripts/${formatChapterKey(conflict.chapterB)}.md`;
+                    const patchOutcome = await this.store.withTxLock(async () => {
+                        const currentTextB = await readOptionalText(pathB);
+                        if (currentTextB === null) {
+                            return { missing: true as const };
+                        }
+                        const liveVerify = verifyDualQuotes(
+                            conflict.quoteA,
+                            textA,
+                            conflict.quoteB,
+                            currentTextB
                         );
-                        addUsage(usage, patchRes.usage);
-                        replacement =
-                            stripBlockingTags(patchRes.text).cleanText.trim() || conflict.quoteB;
+                        if (!liveVerify.passed) {
+                            return { stale: true as const };
+                        }
+
+                        const patchRoleCfg = await this.roleRunner.loadRoleConfig(
+                            'patch',
+                            this.store.bookRoot
+                        );
+                        if (patchRoleCfg.cleanroom || patchRoleCfg.maxReadCalls > 0) {
+                            throw new ValidationError(
+                                `Patch 角色配置违规：必须保持 cleanroom=false 且 maxReadCalls=0（当前 cleanroom=${String(patchRoleCfg.cleanroom)}, maxReadCalls=${patchRoleCfg.maxReadCalls}）`
+                            );
+                        }
+
+                        const snapshot = await this.store.loadSnapshot();
+                        const { cardRelPath, cardVolume, cardRaw, section } =
+                            await this.locateChapterL2Card(
+                                conflict.chapterB,
+                                snapshot.worldState.frontmatter.current_volume
+                            );
+                        const chapterStoryDay = this.resolveChapterStoryDay(
+                            section?.dayLabel,
+                            snapshot.worldState.frontmatter.story_day
+                        );
+
+                        // 为净室 Patch 装配正向文风锁与出场实体卡片（严禁暴露全知禁区与 WARPED）
+                        const staticVoiceRaw = await readOptionalText(
+                            join(this.store.bookRoot, 'world/static_base_and_voice.md')
+                        );
+                        const staticVoiceClean = staticVoiceRaw
+                            ? stripWriterRestrictedDirectives(staticVoiceRaw) ?? ''
+                            : '';
+                        const slicer = new ViewSlicer();
+                        const focusEntityIds =
+                            section && section.appearedEntityIds.length > 0
+                                ? section.appearedEntityIds
+                                : Object.keys(snapshot.entities);
+                        const writerView = slicer.slice({
+                            snapshot,
+                            forRole: 'writer',
+                            currentCh: conflict.chapterB,
+                            targetDay: chapterStoryDay,
+                            timelineMode: 'MAINLINE',
+                            entityIds: focusEntityIds
+                        });
+                        const entityCardsText = Object.values(writerView.entities)
+                            .map((profile) =>
+                                renderEntityProfile(profile, {
+                                    compactCard: false,
+                                    stripWarped: true,
+                                    cleanroomDisplay: true
+                                })
+                            )
+                            .filter((block) => block.trim().length > 0)
+                            .join('\n\n');
+
+                        const { paragraphs } = analyzeParagraphs(currentTextB);
+                        const targetParagraphIndices = this.resolveTargetParagraphIndices(
+                            paragraphs,
+                            conflict.quoteB,
+                            liveVerify.sideB.startLine,
+                            liveVerify.sideB.endLine
+                        );
+                        const numberedParagraphs = paragraphs
+                            .map((p, idx) => `[${idx}] ${p}`)
+                            .join('\n\n');
+
+                        const cleanReason =
+                            sanitizeTextForCleanroomWriter(reason) || CLEANROOM_PATCH_FALLBACK_REASON;
+                        const cleanQuoteA = sanitizeTextForCleanroomWriter(conflict.quoteA);
+                        const proseGateOptions = buildDreamProseGateOptions(snapshot.config);
+
+                        const taskPrompt = [
+                            staticVoiceClean ? `## 抽象文风纪律锁\n${staticVoiceClean}` : '',
+                            entityCardsText ? `## 相关出场实体基准（净室脱敏）\n${entityCardsText}` : '',
+                            `## 跨章单点硬穿帮修补目标\n${cleanReason}`,
+                            cleanQuoteA
+                                ? `## 前文锚点基准 (${formatChapterKey(conflict.chapterA)})\n${cleanQuoteA}`
+                                : '',
+                            `## 待修补段落索引 (0-based)\n[${targetParagraphIndices.join(', ')}]`,
+                            `## 需改写的后文原句 (${formatChapterKey(conflict.chapterB)})\n${conflict.quoteB}`,
+                            `## 当前待修补正文（0-based 段落索引）\n${numberedParagraphs}`,
+                            '请对照 0-based 段落索引调用 `patch_paragraphs` 精准修改目标段落消除事实穿帮，保持人称、语气与前后文连贯，确认通过后调用 `yield_patched_draft` 提交定稿。'
+                        ]
+                            .filter(Boolean)
+                            .join('\n\n');
+
+                        const runRes = await this.roleRunner.runMultiTurn<YieldPatchedDraftResult>({
+                            roleId: patchRoleCfg.id,
+                            stage: 'HEAL_PATCH',
+                            chapterNumber: conflict.chapterB,
+                            bookRoot: this.store.bookRoot,
+                            bookConfig: snapshot.config,
+                            draftText: currentTextB,
+                            proseGateOptions,
+                            enforceProseGateOnYield: true,
+                            taskPrompt,
+                            signal: options.signal
+                        });
+                        addUsage(usage, runRes.usage);
+
+                        const patchedText = runRes.yieldResult.patchedProse;
+                        const gateResult = this.gate.evaluate(patchedText, proseGateOptions);
+                        if (!gateResult.passed) {
+                            throw new ValidationError(
+                                `Tier 2 跨章修补未通过静态文风门禁 (${gateResult.violations.map((v) => v.ruleId).join(', ')})`
+                            );
+                        }
+
+                        // 同一把锁内登记 WAL、写回手稿、刷新双轨 L2 卡与 chapter_hashes 后单次原子提交
+                        const normPatched = normalizeForQuoteMatch(patchedText);
+                        const preservedAnchors = (section?.anomalyAnchors ?? []).filter(
+                            (anchor) => {
+                                const trimmed = anchor.trim();
+                                return (
+                                    trimmed.length > 0 &&
+                                    trimmed !== '无' &&
+                                    normPatched.includes(normalizeForQuoteMatch(trimmed))
+                                );
+                            }
+                        );
+                        const plotSummary =
+                            section?.plotSummary?.trim() ||
+                            cleanReason ||
+                            formatChapterKey(conflict.chapterB);
+                        const nextCardContent = upsertVolumeCardEntry(
+                            cardRaw,
+                            cardVolume,
+                            conflict.chapterB,
+                            chapterStoryDay,
+                            plotSummary,
+                            section?.appearedEntityIds ?? [],
+                            preservedAnchors
+                        );
+
+                        const chKey = formatChapterKey(conflict.chapterB);
+                        const currentTx = await this.store.readTxState();
+                        const nextTx: TxState = {
+                            ...currentTx,
+                            chapter_hashes: {
+                                ...currentTx.chapter_hashes,
+                                [chKey]: sha256Hex(patchedText)
+                            },
+                            updated_at: new Date().toISOString()
+                        };
+
+                        await this.store.recordPendingWrites([relChapterPath, cardRelPath]);
+                        await writeFile(pathB, patchedText, 'utf8');
+                        await mkdir(join(this.store.bookRoot, 'index/L2_cards'), {
+                            recursive: true
+                        });
+                        await writeFile(join(this.store.bookRoot, cardRelPath), nextCardContent, 'utf8');
+                        await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+                        await writeFile(
+                            join(this.store.bookRoot, '.ops/tx_state.json'),
+                            `${JSON.stringify(nextTx, null, 4)}\n`,
+                            'utf8'
+                        );
+                        await this.system.commitPaths(
+                            this.store.bookRoot,
+                            [relChapterPath, cardRelPath, '.ops/tx_state.json'],
+                            `fix(${formatChapterTag(conflict.chapterB)}): cleanroom patch single-point conflict & refresh L2/hash`
+                        );
+
+                        return {
+                            missing: false as const,
+                            stale: false as const,
+                            sideALine: verification.sideA.lineNumber,
+                            sideBLine: liveVerify.sideB.lineNumber
+                        };
+                    });
+
+                    if ('missing' in patchOutcome && patchOutcome.missing) {
+                        results.push({
+                            conflictId: conflict.conflictId,
+                            action: 'DISCARDED_HALLUCINATION'
+                        });
+                        continue;
+                    }
+                    if ('stale' in patchOutcome && patchOutcome.stale) {
+                        results.push({
+                            conflictId: conflict.conflictId,
+                            action: 'DISCARDED_HALLUCINATION'
+                        });
+                        continue;
                     }
 
-                    const patchedText = this.applyLineRangePatch(
-                        textB,
-                        verification.sideB.startLine,
-                        verification.sideB.endLine,
-                        replacement
-                    );
-                    const relChapterPath = `manuscripts/${formatChapterKey(conflict.chapterB)}.md`;
-                    await writeFile(pathB, patchedText, 'utf8');
-
+                    // Sync 回调在释放 tx.lock 之后执行，彻底避免不可重入锁死锁
                     if (options.onSyncAfterPatch) {
                         await options.onSyncAfterPatch(conflict.chapterB);
                     }
 
-                    await this.refreshChapterHashAndCommit(
-                        conflict.chapterB,
-                        relChapterPath,
-                        patchedText
-                    );
-
                     results.push({
                         conflictId: conflict.conflictId,
                         action: 'PATCHED_IN_PLACE',
-                        sideALine: verification.sideA.lineNumber,
-                        sideBLine: verification.sideB.lineNumber
+                        sideALine: patchOutcome.sideALine,
+                        sideBLine: patchOutcome.sideBLine
                     });
                     continue;
                 }
 
-                // 级别 3：连带支线硬穿帮 -> 自动备份回滚或熔断 QUARANTINED / SAFE_HALT
+                // 级别 3：连带支线硬穿帮 -> 短锁内快照+回滚+写断点 -> 释放 tx.lock 后无锁重跑 -> 失败熔断 QUARANTINED / SAFE_HALT
                 const maxAutoRollback =
                     options.maxAutoRollbackChapters ?? config.max_auto_rollback_chapters;
-                const txState = await this.store.readTxState();
-
+                const healGitLogMaxCount =
+                    config.ops_and_sync?.heal_git_log_max_count ?? DEFAULT_HEAL_GIT_LOG_MAX_COUNT;
+                const txStateBefore = await this.store.readTxState();
                 const affectedChapters = this.collectAffectedChapters(
                     conflict.chapterB,
-                    txState.last_committed_ch,
+                    txStateBefore.last_committed_ch,
                     conflict.downstreamDependentChapters
                 );
                 const rollbackChapters = affectedChapters.length;
@@ -445,23 +879,111 @@ export class DreamingPipeline {
 
                 let rerunDeadlocked = false;
                 let backupTag: string | undefined;
+                const targetChapter = Math.max(0, conflict.chapterB - 1);
 
                 if (maxAutoRollback > 0 && rollbackChapters <= maxAutoRollback) {
-                    backupTag = `backup/pre-heal-${formatChapterTag(conflict.chapterB)}-${Date.now()}`;
-                    await this.system.createTag(
-                        this.store.bookRoot,
-                        backupTag,
-                        `Backup before auto-rollback for ${conflict.conflictId}`
-                    );
+                    const prepared = await this.store.withTxLock(async () => {
+                        const txState = await this.store.readTxState();
+                        const signalsRaw = await readOptionalText(
+                            join(this.store.bookRoot, '.ops/signals.jsonl')
+                        );
+                        const cursorState = await readSignalsCursorState(this.store.bookRoot);
+                        const voiceSamplesRaw = await readOptionalText(
+                            join(this.store.bookRoot, '.ops/voice_samples.yaml')
+                        );
+                        const lockPath = join(this.store.bookRoot, '.ops/tx.lock');
+                        const currentLockContent = await readOptionalText(lockPath);
 
-                    const targetChapter = Math.max(0, conflict.chapterB - 1);
-                    const rollbackRef = options.resolveRollbackRef
-                        ? await options.resolveRollbackRef(targetChapter)
-                        : await this.findRollbackRef(targetChapter);
+                        const tag = `backup/pre-heal-${formatChapterTag(conflict.chapterB)}-${Date.now()}`;
+                        await this.system.createTag(
+                            this.store.bookRoot,
+                            tag,
+                            `Backup before auto-rollback for ${conflict.conflictId}`
+                        );
 
-                    await this.system.resetHard(this.store.bookRoot, rollbackRef);
-                    await this.system.cleanUntracked(this.store.bookRoot, ['.ops/**']);
+                        const rollbackRef = options.resolveRollbackRef
+                            ? await options.resolveRollbackRef(targetChapter)
+                            : await this.findRollbackRef(targetChapter, healGitLogMaxCount);
 
+                        await this.system.resetHard(this.store.bookRoot, rollbackRef);
+                        // 立即清除或还原被历史提交误带出的 .ops/tx.lock，保证退出短锁时锁文件被干净释放
+                        if (currentLockContent !== null) {
+                            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+                            await writeFile(lockPath, currentLockContent, 'utf8');
+                        } else {
+                            await rm(lockPath, { force: true });
+                        }
+                        await this.system.cleanUntracked(this.store.bookRoot, ['.ops/**']);
+
+                        // 合并写回保留的信号队列与声纹池，并追加本次正向重跑修正信号
+                        await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+                        const preservedLines = (signalsRaw ?? '')
+                            .split(/\r?\n/)
+                            .map((line) => line.trim())
+                            .filter((line) => line.length > 0);
+                        const rerunSignal: OpsSignal = {
+                            type: 'RETCON',
+                            created_at: new Date().toISOString(),
+                            chapter: conflict.chapterB,
+                            conflict_id: conflict.conflictId,
+                            chapter_a: conflict.chapterA,
+                            chapter_b: conflict.chapterB,
+                            reason: `[HEAL_ROLLBACK_CONSTRAINT] ${reason}`
+                        };
+                        await writeFile(
+                            join(this.store.bookRoot, '.ops/signals.jsonl'),
+                            `${[...preservedLines, JSON.stringify(rerunSignal)].join('\n')}\n`,
+                            'utf8'
+                        );
+                        const parsedPreserved = preservedLines.flatMap((line) => {
+                            try {
+                                const obj = JSON.parse(line) as Record<string, unknown>;
+                                return [obj];
+                            } catch {
+                                return [];
+                            }
+                        });
+                        const rollbackSignalIds = new Set<string>();
+                        for (const sigObj of parsedPreserved) {
+                            const sigChapter =
+                                typeof sigObj['chapter'] === 'number' ? sigObj['chapter'] : 0;
+                            if (sigChapter >= conflict.chapterB) {
+                                rollbackSignalIds.add(resolveSignalId(sigObj));
+                            }
+                        }
+                        const filteredConsumedIds = cursorState.consumedIds.filter(
+                            (id) => !rollbackSignalIds.has(id)
+                        );
+                        await writeSignalsCursorState(this.store.bookRoot, {
+                            consumedLines: Math.min(
+                                cursorState.consumedLines,
+                                Math.max(0, preservedLines.length - rollbackSignalIds.size)
+                            ),
+                            consumedIds: filteredConsumedIds
+                        });
+                        if (voiceSamplesRaw !== null) {
+                            await writeFile(
+                                join(this.store.bookRoot, '.ops/voice_samples.yaml'),
+                                voiceSamplesRaw,
+                                'utf8'
+                            );
+                        }
+
+                        await writeHealPlan(this.store.bookRoot, {
+                            conflictId: conflict.conflictId,
+                            backupTag: tag,
+                            fromChapter: conflict.chapterB,
+                            toChapter: Math.max(conflict.chapterB, txState.last_committed_ch),
+                            nextChapter: conflict.chapterB,
+                            constraint: reason
+                        });
+
+                        return { backupTag: tag };
+                    });
+
+                    backupTag = prepared.backupTag;
+
+                    // 严格在释放 tx.lock 后执行重跑回调（内部 stepChapter 可安全独立取锁）
                     if (options.onAutoRerun) {
                         try {
                             const rerunOutcome = await options.onAutoRerun({
@@ -473,12 +995,16 @@ export class DreamingPipeline {
                             if (!rerunOutcome.success || rerunOutcome.stillConflicting) {
                                 rerunDeadlocked = true;
                             }
-                        } catch {
+                        } catch (err) {
+                            if (options.signal?.aborted || isAbortError(err)) {
+                                throw err;
+                            }
                             rerunDeadlocked = true;
                         }
                     }
 
                     if (!rerunDeadlocked) {
+                        await clearHealPlan(this.store.bookRoot);
                         results.push({
                             conflictId: conflict.conflictId,
                             action: 'AUTO_ROLLED_BACK_AND_RERUN',
@@ -503,17 +1029,19 @@ export class DreamingPipeline {
                     created_at: new Date().toISOString()
                 });
 
-                await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-                await writeFile(
-                    join(this.store.bookRoot, '.ops/quarantine_report.json'),
-                    `${JSON.stringify(report, null, 4)}\n`,
-                    'utf8'
-                );
-                await writeFile(
-                    join(this.store.bookRoot, '.ops/safe_halt.json'),
-                    `${JSON.stringify({ ...report, status: 'SAFE_HALT' }, null, 4)}\n`,
-                    'utf8'
-                );
+                await this.store.withTxLock(async () => {
+                    await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
+                    await writeFile(
+                        join(this.store.bookRoot, '.ops/quarantine_report.json'),
+                        `${JSON.stringify(report, null, 4)}\n`,
+                        'utf8'
+                    );
+                    await writeFile(
+                        join(this.store.bookRoot, '.ops/safe_halt.json'),
+                        `${JSON.stringify({ ...report, status: 'SAFE_HALT' }, null, 4)}\n`,
+                        'utf8'
+                    );
+                });
 
                 quarantined = true;
                 quarantineReport = report;
@@ -534,53 +1062,96 @@ export class DreamingPipeline {
                 quarantineReport,
                 usage
             };
-        }));
-    }
-
-    private applyLineRangePatch(
-        sourceText: string,
-        startLine: number | null,
-        endLine: number | null,
-        replacement: string
-    ): string {
-        if (startLine === null || endLine === null || startLine < 1 || endLine < startLine) {
-            return sourceText;
-        }
-        const lines = sourceText.split(/\r?\n/);
-        const before = lines.slice(0, startLine - 1);
-        const after = lines.slice(endLine);
-        const merged = [...before, replacement, ...after].join('\n');
-        return analyzeParagraphs(merged).paragraphs.length > 0 ? merged : sourceText;
-    }
-
-    private async refreshChapterHashAndCommit(
-        chapterNumber: number,
-        relChapterPath: string,
-        updatedContent: string
-    ): Promise<void> {
-        const chKey = formatChapterKey(chapterNumber);
-        await this.store.runWithTxLock(async () => {
-            const currentTx = await this.store.readTxState();
-            const nextTx: TxState = {
-                ...currentTx,
-                chapter_hashes: {
-                    ...currentTx.chapter_hashes,
-                    [chKey]: sha256Hex(updatedContent)
-                },
-                updated_at: new Date().toISOString()
-            };
-            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-            await writeFile(
-                join(this.store.bookRoot, '.ops/tx_state.json'),
-                `${JSON.stringify(nextTx, null, 4)}\n`,
-                'utf8'
-            );
-            await this.system.commitPaths(
-                this.store.bookRoot,
-                [relChapterPath, '.ops/tx_state.json'],
-                `fix(${formatChapterTag(chapterNumber)}): patch single-point conflict & refresh view`
-            );
         });
+    }
+
+    private async locateChapterL2Card(
+        chapterNumber: number,
+        defaultVolume: number
+    ): Promise<{
+        cardRelPath: string;
+        cardVolume: number;
+        cardRaw: string | null;
+        section: ReturnType<typeof parseL2CardSections>['sections'][number] | undefined;
+    }> {
+        const defaultVolPad = String(defaultVolume).padStart(2, '0');
+        const defaultRel = `index/L2_cards/vol_${defaultVolPad}_cards.md`;
+        const defaultRaw = await readOptionalText(join(this.store.bookRoot, defaultRel));
+        const defaultSec = defaultRaw
+            ? parseL2CardSections(defaultRaw).sections.find((s) => s.chapterNumber === chapterNumber)
+            : undefined;
+        if (defaultSec) {
+            return {
+                cardRelPath: defaultRel,
+                cardVolume: defaultVolume,
+                cardRaw: defaultRaw,
+                section: defaultSec
+            };
+        }
+
+        const l2Dir = join(this.store.bookRoot, 'index/L2_cards');
+        try {
+            const files = (await readdir(l2Dir)).filter((f) => /^vol_(\d+)_cards\.md$/.test(f)).sort();
+            for (const file of files) {
+                const rel = `index/L2_cards/${file}`;
+                const raw = await readOptionalText(join(this.store.bookRoot, rel));
+                if (!raw) continue;
+                const sec = parseL2CardSections(raw).sections.find(
+                    (s) => s.chapterNumber === chapterNumber
+                );
+                if (sec) {
+                    const parsedVol = Number(/^vol_(\d+)_cards\.md$/.exec(file)?.[1] ?? defaultVolume);
+                    return {
+                        cardRelPath: rel,
+                        cardVolume: Number.isFinite(parsedVol) ? parsedVol : defaultVolume,
+                        cardRaw: raw,
+                        section: sec
+                    };
+                }
+            }
+        } catch {
+            // index/L2_cards 目录尚未建立时回退当前卷文件
+        }
+
+        return {
+            cardRelPath: defaultRel,
+            cardVolume: defaultVolume,
+            cardRaw: defaultRaw,
+            section: undefined
+        };
+    }
+
+    private resolveChapterStoryDay(dayLabel: string | undefined, fallbackStoryDay: number): number {
+        if (!dayLabel) return fallbackStoryDay;
+        const m = /^day:(-?\d+)$/i.exec(dayLabel.trim());
+        if (!m?.[1]) return fallbackStoryDay;
+        const n = Number(m[1]);
+        return Number.isFinite(n) ? n : fallbackStoryDay;
+    }
+
+    private resolveTargetParagraphIndices(
+        paragraphs: readonly string[],
+        quoteB: string,
+        startLine: number | null,
+        endLine: number | null
+    ): number[] {
+        const normQuote = normalizeForQuoteMatch(quoteB);
+        const byQuote: number[] = [];
+        for (let i = 0; i < paragraphs.length; i += 1) {
+            const p = paragraphs[i] ?? '';
+            if (normQuote && normalizeForQuoteMatch(p).includes(normQuote)) {
+                byQuote.push(i);
+            }
+        }
+        if (byQuote.length > 0) {
+            return byQuote;
+        }
+        if (startLine !== null && endLine !== null && paragraphs.length > 0) {
+            // 退化按行号粗略定位（至少包含一个有效 0-based 段落索引）
+            const clamped = Math.min(paragraphs.length - 1, Math.max(0, startLine > 1 ? 1 : 0));
+            return [clamped];
+        }
+        return paragraphs.length > 1 ? [1] : [0];
     }
 
     private collectAffectedChapters(
@@ -622,12 +1193,22 @@ export class DreamingPipeline {
         return total;
     }
 
-    private async findRollbackRef(targetChapter: number): Promise<string> {
+    private async findRollbackRef(
+        targetChapter: number,
+        maxCount = DEFAULT_HEAL_GIT_LOG_MAX_COUNT
+    ): Promise<string> {
         // 1. 优先从 Git commit log 逐条检索 <= targetChapter 的最近有效稳定基线（依据 .ops/tx_state.json 与原稿列表）
         try {
             const { stdout } = await execFileAsync(
                 'git',
-                ['-C', this.store.bookRoot, 'log', '-n', '250', '--format=%H'],
+                [
+                    '-C',
+                    this.store.bookRoot,
+                    'log',
+                    '-n',
+                    String(Math.max(1, Math.floor(maxCount))),
+                    '--format=%H'
+                ],
                 { encoding: 'utf8' }
             );
             const commits = stdout

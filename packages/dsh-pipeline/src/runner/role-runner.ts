@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { AgentHandle } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -8,6 +8,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
     generateTraced,
+    traceEvent,
     type ApplyStatePatchOptions,
     type BookConfig,
     type CleanroomRequest,
@@ -61,6 +62,8 @@ export interface RunMultiTurnOptions {
     maxTokens?: number | undefined;
     allowedOpsPaths?: string[] | undefined;
     allowedOpsWritePaths?: string[] | undefined;
+    allowedChapterFiles?: string[] | undefined;
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
     targetChapter?: number | undefined;
     targetDay?: number | undefined;
     chapterGoal?: string | undefined;
@@ -236,7 +239,10 @@ export class RoleRunner {
     private readonly defaultOnStageEvent: ((event: StageStreamSseEvent) => void) | undefined;
     private readonly activeHandles = new Set<AgentHandle>();
     private readonly activePromises = new Set<Promise<unknown>>();
-    private readonly liveSessionDetails = new Map<string, StageSessionDetail>();
+    private readonly liveSessionDetails = new Map<
+        string,
+        { bookRoot: string; detail: StageSessionDetail }
+    >();
 
     constructor(deps: RoleRunnerDeps) {
         this.execCtx = deps.ctx;
@@ -258,9 +264,54 @@ export class RoleRunner {
         return this.activePromises.size;
     }
 
-    /** 查询内存中的活跃或近期阶段会话明细 */
-    getLiveSessionDetail(sessionId: string): StageSessionDetail | undefined {
-        return this.liveSessionDetails.get(sessionId);
+    /** 读取指定角色配置（复用当前配置好 presetRoot 的 RoleLoader） */
+    async loadRoleConfig(roleId: string, bookRoot?: string): Promise<LoadedRoleConfig> {
+        return await this.roleLoader.loadRoleConfig(roleId, bookRoot);
+    }
+
+    /** 查询内存中的活跃阶段会话明细（按 bookRoot 隔离） */
+    getLiveSessionDetail(sessionId: string, bookRoot?: string): StageSessionDetail | undefined {
+        const entry = this.liveSessionDetails.get(sessionId);
+        if (!entry) {
+            return undefined;
+        }
+        const targetRoot = bookRoot ?? this.storeService.bookRoot;
+        if (targetRoot && resolve(targetRoot) !== entry.bookRoot) {
+            return undefined;
+        }
+        return entry.detail;
+    }
+
+    /** 读取指定 sessionId 的阶段运行明细（优先查所属 bookRoot 活跃内存，否则读取对应 bookRoot 持久化日志） */
+    async getSessionDetail(
+        sessionId: string,
+        bookRoot?: string
+    ): Promise<StageSessionDetail | null> {
+        if (!SESSION_ID_SAFE_RE.test(sessionId)) {
+            throw new Error(`非法的 sessionId 格式: ${sessionId}`);
+        }
+        const live = this.getLiveSessionDetail(sessionId, bookRoot);
+        if (live) {
+            return live;
+        }
+        const effectiveRoot = bookRoot ?? this.storeService.bookRoot;
+        if (!effectiveRoot || effectiveRoot.trim().length === 0) {
+            return null;
+        }
+        const logPath = join(resolve(effectiveRoot), '.ops/session_logs', `${sessionId}.json`);
+        try {
+            const raw = await readFile(logPath, 'utf8');
+            const parsed = JSON.parse(raw) as StageSessionDetail;
+            return {
+                ...parsed,
+                live: false
+            };
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code === 'ENOENT') {
+                return null;
+            }
+            throw err;
+        }
     }
 
     /** 通知所有在途多轮 Agent 取消并等待全部运行句柄与清理流程完全排空 */
@@ -313,11 +364,14 @@ export class RoleRunner {
             maxTokens: options.maxTokens,
             allowedOpsPaths: options.allowedOpsPaths,
             allowedOpsWritePaths: options.allowedOpsWritePaths,
+            allowedChapterFiles: options.allowedChapterFiles,
+            stagingOverlay: options.stagingOverlay,
             targetChapter: options.targetChapter,
             targetDay: options.targetDay,
             chapterGoal: options.chapterGoal,
             draftText: options.draftText,
             draftPath: options.draftPath,
+            chapterNumberForTools: options.chapterNumberForTools,
             timelineMode: options.timelineMode,
             allowInnateMutation: options.allowInnateMutation,
             deferCommit: options.deferCommit,
@@ -361,11 +415,14 @@ export class RoleRunner {
         maxTokens?: number | undefined;
         allowedOpsPaths?: string[] | undefined;
         allowedOpsWritePaths?: string[] | undefined;
+        allowedChapterFiles?: string[] | undefined;
+        stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
         targetChapter?: number | undefined;
         targetDay?: number | undefined;
         chapterGoal?: string | undefined;
         draftText?: string | undefined;
         draftPath?: string | undefined;
+        chapterNumberForTools?: number | undefined;
         timelineMode?: TimelineMode | undefined;
         allowInnateMutation?: boolean | undefined;
         deferCommit?: boolean | undefined;
@@ -389,6 +446,7 @@ export class RoleRunner {
         reasoningText: string;
         usage: TokenUsage;
         modelId: string;
+        finishReason?: string | undefined;
     }> {
         if (params.signal?.aborted) {
             throw params.signal.reason instanceof Error
@@ -403,42 +461,19 @@ export class RoleRunner {
         const sessionId = SessionId(sessionIdStr);
         const chapter = params.chapterNumber ?? 0;
         const startedAt = new Date().toISOString();
-
-        this.storeService.beginRun(runId);
+        const resolvedBookRoot = resolve(params.bookRoot);
+        const attemptMeta = buildStageAttemptMeta(params);
 
         let toolset: BuiltRoleToolSet | undefined;
         let handle: AgentHandle | undefined;
         let abortCleanup: (() => void) | undefined;
-
-        const route = resolveRoleRoute(
-            this.poolRouting,
-            params.roleId,
-            roleCfg.pool,
-            params.bookConfig,
-            params.poolOverride
-        );
-        const modelId = `${route.provider}:${route.model}`;
-        const attemptMeta = buildStageAttemptMeta(params);
-
-        const sessionDetail: StageSessionDetail = {
-            sessionId: sessionIdStr,
-            runId,
-            stage: params.stage,
-            role: params.roleId,
-            chapter,
-            status: 'running',
-            startedAt,
-            modelId,
-            ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-            ...(params.agentMode ? { mode: params.agentMode } : {}),
-            ...attemptMeta,
-            live: true,
-            events: []
-        };
-        this.liveSessionDetails.set(sessionIdStr, sessionDetail);
+        let disposeSessionEventListener: (() => void) | undefined;
+        let sessionDetail: StageSessionDetail | undefined;
+        let modelId = '';
         let nextSeq = 0;
 
         const recordSessionEvent = (item: Omit<StageSessionEventItem, 'seq'>) => {
+            if (!sessionDetail) return;
             const fullItem: StageSessionEventItem = {
                 ...item,
                 seq: nextSeq++
@@ -460,15 +495,46 @@ export class RoleRunner {
             }
         };
 
-        let disposeSessionEventListener: (() => void) | undefined;
         let lastAgentError: Error | undefined;
         let latestAssistantText = '';
         let currentTurnReasoningText = '';
         let latestReasoningText = '';
+        let latestFinishReason: string | undefined;
         let malformedRetries = 0;
         const multiTurnUsage = createEmptyUsage();
 
         try {
+            this.storeService.beginRun(runId);
+
+            const route = resolveRoleRoute(
+                this.poolRouting,
+                params.roleId,
+                roleCfg.pool,
+                params.bookConfig,
+                params.poolOverride
+            );
+            modelId = `${route.provider}:${route.model}`;
+
+            sessionDetail = {
+                sessionId: sessionIdStr,
+                runId,
+                stage: params.stage,
+                role: params.roleId,
+                chapter,
+                status: 'running',
+                startedAt,
+                modelId,
+                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+                ...(params.agentMode ? { mode: params.agentMode } : {}),
+                ...attemptMeta,
+                live: true,
+                events: []
+            };
+            this.liveSessionDetails.set(sessionIdStr, {
+                bookRoot: resolvedBookRoot,
+                detail: sessionDetail
+            });
+
             if (!isCleanroom) {
                 const allowedOpsPaths =
                     params.allowedOpsPaths ??
@@ -476,6 +542,8 @@ export class RoleRunner {
                 const allowedOpsWritePaths =
                     params.allowedOpsWritePaths ??
                     (roleCfg.allowedOpsWrite.length > 0 ? roleCfg.allowedOpsWrite : undefined);
+                const blockedReadPaths =
+                    roleCfg.blockedReadPaths.length > 0 ? roleCfg.blockedReadPaths : undefined;
 
                 toolset = this.toolsService.buildRoleTools({
                     runId,
@@ -485,12 +553,19 @@ export class RoleRunner {
                     yieldTool: roleCfg.yieldTool ?? undefined,
                     allowedOpsPaths,
                     allowedOpsWritePaths,
+                    ...(blockedReadPaths !== undefined ? { blockedReadPaths } : {}),
+                    ...(params.allowedChapterFiles !== undefined
+                        ? { allowedChapterFiles: params.allowedChapterFiles }
+                        : {}),
+                    ...(params.stagingOverlay !== undefined
+                        ? { stagingOverlay: params.stagingOverlay }
+                        : {}),
                     targetChapter: params.targetChapter,
                     targetDay: params.targetDay,
                     chapterGoal: params.chapterGoal,
                     draftText: params.draftText,
                     draftPath: params.draftPath,
-                    chapterNumber: params.chapterNumber,
+                    chapterNumber: params.chapterNumberForTools ?? params.chapterNumber,
                     timelineMode: params.timelineMode,
                     allowInnateMutation: params.allowInnateMutation,
                     deferCommit: params.deferCommit,
@@ -543,8 +618,14 @@ export class RoleRunner {
                 disposeSessionEventListener = this.execCtx.on('session/event', (session, ev) => {
                     if (String(session.id) !== sessionIdStr) return;
                     if (ev.type === 'assistant/message') {
-                        const msgUsage = (ev.data as { usage?: Partial<TokenUsage> } | undefined)
-                            ?.usage;
+                        const msgData = ev.data as
+                            | {
+                                  usage?: Partial<TokenUsage>;
+                                  finish?: { kind?: string };
+                                  finishReason?: string;
+                              }
+                            | undefined;
+                        const msgUsage = msgData?.usage;
                         if (msgUsage) {
                             addUsage(multiTurnUsage, {
                                 inputTokens: msgUsage.inputTokens ?? 0,
@@ -552,6 +633,12 @@ export class RoleRunner {
                                 cacheWriteTokens: msgUsage.cacheWriteTokens ?? 0,
                                 outputTokens: msgUsage.outputTokens ?? 0
                             });
+                        }
+                        if (latestFinishReason === undefined) {
+                            const fallbackFinish = msgData?.finish?.kind ?? msgData?.finishReason;
+                            if (typeof fallbackFinish === 'string' && fallbackFinish.length > 0) {
+                                latestFinishReason = fallbackFinish;
+                            }
                         }
                         if (currentTurnReasoningText.length === 0 || latestReasoningText.length === 0) {
                             const fallbackReasoning = extractFallbackReasoningFromAssistantEvent(ev.data);
@@ -708,6 +795,7 @@ export class RoleRunner {
                     // 透传外部化角色配置的采样温度，并在每次新发起 LLM 请求时重置当前轮次输出缓冲
                     agentCtx.on('agent/request', async (_payload, next) => {
                         latestAssistantText = '';
+                        latestFinishReason = undefined;
                         currentTurnReasoningText = '';
                         if (isCleanroom) {
                             latestReasoningText = '';
@@ -770,6 +858,13 @@ export class RoleRunner {
                                 kind: 'text',
                                 text: frame.chunk.block.text
                             });
+                        } else if (frame.chunk.type === 'finish') {
+                            const chunkFinish =
+                                frame.chunk.reason?.kind ??
+                                (frame.chunk as { finishReason?: unknown }).finishReason;
+                            if (typeof chunkFinish === 'string' && chunkFinish.length > 0) {
+                                latestFinishReason = chunkFinish;
+                            }
                         }
                     });
                     agentCtx.on('agent/status', ({ status }) => {
@@ -884,10 +979,13 @@ export class RoleRunner {
                 assistantText: latestAssistantText,
                 reasoningText: latestReasoningText,
                 usage: multiTurnUsage,
-                modelId: `${route.provider}:${route.model}`
+                modelId,
+                ...(latestFinishReason !== undefined ? { finishReason: latestFinishReason } : {})
             };
         } catch (err: unknown) {
-            sessionDetail.status = 'failed';
+            if (sessionDetail) {
+                sessionDetail.status = 'failed';
+            }
             recordSessionEvent({
                 timestamp: new Date().toISOString(),
                 kind: 'error',
@@ -912,26 +1010,29 @@ export class RoleRunner {
         } finally {
             disposeSessionEventListener?.();
             abortCleanup?.();
-            sessionDetail.live = false;
-            sessionDetail.startedAt = startedAt;
-            sessionDetail.finishedAt = new Date().toISOString();
-            sessionDetail.modelId = modelId;
-            sessionDetail.usage = { ...multiTurnUsage };
-            sessionDetail.reasoning = latestReasoningText;
-            sessionDetail.thinkingChars = latestReasoningText.length;
-            if (SESSION_ID_SAFE_RE.test(sessionIdStr)) {
-                try {
-                    const logsDir = join(params.bookRoot, '.ops/session_logs');
-                    await mkdir(logsDir, { recursive: true });
-                    await writeFile(
-                        join(logsDir, `${sessionIdStr}.json`),
-                        `${JSON.stringify(sessionDetail, null, 2)}\n`,
-                        'utf8'
-                    );
-                } catch {
-                    // 会话日志落盘失败不阻断业务主流程
+            if (sessionDetail) {
+                sessionDetail.live = false;
+                sessionDetail.startedAt = startedAt;
+                sessionDetail.finishedAt = new Date().toISOString();
+                sessionDetail.modelId = modelId;
+                sessionDetail.usage = { ...multiTurnUsage };
+                sessionDetail.reasoning = latestReasoningText;
+                sessionDetail.thinkingChars = latestReasoningText.length;
+                if (SESSION_ID_SAFE_RE.test(sessionIdStr)) {
+                    try {
+                        const logsDir = join(params.bookRoot, '.ops/session_logs');
+                        await mkdir(logsDir, { recursive: true });
+                        await writeFile(
+                            join(logsDir, `${sessionIdStr}.json`),
+                            `${JSON.stringify(sessionDetail, null, 2)}\n`,
+                            'utf8'
+                        );
+                    } catch {
+                        // 会话日志落盘失败不阻断业务主流程
+                    }
                 }
             }
+            this.liveSessionDetails.delete(sessionIdStr);
             if (handle) {
                 this.activeHandles.delete(handle);
                 await handle.dispose().catch(() => {});
@@ -1042,11 +1143,23 @@ export class RoleRunner {
                     }
                     capturedRunId = sessionRes.runId;
                     capturedSessionId = sessionRes.sessionId;
+                    if (
+                        sessionRes.finishReason === 'max-tokens' ||
+                        sessionRes.finishReason === 'length'
+                    ) {
+                        void traceEvent('transport.truncated', {
+                            roleId,
+                            stage: stageName,
+                            finishReason: sessionRes.finishReason
+                        });
+                    }
                     return {
                         text: sessionRes.assistantText,
                         usage: sessionRes.usage,
                         modelId: sessionRes.modelId,
-                        finishReason: 'stop'
+                        ...(sessionRes.finishReason !== undefined
+                            ? { finishReason: sessionRes.finishReason }
+                            : {})
                     };
                 }
             },

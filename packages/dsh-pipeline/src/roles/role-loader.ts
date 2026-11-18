@@ -1,5 +1,5 @@
-import { access, readFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { access, lstat, readFile, realpath } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ControlledBookToolName, YieldToolName } from '@narrateos/dsh-book-tools';
 import { parse as parseYaml } from 'yaml';
@@ -44,6 +44,7 @@ export const RoleConfigSchema = z.object({
     tools: z.array(ControlledBookToolNameSchema).default([]),
     allowedOpsRead: z.array(z.string().min(1)).default([]),
     allowedOpsWrite: z.array(z.string().min(1)).default([]),
+    blockedReadPaths: z.array(z.string().min(1)).default([]),
     yieldTool: YieldToolNameSchema.nullable().default(null)
 });
 
@@ -62,6 +63,7 @@ export interface LoadedRoleConfig {
     tools: ControlledBookToolName[];
     allowedOpsRead: string[];
     allowedOpsWrite: string[];
+    blockedReadPaths: string[];
     yieldTool: YieldToolName | null;
     promptText: string;
     roleFilePath: string;
@@ -78,12 +80,58 @@ async function fileExists(targetPath: string): Promise<boolean> {
     }
 }
 
-function assertInsideDirectory(baseDir: string, targetPath: string, label: string): void {
+async function resolveRealPathWithAncestor(targetPath: string, label: string): Promise<string> {
+    const resolved = resolve(targetPath);
+    const suffix: string[] = [];
+    let probe = resolved;
+
+    while (true) {
+        try {
+            await lstat(probe);
+            const real = await realpath(probe);
+            return suffix.length > 0 ? join(real, ...suffix) : real;
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
+            }
+            // 检测悬空符号链接，拒绝放行
+            try {
+                const st = await lstat(probe);
+                if (st.isSymbolicLink()) {
+                    throw new Error(`${label} 存在无效或悬空符号链接: ${targetPath}`);
+                }
+            } catch (lstatErr: unknown) {
+                if ((lstatErr as { code?: string }).code !== 'ENOENT') {
+                    throw lstatErr;
+                }
+            }
+            const parent = dirname(probe);
+            if (parent === probe) {
+                throw new Error(`${label} 无法解析真实路径: ${targetPath}`);
+            }
+            suffix.unshift(basename(probe));
+            probe = parent;
+        }
+    }
+}
+
+async function assertInsideDirectory(
+    baseDir: string,
+    targetPath: string,
+    label: string
+): Promise<void> {
     const base = resolve(baseDir);
     const target = resolve(targetPath);
-    const rel = relative(base, target);
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    const lexicalRel = relative(base, target);
+    if (lexicalRel === '' || lexicalRel.startsWith('..') || isAbsolute(lexicalRel)) {
         throw new Error(`${label} 禁止越界访问目录: ${targetPath}`);
+    }
+
+    const realBase = await resolveRealPathWithAncestor(base, label);
+    const realTarget = await resolveRealPathWithAncestor(target, label);
+    const realRel = relative(realBase, realTarget);
+    if (realRel === '' || realRel.startsWith('..') || isAbsolute(realRel)) {
+        throw new Error(`${label} 禁止符号链接越界访问目录: ${targetPath}`);
     }
 }
 
@@ -134,8 +182,10 @@ export class RoleLoader {
 
         if (bookRoot && bookRoot.trim().length > 0) {
             bookRolesDir = resolve(bookRoot, 'world/roles');
+            await assertInsideDirectory(bookRoot, bookRolesDir, '单书角色目录');
             const candidateBookRole = resolve(bookRolesDir, `${roleId}.yml`);
-            assertInsideDirectory(bookRolesDir, candidateBookRole, '角色配置路径');
+            await assertInsideDirectory(bookRolesDir, candidateBookRole, '角色配置路径');
+            await assertInsideDirectory(bookRoot, candidateBookRole, '角色配置路径');
             if (await fileExists(candidateBookRole)) {
                 roleFilePath = candidateBookRole;
                 isBookOverride = true;
@@ -143,7 +193,7 @@ export class RoleLoader {
         }
 
         if (!isBookOverride) {
-            assertInsideDirectory(presetRolesDir, roleFilePath, '预设角色配置路径');
+            await assertInsideDirectory(presetRolesDir, roleFilePath, '预设角色配置路径');
             if (!(await fileExists(roleFilePath))) {
                 throw new Error(`未找到角色配置文件: ${roleFilePath}`);
             }
@@ -160,6 +210,7 @@ export class RoleLoader {
         const promptFilePath = await this.resolvePromptFilePath(
             cfg.promptFile,
             dirname(roleFilePath),
+            bookRoot && bookRoot.trim().length > 0 ? resolve(bookRoot) : null,
             bookRolesDir,
             presetRolesDir
         );
@@ -180,6 +231,7 @@ export class RoleLoader {
             tools: [...cfg.tools],
             allowedOpsRead: [...cfg.allowedOpsRead],
             allowedOpsWrite: [...cfg.allowedOpsWrite],
+            blockedReadPaths: [...cfg.blockedReadPaths],
             yieldTool: cfg.yieldTool,
             promptText,
             roleFilePath,
@@ -191,6 +243,7 @@ export class RoleLoader {
     private async resolvePromptFilePath(
         promptFile: string,
         roleYamlDir: string,
+        resolvedBookRoot: string | null,
         bookRolesDir: string | null,
         presetRolesDir: string
     ): Promise<string> {
@@ -203,21 +256,24 @@ export class RoleLoader {
         // 1. 若存在单书 world/roles 目录且不同于预设目录，优先检查单书 Prompt 覆写（支持仅覆写 prompts/*.md）
         if (bookRolesDir && bookRolesDir !== presetRolesDir) {
             const fromBookRoles = resolve(bookRolesDir, promptFile);
-            assertInsideDirectory(bookRolesDir, fromBookRoles, 'promptFile');
+            await assertInsideDirectory(bookRolesDir, fromBookRoles, 'promptFile');
+            if (resolvedBookRoot) {
+                await assertInsideDirectory(resolvedBookRoot, fromBookRoles, 'promptFile');
+            }
             candidates.push({ baseDir: bookRolesDir, path: fromBookRoles });
         }
 
         // 2. 其次相对于命中的 role YAML 所在目录解析
         if (!bookRolesDir || roleYamlDir !== bookRolesDir) {
             const fromYamlDir = resolve(roleYamlDir, promptFile);
-            assertInsideDirectory(roleYamlDir, fromYamlDir, 'promptFile');
+            await assertInsideDirectory(roleYamlDir, fromYamlDir, 'promptFile');
             candidates.push({ baseDir: roleYamlDir, path: fromYamlDir });
         }
 
         // 3. 回退至 <presetRoot>/roles/<promptFile>
         if (presetRolesDir !== roleYamlDir && presetRolesDir !== bookRolesDir) {
             const fromPresetRoles = resolve(presetRolesDir, promptFile);
-            assertInsideDirectory(presetRolesDir, fromPresetRoles, 'promptFile');
+            await assertInsideDirectory(presetRolesDir, fromPresetRoles, 'promptFile');
             candidates.push({ baseDir: presetRolesDir, path: fromPresetRoles });
         }
 

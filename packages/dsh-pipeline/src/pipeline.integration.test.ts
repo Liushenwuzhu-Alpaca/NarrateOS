@@ -649,7 +649,20 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         registerCleanup(() => bookToolsFiber.dispose());
 
         await createHeadlessMockServices(ctx, {
-            onAgent: async () => {},
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_patched_draft')) {
+                    await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 1,
+                                end_paragraph: 1,
+                                replacement_paragraphs: ['天空下着小雨，沈默左手拎着黄铜提灯。']
+                            }
+                        ]
+                    });
+                    await execTool('yield_patched_draft', { summary: '跨章单点硬穿帮净室修补' });
+                }
+            },
             onLlmStream: (opts) => {
                 const sys = opts.system ?? '';
                 if (sys.includes('手稿增量同步定性器')) {
@@ -669,9 +682,6 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                             downstream_dependent: false
                         })
                     );
-                }
-                if (sys.includes('跨章单点硬穿帮局部修补专员')) {
-                    return textToStreamChunks('天空下着小雨，沈默左手拎着黄铜提灯。');
                 }
                 if (sys.includes('卷级归档编纂器')) {
                     return textToStreamChunks(
@@ -959,12 +969,12 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(saved.startsWith('# 分组修补\n\n')).toBe(true);
         expect(saved).toContain('MIDDLE_CLEAN_PARAGRAPH: 货栈角落的煤油灯晃了两下，灯油快见底了。');
 
-        // 补充验证：单书 world/roles/patch.yml 覆盖 cleanroom: true 时保留单轮净室回退兼容
-        const cleanBookRoot = await createGitBookWorkspace(tempDirs, 'patch-cleanroom-fallback');
+        // 补充验证：单书 world/roles/patch.yml 覆盖 cleanroom: true 时显式报错拒绝（不再回退单轮 writer）
+        const cleanBookRoot = await createGitBookWorkspace(tempDirs, 'patch-cleanroom-reject');
         await mkdir(join(cleanBookRoot, 'world/roles/prompts'), { recursive: true });
         await writeFile(
             join(cleanBookRoot, 'world/roles/prompts/patch.md'),
-            '# 单书净室局部修补专员\n\n仅改写指定目标段落正文。\n',
+            '# 单书净室局部修补专员\n\n违规单轮配置。\n',
             'utf8'
         );
         await writeFile(
@@ -994,7 +1004,6 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const cleanBookToolsFiber = await cleanCtx.plugin(bookToolsPlugin);
         registerCleanup(() => cleanBookToolsFiber.dispose());
 
-        const cleanPatchPrompts: string[] = [];
         await createHeadlessMockServices(cleanCtx, {
             onAgent: async ({ tools, execTool }) => {
                 if (tools.has('yield_context_pack')) {
@@ -1007,7 +1016,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                 }
                 if (tools.has('yield_outline')) {
                     await execTool('yield_outline', {
-                        chapter_title: '净室回退',
+                        chapter_title: '拒绝净室覆盖',
                         target_word_count: 1500,
                         focus_cast: ['char_001'],
                         background_cast: [],
@@ -1021,26 +1030,9 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                     });
                     return;
                 }
-                if (tools.has('yield_verdict')) {
-                    await execTool('yield_verdict', { passed: true, issues: [] });
-                    return;
-                }
-                if (tools.has('yield_state_patch')) {
-                    await execTool('yield_state_patch', {
-                        entity_patches: [],
-                        story_day_delta: 0,
-                        chapter_summary: '净室回退完成。',
-                        next_chapter_options: ['继续']
-                    });
-                }
             },
-            onLlmStream: (opts) => {
-                const msgText = JSON.stringify(opts.messages);
-                if (msgText.includes('单书净室局部修补专员')) {
-                    cleanPatchPrompts.push(msgText);
-                    return textToStreamChunks('沈默低头核对箱号，转身记下编号。');
-                }
-                return textToStreamChunks(
+            onLlmStream: () =>
+                textToStreamChunks(
                     [
                         '<blocking>货栈</blocking>',
                         '',
@@ -1048,21 +1040,17 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                         '',
                         'CLEAN_MIDDLE_STAY: 货栈门外的汽笛响了一声。'
                     ].join('\n')
-                );
-            }
+                )
         });
         const cleanPipeFiber = await cleanCtx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
         registerCleanup(() => cleanPipeFiber.dispose());
 
-        const cleanRes = await cleanCtx.narratePipeline.stepChapter({
-            chapterNumber: 1,
-            chapterGoal: '测试 cleanroom=true 回退'
-        });
-        expect(cleanRes.status).toBe('COMMITTED');
-        expect(cleanRes.patchRounds).toBe(1);
-        expect(cleanPatchPrompts.length).toBe(1);
-        const cleanSaved = await readFile(join(cleanBookRoot, 'manuscripts/ch_0001.md'), 'utf8');
-        expect(cleanSaved).toContain('CLEAN_MIDDLE_STAY: 货栈门外的汽笛响了一声。');
+        await expect(
+            cleanCtx.narratePipeline.stepChapter({
+                chapterNumber: 1,
+                chapterGoal: '测试 cleanroom=true 违规配置显式拒止'
+            })
+        ).rejects.toThrow(/cleanroom=false/);
     });
 
     it('narration_subjectivity=subjective_first 透传 StaticProseGate 并豁免 subjective_judgment 与 negation_contrast', async () => {
@@ -1317,6 +1305,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         registerCleanup(() => pipeFiber.dispose());
 
         let lockHeldInsideRerun = false;
+        let healPlanPresentInsideRerun = false;
         const healRes = await ctx.narratePipeline.healCrossChapterConflicts(
             [
                 {
@@ -1332,7 +1321,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             {
                 onAutoRerun: async ({ rollbackToChapter }) => {
                     expect(rollbackToChapter).toBe(1);
-                    // 验证 healCrossChapterConflicts 全程持有 withTxLock
+                    healPlanPresentInsideRerun = existsSync(join(bookRoot, '.ops/heal_plan.json'));
+                    // 验证 Tier 3 在调用 onAutoRerun 前已释放 tx.lock，内部可安全取锁重跑（无死锁）
                     try {
                         await store.withTxLock(async () => {});
                     } catch (err) {
@@ -1346,7 +1336,9 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         );
 
         expect(healRes.results[0]?.action).toBe('AUTO_ROLLED_BACK_AND_RERUN');
-        expect(lockHeldInsideRerun).toBe(true);
+        expect(lockHeldInsideRerun).toBe(false);
+        expect(healPlanPresentInsideRerun).toBe(true);
+        expect(existsSync(join(bookRoot, '.ops/heal_plan.json'))).toBe(false);
         expect(existsSync(join(bookRoot, 'manuscripts/ch_0001.md'))).toBe(true);
         expect(existsSync(join(bookRoot, 'manuscripts/ch_0002.md'))).toBe(false);
         expect(existsSync(join(bookRoot, 'manuscripts/ch_0003.md'))).toBe(false);
@@ -3110,7 +3102,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             sanitizeTextForCleanroomWriter('严禁泄露 SELF_ONLY 情报; 禁止触犯 Stage Ceiling。')
         ).toBe('');
 
-        // 2. 集成测试：cleanroom=false 默认 Patch 模式与 cleanroom=true 单书覆盖模式均禁止回退原始敏感 reason，且不输出空壳 factIssueLines
+        // 2. 集成测试：cleanroom=false 默认 Patch 模式禁止回退原始敏感 reason 且物理剥离受限 quote_source；cleanroom=true 单书覆盖显式拒止
         const runPatchSanitizeCheck = async (cleanroomOverride: boolean) => {
             const bookRoot = await createGitBookWorkspace(
                 tempDirs,
@@ -3120,7 +3112,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                 await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
                 await writeFile(
                     join(bookRoot, 'world/roles/prompts/patch.md'),
-                    '# 单书 Patch 净室提示词\n\n直接输出改写后的目标段落。',
+                    '# 单书 Patch 净室提示词\n\n禁止配置。',
                     'utf8'
                 );
                 await writeFile(
@@ -3153,7 +3145,6 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
             let fcCalls = 0;
             let capturedPatchPrompt = '';
-            let cleanroomCallIndex = 0;
 
             await createHeadlessMockServices(ctx, {
                 onAgent: async ({ tools, execTool, taskPrompt }) => {
@@ -3225,18 +3216,21 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                         });
                     }
                 },
-                onLlmStream: ({ messages }) => {
-                    cleanroomCallIndex += 1;
-                    if (cleanroomOverride && cleanroomCallIndex === 2) {
-                        capturedPatchPrompt = JSON.stringify(messages);
-                        return textToStreamChunks('沈默抬手摸到铁门冰凉的锁舌。');
-                    }
-                    return textToStreamChunks('# 防泄漏修补\n\n沈默想起铁箱里的隐秘。');
-                }
+                onLlmStream: () => textToStreamChunks('# 防泄漏修补\n\n沈默想起铁箱里的隐秘。')
             });
 
             const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
             registerCleanup(() => pipeFiber.dispose());
+
+            if (cleanroomOverride) {
+                await expect(
+                    ctx.narratePipeline.stepChapter({
+                        chapterNumber: 1,
+                        chapterGoal: '验证 cleanroom=true Patch 显式报错'
+                    })
+                ).rejects.toThrow(/cleanroom=false/);
+                return;
+            }
 
             const res = await ctx.narratePipeline.stepChapter({
                 chapterNumber: 1,
@@ -3248,10 +3242,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             expect(capturedPatchPrompt).not.toContain('Stage Ceiling');
             expect(capturedPatchPrompt).not.toContain('严禁');
             expect(capturedPatchPrompt).not.toContain('禁止');
-            if (!cleanroomOverride) {
-                expect(capturedPatchPrompt).not.toContain('## 事实核查修补清单');
-                expect(capturedPatchPrompt).not.toContain('- [1] ');
-            }
+            expect(capturedPatchPrompt).not.toContain('## 事实核查修补清单');
+            expect(capturedPatchPrompt).not.toContain('- [1] ');
         };
 
         await runPatchSanitizeCheck(false);

@@ -116,7 +116,21 @@ function resolveRetryDelay(
     return backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 4000;
 }
 
-/** 按模型池解析 provider 与 model（支持 book_config.yaml 的 model_routing 单书覆盖） */
+/** 拆分 'provider:model' 复合路由字符串，缺省回退默认 provider */
+export function parseProviderModelSpec(spec: string, fallbackProvider: string): LlmRouteTarget {
+    const trimmed = spec.trim();
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx > 0 && colonIdx < trimmed.length - 1) {
+        const provider = trimmed.slice(0, colonIdx).trim();
+        const model = trimmed.slice(colonIdx + 1).trim();
+        if (provider.length > 0 && model.length > 0) {
+            return { provider, model };
+        }
+    }
+    return { provider: fallbackProvider, model: trimmed };
+}
+
+/** 按模型池解析 provider 与 model（支持 book_config.yaml 的 model_routing 单书覆盖与 provider:model 复合格式） */
 export function resolvePoolRoute(
     poolRouting: LlmPoolRouting,
     pool: LlmPool,
@@ -134,7 +148,7 @@ export function resolvePoolRoute(
     if (!override) {
         return { provider: base.provider, model: base.model };
     }
-    return { provider: base.provider, model: override };
+    return parseProviderModelSpec(override, base.provider);
 }
 
 /**
@@ -160,15 +174,7 @@ export function resolveRoleRoute(
     if (!modelOverride) {
         return baseRoute;
     }
-    const colonIdx = modelOverride.indexOf(':');
-    if (colonIdx > 0 && colonIdx < modelOverride.length - 1) {
-        const provider = modelOverride.slice(0, colonIdx).trim();
-        const model = modelOverride.slice(colonIdx + 1).trim();
-        if (provider.length > 0 && model.length > 0) {
-            return { provider, model };
-        }
-    }
-    return { provider: baseRoute.provider, model: modelOverride };
+    return parseProviderModelSpec(modelOverride, baseRoute.provider);
 }
 
 /** 解析单个工种的推理强度（role_routing[roleId].reasoning_effort > override > defaultEffort） */
