@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import '@deepseek-ai/dsh-agent';
+import '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -38,7 +39,8 @@ export function attachYieldEnforcementHook(
         throw new Error(`attachYieldEnforcementHook 需要正整数 maxSteps，收到: ${options.maxSteps}`);
     }
 
-    let attempts = 0;
+    let stepsExecuted = 0;
+    let currentStepCountedByPreStep = false;
     let cleaned = false;
 
     const runCleanupOnce = () => {
@@ -47,8 +49,26 @@ export function attachYieldEnforcementHook(
         options.cleanupStaging?.();
     };
 
+    const disposePreStep = agentCtx.on('agent/pre-step', async (_payload, next) => {
+        const decision = await next();
+        if (decision.kind === 'enter') {
+            stepsExecuted += 1;
+            currentStepCountedByPreStep = true;
+        }
+        return decision;
+    });
+
+    const disposePreExecute = agentCtx.on('tools/pre-execute', async (_exec, next) => {
+        const decision = await next();
+        if (decision.kind !== 'cancel' && !currentStepCountedByPreStep) {
+            stepsExecuted += 1;
+        }
+        return decision;
+    });
+
     const disposeTurnStopping = agentCtx.on('agent/turn-stopping', async ({ agent, signal }) => {
         if (options.hasYielded()) {
+            currentStepCountedByPreStep = false;
             return;
         }
         if (signal.aborted) {
@@ -56,9 +76,14 @@ export function attachYieldEnforcementHook(
             return;
         }
 
-        if (attempts < options.maxSteps - 1) {
-            attempts += 1;
-            const remaining = options.maxSteps - 1 - attempts;
+        if (currentStepCountedByPreStep) {
+            currentStepCountedByPreStep = false;
+        } else {
+            stepsExecuted += 1;
+        }
+
+        if (stepsExecuted < options.maxSteps) {
+            const remaining = options.maxSteps - 1 - stepsExecuted;
             agent.steer(
                 createUserMessage({
                     content: [
@@ -80,16 +105,14 @@ export function attachYieldEnforcementHook(
     });
 
     const disposeAgentDisposed = agentCtx.on('agent/disposed', () => {
-        if (!options.hasYielded()) {
-            runCleanupOnce();
-        }
+        runCleanupOnce();
     });
 
     return () => {
+        disposePreStep();
+        disposePreExecute();
         disposeTurnStopping();
         disposeAgentDisposed();
-        if (!options.hasYielded()) {
-            runCleanupOnce();
-        }
+        runCleanupOnce();
     };
 }
