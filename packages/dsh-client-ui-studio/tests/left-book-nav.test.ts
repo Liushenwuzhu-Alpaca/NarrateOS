@@ -266,6 +266,94 @@ describe('StudioActionModals 换卷封存与多线并行弹窗', () => {
         });
     });
 
+    it('AdvanceVolumeModal 与 ParallelWindowModal 打开期间父组件重渲染不丢失用户表单状态', () => {
+        const onConfirm = vi.fn();
+        const onFork = vi.fn();
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        const initialEntities = [
+            { id: 'char_chen', name: '陈砚', role: '主角' },
+            { id: 'char_zhou', name: '周敬山', role: '账房' }
+        ];
+        act(() => {
+            root.render(
+                createElement(AdvanceVolumeModal, {
+                    open: true,
+                    entities: initialEntities,
+                    onClose: vi.fn(),
+                    onConfirm
+                })
+            );
+        });
+
+        const volDialog = document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="结束本卷 / 开启下一卷"]')!;
+        const checkboxes = Array.from(volDialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+        act(() => {
+            checkboxes[1]!.click();
+            checkboxes[2]!.click();
+        });
+
+        // 父组件重渲染并重建 entities 数组引用（如提交中或后台 SSE 刷新）
+        act(() => {
+            root.render(
+                createElement(AdvanceVolumeModal, {
+                    open: true,
+                    entities: [
+                        { id: 'char_chen', name: '陈砚', role: '主角' },
+                        { id: 'char_zhou', name: '周敬山', role: '账房' }
+                    ],
+                    submitting: false,
+                    onClose: vi.fn(),
+                    onConfirm
+                })
+            );
+        });
+
+        const afterCheckboxes = Array.from(volDialog.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+        expect(afterCheckboxes[0]?.checked).toBe(true);
+        expect(afterCheckboxes[1]?.checked).toBe(false);
+        expect(afterCheckboxes[2]?.checked).toBe(true);
+
+        // 验证 ParallelWindowModal 打开期间父组件重渲染也不重置用户输入
+        act(() => {
+            root.render(
+                createElement(ParallelWindowModal, {
+                    open: true,
+                    activeWindowId: 'win-init',
+                    activeBranchId: 'branch-a',
+                    onClose: vi.fn(),
+                    onFork,
+                    onMerge: vi.fn()
+                })
+            );
+        });
+        const parDialog = document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="多线并行章节窗口"]')!;
+        const winInput = parDialog.querySelector<HTMLInputElement>('input[name="windowId"]')!;
+        const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        act(() => {
+            inputSetter?.call(winInput, 'win-user-edited');
+            winInput.dispatchEvent(new Event('input', { bubbles: true }));
+            winInput.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        act(() => {
+            root.render(
+                createElement(ParallelWindowModal, {
+                    open: true,
+                    activeWindowId: 'win-init',
+                    activeBranchId: 'branch-b',
+                    availableBranches: ['branch-a', 'branch-b'],
+                    onClose: vi.fn(),
+                    onFork,
+                    onMerge: vi.fn()
+                })
+            );
+        });
+        expect(parDialog.querySelector<HTMLInputElement>('input[name="windowId"]')?.value).toBe('win-user-edited');
+    });
+
     it('ParallelWindowModal 校验 windowId 格式并支持分叉与合流回主线', () => {
         const onFork = vi.fn();
         const onMerge = vi.fn();
@@ -355,5 +443,7 @@ describe('DESIGN.md 东方清样样式底座与渐进增强契约', () => {
         expect(STUDIO_CSS).toContain('@media (prefers-reduced-motion: reduce)');
         expect(BOOT_CSS).toContain('.ns-b-chat-guide');
         expect(BOOT_CSS).toContain('.ns-action-modal-shell');
+        expect(INSPECTOR_CSS).toMatch(/\.ns-i-rule-list\[hidden\][\s\S]*display:\s*none/);
+        expect(INSPECTOR_CSS).toMatch(/\.ns-role-detail\[hidden\][\s\S]*display:\s*none/);
     });
 });
