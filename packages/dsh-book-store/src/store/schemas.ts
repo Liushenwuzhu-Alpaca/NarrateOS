@@ -33,6 +33,26 @@ export interface ChapterOutlineSnapshot {
 export const NarrationSubjectivitySchema = z.enum(['objective_third', 'subjective_first']);
 export type NarrationSubjectivity = z.infer<typeof NarrationSubjectivitySchema>;
 
+/** 单工种模型池档位覆盖（第一层：strong -> strong_creative, weak -> fast_retrieval） */
+export const RoleTierOverrideSchema = z.enum(['strong', 'weak']);
+export type RoleTierOverride = z.infer<typeof RoleTierOverrideSchema>;
+
+/** 单工种推理强度覆盖 */
+export const RoleReasoningEffortSchema = z.enum(['off', 'low', 'medium', 'high', 'max']);
+export type RoleReasoningEffort = z.infer<typeof RoleReasoningEffortSchema>;
+
+/** 单工种双层模型配置覆盖项 */
+export const RoleModelOverrideSchema = z.object({
+    tier: RoleTierOverrideSchema.optional(),
+    model: z.string().min(1).optional(),
+    reasoning_effort: RoleReasoningEffortSchema.optional()
+});
+export type RoleModelOverride = z.infer<typeof RoleModelOverrideSchema>;
+
+/** 按工种 ID 映射的双层模型路由覆盖表 */
+export const RoleRoutingSchema = z.record(z.string(), RoleModelOverrideSchema);
+export type RoleRouting = z.infer<typeof RoleRoutingSchema>;
+
 /** 作品可配变量 Schema (world/book_config.yaml) */
 export const BookConfigSchema = z.object({
     book_slug: z.string().min(1),
@@ -64,7 +84,8 @@ export const BookConfigSchema = z.object({
             enable_cross_chapter_simile: true,
             cross_chapter_simile_window: 5
         }),
-    model_routing: z.record(z.string(), z.string()).optional()
+    model_routing: z.record(z.string(), z.string()).optional(),
+    role_routing: RoleRoutingSchema.optional()
 });
 
 export type BookConfig = z.infer<typeof BookConfigSchema>;

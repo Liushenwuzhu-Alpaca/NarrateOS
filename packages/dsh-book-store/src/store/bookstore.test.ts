@@ -10,6 +10,9 @@ import {
     BookStore,
     ForeignKeyError,
     InnateLockViolationError,
+    RoleModelOverrideSchema,
+    RoleRoutingSchema,
+    RoleTierOverrideSchema,
     TxLockConflictError,
     parseEntityMarkdown,
     serializeEntityMarkdown
@@ -971,5 +974,57 @@ describe('BookStore', () => {
         );
         const loaded = await store.readBookConfig();
         expect(loaded.max_auto_rollback_chapters).toBe(0);
+    });
+
+    it('支持单工种双层模型配置 Schema (role_routing) 并保持 model_routing 向后兼容', async () => {
+        const { store } = await createTempBookRepo();
+
+        // 1. RoleTierOverrideSchema 仅接受 strong / weak
+        expect(RoleTierOverrideSchema.parse('strong')).toBe('strong');
+        expect(RoleTierOverrideSchema.parse('weak')).toBe('weak');
+        expect(() => RoleTierOverrideSchema.parse('audit')).toThrow();
+
+        // 2. RoleModelOverrideSchema 支持可选 tier / model / reasoning_effort，拒绝空 model 与非法 effort
+        expect(RoleModelOverrideSchema.parse({})).toEqual({});
+        expect(
+            RoleModelOverrideSchema.parse({
+                tier: 'weak',
+                model: 'deepseek:deepseek-chat',
+                reasoning_effort: 'medium'
+            })
+        ).toEqual({
+            tier: 'weak',
+            model: 'deepseek:deepseek-chat',
+            reasoning_effort: 'medium'
+        });
+        expect(() => RoleModelOverrideSchema.parse({ model: '' })).toThrow();
+        expect(() => RoleModelOverrideSchema.parse({ reasoning_effort: 'extreme' })).toThrow();
+
+        // 3. RoleRoutingSchema 支持按工种 ID 映射
+        const parsedRouting = RoleRoutingSchema.parse({
+            librarian: { tier: 'weak' },
+            writer: { tier: 'strong', model: 'deepseek-reasoner', reasoning_effort: 'high' }
+        });
+        expect(parsedRouting.librarian?.tier).toBe('weak');
+        expect(parsedRouting.writer?.model).toBe('deepseek-reasoner');
+
+        // 4. BookConfigSchema 兼容无 role_routing 的既有配置，也支持同时携带 model_routing 与 role_routing 并持久化往返
+        const legacy = await store.readBookConfig();
+        expect(legacy.role_routing).toBeUndefined();
+
+        await store.writeBookConfig({
+            ...legacy,
+            model_routing: { strong_creative: 'openai:gpt-5' },
+            role_routing: {
+                librarian: { tier: 'weak', reasoning_effort: 'low' },
+                writer: { model: 'anthropic:claude-sonnet-4-5', reasoning_effort: 'medium' }
+            }
+        });
+        const reloaded = await store.readBookConfig();
+        expect(reloaded.model_routing).toEqual({ strong_creative: 'openai:gpt-5' });
+        expect(reloaded.role_routing).toEqual({
+            librarian: { tier: 'weak', reasoning_effort: 'low' },
+            writer: { model: 'anthropic:claude-sonnet-4-5', reasoning_effort: 'medium' }
+        });
     });
 });
