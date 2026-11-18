@@ -419,7 +419,7 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(retainedRecords[1]?.released).toBe(true);
     });
 
-    it('/api/narrate/runs 按选中章节回填历史 sessionId；Writer 保持净室只读说明', async () => {
+    it('/api/narrate/runs 按选中章节回填历史 sessionId；支持无会话历史兼容提示与 Writer 原生会话复用', async () => {
         const { container } = await mountStudio();
         await openStageStrip(container);
 
@@ -437,13 +437,36 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(stageNode(container, 'FACT_CHECKER').dataset.sessionId).toBe('sess-ch2-fc');
         expect(stageNode(container, 'LIBRARIAN').dataset.sessionId).toBe('');
 
-        // 点击 Writer 节点：无 sessionId，详情条展示净室 ctx.llm 只读说明
+        // 切换至第 2 章（历史记录不含 Writer sessionId）-> 点击 Writer 节点展示未绑定会话提示
         await click(stageNode(container, 'WRITER'));
-        expect(container.querySelector('.ns-inspector-cleanroom-note')?.textContent).toContain('ctx.llm');
+        expect(container.querySelector('.ns-inspector-cleanroom-note')?.textContent).toContain(
+            '未绑定原生会话'
+        );
         // 未打开会话页签
         expect(
             container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')
         ).not.toBe('true');
+
+        // 实时/带 sessionId 的 Writer 节点可直接复用原生 StageSessionViewer 查看
+        await emit({
+            event: 'stage',
+            data: {
+                stage: 'WRITER',
+                chapterNumber: 3,
+                activeSessionId: 'sess-live-writer-3',
+                runId: 'run-writer-3',
+                message: '净室单轮 Agent 执笔'
+            }
+        });
+        const writerNode = stageNode(container, 'WRITER');
+        expect(writerNode.dataset.sessionId).toBe('sess-live-writer-3');
+        await click(writerNode);
+        expect(
+            container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')
+        ).toBe('true');
+        expect(
+            container.querySelector('[data-session-fallback="true"]')?.textContent
+        ).toContain('sess-live-writer-3');
 
         // 点击第 2 章历史 Planner 节点（无宿主 sessions 服务）-> 打开降级元数据面板，展示 sessionId 与状态
         await click(stageNode(container, 'PLANNER'));

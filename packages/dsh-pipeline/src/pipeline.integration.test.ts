@@ -1397,4 +1397,257 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(attempts).toBe(2);
         expect(res.text).toContain('陈砚合上账册');
     });
+
+    it('全工种均在最外层过滤 agent-instructions (AGENTS.md)，且 WRITER 支持单轮无工具 Agent 会话与 MALFORMED_RESPONSE 重试', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'writer-isolation');
+        const ctx = new Context();
+
+        const storeFiber = await ctx.plugin(bookStorePlugin, { booksRoot: join(bookRoot, '..') });
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot: join(bookRoot, '..') });
+        registerCleanup(async () => {
+            await toolsFiber.dispose();
+            await storeFiber.dispose();
+        });
+
+        let sawToolsRegisterOnWriter = false;
+        let preStepCapturedMessages: Array<{ source?: { kind?: string }; text?: string }> = [];
+        let malformedRetryDecisions: Array<{ kind: string } | undefined> = [];
+
+        const mockSysPromptPlugin = {
+            name: 'mock-sys-prompt',
+            apply() {}
+        };
+        void mockSysPromptPlugin;
+
+        const { RoleRunner } = await import('./runner/role-runner.js');
+        const { RoleLoader } = await import('./roles/role-loader.js');
+
+        // 模拟宿主先挂的 dsh-agent-instructions：会在 agent/pre-step 内层往 messages 塞一条 agent-instructions
+        const outerPreStepWrappers: Array<
+            (payload: unknown, next: () => Promise<{ kind: string; messages: unknown[] }>) => Promise<{
+                kind: string;
+                messages: unknown[];
+            }>
+        > = [];
+        const preStepListeners: Array<
+            (payload: unknown, next: () => Promise<{ kind: string; messages: unknown[] }>) => Promise<{
+                kind: string;
+                messages: unknown[];
+            }>
+        > = [];
+        const requestErrorListeners: Array<
+            (
+                payload: {
+                    turn: number;
+                    step: number;
+                    provider: string;
+                    failure: { code: string; message: string };
+                    signal: AbortSignal;
+                },
+                next: () => Promise<{ kind: 'retry' } | undefined>
+            ) => Promise<{ kind: 'retry' } | undefined>
+        > = [];
+
+        // 外层模拟宿主 @deepseek-ai/dsh-agent-instructions
+        outerPreStepWrappers.push(async (_payload, next) => {
+            const d = await next();
+            return {
+                ...d,
+                messages: [
+                    ...d.messages,
+                    {
+                        role: 'user',
+                        source: { kind: 'agent-instructions' },
+                        text: '来自宿主工作区的 AGENTS.md 污染内容'
+                    }
+                ]
+            };
+        });
+
+        let latestStreamHandler: ((ev: { frame: unknown }) => void) | undefined;
+        let idleResolve: (() => void) | undefined;
+        const fakeAgentCtx = {
+            tools: {
+                restrict() {},
+                register() {
+                    sawToolsRegisterOnWriter = true;
+                }
+            },
+            systemPrompt: {
+                section() {}
+            },
+            on(event: string, listener: (...args: never[]) => unknown, opts?: { prepend?: boolean }) {
+                if (event === 'agent/pre-step') {
+                    const fn = listener as (typeof preStepListeners)[number];
+                    if (opts?.prepend) {
+                        preStepListeners.unshift(fn);
+                    } else {
+                        preStepListeners.push(fn);
+                    }
+                } else if (event === 'agent/request-error') {
+                    requestErrorListeners.push(listener as (typeof requestErrorListeners)[number]);
+                } else if (event === 'agent/assistant-stream') {
+                    latestStreamHandler = listener as typeof latestStreamHandler;
+                }
+                return () => {};
+            }
+        };
+
+        const mockAgents = {
+            async create(opts: {
+                sessionId: unknown;
+                setup: (agentCtx: typeof fakeAgentCtx) => void;
+            }) {
+                preStepListeners.length = 0;
+                preStepListeners.push(...outerPreStepWrappers);
+                requestErrorListeners.length = 0;
+                opts.setup(fakeAgentCtx);
+
+                const idlePromise = new Promise<void>((resolve) => {
+                    idleResolve = resolve;
+                });
+
+                return {
+                    agent: {
+                        session: { id: opts.sessionId },
+                        cancel() {},
+                        steer() {},
+                        whenIdle: () => idlePromise,
+                        followup(msg: { content: unknown[] }) {
+                            void (async () => {
+                                // 验证最外层 prepend pre-step 能否剥离内层注入的 agent-instructions
+                                const dispatchPreStep = async (idx: number): Promise<{
+                                    kind: string;
+                                    messages: unknown[];
+                                }> => {
+                                    const fn = preStepListeners[idx];
+                                    if (!fn) {
+                                        return {
+                                            kind: 'enter',
+                                            messages: [
+                                                {
+                                                    role: 'user',
+                                                    source: { kind: 'narrateos-pipeline' },
+                                                    content: msg.content
+                                                }
+                                            ]
+                                        };
+                                    }
+                                    return await fn({}, () => dispatchPreStep(idx + 1));
+                                };
+                                const preStepResult = await dispatchPreStep(0);
+                                preStepCapturedMessages = preStepResult.messages as typeof preStepCapturedMessages;
+
+                                // 模拟 3 次 MALFORMED_RESPONSE 请求错误：前 2 次应返回 retry，第 3 次不再无限重试
+                                for (let i = 0; i < 3; i += 1) {
+                                    const ac = new AbortController();
+                                    const reqErrHandler = requestErrorListeners[0];
+                                    if (reqErrHandler) {
+                                        const action = await reqErrHandler(
+                                            {
+                                                turn: 1,
+                                                step: 1,
+                                                provider: 'deepseek-official',
+                                                failure: {
+                                                    code: 'MALFORMED_RESPONSE',
+                                                    message: 'duplicate message_start'
+                                                },
+                                                signal: ac.signal
+                                            },
+                                            async () => undefined
+                                        );
+                                        malformedRetryDecisions.push(action);
+                                    }
+                                }
+
+                                latestStreamHandler?.({
+                                    frame: {
+                                        type: 'chunk',
+                                        chunk: {
+                                            type: 'reasoning-delta',
+                                            index: 0,
+                                            text: '先锚定潮湿码头与冷风声线'
+                                        }
+                                    }
+                                });
+                                latestStreamHandler?.({
+                                    frame: {
+                                        type: 'chunk',
+                                        chunk: {
+                                            type: 'text-delta',
+                                            index: 0,
+                                            text: '海雾压在吊机铁臂上，陈砚把油印票据折进袖口。'
+                                        }
+                                    }
+                                });
+                                idleResolve?.();
+                            })();
+                        }
+                    },
+                    async dispose() {}
+                };
+            }
+        };
+
+        ctx.provide('agents', mockAgents as never);
+        ctx.provide('llm', { stream: () => textToStreamChunks('unused') } as never);
+
+        const roleLoader = new RoleLoader(join(process.cwd(), 'presets/dsh-preset-narrateos'));
+        const runner = new RoleRunner({
+            ctx,
+            storeService: ctx.narrateStore,
+            toolsService: ctx.narrateTools,
+            roleLoader,
+            llmAdapter: new DshLlmAdapter(ctx.llm, {
+                poolRouting: {
+                    strong_creative: { provider: 'deepseek-official', model: 'mock-strong' },
+                    fast_retrieval: { provider: 'deepseek-official', model: 'mock-fast' },
+                    audit: { provider: 'deepseek-official', model: 'mock-audit' }
+                }
+            }),
+            poolRouting: {
+                strong_creative: { provider: 'deepseek-official', model: 'mock-strong' },
+                fast_retrieval: { provider: 'deepseek-official', model: 'mock-fast' },
+                audit: { provider: 'deepseek-official', model: 'mock-audit' }
+            }
+        });
+
+        const stageSessions: Array<{ stage: string; sessionId: string }> = [];
+        const writerRes = await runner.runCleanroom({
+            roleId: 'writer',
+            bookRoot,
+            chapterNumber: 3,
+            request: {
+                staticPrefixBlocks: ['静态前缀设定'],
+                dynamicTail: '第三章写作指令',
+                traceStage: 'writer'
+            },
+            onStageSession(ev) {
+                stageSessions.push({ stage: ev.stage, sessionId: ev.sessionId });
+            }
+        });
+
+        expect(sawToolsRegisterOnWriter).toBe(false);
+        expect(writerRes.sessionId).toMatch(/^narrate-writer-/);
+        expect(stageSessions).toEqual([
+            { stage: 'WRITER', sessionId: writerRes.sessionId! }
+        ]);
+        expect(writerRes.response.text).toContain('陈砚把油印票据折进袖口');
+        expect(
+            preStepCapturedMessages.some((m) => m.source?.kind === 'agent-instructions')
+        ).toBe(false);
+        expect(malformedRetryDecisions).toEqual([
+            { kind: 'retry' },
+            { kind: 'retry' },
+            undefined
+        ]);
+
+        const runsRaw = await readFile(join(bookRoot, '.ops/runs.jsonl'), 'utf8');
+        expect(runsRaw).toContain(writerRes.sessionId!);
+        const sessionLogPath = join(bookRoot, `.ops/session_logs/${writerRes.sessionId}.json`);
+        expect(existsSync(sessionLogPath)).toBe(true);
+        const sessionLog = await readFile(sessionLogPath, 'utf8');
+        expect(sessionLog).toContain('先锚定潮湿码头与冷风声线');
+        expect(sessionLog).toContain('陈砚把油印票据折进袖口');
+    });
 });

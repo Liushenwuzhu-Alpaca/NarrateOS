@@ -318,10 +318,9 @@ function deriveHistoricalStageOverrides(
     for (const run of runs) {
         const stageId = resolveStageId(run.stage);
         if (!stageId) continue;
-        // 洁净室 Writer 不创建交互式多轮会话；仅保留状态说明
-        const sessionId = stageId === 'WRITER' ? undefined : asString(run.sessionId);
-        const parentSessionId = stageId === 'WRITER' ? undefined : asString(run.parentSessionId);
-        const mode = stageId === 'WRITER' ? undefined : asString(run.mode);
+        const sessionId = asString(run.sessionId);
+        const parentSessionId = asString(run.parentSessionId);
+        const mode = asString(run.mode);
         mapped[stageId] = {
             status: mapRunStatusToStageStatus(run.status),
             summary: DEFAULT_STAGE_SUMMARIES[stageId],
@@ -782,10 +781,9 @@ export function NarrateStudioRoot({
                 if (resolvedStage && (message || rawSessionId || runId)) {
                     // PROSE_GATE 每章例行校验,只是 Writer 运行中;LOCAL_PATCH 才是拦截返修
                     const isPatch = stageName === 'LOCAL_PATCH';
-                    const sessionId = resolvedStage === 'WRITER' ? undefined : rawSessionId;
-                    const parentSessionId =
-                        resolvedStage === 'WRITER' ? undefined : rawParentSessionId;
-                    const mode = resolvedStage === 'WRITER' ? undefined : rawMode;
+                    const sessionId = rawSessionId;
+                    const parentSessionId = rawParentSessionId;
+                    const mode = rawMode;
                     setStageOverrides((prev) => {
                         const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
                         const resolvedIdx = STAGE_SEQUENCE.indexOf(resolvedStage);
@@ -1468,8 +1466,7 @@ export function NarrateStudioRoot({
     const stageArtifact = useMemo(() => {
         const base = deriveStageArtifact(latestSseStage);
         const resolved = latestSseStage ? resolveStageId(latestSseStage) : null;
-        const boundSession =
-            resolved && resolved !== 'WRITER' ? effectiveStages[resolved]?.sessionId ?? null : null;
+        const boundSession = resolved ? effectiveStages[resolved]?.sessionId ?? null : null;
         return boundSession ? { ...base, sessionId: boundSession } : base;
     }, [effectiveStages, latestSseStage]);
 
@@ -1482,7 +1479,7 @@ export function NarrateStudioRoot({
     const handleInspectStageSessionById = useCallback(
         (sessionId: string) => {
             const matchedId = STAGE_SEQUENCE.find(
-                (id) => id !== 'WRITER' && effectiveStages[id]?.sessionId === sessionId
+                (id) => effectiveStages[id]?.sessionId === sessionId
             );
             const meta = matchedId
                 ? PIPELINE_STAGE_META.find((item) => item.id === matchedId)

@@ -404,10 +404,10 @@ export function StageSessionViewer({
                     <strong>未选择工种会话节点</strong>
                     <p>
                         点击中栏顶部的 6 圆点流水线胶囊展开阶段图，再点击任意已绑定会话的节点
-                        （Librarian / Planner / Fact Check / Extractor / Dreaming），即可在此查看实时思考流或历史 Trajectory。
+                        （Librarian / Planner / Writer / Fact Check / Extractor / Dreaming），即可在此查看实时思考流或历史 Trajectory。
                     </p>
                     <p className="ns-muted">
-                        注：Writer 采用零工具单轮净室调用（直调 ctx.llm），不创建多轮 Agent Session。
+                        注：Writer 采用零工具单轮净室 Agent（与多轮工种统一基于原生会话记录，无工具与宿主指令污染）。
                     </p>
                 </div>
             </div>

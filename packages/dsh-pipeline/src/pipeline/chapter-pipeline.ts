@@ -51,6 +51,7 @@ import {
     type EngineProgressEvent,
     type EngineStageName,
     type OpsSignal,
+    type StageSessionEvent,
     type StepChapterOptions,
     type StepChapterResult
 } from '../schemas.js';
@@ -435,8 +436,8 @@ export class ChapterPipeline {
             );
             activeOutline = planned.outline;
 
-            // Step 3: Writer (净室零工具单轮流)
-            emit('WRITER', chapterNumber, '净室单轮执笔');
+            // Step 3: Writer (净室单轮无工具 Agent)
+            emit('WRITER', chapterNumber, '净室单轮 Agent 执笔');
             const drafted = await this.runWriter(
                 snapshot,
                 chapterNumber,
@@ -453,7 +454,8 @@ export class ChapterPipeline {
                 writerInjection,
                 voicePool,
                 totalUsage,
-                options.signal
+                options.signal,
+                options.onStageSession
             );
             activeProse = drafted.prose;
             updatedVoicePool = drafted.updatedVoicePool;
@@ -493,11 +495,13 @@ export class ChapterPipeline {
                             .join('; ');
                         activeProse = await this.runLocalPatch(
                             snapshot.config,
+                            chapterNumber,
                             activeProse,
                             gateResult.violatedParagraphIndices,
                             reason,
                             totalUsage,
-                            options.signal
+                            options.signal,
+                            options.onStageSession
                         );
                         continue;
                     }
@@ -521,7 +525,8 @@ export class ChapterPipeline {
                             writerInjection,
                             voicePool,
                             totalUsage,
-                            options.signal
+                            options.signal,
+                            options.onStageSession
                         );
                         activeProse = rewritten.prose;
                         updatedVoicePool = rewritten.updatedVoicePool;
@@ -616,11 +621,13 @@ export class ChapterPipeline {
                     const reason = verifiedIssues.map((i) => i.description).join('; ');
                     activeProse = await this.runLocalPatch(
                         snapshot.config,
+                        chapterNumber,
                         activeProse,
                         patchIndices,
                         reason,
                         totalUsage,
-                        options.signal
+                        options.signal,
+                        options.onStageSession
                     );
                     continue;
                 }
@@ -644,7 +651,8 @@ export class ChapterPipeline {
                         writerInjection,
                         voicePool,
                         totalUsage,
-                        options.signal
+                        options.signal,
+                        options.onStageSession
                     );
                     activeProse = rewritten.prose;
                     updatedVoicePool = rewritten.updatedVoicePool;
@@ -938,7 +946,8 @@ export class ChapterPipeline {
         writerInjection: string,
         voicePool: VoiceSamplePool | undefined,
         totalUsage: TokenUsage,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        onStageSession?: (event: StageSessionEvent) => void
     ): Promise<{
         prose: string;
         writerView: ReturnType<ViewSlicer['slice']>;
@@ -992,11 +1001,13 @@ export class ChapterPipeline {
             roleId: 'writer',
             bookRoot: this.store.bookRoot,
             bookConfig: snapshot.config,
+            chapterNumber,
             request: {
                 ...assembled.request,
                 traceStage: 'writer'
             },
-            signal
+            signal,
+            onStageSession
         });
         addUsage(totalUsage, response.usage);
 
@@ -1008,14 +1019,16 @@ export class ChapterPipeline {
         };
     }
 
-    /** 执行局部 Patch（净室零工具单轮调用，按连续相邻索引分组，仅重写目标段落与紧邻参考） */
+    /** 执行局部 Patch（净室零工具单轮 Agent，按连续相邻索引分组，仅重写目标段落与紧邻参考） */
     private async runLocalPatch(
         bookConfig: BookSnapshot['config'],
+        chapterNumber: number,
         prose: string,
         violatedIndices: number[],
         reason: string,
         totalUsage: TokenUsage,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        onStageSession?: (event: StageSessionEvent) => void
     ): Promise<string> {
         const paragraphs = splitParagraphs(prose);
         if (paragraphs.length === 0 || violatedIndices.length === 0) {
@@ -1068,6 +1081,7 @@ export class ChapterPipeline {
                 roleId: patchRoleCfg.id,
                 bookRoot: this.store.bookRoot,
                 bookConfig,
+                chapterNumber,
                 request: {
                     pool: patchRoleCfg.pool,
                     traceStage: 'patch',
@@ -1082,7 +1096,8 @@ export class ChapterPipeline {
                         .filter(Boolean)
                         .join('\n\n')
                 },
-                signal
+                signal,
+                onStageSession
             });
             addUsage(totalUsage, response.usage);
 

@@ -91,8 +91,38 @@ export interface RunCleanroomOptions {
     roleId?: string | undefined;
     bookRoot: string;
     bookConfig?: BookConfig | undefined;
+    chapterNumber?: number | undefined;
     request: Omit<CleanroomRequest, 'pool'> & { pool?: CleanroomRequest['pool'] | undefined };
     signal?: AbortSignal | undefined;
+    onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+    onStageEvent?: ((event: StageStreamSseEvent) => void) | undefined;
+}
+
+const MAX_AGENT_MALFORMED_RETRIES = 2;
+
+function isAgentInstructionsMessage(msg: unknown): boolean {
+    if (typeof msg !== 'object' || msg === null) return false;
+    const source = (msg as { source?: unknown }).source;
+    return (
+        typeof source === 'object' &&
+        source !== null &&
+        (source as { kind?: unknown }).kind === 'agent-instructions'
+    );
+}
+
+async function waitRetryBackoff(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return false;
+    return await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve(true);
+        }, delayMs);
+        function onAbort() {
+            clearTimeout(timer);
+            resolve(false);
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 /** RoleRunner 构造依赖 */
@@ -119,10 +149,10 @@ async function appendExtendedRunRecord(
 }
 
 /**
- * 通用双路径角色执行器：
- * - 多轮探查工种 (`cleanroom: false`)：通过 ctx.agents.create({ meta: { cwd } }) 启动受控独立 Agent，
- *   挂载单书/预设角色提示词、受控工具白名单与 yield_* 防逃逸 Hook，记录 .ops/runs.jsonl 会话索引与 .ops/session_logs/；
- * - 净室单轮工种 (`cleanroom: true`)：零工具、零 sessionId 直调 DshLlmAdapter (ctx.llm.stream)。
+ * 通用双模式受控角色执行器（统一基于 ctx.agents.create）：
+ * - 多轮探查工种 (`cleanroom: false`)：挂载受控工具白名单与 yield_* 防逃逸 Hook；
+ * - 净室单轮工种 (`cleanroom: true`)：零工具、无 yield_*，直接提取单轮文本输出传给下游；
+ * - 全工种统一在最外层 agent/pre-step 过滤宿主 agent-instructions (AGENTS.md)，并统一补齐 MALFORMED_RESPONSE 重试与会话归档。
  */
 export class RoleRunner {
     private execCtx: Context;
@@ -191,21 +221,107 @@ export class RoleRunner {
     private async runMultiTurnInner<TYield>(
         options: RunMultiTurnOptions
     ): Promise<RunMultiTurnResult<TYield>> {
-        if (options.signal?.aborted) {
-            throw options.signal.reason instanceof Error
-                ? options.signal.reason
-                : new Error('Aborted');
-        }
-
         const roleCfg = await this.roleLoader.loadRoleConfig(options.roleId, options.bookRoot);
         if (roleCfg.cleanroom) {
             throw new Error(`工种 ${options.roleId} 配置为 cleanroom=true，请改用 runCleanroom 净室路径`);
         }
+        const sessionRes = await this.runAgentSession<TYield>({
+            mode: 'multi-turn',
+            roleCfg,
+            roleId: options.roleId,
+            stage: options.stage,
+            bookRoot: options.bookRoot,
+            bookConfig: options.bookConfig,
+            chapterNumber: options.chapterNumber,
+            taskPromptBlocks: [options.taskPrompt],
+            runId: options.runId,
+            sessionId: options.sessionId,
+            parentSessionId: options.parentSessionId,
+            agentMode: options.mode,
+            maxTokens: options.maxTokens,
+            allowedOpsPaths: options.allowedOpsPaths,
+            allowedOpsWritePaths: options.allowedOpsWritePaths,
+            targetChapter: options.targetChapter,
+            targetDay: options.targetDay,
+            chapterGoal: options.chapterGoal,
+            draftText: options.draftText,
+            draftPath: options.draftPath,
+            timelineMode: options.timelineMode,
+            allowInnateMutation: options.allowInnateMutation,
+            deferCommit: options.deferCommit,
+            applyOptions: options.applyOptions,
+            visibleEntities: options.visibleEntities,
+            reachableIds: options.reachableIds,
+            narrationSubjectivity: options.narrationSubjectivity,
+            signal: options.signal,
+            onStageSession: options.onStageSession,
+            onStageEvent: options.onStageEvent
+        });
+        return {
+            runId: sessionRes.runId,
+            sessionId: sessionRes.sessionId,
+            roleConfig: sessionRes.roleConfig,
+            yieldResult: sessionRes.yieldResult as TYield,
+            usage: sessionRes.usage
+        };
+    }
 
-        const runId = options.runId ?? randomUUID();
-        const sessionIdStr = options.sessionId ?? `narrate-${options.roleId}-${runId}`;
+    private async runAgentSession<TYield>(params: {
+        mode: 'multi-turn' | 'cleanroom';
+        roleCfg: LoadedRoleConfig;
+        roleId: string;
+        stage: string;
+        bookRoot: string;
+        bookConfig?: BookConfig | undefined;
+        chapterNumber?: number | undefined;
+        taskPromptBlocks: string[];
+        poolOverride?: CleanroomRequest['pool'] | undefined;
+        temperatureOverride?: number | undefined;
+        reasoningEffortOverride?: LoadedRoleConfig['reasoningEffort'] | undefined;
+        runId?: string | undefined;
+        sessionId?: string | undefined;
+        parentSessionId?: string | undefined;
+        agentMode?: string | undefined;
+        maxTokens?: number | undefined;
+        allowedOpsPaths?: string[] | undefined;
+        allowedOpsWritePaths?: string[] | undefined;
+        targetChapter?: number | undefined;
+        targetDay?: number | undefined;
+        chapterGoal?: string | undefined;
+        draftText?: string | undefined;
+        draftPath?: string | undefined;
+        timelineMode?: TimelineMode | undefined;
+        allowInnateMutation?: boolean | undefined;
+        deferCommit?: boolean | undefined;
+        applyOptions?: ApplyStatePatchOptions | undefined;
+        visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
+        reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
+        narrationSubjectivity?: NarrationSubjectivity | undefined;
+        signal?: AbortSignal | undefined;
+        onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+        onStageEvent?: ((event: StageStreamSseEvent) => void) | undefined;
+    }): Promise<{
+        runId: string;
+        sessionId: string;
+        roleConfig: LoadedRoleConfig;
+        yieldResult: TYield | undefined;
+        assistantText: string;
+        reasoningText: string;
+        usage: TokenUsage;
+        modelId: string;
+    }> {
+        if (params.signal?.aborted) {
+            throw params.signal.reason instanceof Error
+                ? params.signal.reason
+                : new Error('Aborted');
+        }
+
+        const roleCfg = params.roleCfg;
+        const isCleanroom = params.mode === 'cleanroom';
+        const runId = params.runId ?? randomUUID();
+        const sessionIdStr = params.sessionId ?? `narrate-${params.roleId}-${runId}`;
         const sessionId = SessionId(sessionIdStr);
-        const chapter = options.chapterNumber ?? 0;
+        const chapter = params.chapterNumber ?? 0;
         const startedAt = new Date().toISOString();
 
         this.storeService.beginRun(runId);
@@ -217,12 +333,12 @@ export class RoleRunner {
         const sessionDetail: StageSessionDetail = {
             sessionId: sessionIdStr,
             runId,
-            stage: options.stage,
-            role: options.roleId,
+            stage: params.stage,
+            role: params.roleId,
             chapter,
             status: 'running',
-            ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
-            ...(options.mode ? { mode: options.mode } : {}),
+            ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+            ...(params.agentMode ? { mode: params.agentMode } : {}),
             live: true,
             events: []
         };
@@ -236,10 +352,10 @@ export class RoleRunner {
             };
             sessionDetail.events.push(fullItem);
             try {
-                const emitter = options.onStageEvent ?? this.defaultOnStageEvent;
+                const emitter = params.onStageEvent ?? this.defaultOnStageEvent;
                 emitter?.({
                     sessionId: sessionIdStr,
-                    stage: options.stage,
+                    stage: params.stage,
                     kind: fullItem.kind,
                     ...(fullItem.text !== undefined ? { text: fullItem.text } : {}),
                     ...(fullItem.toolName !== undefined ? { toolName: fullItem.toolName } : {}),
@@ -253,62 +369,72 @@ export class RoleRunner {
 
         let disposeSessionEventListener: (() => void) | undefined;
         let lastAgentError: Error | undefined;
+        let latestAssistantText = '';
+        let latestReasoningText = '';
+        let malformedRetries = 0;
         const multiTurnUsage = createEmptyUsage();
+        const route = resolvePoolRoute(
+            this.poolRouting,
+            params.poolOverride ?? roleCfg.pool,
+            params.bookConfig
+        );
 
         try {
-            const allowedOpsPaths =
-                options.allowedOpsPaths ??
-                (roleCfg.allowedOpsRead.length > 0 ? roleCfg.allowedOpsRead : undefined);
-            const allowedOpsWritePaths =
-                options.allowedOpsWritePaths ??
-                (roleCfg.allowedOpsWrite.length > 0 ? roleCfg.allowedOpsWrite : undefined);
+            if (!isCleanroom) {
+                const allowedOpsPaths =
+                    params.allowedOpsPaths ??
+                    (roleCfg.allowedOpsRead.length > 0 ? roleCfg.allowedOpsRead : undefined);
+                const allowedOpsWritePaths =
+                    params.allowedOpsWritePaths ??
+                    (roleCfg.allowedOpsWrite.length > 0 ? roleCfg.allowedOpsWrite : undefined);
 
-            toolset = this.toolsService.buildRoleTools({
-                runId,
-                bookRoot: options.bookRoot,
-                maxReadCalls: roleCfg.maxReadCalls,
-                tools: roleCfg.tools,
-                yieldTool: roleCfg.yieldTool ?? undefined,
-                allowedOpsPaths,
-                allowedOpsWritePaths,
-                targetChapter: options.targetChapter,
-                targetDay: options.targetDay,
-                chapterGoal: options.chapterGoal,
-                draftText: options.draftText,
-                draftPath: options.draftPath,
-                chapterNumber: options.chapterNumber,
-                timelineMode: options.timelineMode,
-                allowInnateMutation: options.allowInnateMutation,
-                deferCommit: options.deferCommit,
-                applyOptions: options.applyOptions,
-                visibleEntities: options.visibleEntities,
-                reachableIds: options.reachableIds,
-                narrationSubjectivity: options.narrationSubjectivity
-            });
+                toolset = this.toolsService.buildRoleTools({
+                    runId,
+                    bookRoot: params.bookRoot,
+                    maxReadCalls: roleCfg.maxReadCalls,
+                    tools: roleCfg.tools,
+                    yieldTool: roleCfg.yieldTool ?? undefined,
+                    allowedOpsPaths,
+                    allowedOpsWritePaths,
+                    targetChapter: params.targetChapter,
+                    targetDay: params.targetDay,
+                    chapterGoal: params.chapterGoal,
+                    draftText: params.draftText,
+                    draftPath: params.draftPath,
+                    chapterNumber: params.chapterNumber,
+                    timelineMode: params.timelineMode,
+                    allowInnateMutation: params.allowInnateMutation,
+                    deferCommit: params.deferCommit,
+                    applyOptions: params.applyOptions,
+                    visibleEntities: params.visibleEntities,
+                    reachableIds: params.reachableIds,
+                    narrationSubjectivity: params.narrationSubjectivity
+                });
+            }
 
-            await appendExtendedRunRecord(options.bookRoot, {
+            await appendExtendedRunRecord(params.bookRoot, {
                 runId,
                 chapter,
-                stage: options.stage,
-                role: options.roleId,
+                stage: params.stage,
+                role: params.roleId,
                 sessionId: sessionIdStr,
                 status: 'running',
                 startedAt,
-                ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
-                ...(options.mode ? { mode: options.mode } : {})
+                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+                ...(params.agentMode ? { mode: params.agentMode } : {})
             });
 
             try {
-                options.onStageSession?.({
-                    stage: options.stage,
-                    role: options.roleId,
+                params.onStageSession?.({
+                    stage: params.stage,
+                    role: params.roleId,
                     chapter,
                     runId,
                     sessionId: sessionIdStr,
-                    ...(options.parentSessionId
-                        ? { parentSessionId: options.parentSessionId }
+                    ...(params.parentSessionId
+                        ? { parentSessionId: params.parentSessionId }
                         : {}),
-                    ...(options.mode ? { mode: options.mode } : {})
+                    ...(params.agentMode ? { mode: params.agentMode } : {})
                 });
             } catch {
                 // 避免 SSE 回调异常中断执行
@@ -334,73 +460,76 @@ export class RoleRunner {
                 });
             }
 
-            const route = resolvePoolRoute(this.poolRouting, roleCfg.pool, options.bookConfig);
+            const requestedEffort = params.reasoningEffortOverride ?? roleCfg.reasoningEffort;
             const compatibleEffort = await resolveCompatibleReasoningEffort(
                 this.execCtx.llm,
                 route.provider,
                 route.model,
-                roleCfg.reasoningEffort,
-                options.signal
+                requestedEffort,
+                params.signal
             );
             const builtToolset = toolset;
+            const effectiveTemperature = params.temperatureOverride ?? roleCfg.temperature;
 
             handle = await this.execCtx.agents.create({
                 sessionId,
                 meta: {
-                    cwd: options.bookRoot
+                    cwd: params.bookRoot
                 },
                 agentOptions: {
                     provider: route.provider,
                     model: route.model,
                     ...(compatibleEffort !== undefined ? { reasoningEffort: compatibleEffort } : {}),
-                    ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {})
+                    ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {})
                 },
-                ...(options.signal !== undefined ? { signal: options.signal } : {}),
+                ...(params.signal !== undefined ? { signal: params.signal } : {}),
                 setup: (agentCtx) => {
-                    // 屏蔽宿主全局工具，仅注册该角色白名单内的受控工具（并包裹执行观测器）
+                    // 屏蔽宿主全局工具；净室工种零工具，多轮工种仅注册受控白名单工具
                     if (agentCtx.tools) {
                         agentCtx.tools.restrict({ allow: [] });
-                        for (const tool of builtToolset.tools) {
-                            const observedTool: ToolDefinition = {
-                                ...tool,
-                                async execute(args, exec) {
-                                    recordSessionEvent({
-                                        timestamp: new Date().toISOString(),
-                                        kind: 'tool-call',
-                                        toolName: tool.name,
-                                        callId: String(exec.callId),
-                                        text: JSON.stringify(args),
-                                        status: 'running'
-                                    });
-                                    try {
-                                        const out = await tool.execute(args, exec);
-                                        const preview =
-                                            typeof out === 'string'
-                                                ? out.slice(0, 800)
-                                                : JSON.stringify(out).slice(0, 800);
+                        if (builtToolset) {
+                            for (const tool of builtToolset.tools) {
+                                const observedTool: ToolDefinition = {
+                                    ...tool,
+                                    async execute(args, exec) {
                                         recordSessionEvent({
                                             timestamp: new Date().toISOString(),
-                                            kind: 'tool-result',
+                                            kind: 'tool-call',
                                             toolName: tool.name,
                                             callId: String(exec.callId),
-                                            text: preview,
-                                            status: 'completed'
+                                            text: JSON.stringify(args),
+                                            status: 'running'
                                         });
-                                        return out;
-                                    } catch (err) {
-                                        recordSessionEvent({
-                                            timestamp: new Date().toISOString(),
-                                            kind: 'tool-result',
-                                            toolName: tool.name,
-                                            callId: String(exec.callId),
-                                            text: err instanceof Error ? err.message : String(err),
-                                            status: 'error'
-                                        });
-                                        throw err;
+                                        try {
+                                            const out = await tool.execute(args, exec);
+                                            const preview =
+                                                typeof out === 'string'
+                                                    ? out.slice(0, 800)
+                                                    : JSON.stringify(out).slice(0, 800);
+                                            recordSessionEvent({
+                                                timestamp: new Date().toISOString(),
+                                                kind: 'tool-result',
+                                                toolName: tool.name,
+                                                callId: String(exec.callId),
+                                                text: preview,
+                                                status: 'completed'
+                                            });
+                                            return out;
+                                        } catch (err) {
+                                            recordSessionEvent({
+                                                timestamp: new Date().toISOString(),
+                                                kind: 'tool-result',
+                                                toolName: tool.name,
+                                                callId: String(exec.callId),
+                                                text: err instanceof Error ? err.message : String(err),
+                                                status: 'error'
+                                            });
+                                            throw err;
+                                        }
                                     }
-                                }
-                            };
-                            agentCtx.tools.register(observedTool);
+                                };
+                                agentCtx.tools.register(observedTool);
+                            }
                         }
                     }
 
@@ -415,13 +544,61 @@ export class RoleRunner {
                         });
                     }
 
-                    // 透传外部化角色配置的采样温度
+                    // 置于最外层过滤宿主 dsh-agent-instructions 注入的 AGENTS.md / CLAUDE.md，确保全工种净室隔离
+                    const registerPrependOn = agentCtx.on as unknown as (
+                        event: 'agent/pre-step',
+                        listener: (
+                            payload: unknown,
+                            next: () => Promise<{ kind: string; messages?: unknown[] }>
+                        ) => Promise<{ kind: string; messages?: unknown[] }>,
+                        options?: { prepend?: boolean }
+                    ) => unknown;
+                    registerPrependOn(
+                        'agent/pre-step',
+                        async (_payload, next) => {
+                            const decision = await next();
+                            if (decision.kind === 'reject' || !Array.isArray(decision.messages)) {
+                                return decision;
+                            }
+                            return {
+                                ...decision,
+                                messages: decision.messages.filter(
+                                    (msg) => !isAgentInstructionsMessage(msg)
+                                )
+                            };
+                        },
+                        { prepend: true }
+                    );
+
+                    // 透传外部化角色配置的采样温度，并在每次新发起 LLM 请求时重置当前轮次输出缓冲
                     agentCtx.on('agent/request', async (_payload, next) => {
+                        latestAssistantText = '';
+                        latestReasoningText = '';
                         const base = await next();
                         return {
                             ...base,
-                            temperature: roleCfg.temperature
+                            temperature: effectiveTemperature
                         };
+                    });
+
+                    // 补齐 MALFORMED_RESPONSE（例如上游重复 message_start）指数退避重试
+                    agentCtx.on('agent/request-error', async (payload, next) => {
+                        const upstream = await next();
+                        if (upstream?.kind === 'retry') {
+                            return upstream;
+                        }
+                        if (
+                            payload.failure.code === 'MALFORMED_RESPONSE' &&
+                            malformedRetries < MAX_AGENT_MALFORMED_RETRIES
+                        ) {
+                            const delayMs = 500 * 2 ** malformedRetries;
+                            malformedRetries += 1;
+                            const ok = await waitRetryBackoff(delayMs, payload.signal);
+                            if (ok) {
+                                return { kind: 'retry' };
+                            }
+                        }
+                        return upstream;
                     });
 
                     // 订阅实时思考/文本流与状态变更，透传给 SSE stage:event（工具调用统一由 observedTool 记录）
@@ -429,12 +606,14 @@ export class RoleRunner {
                         if (frame.type !== 'chunk') return;
                         const ts = new Date().toISOString();
                         if (frame.chunk.type === 'reasoning-delta') {
+                            latestReasoningText += frame.chunk.text;
                             recordSessionEvent({
                                 timestamp: ts,
                                 kind: 'thinking',
                                 text: frame.chunk.text
                             });
                         } else if (frame.chunk.type === 'text-delta') {
+                            latestAssistantText += frame.chunk.text;
                             recordSessionEvent({
                                 timestamp: ts,
                                 kind: 'text',
@@ -461,8 +640,8 @@ export class RoleRunner {
                         });
                     });
 
-                    // 挂载防纯文本逃逸终态门禁 Hook
-                    if (roleCfg.yieldTool) {
+                    // 多轮工种挂载防纯文本逃逸终态门禁 Hook
+                    if (!isCleanroom && roleCfg.yieldTool && builtToolset) {
                         this.toolsService.attachYieldEnforcementHook(agentCtx, {
                             expectedYieldTool: roleCfg.yieldTool,
                             maxSteps: roleCfg.maxSteps,
@@ -475,7 +654,7 @@ export class RoleRunner {
 
             this.activeHandles.add(handle);
 
-            if (options.signal) {
+            if (params.signal) {
                 const liveHandle = handle;
                 const onAbort = () => {
                     try {
@@ -484,65 +663,72 @@ export class RoleRunner {
                         // 忽略已关闭句柄
                     }
                 };
-                if (options.signal.aborted) {
+                if (params.signal.aborted) {
                     onAbort();
                 } else {
-                    options.signal.addEventListener('abort', onAbort, { once: true });
-                    abortCleanup = () => options.signal?.removeEventListener('abort', onAbort);
+                    params.signal.addEventListener('abort', onAbort, { once: true });
+                    abortCleanup = () => params.signal?.removeEventListener('abort', onAbort);
                 }
             }
 
+            const contentBlocks = params.taskPromptBlocks
+                .filter((text) => text.length > 0)
+                .map((text) => ({ type: 'text' as const, text }));
             const promptMsg = createUserMessage({
-                content: [{ type: 'text', text: options.taskPrompt }],
+                content:
+                    contentBlocks.length > 0 ? contentBlocks : [{ type: 'text' as const, text: '' }],
                 source: { kind: 'narrateos-pipeline' }
             });
             handle.agent.followup(promptMsg);
 
             await handle.agent.whenIdle();
 
-            if (options.signal?.aborted) {
-                throw options.signal.reason instanceof Error
-                    ? options.signal.reason
+            if (params.signal?.aborted) {
+                throw params.signal.reason instanceof Error
+                    ? params.signal.reason
                     : new Error('Aborted');
             }
 
-            if (lastAgentError && (!roleCfg.yieldTool || !toolset.hasYielded())) {
+            if (lastAgentError && (isCleanroom || !roleCfg.yieldTool || !toolset?.hasYielded())) {
                 throw lastAgentError;
             }
 
-            if (roleCfg.yieldTool && !toolset.hasYielded()) {
+            if (!isCleanroom && roleCfg.yieldTool && !toolset?.hasYielded()) {
                 throw new Error(
-                    `工种 ${options.roleId} 未调用终态门禁工具 ${roleCfg.yieldTool} 即结束运行 (maxSteps=${roleCfg.maxSteps})`
+                    `工种 ${params.roleId} 未调用终态门禁工具 ${roleCfg.yieldTool} 即结束运行 (maxSteps=${roleCfg.maxSteps})`
                 );
             }
 
-            const yieldResult = toolset.getYieldResult<TYield>();
-            if (roleCfg.yieldTool && yieldResult === undefined) {
+            const yieldResult = !isCleanroom ? toolset?.getYieldResult<TYield>() : undefined;
+            if (!isCleanroom && roleCfg.yieldTool && yieldResult === undefined) {
                 throw new Error(
-                    `工种 ${options.roleId} 调用 ${roleCfg.yieldTool} 后未产出有效结构化结果`
+                    `工种 ${params.roleId} 调用 ${roleCfg.yieldTool} 后未产出有效结构化结果`
                 );
             }
 
             sessionDetail.status = 'completed';
-            await appendExtendedRunRecord(options.bookRoot, {
+            await appendExtendedRunRecord(params.bookRoot, {
                 runId,
                 chapter,
-                stage: options.stage,
-                role: options.roleId,
+                stage: params.stage,
+                role: params.roleId,
                 sessionId: sessionIdStr,
                 status: 'completed',
                 startedAt,
                 finishedAt: new Date().toISOString(),
-                ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
-                ...(options.mode ? { mode: options.mode } : {})
+                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+                ...(params.agentMode ? { mode: params.agentMode } : {})
             });
 
             return {
                 runId,
                 sessionId: sessionIdStr,
                 roleConfig: roleCfg,
-                yieldResult: yieldResult as TYield,
-                usage: multiTurnUsage
+                yieldResult,
+                assistantText: latestAssistantText,
+                reasoningText: latestReasoningText,
+                usage: multiTurnUsage,
+                modelId: `${route.provider}:${route.model}`
             };
         } catch (err: unknown) {
             sessionDetail.status = 'failed';
@@ -552,18 +738,18 @@ export class RoleRunner {
                 text: err instanceof Error ? err.message : String(err),
                 status: 'failed'
             });
-            await appendExtendedRunRecord(options.bookRoot, {
+            await appendExtendedRunRecord(params.bookRoot, {
                 runId,
                 chapter,
-                stage: options.stage,
-                role: options.roleId,
+                stage: params.stage,
+                role: params.roleId,
                 sessionId: sessionIdStr,
                 status: 'failed',
                 startedAt,
                 finishedAt: new Date().toISOString(),
                 error: err instanceof Error ? err.message : String(err),
-                ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
-                ...(options.mode ? { mode: options.mode } : {})
+                ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+                ...(params.agentMode ? { mode: params.agentMode } : {})
             }).catch(() => {});
             throw err;
         } finally {
@@ -572,7 +758,7 @@ export class RoleRunner {
             sessionDetail.live = false;
             if (SESSION_ID_SAFE_RE.test(sessionIdStr)) {
                 try {
-                    const logsDir = join(options.bookRoot, '.ops/session_logs');
+                    const logsDir = join(params.bookRoot, '.ops/session_logs');
                     await mkdir(logsDir, { recursive: true });
                     await writeFile(
                         join(logsDir, `${sessionIdStr}.json`),
@@ -594,18 +780,24 @@ export class RoleRunner {
 
     /**
      * 执行净室单轮调用 (cleanroom: true，如 Writer / Patch)：
-     * - 严禁携带 tools 或 sessionId；
-     * - 从外部化角色配置读取池路由、温度与系统提示词；
-     * - 根据 book_config.yaml 的 trace_level 写入 .ops/traces/<runId>/。
+     * - 零工具、无 yield_*，直接将单轮文本输出传给下游；
+     * - 优先通过 ctx.agents.create 创建原生 DSH 会话（支持 Studio Conversation/Trajectory 查看、
+     *   agent-instructions 隔离与 MALFORMED_RESPONSE 重试），同时通过 generateTraced 写入 .ops/traces/<runId>/；
+     * - 若运行环境未注入 ctx.agents.create（极简单元测试），安全回退到 DshLlmAdapter 直调。
      */
     async runCleanroom(options: RunCleanroomOptions): Promise<{
         response: CleanroomResponse;
         roleConfig: LoadedRoleConfig;
+        runId?: string | undefined;
+        sessionId?: string | undefined;
     }> {
         const roleId = options.roleId ?? 'writer';
         const roleCfg = await this.roleLoader.loadRoleConfig(roleId, options.bookRoot);
         if (!roleCfg.cleanroom) {
             throw new Error(`工种 ${roleId} 配置为 cleanroom=false，禁止走净室单轮路径`);
+        }
+        if (roleCfg.tools.length > 0 || roleCfg.yieldTool !== null) {
+            throw new Error(`净室工种 ${roleId} 禁止配置 tools 或 yield_tool`);
         }
 
         const req: CleanroomRequest = {
@@ -626,10 +818,71 @@ export class RoleRunner {
                 : { traceStage: roleId })
         };
 
-        const response = await generateTraced(this.llmAdapter, req, options.signal);
+        if (typeof this.execCtx.agents?.create !== 'function') {
+            const response = await generateTraced(this.llmAdapter, req, options.signal);
+            return {
+                response,
+                roleConfig: roleCfg
+            };
+        }
+
+        const stageName = (req.traceStage ?? roleId).toUpperCase();
+        let capturedRunId: string | undefined;
+        let capturedSessionId: string | undefined;
+        const taskPromptBlocks = [
+            ...req.staticPrefixBlocks.filter((block) => block.length > 0),
+            req.dynamicTail
+        ].filter((block) => block.length > 0);
+
+        const response = await generateTraced(
+            {
+                generate: async (_tracedReq, signal) => {
+                    const execPromise = this.runAgentSession<never>({
+                        mode: 'cleanroom',
+                        roleCfg,
+                        roleId,
+                        stage: stageName === 'PATCH' ? 'LOCAL_PATCH' : stageName,
+                        bookRoot: options.bookRoot,
+                        bookConfig: options.bookConfig,
+                        chapterNumber: options.chapterNumber,
+                        taskPromptBlocks,
+                        poolOverride: req.pool,
+                        temperatureOverride: req.temperature,
+                        reasoningEffortOverride: req.reasoningEffort,
+                        maxTokens: req.maxTokens,
+                        signal: signal ?? options.signal,
+                        onStageSession: options.onStageSession,
+                        onStageEvent: options.onStageEvent
+                    });
+                    this.activePromises.add(execPromise);
+                    let sessionRes: Awaited<typeof execPromise>;
+                    try {
+                        sessionRes = await execPromise;
+                    } finally {
+                        this.activePromises.delete(execPromise);
+                    }
+                    capturedRunId = sessionRes.runId;
+                    capturedSessionId = sessionRes.sessionId;
+                    if (!sessionRes.assistantText.trim()) {
+                        throw new Error(`净室工种 ${roleId} 未输出有效正文文本`);
+                    }
+                    return {
+                        text: sessionRes.assistantText,
+                        usage: sessionRes.usage,
+                        modelId: sessionRes.modelId,
+                        finishReason: 'stop'
+                    };
+                }
+            },
+            req,
+            options.signal
+        );
+
         return {
             response,
-            roleConfig: roleCfg
+            roleConfig: roleCfg,
+            runId: capturedRunId,
+            sessionId: capturedSessionId
         };
     }
 }

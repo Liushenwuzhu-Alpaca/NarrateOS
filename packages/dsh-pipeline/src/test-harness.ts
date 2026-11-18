@@ -441,6 +441,10 @@ export async function createHeadlessMockServices(
                         });
 
                         void (async () => {
+                            let emittedStream = false;
+                            const disposeTrack = agentCtx.on('agent/assistant-stream', () => {
+                                emittedStream = true;
+                            });
                             try {
                                 await handlers.onAgent({
                                     sessionId: String(options.sessionId),
@@ -452,9 +456,51 @@ export async function createHeadlessMockServices(
                                     agent: fakeAgent,
                                     signal: ac.signal
                                 });
-                            } catch {
-                                // 忽略 mock agent 被取消或测试断言触发的内部抛错
+                                if (!emittedStream && registeredTools.size === 0) {
+                                    const streamOpts: GenerateOptions = {
+                                        provider: callConfig.provider,
+                                        model: callConfig.model,
+                                        ...(callConfig.temperature !== undefined
+                                            ? { temperature: callConfig.temperature }
+                                            : {}),
+                                        ...(options.agentOptions?.reasoningEffort !== undefined
+                                            ? { reasoningEffort: options.agentOptions.reasoningEffort }
+                                            : {}),
+                                        ...(capturedSystemPrompt
+                                            ? { system: capturedSystemPrompt }
+                                            : {}),
+                                        messages: [msg],
+                                        signal: ac.signal
+                                    };
+                                    for await (const chunk of mockLlm.stream(streamOpts)) {
+                                        agentCtx.emit(
+                                            scopeTarget(fakeAgent, fakeAgent),
+                                            'agent/assistant-stream',
+                                            {
+                                                frame: {
+                                                    type: 'chunk',
+                                                    chunk
+                                                }
+                                            } as never
+                                        );
+                                        if (chunk.type === 'usage') {
+                                            ctx.emit(
+                                                'session/event',
+                                                fakeAgent.session,
+                                                {
+                                                    type: 'assistant/message',
+                                                    data: { usage: chunk.usage }
+                                                } as never
+                                            );
+                                        }
+                                    }
+                                }
+                            } catch (err) {
+                                agentCtx.emit(scopeTarget(fakeAgent, fakeAgent), 'agent/error', {
+                                    error: err
+                                } as never);
                             } finally {
+                                disposeTrack();
                                 idleResolve?.();
                             }
                         })();

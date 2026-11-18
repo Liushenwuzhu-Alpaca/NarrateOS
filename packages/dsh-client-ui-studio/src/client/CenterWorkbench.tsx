@@ -2085,8 +2085,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                             const nodeState = stageMap[stage.id];
                             const statusMeta = getStageStatusMeta(nodeState.status);
                             const isSelected = inspectedStageId === stage.id;
-                            const isCleanroomWriter = stage.id === 'WRITER';
-                            const boundSessionId = !isCleanroomWriter ? nodeState.sessionId : undefined;
+                            const boundSessionId = nodeState.sessionId;
                             const isLiveSession =
                                 Boolean(boundSessionId) &&
                                 (nodeState.status === 'active' || nodeState.status === 'healing');
@@ -2101,9 +2100,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         title={
                                             boundSessionId
                                                 ? `${stage.label} - 点击查看原生会话 (${boundSessionId})`
-                                                : isCleanroomWriter
-                                                  ? `${stage.label} - 净室单轮 ctx.llm 调用（无多轮 Agent Session）`
-                                                  : `${stage.label} - ${stage.shortDesc}`
+                                                : `${stage.label} - ${stage.shortDesc}`
                                         }
                                         onClick={() => {
                                             setInspectedStageId(stage.id);
@@ -2144,13 +2141,6 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                             >
                                                 轨迹
                                             </span>
-                                        ) : isCleanroomWriter && nodeState.status !== 'idle' ? (
-                                            <span
-                                                className="ns-stage-sess-pill ns-sess-cleanroom"
-                                                title="净室单轮调用 ctx.llm，不创建多轮 Agent Session"
-                                            >
-                                                净室
-                                            </span>
                                         ) : null}
                                         {nodeState.badge ? (
                                             <span className="ns-stage-repair ns-mono">{nodeState.badge}</span>
@@ -2176,8 +2166,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                     <span className="ns-mono ns-muted">
                                         SSE: {latestSseStage ?? 'IDLE'}
                                     </span>
-                                    {inspectedStageDef.id !== 'WRITER' &&
-                                    stageMap[inspectedStageDef.id].sessionId &&
+                                    {stageMap[inspectedStageDef.id].sessionId &&
                                     onSelectStageSession ? (
                                         <button
                                             type="button"
@@ -2221,18 +2210,17 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                             inspectedStageDef.defaultOutput}
                                     </span>
                                 </div>
-                                {inspectedStageDef.id === 'WRITER' ? (
-                                    <div className="ns-inspector-cleanroom-note" role="note">
-                                        <strong>只读说明：</strong>
-                                        Writer（含静态门禁局部 Patch）采用零工具单轮净室调用（直调 <code>ctx.llm</code>），
-                                        不建立多轮 Agent Session，因此无 Conversation / Trajectory；门禁与遥测明细请在右侧「检查器」或 <code>.ops/traces/</code> 查看。
-                                    </div>
-                                ) : stageMap[inspectedStageDef.id].sessionId ? (
+                                {stageMap[inspectedStageDef.id].sessionId ? (
                                     <div className="ns-inspector-session-note ns-mono">
                                         已绑定 Session: {stageMap[inspectedStageDef.id].sessionId}
                                         {stageMap[inspectedStageDef.id].runId
                                             ? ` - runId: ${stageMap[inspectedStageDef.id].runId}`
                                             : ''}
+                                    </div>
+                                ) : inspectedStageDef.id === 'WRITER' ? (
+                                    <div className="ns-inspector-cleanroom-note" role="note">
+                                        <strong>只读说明：</strong>
+                                        该历史章节的 Writer 未绑定原生会话（净室直调历史记录），门禁与遥测明细请在右侧「检查器」或 <code>.ops/traces/</code> 查看。
                                     </div>
                                 ) : null}
                             </div>
