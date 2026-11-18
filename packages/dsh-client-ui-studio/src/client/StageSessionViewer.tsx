@@ -68,6 +68,15 @@ export type StudioRenderStageConversation = (owner: {
     view?: StageSessionViewMode | string;
 }) => React.ReactNode;
 
+/** 同节点多尝试切换条目 */
+export interface StageViewerAttemptItem {
+    sessionId: string;
+    label: string;
+    status?: string | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
+}
+
 /** StageSessionViewer 组件 Props */
 export interface StageSessionViewerProps {
     selection: StageSessionSelection | null;
@@ -75,6 +84,14 @@ export interface StageSessionViewerProps {
     SessionProvider?: StudioSessionProviderComponent | undefined;
     renderStageConversation?: StudioRenderStageConversation | undefined;
     onClose?: (() => void) | undefined;
+    /** 当前阶段生效模型标签（如 provider:model），用于原生/回退顶部抬头即时展示 */
+    effectiveModelLabel?: string | undefined;
+    /** 同节点多次尝试会话列表（如 初稿执笔 / 局部润色 Patch / 整章重写） */
+    attemptSessions?: StageViewerAttemptItem[] | undefined;
+    /** 切换同节点尝试会话回调 */
+    onSelectAttemptSession?: ((sessionId: string) => void) | undefined;
+    /** 来自 stage:event SSE 的实时增量事件流 */
+    liveEvents?: StageSessionDetailEvent[] | undefined;
 }
 
 function defaultViewModeForStatus(status: StageNodeStatus | undefined): StageSessionViewMode {
@@ -110,6 +127,53 @@ function normalizeSubagentMode(mode: string | undefined): StageSessionSubagentMo
         return mode;
     }
     return 'one-shot';
+}
+
+/** 规范化阶段工种展示名称：第 4 步核查统一显示为 4. Checker / Checker */
+function normalizeStageRoleDisplayLabel(stageId: string, stageLabel: string): string {
+    const trimmed = stageLabel.trim();
+    if (
+        stageId.toUpperCase() === 'FACT_CHECKER' ||
+        /^(?:4\.\s*)?fact[\s_-]*check(?:er)?$/i.test(trimmed)
+    ) {
+        return '4. Checker';
+    }
+    return trimmed.replace(/fact[\s_-]*checker/gi, 'Checker').replace(/fact[\s_-]*check/gi, 'Checker');
+}
+
+/** 合并已落盘归档事件与实时 stage:event SSE 增量事件，避免重复条目 */
+function mergeSessionEvents(
+    archived: readonly StageSessionDetailEvent[] | undefined,
+    live: readonly StageSessionDetailEvent[] | undefined
+): StageSessionDetailEvent[] {
+    const archivedList = Array.isArray(archived) ? archived : [];
+    const liveList = Array.isArray(live) ? live : [];
+    if (archivedList.length === 0) return [...liveList];
+    if (liveList.length === 0) return [...archivedList];
+
+    const seen = new Set<string>();
+    const merged: StageSessionDetailEvent[] = [];
+    const keyOf = (ev: StageSessionDetailEvent, fallbackIndex: number): string => {
+        if (typeof ev.seq === 'number') {
+            return `seq:${ev.seq}:${ev.kind}:${ev.callId ?? ''}`;
+        }
+        return `raw:${fallbackIndex}:${ev.kind}:${ev.callId ?? ''}:${ev.toolName ?? ''}:${ev.text ?? ''}`;
+    };
+
+    for (let i = 0; i < archivedList.length; i += 1) {
+        const ev = archivedList[i]!;
+        seen.add(keyOf(ev, i));
+        merged.push(ev);
+    }
+    for (let i = 0; i < liveList.length; i += 1) {
+        const ev = liveList[i]!;
+        const key = keyOf(ev, i);
+        if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(ev);
+        }
+    }
+    return merged;
 }
 
 function formatDetailValue(value: unknown): string {
@@ -399,7 +463,11 @@ export function StageSessionViewer({
     sessionsService,
     SessionProvider,
     renderStageConversation,
-    onClose
+    onClose,
+    effectiveModelLabel,
+    attemptSessions,
+    onSelectAttemptSession,
+    liveEvents
 }: StageSessionViewerProps): React.ReactElement {
     const [viewMode, setViewMode] = useState<StageSessionViewMode>(() =>
         defaultViewModeForStatus(selection?.status)
@@ -550,7 +618,7 @@ export function StageSessionViewer({
                     <strong>未选择工种会话节点</strong>
                     <p>
                         点击中栏顶部的 6 圆点流水线胶囊展开阶段图，再点击任意已绑定会话的节点
-                        （Librarian / Planner / Writer / Fact Check / Extractor / Dreaming），即可在此查看实时思考流或历史 Trajectory。
+                        （Librarian / Planner / Writer / Checker / Extractor / Dreamer），即可在此查看实时思考流或历史 Trajectory。
                     </p>
                     <p className="ns-muted">
                         注：Writer 采用零工具单轮净室 Agent（与多轮工种统一基于原生会话记录，无工具与宿主指令污染）。
@@ -561,6 +629,18 @@ export function StageSessionViewer({
     }
 
     const statusMeta = formatStageStatusText(selection.status);
+    const normalizedRoleLabel = normalizeStageRoleDisplayLabel(
+        selection.stageId,
+        selection.stageLabel
+    );
+    const traceLampStatusClass =
+        selection.status === 'active' ||
+        selection.status === 'done' ||
+        selection.status === 'healing' ||
+        selection.status === 'halt'
+            ? selection.status
+            : 'idle';
+    const resolvedModelLabel = runDetail?.modelId || effectiveModelLabel;
     const activeSessionRef =
         sessionRef && sessionRef.sessionId === selection.sessionId ? sessionRef : null;
     const canMountNative = Boolean(
@@ -571,7 +651,9 @@ export function StageSessionViewer({
             !retainError
     );
 
-    const normalizedEvents = normalizeEventsPayload(runDetail?.events);
+    const mergedEvents = mergeSessionEvents(runDetail?.events, liveEvents);
+    const hasLiveEvents = Boolean(liveEvents && liveEvents.length > 0);
+    const normalizedEvents = normalizeEventsPayload(mergedEvents);
     const topLevelThinking =
         runDetail?.thinking ?? runDetail?.reasoning ?? normalizedEvents.thinking;
     const rootOrEventToolCalls =
@@ -590,12 +672,11 @@ export function StageSessionViewer({
         normalizedEvents.output;
     const hasRequestInput = Boolean(extractRequestInputView(runDetail?.requestInput));
     const hasDetailBody = Boolean(
-        runDetail &&
-            ((Array.isArray(runDetail.turns) && runDetail.turns.length > 0) ||
-                topLevelThinking ||
-                rootOrEventToolCalls.length > 0 ||
-                topLevelOutput ||
-                hasRequestInput)
+        (runDetail && Array.isArray(runDetail.turns) && runDetail.turns.length > 0) ||
+            topLevelThinking ||
+            rootOrEventToolCalls.length > 0 ||
+            topLevelOutput ||
+            hasRequestInput
     );
     const hasSupplementary = Boolean(
         hasRequestInput ||
@@ -611,10 +692,20 @@ export function StageSessionViewer({
             data-stage-id={selection.stageId}
             data-session-id={selection.sessionId}
         >
-            <header className="ns-session-head">
+            <header className="ns-session-head ns-trace-head">
                 <div className="ns-session-title-row">
                     <div className="ns-session-title-group">
-                        <strong>{selection.stageLabel}</strong>
+                        <span
+                            className={`ns-trace-lamp ns-dt ${traceLampStatusClass}`}
+                            style={{ viewTransitionName: 'ns-trace-lamp' }}
+                            aria-hidden="true"
+                        />
+                        <strong
+                            className="ns-trace-role"
+                            style={{ viewTransitionName: 'ns-trace-role' }}
+                        >
+                            {normalizedRoleLabel}
+                        </strong>
                         <span className={statusMeta.pillClass}>{statusMeta.label}</span>
                     </div>
                     {onClose ? (
@@ -622,12 +713,54 @@ export function StageSessionViewer({
                             type="button"
                             className="ns-btn ns-btn-ghost ns-btn-xs"
                             onClick={onClose}
-                            aria-label="返回检查器"
+                            aria-label="返回运行状态"
                         >
                             返回
                         </button>
                     ) : null}
                 </div>
+
+                {resolvedModelLabel || typeof runDetail?.thinkingChars === 'number' ? (
+                    <div className="ns-session-model-row ns-mono" data-session-model-meta="true">
+                        {resolvedModelLabel ? (
+                            <span className="ns-pill ns-pill-muted" title={resolvedModelLabel}>
+                                执行模型: {resolvedModelLabel}
+                            </span>
+                        ) : null}
+                        {typeof runDetail?.thinkingChars === 'number' ? (
+                            <span className="ns-pill ns-pill-muted">
+                                thinking: {runDetail.thinkingChars} chars
+                            </span>
+                        ) : null}
+                    </div>
+                ) : null}
+
+                {attemptSessions && attemptSessions.length > 0 ? (
+                    <div
+                        className="ns-session-model-row"
+                        role="group"
+                        aria-label="同阶段尝试切换"
+                    >
+                        {attemptSessions.map((item) => {
+                            const isCurrent = item.sessionId === selection.sessionId;
+                            return (
+                                <button
+                                    key={item.sessionId}
+                                    type="button"
+                                    data-attempt-session-id={item.sessionId}
+                                    aria-pressed={isCurrent}
+                                    title={item.triggerReason}
+                                    className={`ns-btn ns-btn-xs ${
+                                        isCurrent ? 'ns-btn-ghost ns-btn-active' : 'ns-btn-ghost'
+                                    }`}
+                                    onClick={() => onSelectAttemptSession?.(item.sessionId)}
+                                >
+                                    {item.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                ) : null}
 
                 <div className="ns-session-meta-row">
                     <span className="ns-mono ns-session-id-badge" title={selection.sessionId}>
@@ -645,21 +778,6 @@ export function StageSessionViewer({
                 {selection.runId ? (
                     <div className="ns-session-run-row ns-mono">
                         runId: {selection.runId}
-                    </div>
-                ) : null}
-
-                {runDetail?.modelId || typeof runDetail?.thinkingChars === 'number' ? (
-                    <div className="ns-session-model-row ns-mono" data-session-model-meta="true">
-                        {runDetail?.modelId ? (
-                            <span className="ns-pill ns-pill-muted" title={runDetail.modelId}>
-                                model: {runDetail.modelId}
-                            </span>
-                        ) : null}
-                        {typeof runDetail?.thinkingChars === 'number' ? (
-                            <span className="ns-pill ns-pill-muted">
-                                thinking: {runDetail.thinkingChars} chars
-                            </span>
-                        ) : null}
                     </div>
                 ) : null}
 
@@ -692,7 +810,7 @@ export function StageSessionViewer({
                         <p>
                             Writer（零工具单轮净室 Agent）与 Patch（纯内存段落编辑多轮净室 Agent）均经{' '}
                             <code>ctx.agents.create</code> 隔离运行并留存会话轨迹；当前节点未绑定可回放的{' '}
-                            <code>sessionId</code>（可能为早期历史章节），门禁指标与 Token 统计请切换至「检查器」页签查看。
+                            <code>sessionId</code>（可能为早期历史章节），门禁指标与 Token 统计请切换至「运行状态」页签查看。
                         </p>
                     </div>
                 ) : canMountNative && SessionProvider && renderStageConversation && activeSessionRef ? (
@@ -711,9 +829,9 @@ export function StageSessionViewer({
                                 {renderStageConversation({ view: viewMode })}
                             </SessionProvider>
                         </div>
-                        {hasSupplementary && runDetail ? (
+                        {hasSupplementary ? (
                             <div className="ns-session-supplementary">
-                                {renderRequestInputSection(runDetail.requestInput)}
+                                {renderRequestInputSection(runDetail?.requestInput)}
                                 {renderToolResultsSupplementary(supplementaryToolCalls)}
                             </div>
                         ) : null}
@@ -721,11 +839,13 @@ export function StageSessionViewer({
                 ) : (
                     <div className="ns-session-fallback" data-session-fallback="true">
                         <div className="ns-session-fallback-title">
-                            {hasDetailBody
-                                ? '已加载阶段会话轨迹（.ops/session_logs 归档回放）'
-                                : retainError
-                                  ? '会话加载失败'
-                                  : '原生 DSH 会话预览不可用'}
+                            {hasLiveEvents && !runDetail
+                                ? '实时思考与工具流（stage:event 增量推流）'
+                                : hasDetailBody
+                                  ? '已加载阶段会话轨迹（.ops/session_logs 归档回放）'
+                                  : retainError
+                                    ? '会话加载失败'
+                                    : '原生 DSH 会话预览不可用'}
                         </div>
                         {retainError && !hasDetailBody ? (
                             <p className="ns-session-error" role="alert">
@@ -760,9 +880,13 @@ export function StageSessionViewer({
                             </div>
                         ) : null}
 
-                        {hasDetailBody && runDetail ? (
-                            <div className="ns-session-detail" data-session-detail="true">
-                                {renderRequestInputSection(runDetail.requestInput)}
+                        {hasDetailBody ? (
+                            <div
+                                className="ns-session-detail"
+                                data-session-detail="true"
+                                data-session-live-stream={hasLiveEvents ? 'true' : undefined}
+                            >
+                                {renderRequestInputSection(runDetail?.requestInput)}
                                 {topLevelThinking ? (
                                     <details className="ns-session-turn-thinking" open>
                                         <summary>Thinking</summary>
@@ -770,7 +894,7 @@ export function StageSessionViewer({
                                     </details>
                                 ) : null}
                                 {renderToolCallList(rootOrEventToolCalls, 'root')}
-                                {Array.isArray(runDetail.turns) && runDetail.turns.length > 0 ? (
+                                {Array.isArray(runDetail?.turns) && runDetail.turns.length > 0 ? (
                                     <div className="ns-session-turns">
                                         {runDetail.turns.map((turn, idx) => renderRunTurn(turn, idx))}
                                     </div>
@@ -778,16 +902,14 @@ export function StageSessionViewer({
                                 {topLevelOutput ? (
                                     <div className="ns-session-turn-output">{topLevelOutput}</div>
                                 ) : null}
-                                {viewMode === 'trajectory' &&
-                                Array.isArray(runDetail.events) &&
-                                runDetail.events.length > 0 ? (
+                                {viewMode === 'trajectory' && mergedEvents.length > 0 ? (
                                     <details className="ns-session-turn-thinking">
-                                        <summary>原始 Trajectory 事件流 ({runDetail.events.length})</summary>
+                                        <summary>原始 Trajectory 事件流 ({mergedEvents.length})</summary>
                                         <pre className="ns-session-pre ns-mono">
                                             {JSON.stringify(
                                                 {
-                                                    usage: runDetail.usage,
-                                                    events: runDetail.events
+                                                    usage: runDetail?.usage,
+                                                    events: mergedEvents
                                                 },
                                                 null,
                                                 2

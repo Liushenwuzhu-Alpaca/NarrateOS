@@ -228,7 +228,8 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
         const { container: emptyContainer } = mountEditor(
             baseProps({ roleDefinitions: null, roleRouting: null })
         );
-        expect(emptyContainer.textContent).toContain('分角色模型覆盖 (Subagent 2-Layer Override)');
+        expect(emptyContainer.textContent).toContain('全局强弱基础模型底座');
+        expect(emptyContainer.textContent).toContain('按 Agent 单独指定');
         expect(emptyContainer.textContent).toContain('等待服务端下发工种配置 (roleDefinitions)...');
         expect(emptyContainer.querySelectorAll('[data-role-id]')).toHaveLength(0);
 
@@ -537,5 +538,107 @@ describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
 
         expect(saveBtn.disabled).toBe(false);
         expect(container.textContent).toContain('保存失败: HTTP 409 事务锁占用');
+    });
+
+    it('第一层支持直接编辑强/快/独立挑错三池输入框（关联 datalist），实时联动生效模型并与 role_routing 一并提交', async () => {
+        const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
+        const { container } = mountEditor(
+            baseProps({
+                availableModels: [
+                    { provider: 'deepseek', model: 'deepseek-reasoner', label: 'DeepSeek R1' },
+                    { provider: 'openai', model: 'gpt-5.4-high', label: 'GPT-5.4' }
+                ],
+                onSaveModelRouting: onSave
+            })
+        );
+
+        const strongInput = container.querySelector<HTMLInputElement>('input[aria-label="强模型池"]');
+        const fastInput = container.querySelector<HTMLInputElement>('input[aria-label="快模型池"]');
+        const auditInput = container.querySelector<HTMLInputElement>('input[aria-label="独立挑错池"]');
+        expect(strongInput).not.toBeNull();
+        expect(fastInput).not.toBeNull();
+        expect(auditInput).not.toBeNull();
+        expect(strongInput?.getAttribute('list')).toBeTruthy();
+
+        const saveBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+            (btn) => btn.textContent?.includes('保存工种模型配置')
+        )!;
+        // 唯一实心主按钮规则：!isDirty 时使用描边次级态，不使用主色实心填充
+        expect(saveBtn.className).not.toContain('ns-btn-primary');
+        expect(saveBtn.className).toContain('ns-btn-ghost');
+
+        setInputValue(strongInput!, 'deepseek:deepseek-reasoner');
+        setInputValue(auditInput!, 'openai:gpt-5.4-high');
+
+        // 修改后点亮主色实心按钮
+        expect(saveBtn.className).toContain('ns-btn-primary');
+
+        // 实时联动 Layer 2 展示生效模型
+        const writerRow = container.querySelector<HTMLElement>('[data-role-id="writer"]');
+        expect(writerRow?.textContent).toContain('deepseek:deepseek-reasoner');
+        const checkerRow = container.querySelector<HTMLElement>('[data-role-id="fact-checker"]');
+        expect(checkerRow?.textContent).toContain('Checker');
+        expect(checkerRow?.textContent).not.toContain('Fact Checker');
+        expect(checkerRow?.textContent).toContain('openai:gpt-5.4-high');
+
+        await act(async () => {
+            saveBtn.click();
+        });
+
+        expect(onSave).toHaveBeenCalledExactlyOnceWith({
+            model_routing: {
+                strong_creative: 'deepseek:deepseek-reasoner',
+                fast_retrieval: 'deepseek:deepseek-chat',
+                audit: 'openai:gpt-5.4-high'
+            },
+            role_routing: {}
+        });
+    });
+
+    it('第二层手风琴支持 fact_checker -> Checker 映射、覆盖项主色高亮与展开收起', async () => {
+        const { container } = mountEditor(
+            baseProps({
+                roleDefinitions: [
+                    {
+                        id: 'fact_checker',
+                        defaultPool: 'audit',
+                        defaultReasoningEffort: 'medium',
+                        effectivePool: 'audit',
+                        effectiveProvider: 'openai',
+                        effectiveModel: 'gpt-4.1',
+                        effectiveReasoningEffort: 'high'
+                    },
+                    {
+                        id: 'writer',
+                        defaultPool: 'strong_creative',
+                        defaultReasoningEffort: 'medium',
+                        effectivePool: 'strong_creative',
+                        effectiveProvider: 'anthropic',
+                        effectiveModel: 'claude-sonnet-4-5',
+                        effectiveReasoningEffort: 'medium'
+                    }
+                ],
+                roleRouting: {
+                    fact_checker: { model: 'anthropic:claude-opus-4-6', reasoning_effort: 'high' }
+                }
+            })
+        );
+
+        const checkerRow = container.querySelector<HTMLElement>('[data-role-id="fact_checker"]');
+        expect(checkerRow).not.toBeNull();
+        expect(checkerRow?.textContent).toContain('Checker');
+        expect(checkerRow?.textContent).not.toContain('fact_checker');
+        expect(checkerRow?.getAttribute('data-role-overridden')).toBe('true');
+
+        const writerRow = container.querySelector<HTMLElement>('[data-role-id="writer"]');
+        expect(writerRow?.getAttribute('data-role-overridden')).not.toBe('true');
+
+        const checkerSummary = checkerRow?.querySelector<HTMLButtonElement>('button[aria-expanded]');
+        expect(checkerSummary).not.toBeNull();
+        expect(checkerSummary?.getAttribute('aria-expanded')).toBe('false');
+        act(() => {
+            checkerSummary!.click();
+        });
+        expect(checkerSummary?.getAttribute('aria-expanded')).toBe('true');
     });
 });
