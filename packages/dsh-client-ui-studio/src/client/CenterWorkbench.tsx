@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives';
 import { handleTabKeyDown } from './tab-keyboard';
 import type { StageSessionSelection } from './StageSessionViewer';
+import type { RuntimeTaskKind } from './types';
 
 export type { StageSessionSelection } from './StageSessionViewer';
 
@@ -199,7 +200,7 @@ export interface CenterWorkbenchProps {
     selectedChapter?: number | undefined;
     timelineMode?: string | undefined;
     walPhase?: string | undefined;
-    activeTask?: 'IDLE' | 'STEPPING' | 'SYNCING' | 'DREAMING' | 'BOOTING' | undefined;
+    activeTask?: RuntimeTaskKind | undefined;
     haltRequested?: boolean | undefined;
     haltWaiting?: boolean | undefined;
     yolo?: YoloStatusData | undefined;
