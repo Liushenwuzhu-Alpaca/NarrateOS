@@ -17,6 +17,8 @@ import type {
     PutChapterResponse,
     RunDetailPayload,
     RunsListPayload,
+    SaveModelRoutingRequest,
+    SaveModelRoutingResponse,
     SelectBookRequest,
     SelectBookResponse,
     SignalsViewPayload,
@@ -115,6 +117,14 @@ export function bootBook(payload: BootBookRequest): Promise<BootBookResponse> {
 /** 获取当前作品的全局 WAL / YOLO / 遥测状态 */
 export function fetchStatus(): Promise<NarrateStatusPayload> {
     return requestJson<NarrateStatusPayload>('/api/narrate/status');
+}
+
+/** 更新当前作品的三池或分角色两层模型路由配置 */
+export function saveModelRouting(payload: SaveModelRoutingRequest): Promise<SaveModelRoutingResponse> {
+    return requestJson<SaveModelRoutingResponse>('/api/narrate/model-routing', {
+        method: 'PUT',
+        body: payload
+    });
 }
 
 /** 获取当前作品的所有章节摘要列表 */

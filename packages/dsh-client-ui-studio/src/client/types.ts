@@ -50,6 +50,38 @@ export interface RuntimeStatusSummary {
     haltRequested: boolean;
 }
 
+/** 分角色模型路由第一层档位覆盖 */
+export type RoleTierOverride = 'strong' | 'weak';
+
+/** 分角色推理强度覆盖 */
+export type RoleReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max';
+
+/** 分角色两层模型路由覆盖项（对应 book_config.yaml role_routing[roleId]） */
+export interface RoleModelOverride {
+    tier?: RoleTierOverride | undefined;
+    model?: string | undefined;
+    reasoning_effort?: RoleReasoningEffort | string | undefined;
+}
+
+/** 后端下发的工种模型解析定义（对应 status.roleDefinitions） */
+export interface RoleDefinitionItem {
+    id: string;
+    defaultPool: 'strong_creative' | 'fast_retrieval' | 'audit' | string;
+    defaultReasoningEffort?: string | undefined;
+    effectiveTier?: RoleTierOverride | null | undefined;
+    effectivePool: string;
+    effectiveProvider: string;
+    effectiveModel: string;
+    effectiveReasoningEffort?: string | undefined;
+}
+
+/** 后端注册的可用模型候选（对应 status.availableModels） */
+export interface AvailableModelItem {
+    provider: string;
+    model: string;
+    label?: string | undefined;
+}
+
 /** 作品全局状态载荷（对应 GET /api/narrate/status） */
 export interface NarrateStatusPayload {
     bookRoot: string;
@@ -67,6 +99,23 @@ export interface NarrateStatusPayload {
     yolo: YoloStatusSummary;
     runtime: RuntimeStatusSummary;
     modelRouting?: Record<string, string> | undefined;
+    roleRouting?: Record<string, RoleModelOverride> | undefined;
+    roleDefinitions?: RoleDefinitionItem[] | undefined;
+    availableModels?: AvailableModelItem[] | undefined;
+}
+
+/** 更新模型路由请求（对应 PUT /api/narrate/model-routing） */
+export interface SaveModelRoutingRequest {
+    model_routing?: Record<string, string> | undefined;
+    role_routing?: Record<string, RoleModelOverride> | undefined;
+}
+
+/** 更新模型路由响应（对应 PUT /api/narrate/model-routing） */
+export interface SaveModelRoutingResponse {
+    status: string;
+    modelRouting?: Record<string, string> | undefined;
+    roleRouting?: Record<string, RoleModelOverride> | undefined;
+    roleDefinitions?: RoleDefinitionItem[] | undefined;
 }
 
 /** 章节列表单项摘要（对应 GET /api/narrate/chapters） */

@@ -696,4 +696,130 @@ export const INSPECTOR_CSS = `
 .ns-i-rule-count-on {
     color: var(--ns-amber-ink);
 }
+
+/* 分角色两层模型覆盖配置卡片 */
+.ns-i-role-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ns-i-role-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid var(--ns-border-1);
+    border-radius: var(--ns-r-md);
+    background: var(--ns-bg-hover);
+}
+
+.ns-i-role-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
+}
+
+.ns-i-role-id {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--ns-text-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-i-role-pool {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--ns-text-4);
+    white-space: nowrap;
+}
+
+.ns-i-role-effective {
+    font-size: 11px;
+    color: var(--ns-brand-ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-i-role-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 88px);
+    gap: 6px;
+    min-width: 0;
+}
+
+.ns-i-role-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.ns-i-role-field-full {
+    grid-column: 1 / -1;
+}
+
+.ns-i-role-label {
+    font-size: 10px;
+    color: var(--ns-text-4);
+}
+
+.ns-i-select,
+.ns-i-input {
+    width: 100%;
+    min-width: 0;
+    height: 26px;
+    padding: 0 7px;
+    box-sizing: border-box;
+    border: 1px solid var(--ns-border-2);
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-base);
+    color: var(--ns-text-1);
+    font-family: var(--ns-font-sans);
+    font-size: 11px;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ns-i-input {
+    font-family: var(--ns-font-mono);
+}
+
+.ns-i-input::placeholder {
+    color: var(--ns-text-4);
+}
+
+.ns-i-select:focus,
+.ns-i-input:focus {
+    border-color: var(--ns-brand-line);
+    box-shadow: 0 0 0 2px var(--ns-brand-soft);
+}
+
+.ns-i-select:disabled,
+.ns-i-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.ns-i-role-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 2px;
+}
+
+.ns-i-role-feedback {
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
 `;
