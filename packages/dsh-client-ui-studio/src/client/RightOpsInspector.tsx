@@ -295,6 +295,479 @@ function resolveWalPhaseStepStatus(
     return 'idle';
 }
 
+function formatWordWatermarkLabel(
+    accumulatedWords: number | null,
+    wordThreshold: number | null
+): string {
+    if (accumulatedWords !== null && wordThreshold !== null) {
+        return `${formatWordCount(accumulatedWords)} / ${formatWordCount(wordThreshold)} 字`;
+    }
+    if (accumulatedWords !== null) {
+        return `${formatWordCount(accumulatedWords)} 字`;
+    }
+    return '字数水位未提供';
+}
+
+function formatAssemblyBadgeLabel(
+    hasAssemblyStats: boolean,
+    totalUsedTokens: number,
+    budgetLimit: number
+): string {
+    if (!hasAssemblyStats) return '装配统计未提供';
+    if (budgetLimit > 0) {
+        return `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`;
+    }
+    return `${formatTokenCount(totalUsedTokens)} tok`;
+}
+
+function resolveDegradationBadge(degradationLevel: number | null): {
+    pillClass: string;
+    label: string;
+} {
+    if (degradationLevel === null) {
+        return { pillClass: 'ns-pill ns-pill-muted', label: '降级级别未提供' };
+    }
+    if (degradationLevel > 0) {
+        return { pillClass: 'ns-pill ns-pill-amber', label: `降级 ${degradationLevel} 级` };
+    }
+    return { pillClass: 'ns-pill ns-pill-green', label: '0 级正常' };
+}
+
+function resolveProseGateBadge(
+    violationCount: number,
+    hasAnyMetric: boolean
+): { pillClass: string; label: string } {
+    if (violationCount > 0) {
+        return { pillClass: 'ns-pill ns-pill-amber', label: `命中 ${violationCount} 处` };
+    }
+    if (hasAnyMetric) {
+        return { pillClass: 'ns-pill ns-pill-green', label: '通过' };
+    }
+    return { pillClass: 'ns-pill ns-pill-muted', label: '待检测' };
+}
+
+function resolveProseMetricDotClass(value: number | null, warnAbove?: number): string {
+    if (value === null) return 'ns-i-dot ns-i-dot-idle';
+    if (warnAbove !== undefined && value > warnAbove) return 'ns-i-dot ns-i-dot-amber';
+    return 'ns-i-dot ns-i-dot-green';
+}
+
+function resolveGateRuleStatusText(triggered: boolean, patchedCount: number): string {
+    if (!triggered) return '通过';
+    return patchedCount > 0 ? '已 Patch' : '命中';
+}
+
+function formatVolumeProgressLabel(
+    completed: number | null,
+    total: number | null,
+    pct: number | null
+): string {
+    if (pct !== null) return `${completed} / ${total} (${pct}%)`;
+    if (completed !== null) return `已完成 ${completed} 章 - 目标未提供`;
+    return '目标未提供';
+}
+
+const MODEL_ROUTE_DESCRIPTORS: ReadonlyArray<{
+    poolId: keyof ModelRoutingSnapshot;
+    modelClass: string;
+    roles: string;
+}> = [
+    {
+        poolId: 'strong_creative',
+        modelClass: 'ns-mono ns-i-route-model ns-i-route-model-brand',
+        roles: 'Planner · Writer · Patch · Dreamer'
+    },
+    {
+        poolId: 'fast_retrieval',
+        modelClass: 'ns-mono ns-i-route-model ns-i-route-model-green',
+        roles: 'Librarian · Extractor'
+    },
+    {
+        poolId: 'audit',
+        modelClass: 'ns-mono ns-i-route-model ns-i-route-model-amber',
+        roles: 'Checker'
+    }
+];
+
+function renderAssemblyStatsBody(options: {
+    hasAssemblyStats: boolean;
+    staticTokens: number;
+    dynamicTokens: number;
+    totalUsedTokens: number;
+    budgetLimit: number;
+    hasBudgetBar: boolean;
+    staticPct: number;
+    dynamicPct: number;
+}): React.ReactElement {
+    const {
+        hasAssemblyStats,
+        staticTokens,
+        dynamicTokens,
+        totalUsedTokens,
+        budgetLimit,
+        hasBudgetBar,
+        staticPct,
+        dynamicPct
+    } = options;
+    if (!hasAssemblyStats) {
+        return (
+            <div className="ns-i-empty">
+                未提供装配统计，无法呈现 token 用量与预算占比。
+            </div>
+        );
+    }
+
+    return (
+        <>
+            <div className="ns-stat-row">
+                <span>固定背景与人物声纹</span>
+                <span className="ns-mono">{formatTokenCount(staticTokens)} Token</span>
+            </div>
+            <div className="ns-stat-row">
+                <span>前文片段与本章细纲</span>
+                <span className="ns-mono">{formatTokenCount(dynamicTokens)} Token</span>
+            </div>
+            <div className="ns-stat-row">
+                <span>预算上限与总装配</span>
+                <span className="ns-mono">
+                    {budgetLimit > 0
+                        ? `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`
+                        : `总装配 ${formatTokenCount(totalUsedTokens)} tokens`}
+                </span>
+            </div>
+            {hasBudgetBar ? (
+                <div className="ns-i-bar">
+                    <div
+                        className="ns-i-bar-seg ns-i-seg-brand"
+                        style={{ width: `${staticPct}%` }}
+                    />
+                    <div
+                        className="ns-i-bar-seg ns-i-seg-green"
+                        style={{ width: `${dynamicPct}%` }}
+                    />
+                </div>
+            ) : (
+                <div className="ns-i-empty">预算上限未提供，不计算占比</div>
+            )}
+        </>
+    );
+}
+
+function renderStageSessionRow(
+    sessionId: string | null | undefined,
+    onInspectStageSession?: (sessionId: string) => void
+): React.ReactNode {
+    if (!sessionId) return null;
+    return (
+        <div className="ns-i-stage-session-row">
+            <span className="ns-mono ns-i-muted">session: {sessionId}</span>
+            {onInspectStageSession ? (
+                <button
+                    type="button"
+                    className="ns-btn ns-btn-ghost ns-btn-xs"
+                    onClick={() => onInspectStageSession(sessionId)}
+                >
+                    查看思考过程
+                </button>
+            ) : null}
+        </div>
+    );
+}
+
+function renderVolumeProgressBody(
+    volumeCompletedCh: number | null,
+    volumePct: number | null
+): React.ReactElement {
+    if (volumePct !== null) {
+        return (
+            <div className="ns-prog-bar ns-i-prog-flat">
+                <div className="ns-prog-fill" style={{ width: `${volumePct}%` }} />
+            </div>
+        );
+    }
+    return (
+        <div className="ns-i-empty">
+            {volumeCompletedCh === null
+                ? '未提供当前卷完成数与目标章数，不绘制进度比例。'
+                : '未提供当前卷目标章数，不绘制进度比例。'}
+        </div>
+    );
+}
+
+function renderSpotlightQueueBody(
+    spotlightQueue: SpotlightQueueItem[] | null
+): React.ReactNode {
+    if (spotlightQueue === null) {
+        return (
+            <div className="ns-i-empty">
+                未提供切镜信号数据，无法判断是否存在待切镜幕后角色。
+            </div>
+        );
+    }
+    if (spotlightQueue.length === 0) {
+        return <div className="ns-i-empty">暂无待切镜幕后角色信号</div>;
+    }
+    return spotlightQueue.map((item) => {
+        const pct = Math.min(100, Math.max(0, item.progressPct));
+        return (
+            <div key={item.entityId} className="ns-i-spotlight-item">
+                <div className="ns-i-spotlight-row">
+                    <span className="ns-i-spotlight-label">
+                        {item.label}{' '}
+                        <span className="ns-mono ns-i-muted">({item.entityId})</span>
+                    </span>
+                    <span className="ns-mono">
+                        {Math.round(pct)}%
+                        {item.triggered ? ' - 已触发' : ''}
+                    </span>
+                </div>
+                <div className="ns-prog-bar ns-i-prog-flat">
+                    <div
+                        className={`ns-prog-fill ${
+                            item.triggered ? 'ns-i-fill-amber' : 'ns-i-fill-brand'
+                        }`}
+                        style={{ width: `${pct}%` }}
+                    />
+                </div>
+            </div>
+        );
+    });
+}
+
+function renderEntitiesBody(options: {
+    hasEntitySource: boolean;
+    resolvedEntities: readonly InspectorEntityItem[];
+    expandedEntityId: string | null;
+    onToggleEntity: (id: string | null) => void;
+    onSelectEntity?: ((entityId: string, lastChapter?: number) => void) | undefined;
+    onSelectChapter?: ((chapter: number) => void) | undefined;
+}): React.ReactElement {
+    const {
+        hasEntitySource,
+        resolvedEntities,
+        expandedEntityId,
+        onToggleEntity,
+        onSelectEntity,
+        onSelectChapter
+    } = options;
+    if (!hasEntitySource) {
+        return (
+            <div className="ns-i-empty">
+                未提供活跃实体与切镜信号数据，无法呈现实体列表。
+            </div>
+        );
+    }
+    if (resolvedEntities.length === 0) {
+        return (
+            <div className="ns-i-empty">
+                暂无活跃实体记录，可在运行写章或刷新工作区后查看。
+            </div>
+        );
+    }
+    return (
+        <div className="ns-i-entity-list">
+            {resolvedEntities.map((ent) => {
+                const isExpanded = expandedEntityId === ent.id;
+                return (
+                    <div
+                        key={ent.id}
+                        className={`ns-i-entity${ent.warped ? ' ns-i-entity-warped' : ''}`}
+                    >
+                        <button
+                            type="button"
+                            className="ns-i-entity-btn"
+                            onClick={() => {
+                                onToggleEntity(isExpanded ? null : ent.id);
+                                if (onSelectEntity) {
+                                    onSelectEntity(ent.id, ent.lastChapter);
+                                } else if (ent.lastChapter && onSelectChapter) {
+                                    onSelectChapter(ent.lastChapter);
+                                }
+                            }}
+                        >
+                            <span
+                                className={`ns-i-entity-avatar${
+                                    ent.warped ? ' ns-i-entity-avatar-warped' : ''
+                                }`}
+                                aria-hidden="true"
+                            >
+                                {ent.name.slice(0, 1) || '?'}
+                            </span>
+                            <span className="ns-i-entity-main">
+                                <span className="ns-i-entity-name">{ent.name}</span>
+                                <span className="ns-mono ns-i-entity-meta">
+                                    {ent.id}
+                                    {ent.role ? ` - ${ent.role}` : ''}
+                                </span>
+                            </span>
+                            {typeof ent.lastChapter === 'number' ? (
+                                <span className="ns-pill ns-pill-muted ns-mono">
+                                    Ch.{ent.lastChapter}
+                                </span>
+                            ) : null}
+                        </button>
+                        {ent.brief && (isExpanded || !onSelectEntity) ? (
+                            <div className="ns-i-entity-brief">{ent.brief}</div>
+                        ) : null}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+function renderHaltRefsBlock(haltDiagnostic: HaltDiagnosticInfo): React.ReactNode {
+    const hasRefs = Boolean(
+        haltDiagnostic.leftRef ||
+            haltDiagnostic.rightRef ||
+            haltDiagnostic.leftExcerpt ||
+            haltDiagnostic.rightExcerpt
+    );
+    if (!hasRefs) return null;
+    return (
+        <div className="ns-mono ns-i-halt-refs">
+            <div>
+                冲突双侧:{' '}
+                {formatConflictRefWithLine(haltDiagnostic.leftRef, haltDiagnostic.leftLine)}{' '}
+                vs{' '}
+                {formatConflictRefWithLine(haltDiagnostic.rightRef, haltDiagnostic.rightLine)}
+            </div>
+            {haltDiagnostic.leftExcerpt ? (
+                <div className="ns-i-halt-excerpt">
+                    [前文依据] {haltDiagnostic.leftExcerpt}
+                </div>
+            ) : null}
+            {haltDiagnostic.rightExcerpt ? (
+                <div className="ns-i-halt-excerpt-tight">
+                    [当章原句] {haltDiagnostic.rightExcerpt}
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
+function renderHaltIssuesBlock(issues: HaltDiagnosticIssueItem[] | undefined): React.ReactNode {
+    if (!Array.isArray(issues) || issues.length === 0) return null;
+    return (
+        <div className="ns-i-halt-refs">
+            {issues.map((issue, idx) => (
+                <div key={`halt-issue-${idx}`} className="ns-i-halt-excerpt">
+                    {issue.description || issue.rule || `冲突 #${idx + 1}`}
+                    {issue.source_ref ? ` (${issue.source_ref})` : ''}
+                    {issue.quote_source ? ` | 依据: ${issue.quote_source}` : ''}
+                    {issue.quote_draft ? ` | 草稿: ${issue.quote_draft}` : ''}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+function renderHaltScopeBlock(haltDiagnostic: HaltDiagnosticInfo): React.ReactNode {
+    const hasChapters = typeof haltDiagnostic.affectedChapters === 'number';
+    const hasWords = typeof haltDiagnostic.affectedWords === 'number';
+    if (!hasChapters && !hasWords) return null;
+    return (
+        <div className="ns-mono ns-i-halt-scope">
+            波及范围:{' '}
+            {hasChapters ? `${haltDiagnostic.affectedChapters} 章` : '--'}
+            {hasWords ? ` / ${haltDiagnostic.affectedWords} 字` : ''}
+            {typeof haltDiagnostic.rollbackThreshold === 'number'
+                ? ` (自动回滚阈值 ${haltDiagnostic.rollbackThreshold} 章)`
+                : ''}
+        </div>
+    );
+}
+
+function renderHaltDiagnosticCard(
+    haltDiagnostic: HaltDiagnosticInfo | null,
+    onInspectHalt?: () => void
+): React.ReactNode {
+    if (!haltDiagnostic) return null;
+    return (
+        <div className="ns-i-card ns-i-card-halt">
+            <div className="ns-i-card-head">
+                <span className="ns-i-red-ink">{haltDiagnostic.kind} - 完整双侧冲突诊断</span>
+                <span className="ns-pill ns-pill-red">{haltDiagnostic.kind}</span>
+            </div>
+            <div className="ns-i-halt-reason">{haltDiagnostic.reason}</div>
+            {renderHaltRefsBlock(haltDiagnostic)}
+            {renderHaltIssuesBlock(haltDiagnostic.issues)}
+            {renderHaltScopeBlock(haltDiagnostic)}
+            {onInspectHalt ? (
+                <button
+                    type="button"
+                    className="ns-btn ns-btn-stop ns-btn-sm"
+                    onClick={onInspectHalt}
+                >
+                    定位冲突快照与恢复方案
+                </button>
+            ) : null}
+        </div>
+    );
+}
+
+function renderStageSessionsList(
+    sessions: readonly StageAttemptSession[] | undefined,
+    onInspectStageSession?: (sessionId: string) => void
+): React.ReactNode {
+    if (!sessions || sessions.length === 0) return null;
+    return (
+        <div className="ns-i-stage-sessions" aria-label="关联会话轨迹列表">
+            <div className="ns-i-stage-sessions-title">
+                关联会话轨迹列表 ({sessions.length})
+            </div>
+            <div className="ns-i-stage-sessions-list">
+                {sessions.map((item, idx) => (
+                    <button
+                        key={item.sessionId || `${item.stage}-${idx}`}
+                        type="button"
+                        className="ns-i-stage-session-item"
+                        data-attempt-session-id={item.sessionId}
+                        disabled={!onInspectStageSession}
+                        onClick={() => onInspectStageSession?.(item.sessionId)}
+                    >
+                        <span className="ns-i-stage-session-main">
+                            <span className="ns-mono ns-i-stage-session-stage">
+                                {normalizeCheckerLabel(item.stage)}
+                                {typeof item.attempt === 'number' ? ` #${item.attempt}` : ''}
+                            </span>
+                            <span className="ns-pill ns-pill-muted ns-mono">{item.status}</span>
+                        </span>
+                        {item.triggerReason ? (
+                            <span className="ns-i-stage-session-reason">
+                                {normalizeCheckerLabel(item.triggerReason)}
+                            </span>
+                        ) : null}
+                        <span className="ns-mono ns-i-muted ns-i-stage-session-id">
+                            {item.sessionId}
+                        </span>
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function renderThreadsList(resolvedThreads: readonly OpenThreadItem[]): React.ReactNode {
+    if (resolvedThreads.length === 0) return null;
+    return (
+        <div className="ns-i-thread-list">
+            {resolvedThreads.map((thd, idx) => (
+                <div key={thd.id ?? `${thd.title}-${idx}`} className="ns-i-thread">
+                    <span className="ns-mono ns-i-thread-ch">
+                        {typeof thd.chapter === 'number' ? `Ch.${thd.chapter}` : '--'}
+                    </span>
+                    <div className="ns-i-thread-main">
+                        <div className="ns-i-thread-title">{thd.title}</div>
+                        {thd.hint ? <div className="ns-i-thread-hint">{thd.hint}</div> : null}
+                    </div>
+                    {thd.scope ? <span className="ns-pill ns-pill-brand">{thd.scope}</span> : null}
+                </div>
+            ))}
+        </div>
+    );
+}
+
 /**
  * 右栏「运行状态」检查器：
  * - 默认直白展示三段核心摘要：1) 本章给写手装入的资料；2) 文风体检；3) 自动整理进度
@@ -402,12 +875,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         rawWordThreshold > 0
             ? rawWordThreshold
             : null;
-    const wordWatermarkLabel =
-        accumulatedWords !== null && wordThreshold !== null
-            ? `${formatWordCount(accumulatedWords)} / ${formatWordCount(wordThreshold)} 字`
-            : accumulatedWords !== null
-              ? `${formatWordCount(accumulatedWords)} 字`
-              : '字数水位未提供';
+    const wordWatermarkLabel = formatWordWatermarkLabel(accumulatedWords, wordThreshold);
 
     // 写手净室资料装配统计
     const hasAssemblyStats =
@@ -433,6 +901,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         Number.isFinite(stageArtifact.degradationLevel)
             ? stageArtifact.degradationLevel
             : null;
+    const degradationBadge = resolveDegradationBadge(degradationLevel);
 
     const voiceDisplay = useMemo(() => {
         if (selectedVoiceSample && (selectedVoiceSample.tag || selectedVoiceSample.text)) {
@@ -493,6 +962,21 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
     };
 
     const normalizedStageName = normalizeCheckerLabel(stageArtifact.stageName);
+    const proseGateBadge = resolveProseGateBadge(
+        proseGate.recentViolations.length,
+        hasAnyProseMetric
+    );
+    const proseMetrics: ReadonlyArray<{
+        label: string;
+        value: number | null;
+        note: string;
+        warnAbove?: number;
+    }> = [
+        { label: '词汇丰富度', value: proseGate.mattr500, note: '词汇多样性' },
+        { label: '信息新鲜度', value: proseGate.kontoyiannisEntropy, note: '防车轱辘话' },
+        { label: '句式长短变化', value: proseGate.sentenceLengthCv, note: '节奏变化' },
+        { label: '套话密度', value: proseGate.clicheDensityPer1k, note: '/千字', warnAbove: 1.5 }
+    ];
 
     return (
         <div className="ns-ops-inspector" aria-label="运行状态">
@@ -524,70 +1008,24 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                     <div className="ns-sec-head">
                         <span>本章给写手装入的资料</span>
                         <span className="ns-pill ns-pill-brand ns-mono">
-                            {hasAssemblyStats
-                                ? budgetLimit > 0
-                                    ? `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`
-                                    : `${formatTokenCount(totalUsedTokens)} tok`
-                                : '装配统计未提供'}
+                            {formatAssemblyBadgeLabel(hasAssemblyStats, totalUsedTokens, budgetLimit)}
                         </span>
                     </div>
 
-                    {hasAssemblyStats ? (
-                        <>
-                            <div className="ns-stat-row">
-                                <span>固定背景与人物声纹</span>
-                                <span className="ns-mono">{formatTokenCount(staticTokens)} Token</span>
-                            </div>
-                            <div className="ns-stat-row">
-                                <span>前文片段与本章细纲</span>
-                                <span className="ns-mono">{formatTokenCount(dynamicTokens)} Token</span>
-                            </div>
-                            <div className="ns-stat-row">
-                                <span>预算上限与总装配</span>
-                                <span className="ns-mono">
-                                    {budgetLimit > 0
-                                        ? `${formatTokenCount(totalUsedTokens)} / ${formatTokenCount(budgetLimit)}`
-                                        : `总装配 ${formatTokenCount(totalUsedTokens)} tokens`}
-                                </span>
-                            </div>
-                            {hasBudgetBar ? (
-                                <div className="ns-i-bar">
-                                    <div
-                                        className="ns-i-bar-seg ns-i-seg-brand"
-                                        style={{ width: `${staticPct}%` }}
-                                    />
-                                    <div
-                                        className="ns-i-bar-seg ns-i-seg-green"
-                                        style={{ width: `${dynamicPct}%` }}
-                                    />
-                                </div>
-                            ) : (
-                                <div className="ns-i-empty">预算上限未提供，不计算占比</div>
-                            )}
-                        </>
-                    ) : (
-                        <div className="ns-i-empty">
-                            未提供装配统计，无法呈现 token 用量与预算占比。
-                        </div>
-                    )}
+                    {renderAssemblyStatsBody({
+                        hasAssemblyStats,
+                        staticTokens,
+                        dynamicTokens,
+                        totalUsedTokens,
+                        budgetLimit,
+                        hasBudgetBar,
+                        staticPct,
+                        dynamicPct
+                    })}
 
                     <div className="ns-stat-row">
                         <span>窗口降级等级</span>
-                        <span
-                            className={
-                                degradationLevel === null
-                                    ? 'ns-pill ns-pill-muted'
-                                    : degradationLevel > 0
-                                      ? 'ns-pill ns-pill-amber'
-                                      : 'ns-pill ns-pill-green'
-                            }
-                        >
-                            {degradationLevel === null
-                                ? '降级级别未提供'
-                                : degradationLevel > 0
-                                  ? `降级 ${degradationLevel} 级`
-                                  : '0 级正常'}
-                        </span>
+                        <span className={degradationBadge.pillClass}>{degradationBadge.label}</span>
                     </div>
 
                     {voiceDisplay ? (
@@ -609,156 +1047,37 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                         ：{stageArtifact.stageSummary}
                     </div>
 
-                    {stageArtifact.sessionId ? (
-                        <div className="ns-i-stage-session-row">
-                            <span className="ns-mono ns-i-muted">
-                                session: {stageArtifact.sessionId}
-                            </span>
-                            {onInspectStageSession ? (
-                                <button
-                                    type="button"
-                                    className="ns-btn ns-btn-ghost ns-btn-xs"
-                                    onClick={() => onInspectStageSession(stageArtifact.sessionId!)}
-                                >
-                                    查看思考过程
-                                </button>
-                            ) : null}
-                        </div>
-                    ) : null}
+                    {renderStageSessionRow(stageArtifact.sessionId, onInspectStageSession)}
 
-                    {stageArtifact.sessions && stageArtifact.sessions.length > 0 ? (
-                        <div className="ns-i-stage-sessions" aria-label="关联会话轨迹列表">
-                            <div className="ns-i-stage-sessions-title">
-                                关联会话轨迹列表 ({stageArtifact.sessions.length})
-                            </div>
-                            <div className="ns-i-stage-sessions-list">
-                                {stageArtifact.sessions.map((item, idx) => (
-                                    <button
-                                        key={item.sessionId || `${item.stage}-${idx}`}
-                                        type="button"
-                                        className="ns-i-stage-session-item"
-                                        data-attempt-session-id={item.sessionId}
-                                        disabled={!onInspectStageSession}
-                                        onClick={() => onInspectStageSession?.(item.sessionId)}
-                                    >
-                                        <span className="ns-i-stage-session-main">
-                                            <span className="ns-mono ns-i-stage-session-stage">
-                                                {normalizeCheckerLabel(item.stage)}
-                                                {typeof item.attempt === 'number'
-                                                    ? ` #${item.attempt}`
-                                                    : ''}
-                                            </span>
-                                            <span className="ns-pill ns-pill-muted ns-mono">
-                                                {item.status}
-                                            </span>
-                                        </span>
-                                        {item.triggerReason ? (
-                                            <span className="ns-i-stage-session-reason">
-                                                {normalizeCheckerLabel(item.triggerReason)}
-                                            </span>
-                                        ) : null}
-                                        <span className="ns-mono ns-i-muted ns-i-stage-session-id">
-                                            {item.sessionId}
-                                        </span>
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                    ) : null}
+                    {renderStageSessionsList(stageArtifact.sessions, onInspectStageSession)}
                 </section>
 
                 {/* 2. 文风体检 */}
                 <section className="ns-panel-section" aria-label="文风体检">
                     <div className="ns-sec-head">
                         <span>文风体检</span>
-                        <span
-                            className={
-                                proseGate.recentViolations.length > 0
-                                    ? 'ns-pill ns-pill-amber'
-                                    : hasAnyProseMetric
-                                      ? 'ns-pill ns-pill-green'
-                                      : 'ns-pill ns-pill-muted'
-                            }
-                        >
-                            {proseGate.recentViolations.length > 0
-                                ? `命中 ${proseGate.recentViolations.length} 处`
-                                : hasAnyProseMetric
-                                  ? '通过'
-                                  : '待检测'}
-                        </span>
+                        <span className={proseGateBadge.pillClass}>{proseGateBadge.label}</span>
                     </div>
 
                     <div className="ns-kv-grid">
-                        <div className="ns-metric">
-                            <div className="ns-metric-k ns-i-metric-k-row">
-                                <span>词汇丰富度</span>
-                                <span
-                                    className={`ns-i-dot ${
-                                        proseGate.mattr500 !== null
-                                            ? 'ns-i-dot-green'
-                                            : 'ns-i-dot-idle'
-                                    }`}
-                                    aria-hidden="true"
-                                />
+                        {proseMetrics.map((metric) => (
+                            <div key={metric.label} className="ns-metric">
+                                <div className="ns-metric-k ns-i-metric-k-row">
+                                    <span>{metric.label}</span>
+                                    <span
+                                        className={resolveProseMetricDotClass(
+                                            metric.value,
+                                            metric.warnAbove
+                                        )}
+                                        aria-hidden="true"
+                                    />
+                                </div>
+                                <div className="ns-metric-v ns-mono">
+                                    {formatMetricNumber(metric.value)}
+                                </div>
+                                <div className="ns-i-metric-note">{metric.note}</div>
                             </div>
-                            <div className="ns-metric-v ns-mono">
-                                {formatMetricNumber(proseGate.mattr500)}
-                            </div>
-                            <div className="ns-i-metric-note">词汇多样性</div>
-                        </div>
-                        <div className="ns-metric">
-                            <div className="ns-metric-k ns-i-metric-k-row">
-                                <span>信息新鲜度</span>
-                                <span
-                                    className={`ns-i-dot ${
-                                        proseGate.kontoyiannisEntropy !== null
-                                            ? 'ns-i-dot-green'
-                                            : 'ns-i-dot-idle'
-                                    }`}
-                                    aria-hidden="true"
-                                />
-                            </div>
-                            <div className="ns-metric-v ns-mono">
-                                {formatMetricNumber(proseGate.kontoyiannisEntropy)}
-                            </div>
-                            <div className="ns-i-metric-note">防车轱辘话</div>
-                        </div>
-                        <div className="ns-metric">
-                            <div className="ns-metric-k ns-i-metric-k-row">
-                                <span>句式长短变化</span>
-                                <span
-                                    className={`ns-i-dot ${
-                                        proseGate.sentenceLengthCv !== null
-                                            ? 'ns-i-dot-green'
-                                            : 'ns-i-dot-idle'
-                                    }`}
-                                    aria-hidden="true"
-                                />
-                            </div>
-                            <div className="ns-metric-v ns-mono">
-                                {formatMetricNumber(proseGate.sentenceLengthCv)}
-                            </div>
-                            <div className="ns-i-metric-note">节奏变化</div>
-                        </div>
-                        <div className="ns-metric">
-                            <div className="ns-metric-k ns-i-metric-k-row">
-                                <span>套话密度</span>
-                                <span
-                                    className={`ns-i-dot ${
-                                        proseGate.clicheDensityPer1k !== null
-                                            ? proseGate.clicheDensityPer1k > 1.5
-                                                ? 'ns-i-dot-amber'
-                                                : 'ns-i-dot-green'
-                                            : 'ns-i-dot-idle'
-                                    }`}
-                                    aria-hidden="true"
-                                />
-                            </div>
-                            <div className="ns-metric-v ns-mono">
-                                {formatMetricNumber(proseGate.clicheDensityPer1k)}
-                            </div>
-                            <div className="ns-i-metric-note">/千字</div>
-                        </div>
+                        ))}
                     </div>
 
                     <button
@@ -801,11 +1120,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                             triggered ? 'ns-pill ns-pill-amber' : 'ns-pill ns-pill-green'
                                         }
                                     >
-                                        {triggered
-                                            ? rule.patchedCount > 0
-                                                ? '已 Patch'
-                                                : '命中'
-                                            : '通过'}
+                                        {resolveGateRuleStatusText(triggered, rule.patchedCount)}
                                     </span>
                                 </div>
                             );
@@ -922,24 +1237,10 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                     : ''}
                             </span>
                             <span className={volumePct !== null ? 'ns-mono' : 'ns-mono ns-i-muted'}>
-                                {volumePct !== null
-                                    ? `${volumeCompletedCh} / ${volumeTotalCh} (${volumePct}%)`
-                                    : volumeCompletedCh !== null
-                                      ? `已完成 ${volumeCompletedCh} 章 - 目标未提供`
-                                      : '目标未提供'}
+                                {formatVolumeProgressLabel(volumeCompletedCh, volumeTotalCh, volumePct)}
                             </span>
                         </div>
-                        {volumePct !== null ? (
-                            <div className="ns-prog-bar ns-i-prog-flat">
-                                <div className="ns-prog-fill" style={{ width: `${volumePct}%` }} />
-                            </div>
-                        ) : (
-                            <div className="ns-i-empty">
-                                {volumeCompletedCh === null
-                                    ? '未提供当前卷完成数与目标章数，不绘制进度比例。'
-                                    : '未提供当前卷目标章数，不绘制进度比例。'}
-                            </div>
-                        )}
+                        {renderVolumeProgressBody(volumeCompletedCh, volumePct)}
                         <div className="ns-i-vol-meta">
                             <span>时间线: {walLock.timelineMode}</span>
                             <span>全书已提交 {walLock.lastCommittedChapter} 章</span>
@@ -1098,43 +1399,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                         : `${dreaming.spotlightQueue.length} 项`}
                                 </span>
                             </div>
-                            {dreaming.spotlightQueue === null ? (
-                                <div className="ns-i-empty">
-                                    未提供切镜信号数据，无法判断是否存在待切镜幕后角色。
-                                </div>
-                            ) : dreaming.spotlightQueue.length === 0 ? (
-                                <div className="ns-i-empty">暂无待切镜幕后角色信号</div>
-                            ) : (
-                                dreaming.spotlightQueue.map((item) => {
-                                    const pct = Math.min(100, Math.max(0, item.progressPct));
-                                    return (
-                                        <div key={item.entityId} className="ns-i-spotlight-item">
-                                            <div className="ns-i-spotlight-row">
-                                                <span className="ns-i-spotlight-label">
-                                                    {item.label}{' '}
-                                                    <span className="ns-mono ns-i-muted">
-                                                        ({item.entityId})
-                                                    </span>
-                                                </span>
-                                                <span className="ns-mono">
-                                                    {Math.round(pct)}%
-                                                    {item.triggered ? ' - 已触发' : ''}
-                                                </span>
-                                            </div>
-                                            <div className="ns-prog-bar ns-i-prog-flat">
-                                                <div
-                                                    className={`ns-prog-fill ${
-                                                        item.triggered
-                                                            ? 'ns-i-fill-amber'
-                                                            : 'ns-i-fill-brand'
-                                                    }`}
-                                                    style={{ width: `${pct}%` }}
-                                                />
-                                            </div>
-                                        </div>
-                                    );
-                                })
-                            )}
+                            {renderSpotlightQueueBody(dreaming.spotlightQueue)}
                         </div>
 
                         {/* 活跃实体与跨卷伏笔 */}
@@ -1147,106 +1412,15 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                     {resolvedThreads.length}
                                 </span>
                             </div>
-                            {!hasEntitySource ? (
-                                <div className="ns-i-empty">
-                                    未提供活跃实体与切镜信号数据，无法呈现实体列表。
-                                </div>
-                            ) : resolvedEntities.length === 0 ? (
-                                <div className="ns-i-empty">
-                                    暂无活跃实体记录，可在运行写章或刷新工作区后查看。
-                                </div>
-                            ) : (
-                                <div className="ns-i-entity-list">
-                                    {resolvedEntities.map((ent) => {
-                                        const isExpanded = expandedEntityId === ent.id;
-                                        return (
-                                            <div
-                                                key={ent.id}
-                                                className={`ns-i-entity${
-                                                    ent.warped ? ' ns-i-entity-warped' : ''
-                                                }`}
-                                            >
-                                                <button
-                                                    type="button"
-                                                    className="ns-i-entity-btn"
-                                                    onClick={() => {
-                                                        setExpandedEntityId(
-                                                            isExpanded ? null : ent.id
-                                                        );
-                                                        if (onSelectEntity) {
-                                                            onSelectEntity(ent.id, ent.lastChapter);
-                                                        } else if (
-                                                            ent.lastChapter &&
-                                                            onSelectChapter
-                                                        ) {
-                                                            onSelectChapter(ent.lastChapter);
-                                                        }
-                                                    }}
-                                                >
-                                                    <span
-                                                        className={`ns-i-entity-avatar${
-                                                            ent.warped
-                                                                ? ' ns-i-entity-avatar-warped'
-                                                                : ''
-                                                        }`}
-                                                        aria-hidden="true"
-                                                    >
-                                                        {ent.name.slice(0, 1) || '?'}
-                                                    </span>
-                                                    <span className="ns-i-entity-main">
-                                                        <span className="ns-i-entity-name">
-                                                            {ent.name}
-                                                        </span>
-                                                        <span className="ns-mono ns-i-entity-meta">
-                                                            {ent.id}
-                                                            {ent.role ? ` - ${ent.role}` : ''}
-                                                        </span>
-                                                    </span>
-                                                    {typeof ent.lastChapter === 'number' ? (
-                                                        <span className="ns-pill ns-pill-muted ns-mono">
-                                                            Ch.{ent.lastChapter}
-                                                        </span>
-                                                    ) : null}
-                                                </button>
-                                                {ent.brief && (isExpanded || !onSelectEntity) ? (
-                                                    <div className="ns-i-entity-brief">
-                                                        {ent.brief}
-                                                    </div>
-                                                ) : null}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                            {resolvedThreads.length > 0 ? (
-                                <div className="ns-i-thread-list">
-                                    {resolvedThreads.map((thd, idx) => (
-                                        <div
-                                            key={thd.id ?? `${thd.title}-${idx}`}
-                                            className="ns-i-thread"
-                                        >
-                                            <span className="ns-mono ns-i-thread-ch">
-                                                {typeof thd.chapter === 'number'
-                                                    ? `Ch.${thd.chapter}`
-                                                    : '--'}
-                                            </span>
-                                            <div className="ns-i-thread-main">
-                                                <div className="ns-i-thread-title">{thd.title}</div>
-                                                {thd.hint ? (
-                                                    <div className="ns-i-thread-hint">
-                                                        {thd.hint}
-                                                    </div>
-                                                ) : null}
-                                            </div>
-                                            {thd.scope ? (
-                                                <span className="ns-pill ns-pill-brand">
-                                                    {thd.scope}
-                                                </span>
-                                            ) : null}
-                                        </div>
-                                    ))}
-                                </div>
-                            ) : null}
+                            {renderEntitiesBody({
+                                hasEntitySource,
+                                resolvedEntities,
+                                expandedEntityId,
+                                onToggleEntity: setExpandedEntityId,
+                                onSelectEntity,
+                                onSelectChapter
+                            })}
+                            {renderThreadsList(resolvedThreads)}
                         </div>
 
                         {/* 三池模型路由只读快照 */}
@@ -1255,129 +1429,25 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                 <span>三池模型路由 (modelRouting)</span>
                             </div>
                             <div className="ns-i-route-list">
-                                <div className="ns-i-route">
-                                    <span className="ns-i-route-name">
-                                        {POOL_LABELS.strong_creative} (strong_creative)
-                                    </span>
-                                    <span
-                                        className="ns-mono ns-i-route-model ns-i-route-model-brand"
-                                        title={resolvedRouting.strong_creative}
-                                    >
-                                        {resolvedRouting.strong_creative}
-                                    </span>
-                                    <span className="ns-i-route-role">Planner · Writer · Patch · Dreamer</span>
-                                </div>
-                                <div className="ns-i-route">
-                                    <span className="ns-i-route-name">
-                                        {POOL_LABELS.fast_retrieval} (fast_retrieval)
-                                    </span>
-                                    <span
-                                        className="ns-mono ns-i-route-model ns-i-route-model-green"
-                                        title={resolvedRouting.fast_retrieval}
-                                    >
-                                        {resolvedRouting.fast_retrieval}
-                                    </span>
-                                    <span className="ns-i-route-role">Librarian · Extractor</span>
-                                </div>
-                                <div className="ns-i-route">
-                                    <span className="ns-i-route-name">
-                                        {POOL_LABELS.audit} (audit)
-                                    </span>
-                                    <span
-                                        className="ns-mono ns-i-route-model ns-i-route-model-amber"
-                                        title={resolvedRouting.audit}
-                                    >
-                                        {resolvedRouting.audit}
-                                    </span>
-                                    <span className="ns-i-route-role">Checker</span>
-                                </div>
+                                {MODEL_ROUTE_DESCRIPTORS.map((desc) => {
+                                    const modelValue = resolvedRouting[desc.poolId];
+                                    return (
+                                        <div key={desc.poolId} className="ns-i-route">
+                                            <span className="ns-i-route-name">
+                                                {POOL_LABELS[desc.poolId]} ({desc.poolId})
+                                            </span>
+                                            <span className={desc.modelClass} title={modelValue}>
+                                                {modelValue}
+                                            </span>
+                                            <span className="ns-i-route-role">{desc.roles}</span>
+                                        </div>
+                                    );
+                                })}
                             </div>
                         </div>
 
                         {/* 完整双侧冲突诊断 */}
-                        {hasHalt && haltDiagnostic ? (
-                            <div className="ns-i-card ns-i-card-halt">
-                                <div className="ns-i-card-head">
-                                    <span className="ns-i-red-ink">
-                                        {haltDiagnostic.kind} - 完整双侧冲突诊断
-                                    </span>
-                                    <span className="ns-pill ns-pill-red">
-                                        {haltDiagnostic.kind}
-                                    </span>
-                                </div>
-                                <div className="ns-i-halt-reason">{haltDiagnostic.reason}</div>
-                                {(haltDiagnostic.leftRef ||
-                                    haltDiagnostic.rightRef ||
-                                    haltDiagnostic.leftExcerpt ||
-                                    haltDiagnostic.rightExcerpt) ? (
-                                    <div className="ns-mono ns-i-halt-refs">
-                                        <div>
-                                            冲突双侧:{' '}
-                                            {formatConflictRefWithLine(
-                                                haltDiagnostic.leftRef,
-                                                haltDiagnostic.leftLine
-                                            )}{' '}
-                                            vs{' '}
-                                            {formatConflictRefWithLine(
-                                                haltDiagnostic.rightRef,
-                                                haltDiagnostic.rightLine
-                                            )}
-                                        </div>
-                                        {haltDiagnostic.leftExcerpt ? (
-                                            <div className="ns-i-halt-excerpt">
-                                                [前文依据] {haltDiagnostic.leftExcerpt}
-                                            </div>
-                                        ) : null}
-                                        {haltDiagnostic.rightExcerpt ? (
-                                            <div className="ns-i-halt-excerpt-tight">
-                                                [当章原句] {haltDiagnostic.rightExcerpt}
-                                            </div>
-                                        ) : null}
-                                    </div>
-                                ) : null}
-                                {Array.isArray(haltDiagnostic.issues) &&
-                                haltDiagnostic.issues.length > 0 ? (
-                                    <div className="ns-i-halt-refs">
-                                        {haltDiagnostic.issues.map((issue, idx) => (
-                                            <div key={`halt-issue-${idx}`} className="ns-i-halt-excerpt">
-                                                {issue.description || issue.rule || `冲突 #${idx + 1}`}
-                                                {issue.source_ref ? ` (${issue.source_ref})` : ''}
-                                                {issue.quote_source
-                                                    ? ` | 依据: ${issue.quote_source}`
-                                                    : ''}
-                                                {issue.quote_draft
-                                                    ? ` | 草稿: ${issue.quote_draft}`
-                                                    : ''}
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : null}
-                                {(typeof haltDiagnostic.affectedChapters === 'number' ||
-                                    typeof haltDiagnostic.affectedWords === 'number') ? (
-                                    <div className="ns-mono ns-i-halt-scope">
-                                        波及范围:{' '}
-                                        {typeof haltDiagnostic.affectedChapters === 'number'
-                                            ? `${haltDiagnostic.affectedChapters} 章`
-                                            : '--'}
-                                        {typeof haltDiagnostic.affectedWords === 'number'
-                                            ? ` / ${haltDiagnostic.affectedWords} 字`
-                                            : ''}
-                                        {typeof haltDiagnostic.rollbackThreshold === 'number'
-                                            ? ` (自动回滚阈值 ${haltDiagnostic.rollbackThreshold} 章)`
-                                            : ''}
-                                    </div>
-                                ) : null}
-                                {onInspectHalt ? (
-                                    <button
-                                        type="button"
-                                        className="ns-btn ns-btn-stop ns-btn-sm"
-                                        onClick={onInspectHalt}
-                                    >
-                                        定位冲突快照与恢复方案
-                                    </button>
-                                ) : null}
-                            </div>
-                        ) : null}
+                        {hasHalt ? renderHaltDiagnosticCard(haltDiagnostic, onInspectHalt) : null}
                     </div>
                 </section>
             </div>

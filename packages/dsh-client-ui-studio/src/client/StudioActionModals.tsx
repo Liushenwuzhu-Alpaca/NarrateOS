@@ -87,12 +87,46 @@ function ActionModalHeader({ title, subtitle, disabled, onClose }: ActionModalHe
     );
 }
 
+function resolveAdvanceSubmitLabel(submitting: boolean, completeBook: boolean): string {
+    if (submitting) return '正在封存本卷…';
+    if (completeBook) return '确认完结封笔';
+    return '封存本卷并开启下一卷';
+}
+
+function renderAdvanceEntityChecklist(options: {
+    entities: readonly AdvanceVolumeEntityOption[];
+    selectedIds: readonly string[];
+    disabled: boolean;
+    onToggle: (id: string) => void;
+}): React.ReactElement {
+    const { entities, selectedIds, disabled, onToggle } = options;
+    if (entities.length === 0) {
+        return <div className="ns-action-empty">当前暂无活跃人物档案，可直接封存本卷。</div>;
+    }
+    return (
+        <div className="ns-action-check-list">
+            {entities.map((entity) => (
+                <label key={entity.id} className="ns-action-check-item">
+                    <input
+                        type="checkbox"
+                        checked={selectedIds.includes(entity.id)}
+                        disabled={disabled}
+                        onChange={() => onToggle(entity.id)}
+                    />
+                    <span className="ns-action-check-name">{entity.name}</span>
+                    {entity.role ? <span className="ns-action-check-role">{entity.role}</span> : null}
+                </label>
+            ))}
+        </div>
+    );
+}
+
 /**
  * 结束本卷 / 开启下一卷 轻量无障碍弹窗：
  * - 勾选随行核心人物（companionEntityIds），未勾选角色自动归入冷档案
  * - 支持完结封笔开关（completeBook）及确认提醒
  */
-export const AdvanceVolumeModal: React.FC<AdvanceVolumeModalProps> = ({
+export function AdvanceVolumeModal({
     open,
     currentVolumeLabel,
     entities,
@@ -100,7 +134,7 @@ export const AdvanceVolumeModal: React.FC<AdvanceVolumeModalProps> = ({
     errorMessage = null,
     onClose,
     onConfirm
-}) => {
+}: AdvanceVolumeModalProps): React.ReactElement | null {
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const [completeBook, setCompleteBook] = useState(false);
     const wasOpenRef = useRef(false);
@@ -164,29 +198,12 @@ export const AdvanceVolumeModal: React.FC<AdvanceVolumeModalProps> = ({
                                 已选 {selectedIds.length} / {entities.length}
                             </span>
                         </div>
-                        {entities.length === 0 ? (
-                            <div className="ns-action-empty">当前暂无活跃人物档案，可直接封存本卷。</div>
-                        ) : (
-                            <div className="ns-action-check-list">
-                                {entities.map((entity) => {
-                                    const checked = selectedIds.includes(entity.id);
-                                    return (
-                                        <label key={entity.id} className="ns-action-check-item">
-                                            <input
-                                                type="checkbox"
-                                                checked={checked}
-                                                disabled={submitting || completeBook}
-                                                onChange={() => toggleEntity(entity.id)}
-                                            />
-                                            <span className="ns-action-check-name">{entity.name}</span>
-                                            {entity.role ? (
-                                                <span className="ns-action-check-role">{entity.role}</span>
-                                            ) : null}
-                                        </label>
-                                    );
-                                })}
-                            </div>
-                        )}
+                        {renderAdvanceEntityChecklist({
+                            entities,
+                            selectedIds,
+                            disabled: submitting || completeBook,
+                            onToggle: toggleEntity
+                        })}
                     </div>
 
                     <label className="ns-action-toggle-row">
@@ -226,24 +243,20 @@ export const AdvanceVolumeModal: React.FC<AdvanceVolumeModalProps> = ({
                         className="ns-btn ns-btn-primary"
                         disabled={submitting}
                     >
-                        {submitting
-                            ? '正在封存本卷…'
-                            : completeBook
-                              ? '确认完结封笔'
-                              : '封存本卷并开启下一卷'}
+                        {resolveAdvanceSubmitLabel(submitting, completeBook)}
                     </button>
                 </footer>
             </form>
         </Modal>
     );
-};
+}
 
 /**
  * 多线并行章节窗口 轻量无障碍弹窗：
  * - windowId 正则校验 /^[a-zA-Z0-9_-]+$/
  * - 支持开启并行分叉、切换支线继续写与合流回主线
  */
-export const ParallelWindowModal: React.FC<ParallelWindowModalProps> = ({
+export function ParallelWindowModal({
     open,
     parallelActive = false,
     activeWindowId = '',
@@ -254,7 +267,7 @@ export const ParallelWindowModal: React.FC<ParallelWindowModalProps> = ({
     onClose,
     onFork,
     onMerge
-}) => {
+}: ParallelWindowModalProps): React.ReactElement | null {
     const [windowId, setWindowId] = useState(activeWindowId);
     const [branchId, setBranchId] = useState(activeBranchId);
     const [validationError, setValidationError] = useState<string | null>(null);
@@ -406,4 +419,4 @@ export const ParallelWindowModal: React.FC<ParallelWindowModalProps> = ({
             </form>
         </Modal>
     );
-};
+}

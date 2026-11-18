@@ -161,6 +161,17 @@ function buildPlanBeats(
     ];
 }
 
+function readNonEmptyString(obj: Record<string, unknown>, ...keys: string[]): string | null {
+    for (const key of keys) {
+        const val = obj[key];
+        if (typeof val === 'string') {
+            const trimmed = val.trim();
+            if (trimmed) return trimmed;
+        }
+    }
+    return null;
+}
+
 /** 尝试将章节 outlineText 解析为结构化细纲对象（支持 JSON 与 Markdown/键值回退） */
 export function parseStructuredPlan(
     rawText: string | undefined,
@@ -183,12 +194,7 @@ export function parseStructuredPlan(
             const backgroundCast = normalizeCastList(
                 parsed['background_cast'] ?? parsed['backgroundCast']
             );
-            const povCharacter =
-                typeof parsed['pov_character'] === 'string' && parsed['pov_character'].trim()
-                    ? parsed['pov_character'].trim()
-                    : typeof parsed['pov'] === 'string' && parsed['pov'].trim()
-                      ? parsed['pov'].trim()
-                      : null;
+            const povCharacter = readNonEmptyString(parsed, 'pov_character', 'pov');
 
             const rawScenes = Array.isArray(parsed['scene_plan'])
                 ? (parsed['scene_plan'] as Array<{
@@ -199,30 +205,16 @@ export function parseStructuredPlan(
                 : null;
             const spotlightScene = rawScenes?.find((s) => s.is_spotlight);
             const spotlight =
-                typeof parsed['spotlight'] === 'string' && parsed['spotlight'].trim()
-                    ? parsed['spotlight'].trim()
-                    : spotlightScene?.summary?.trim() ?? '';
-            const outlineBody =
-                typeof parsed['outline_text'] === 'string' && parsed['outline_text'].trim()
-                    ? parsed['outline_text'].trim()
-                    : trimmed;
-            const endingBeat =
-                typeof parsed['ending_beat'] === 'string' && parsed['ending_beat'].trim()
-                    ? parsed['ending_beat'].trim()
-                    : 'HOOK';
+                readNonEmptyString(parsed, 'spotlight') ?? spotlightScene?.summary?.trim() ?? '';
+            const outlineBody = readNonEmptyString(parsed, 'outline_text') ?? trimmed;
+            const endingBeat = readNonEmptyString(parsed, 'ending_beat') ?? 'HOOK';
             const targetWordCount =
                 typeof parsed['target_word_count'] === 'number' &&
                 Number.isFinite(parsed['target_word_count'])
                     ? parsed['target_word_count']
                     : null;
-            const chapterTitle =
-                typeof parsed['chapter_title'] === 'string' && parsed['chapter_title'].trim()
-                    ? parsed['chapter_title'].trim()
-                    : fallbackTitle;
-            const timelineModeVal =
-                typeof parsed['timeline_mode'] === 'string' && parsed['timeline_mode'].trim()
-                    ? parsed['timeline_mode'].trim()
-                    : null;
+            const chapterTitle = readNonEmptyString(parsed, 'chapter_title') ?? fallbackTitle;
+            const timelineModeVal = readNonEmptyString(parsed, 'timeline_mode');
 
             return {
                 chapterTitle,
@@ -234,9 +226,8 @@ export function parseStructuredPlan(
                 backgroundCast,
                 spotlight: spotlight || outlineBody.split(/[。\n]/)[0] || '待细化',
                 endingSummary:
-                    typeof parsed['ending_summary'] === 'string' && parsed['ending_summary'].trim()
-                        ? parsed['ending_summary'].trim()
-                        : `以 ${endingBeat} 节拍收束本章`,
+                    readNonEmptyString(parsed, 'ending_summary') ??
+                    `以 ${endingBeat} 节拍收束本章`,
                 outlineText: outlineBody,
                 beats: buildPlanBeats(rawScenes, spotlight, outlineBody)
             };
@@ -515,6 +506,24 @@ function stripFrontmatter(markdown: string): string {
     return trimmed.slice(endIdx + 4).trim();
 }
 
+const ZONE_HEADING_PATTERNS: ReadonlyArray<readonly [RegExp, 1 | 2 | 3 | 4]> = [
+    [/^##+\s*(?:Innate|先天|固有)/i, 1],
+    [/^##+\s*(?:Acquired|后天|当前)/i, 2],
+    [/^##+\s*(?:Irreversible|不可逆|变迁)/i, 3],
+    [/^##+\s*(?:Recent|近期|声纹)/i, 4]
+];
+
+function resolveVisibilityTag(
+    hasOmniscient: boolean,
+    hasSelfOnly: boolean,
+    hasWarped: boolean
+): string | undefined {
+    if (hasOmniscient) return '隐藏底牌 · 写手不可见';
+    if (hasSelfOnly) return '私有心理 · 非本人写手不可见';
+    if (hasWarped) return '已作废 · 写手不可见';
+    return undefined;
+}
+
 function classifyZoneEntry(rawLine: string): EntityZoneEntry {
     const trimmed = rawLine.replace(/^[-*]\s+/, '').trim();
     const hasOmniscient = /\bOMNISCIENT_SECRET\b/i.test(trimmed);
@@ -524,18 +533,22 @@ function classifyZoneEntry(rawLine: string): EntityZoneEntry {
         .replace(/^\[[^\]]*\]\s*/g, '')
         .replace(/^(?:OMNISCIENT_SECRET_TOKEN|SELF_ONLY_[A-Z0-9_]+)\s*:\s*/i, '')
         .trim();
-    const visibilityTag = hasOmniscient
-        ? '隐藏底牌 · 写手不可见'
-        : hasSelfOnly
-          ? '私有心理 · 非本人写手不可见'
-          : hasWarped
-            ? '已作废 · 写手不可见'
-            : undefined;
     return {
         text: cleaned || trimmed,
         writerHidden: hasOmniscient || hasSelfOnly || hasWarped,
-        visibilityTag
+        visibilityTag: resolveVisibilityTag(hasOmniscient, hasSelfOnly, hasWarped)
     };
+}
+
+function detectZoneHeading(line: string): (1 | 2 | 3 | 4) | null {
+    const headingMatch = line.match(/^##+\s*([1-4])\b/i);
+    if (headingMatch?.[1]) {
+        return Number(headingMatch[1]) as 1 | 2 | 3 | 4;
+    }
+    for (const [pattern, zone] of ZONE_HEADING_PATTERNS) {
+        if (pattern.test(line)) return zone;
+    }
+    return null;
 }
 
 /** 解析实体档案 Markdown 为结构化四区列表（标明第 1 区及隐藏底牌写手不可见） */
@@ -549,32 +562,12 @@ export function parseEntityZones(markdown: string): EntityZoneSection[] {
     for (const rawLine of body.split(/\r?\n/)) {
         const line = rawLine.trim();
         if (!line) continue;
-        const headingMatch = line.match(/^##+\s*([1-4])\b/i);
-        if (headingMatch?.[1]) {
-            currentZone = Number(headingMatch[1]) as 1 | 2 | 3 | 4;
+        const detectedZone = detectZoneHeading(line);
+        if (detectedZone !== null) {
+            currentZone = detectedZone;
             if (!buckets.has(currentZone)) {
                 buckets.set(currentZone, []);
             }
-            continue;
-        }
-        if (/^##+\s*(?:Innate|先天|固有)/i.test(line)) {
-            currentZone = 1;
-            if (!buckets.has(1)) buckets.set(1, []);
-            continue;
-        }
-        if (/^##+\s*(?:Acquired|后天|当前)/i.test(line)) {
-            currentZone = 2;
-            if (!buckets.has(2)) buckets.set(2, []);
-            continue;
-        }
-        if (/^##+\s*(?:Irreversible|不可逆|变迁)/i.test(line)) {
-            currentZone = 3;
-            if (!buckets.has(3)) buckets.set(3, []);
-            continue;
-        }
-        if (/^##+\s*(?:Recent|近期|声纹)/i.test(line)) {
-            currentZone = 4;
-            if (!buckets.has(4)) buckets.set(4, []);
             continue;
         }
         const targetZone: 1 | 2 | 3 | 4 = currentZone ?? 2;
@@ -587,19 +580,17 @@ export function parseEntityZones(markdown: string): EntityZoneSection[] {
     for (const zoneIdx of [1, 2, 3, 4] as const) {
         const entries = buckets.get(zoneIdx);
         if (!entries || entries.length === 0) continue;
-        sections.push({
+        const section: EntityZoneSection = {
             zoneIndex: zoneIdx,
             label: ZONE_DEFAULT_LABELS[zoneIdx],
-            ...(zoneIdx === 1
-                ? {
-                      writerRestrictedNote:
-                          entries.some((item) => item.writerHidden)
-                              ? '第 1 区含隐藏底牌（写手不可见）'
-                              : '第 1 区先天红线（插叙永不屏蔽 · 秘密底牌对写手隔离）'
-                  }
-                : {}),
             entries
-        });
+        };
+        if (zoneIdx === 1) {
+            section.writerRestrictedNote = entries.some((item) => item.writerHidden)
+                ? '第 1 区含隐藏底牌（写手不可见）'
+                : '第 1 区先天红线（插叙永不屏蔽 · 秘密底牌对写手隔离）';
+        }
+        sections.push(section);
     }
     return sections;
 }

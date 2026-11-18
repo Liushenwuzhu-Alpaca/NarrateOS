@@ -33,6 +33,48 @@ function formatRefLine(ref: string | undefined, line: number | null | undefined)
     return typeof line === 'number' && Number.isFinite(line) ? `${ref} · L${line}` : ref;
 }
 
+function renderHaltIssuesList(
+    issues: NonNullable<SafeHaltInfo['issues']>,
+    gateViolations: readonly VerdictGateViolationItem[]
+): React.ReactNode {
+    if (issues.length === 0 && gateViolations.length === 0) return null;
+    return (
+        <div className="ns-conflict-issues-list" aria-label="拦截冲突与门禁明细">
+            {issues.map((issue, idx) => (
+                <div key={`halt-issue-${idx}`} className="ns-conflict-issue-item">
+                    <div className="ns-compare-caption">
+                        <span>{issue.rule ?? `核查问题 #${idx + 1}`}</span>
+                        <span className="ns-mono">
+                            {formatRefLine(issue.sourceRef, issue.line)}
+                        </span>
+                    </div>
+                    {issue.detail ? <div>{issue.detail}</div> : null}
+                    {issue.sourceQuote ? (
+                        <div className="ns-mono">依据：{issue.sourceQuote}</div>
+                    ) : null}
+                    {issue.quote ?? issue.snippet ? (
+                        <div className="ns-mono">草稿：{issue.quote ?? issue.snippet}</div>
+                    ) : null}
+                </div>
+            ))}
+            {gateViolations.map((violation, idx) => (
+                <div key={`gate-violation-${idx}`} className="ns-conflict-issue-item">
+                    <div className="ns-compare-caption">
+                        <span>门禁规则 · {violation.rule}</span>
+                        {violation.line !== undefined ? (
+                            <span className="ns-mono">L{violation.line}</span>
+                        ) : null}
+                    </div>
+                    <div>{violation.detail}</div>
+                    {violation.snippet ? (
+                        <div className="ns-mono">{violation.snippet}</div>
+                    ) : null}
+                </div>
+            ))}
+        </div>
+    );
+}
+
 /**
  * 双模式设定冲突裁决卡（Q1 物理真源严格分流）：
  * - 已落盘跨章冲突（sync_conflicts / quarantineReport）：提供「自动修补这句冲突」+「我自己动手改稿」+「写条便签解释原因」
@@ -213,41 +255,7 @@ export function ConflictVerdictCard({
                     </div>
                 </div>
 
-                {issues.length > 0 || gateViolations.length > 0 ? (
-                    <div className="ns-conflict-issues-list" aria-label="拦截冲突与门禁明细">
-                        {issues.map((issue, idx) => (
-                            <div key={`halt-issue-${idx}`} className="ns-conflict-issue-item">
-                                <div className="ns-compare-caption">
-                                    <span>{issue.rule ?? `核查问题 #${idx + 1}`}</span>
-                                    <span className="ns-mono">
-                                        {formatRefLine(issue.sourceRef, issue.line)}
-                                    </span>
-                                </div>
-                                {issue.detail ? <div>{issue.detail}</div> : null}
-                                {issue.sourceQuote ? (
-                                    <div className="ns-mono">依据：{issue.sourceQuote}</div>
-                                ) : null}
-                                {issue.quote ?? issue.snippet ? (
-                                    <div className="ns-mono">草稿：{issue.quote ?? issue.snippet}</div>
-                                ) : null}
-                            </div>
-                        ))}
-                        {gateViolations.map((violation, idx) => (
-                            <div key={`gate-violation-${idx}`} className="ns-conflict-issue-item">
-                                <div className="ns-compare-caption">
-                                    <span>门禁规则 · {violation.rule}</span>
-                                    {violation.line !== undefined ? (
-                                        <span className="ns-mono">L{violation.line}</span>
-                                    ) : null}
-                                </div>
-                                <div>{violation.detail}</div>
-                                {violation.snippet ? (
-                                    <div className="ns-mono">{violation.snippet}</div>
-                                ) : null}
-                            </div>
-                        ))}
-                    </div>
-                ) : null}
+                {renderHaltIssuesList(issues, gateViolations)}
 
                 <div className="ns-conflict-actions">
                     <button
