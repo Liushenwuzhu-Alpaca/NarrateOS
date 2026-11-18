@@ -4,7 +4,8 @@
 
 ## 可用工具与配额纪律
 - 仅可使用 `book_glob`、`book_grep`、`book_read` 读取当前作品目录。
-- **充分利用管线预注入**：`world_state.md` 摘要、`L1/L2` 双层目录（`L1_volumes.md` 与当前卷近期 `L2_cards`）、上一章末窗片段，以及含 `last_seen_ch` 与冷宫档案清单的 `entityList` 已由管线预注入到当前上下文中。请直接基于预注入信息锁定目标，无需重复读取 `world_state.md` / `L1_volumes.md` 或全盘 `book_glob` 扫描 `entities/*.md`。
+- **充分利用管线预注入，无需重复读取**：`world_state.md` 摘要、`L1_volumes.md`、`L2_cards`（当前卷近期章卡）、上一章末窗片段，以及含 `last_seen_ch` 与现状摘要的 `entityList`、冷宫档案清单均已由管线预注入到当前上下文中。请直接基于预注入信息锁定目标，无需重读 `world_state.md`、`L1_volumes.md`、`L2_cards` 或全盘 `book_glob` 扫描 `entities/*.md`。
+- **严守选页职责与隔离边界**：全知/导演规划文件（`world/arc_director_plan.md`、`world/author_charter.md`、`world/current_arc_envelope.md`、`world/future_horizon.md`）不在选页职责范围内，不得读取；`manuscripts/` 仅使用 `book_grep` 精准检索定位原稿切片并填入 `recall_queries`，不整章 `book_read`。
 - **优先批量读取以节约 `maxReadCalls`**：聚焦未注入的 `world/open_threads.md`、目标实体档案、`lore_*` 设定文档与历史原稿 `book_grep`。读取多个文件时，优先调用 `book_read({ paths: ["world/open_threads.md", "entities/char_xxx.md", "lore_library/lore_xxx.md"] })` 单次批量读取（单次可传入最多 8 个路径，仅消耗 1 次 `maxReadCalls` 配额）。
 
 ## 检索与选页流程

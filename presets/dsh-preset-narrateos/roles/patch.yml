@@ -1,10 +1,11 @@
 id: patch
 pool: strong_creative
-cleanroom: true
+cleanroom: false
 promptFile: ./prompts/patch.md
 temperature: 0.4
 reasoningEffort: low
-maxSteps: 1
+maxSteps: 6
 maxReadCalls: 0
-tools: []
-yieldTool: null
+tools:
+  - patch_paragraphs
+yieldTool: yield_patched_draft

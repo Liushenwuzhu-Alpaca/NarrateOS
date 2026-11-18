@@ -184,6 +184,8 @@ export interface StageRunRecord {
     parentSessionId?: string | undefined;
     mode?: StageSessionSubagentMode | string | undefined;
     status: string;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
     timestamp?: string | undefined;
     startedAt?: string | undefined;
     finishedAt?: string | undefined;
@@ -230,6 +232,18 @@ export interface StageSessionDetailEvent {
     status?: string | undefined;
 }
 
+/** 阶段会话的完整 LLM 请求输入快照（对应 GET /api/narrate/runs/detail requestInput） */
+export interface RunDetailRequestInput {
+    systemPrompt?: string | undefined;
+    taskPromptBlocks?: string[] | undefined;
+    temperature?: number | undefined;
+    reasoningEffort?: string | undefined;
+    maxTokens?: number | undefined;
+    pool?: string | undefined;
+    tools?: string[] | undefined;
+    [key: string]: unknown;
+}
+
 /** 阶段会话历史详情响应载荷（对应 GET /api/narrate/runs/detail?sessionId=...） */
 export interface RunDetailPayload {
     sessionId: string;
@@ -240,6 +254,9 @@ export interface RunDetailPayload {
     mode?: StageSessionSubagentMode | string | undefined;
     startedAt?: string | undefined;
     finishedAt?: string | undefined;
+    modelId?: string | undefined;
+    thinkingChars?: number | undefined;
+    requestInput?: RunDetailRequestInput | undefined;
     events?: StageSessionDetailEvent[] | undefined;
     usage?: TelemetryTokenUsage | undefined;
     turns?: RunDetailTurn[] | undefined;
@@ -446,6 +463,25 @@ export interface DreamResponse {
     [key: string]: unknown;
 }
 
+/** 声纹采集请求（对应 POST /api/narrate/voice-harvest） */
+export interface HarvestVoiceRequest {
+    chapterNumber?: number | undefined;
+}
+
+/** 声纹采集单条样本 */
+export interface VoiceSampleItem {
+    id: string;
+    tag: string;
+    text: string;
+}
+
+/** 声纹采集响应（对应 POST /api/narrate/voice-harvest） */
+export interface HarvestVoiceResponse {
+    harvestedCount: number;
+    skipped: boolean;
+    samples: VoiceSampleItem[];
+}
+
 /** 投递导演信号请求 */
 export interface PostSignalRequest {
     type: string;
@@ -499,6 +535,7 @@ export type SseEventName =
     | 'chapter_synced'
     | 'chapter:phase'
     | 'stage'
+    | 'stage:session'
     | 'gate:result'
     | 'checker:result'
     | 'dream:started'

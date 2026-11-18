@@ -2,18 +2,23 @@
 /**
  * 分角色两层模型覆盖 (Subagent 2-Layer Override) 前端测试：
  * 1. api.saveModelRouting -> PUT /api/narrate/model-routing 请求与异常契约
- * 2. RightOpsInspector 分角色模型覆盖卡片渲染、Layer 1 档位选择、Layer 2 模型与 datalist、
+ * 2. api.harvestVoice -> POST /api/narrate/voice-harvest 请求契约
+ * 3. RoleRoutingEditor 分角色模型覆盖卡片渲染、Layer 1 档位选择、Layer 2 模型与 datalist、
  *    reasoning_effort 下拉、生效模型展示、busy/提交中禁用、成功与失败提示。
  */
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { NarrateApiError, saveModelRouting } from '../src/client/api.js';
 import {
-    RightOpsInspector,
-    type RightOpsInspectorProps
-} from '../src/client/RightOpsInspector.js';
-import { normalizeRoleRoutingMap } from '../src/client/RoleRoutingEditor.js';
+    NarrateApiError,
+    harvestVoice,
+    saveModelRouting
+} from '../src/client/api.js';
+import {
+    RoleRoutingEditor,
+    normalizeRoleRoutingMap,
+    type RoleRoutingEditorProps
+} from '../src/client/RoleRoutingEditor.js';
 import type {
     AvailableModelItem,
     RoleDefinitionItem,
@@ -88,64 +93,35 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-function baseProps(overrides?: Partial<RightOpsInspectorProps>): RightOpsInspectorProps {
+function baseProps(overrides?: Partial<RoleRoutingEditorProps>): RoleRoutingEditorProps {
     return {
-        walLock: {
-            walPhase: 'STATE_COMMITTED',
-            timelineMode: 'MAINLINE',
-            txLockStatus: 'free',
-            lastCommittedChapter: 3
+        resetKey: '/books/alpha',
+        poolRoutes: {
+            strong_creative: 'anthropic:claude-sonnet-4-5',
+            fast_retrieval: 'deepseek:deepseek-chat',
+            audit: 'openai:gpt-4.1'
         },
-        modelPool: {
-            fastModel: 'deepseek:deepseek-chat',
-            strongModel: 'anthropic:claude-sonnet-4-5',
-            auditModel: 'openai:gpt-4.1',
-            inputTokens: 100,
-            cacheReadTokens: 300
-        },
-        stageArtifact: {
-            selectedStageIndex: 0,
-            stageName: '规划',
-            stageStatus: '就绪',
-            stageSummary: '阶段摘要'
-        },
-        proseGate: {
-            mattr500: null,
-            kontoyiannisEntropy: null,
-            sentenceLengthCv: null,
-            clicheDensityPer1k: null,
-            recentViolations: []
-        },
-        factChecker: { totalChecked: 0, verifiedPassCount: 0, filteredOutCount: 0 },
-        dreaming: {
-            dirtyEntityCount: null,
-            dirtyThreshold: null,
-            coldArchiveCount: 0,
-            spotlightQueue: null
-        },
-        volumeProgress: null,
-        bookRoot: '/books/alpha',
         roleDefinitions: SAMPLE_ROLE_DEFINITIONS,
         ...overrides
     };
 }
 
-function mountInspector(props: RightOpsInspectorProps): {
+function mountEditor(props: RoleRoutingEditorProps): {
     container: HTMLElement;
-    rerender: (nextProps: RightOpsInspectorProps) => void;
+    rerender: (nextProps: RoleRoutingEditorProps) => void;
 } {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
     mountedRoots.push(root);
     act(() => {
-        root.render(createElement(RightOpsInspector, props));
+        root.render(createElement(RoleRoutingEditor, props));
     });
     return {
         container,
-        rerender: (nextProps: RightOpsInspectorProps) => {
+        rerender: (nextProps: RoleRoutingEditorProps) => {
             act(() => {
-                root.render(createElement(RightOpsInspector, nextProps));
+                root.render(createElement(RoleRoutingEditor, nextProps));
             });
         }
     };
@@ -217,9 +193,39 @@ describe('saveModelRouting API 客户端', () => {
     });
 });
 
-describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
+describe('harvestVoice API 客户端', () => {
+    it('向 POST /api/narrate/voice-harvest 发送可选 chapterNumber 并解析响应', async () => {
+        const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
+            ok: true,
+            status: 200,
+            statusText: 'OK',
+            text: async () =>
+                JSON.stringify({
+                    harvestedCount: 2,
+                    skipped: false,
+                    samples: [
+                        { id: 'v1', tag: '冷峻克制', text: '把门关上。' },
+                        { id: 'v2', tag: '低声试探', text: '你刚才在看什么？' }
+                    ]
+                })
+        }));
+        vi.stubGlobal('fetch', fetchMock);
+
+        const res = await harvestVoice(3);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchMock.mock.calls[0]!;
+        expect(url).toBe('/api/narrate/voice-harvest');
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({ chapterNumber: 3 });
+        expect(res.harvestedCount).toBe(2);
+        expect(res.skipped).toBe(false);
+        expect(res.samples).toHaveLength(2);
+    });
+});
+
+describe('RoleRoutingEditor 分角色两层模型覆盖面板', () => {
     it('roleDefinitions 为空且无既有 roleRouting 时显示占位提示；有既有键时仅基于既有键生成最小行', () => {
-        const { container: emptyContainer } = mountInspector(
+        const { container: emptyContainer } = mountEditor(
             baseProps({ roleDefinitions: null, roleRouting: null })
         );
         expect(emptyContainer.textContent).toContain('分角色模型覆盖 (Subagent 2-Layer Override)');
@@ -231,7 +237,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
         )!;
         expect(emptySaveBtn.disabled).toBe(true);
 
-        const { container: fallbackContainer } = mountInspector(
+        const { container: fallbackContainer } = mountEditor(
             baseProps({
                 roleDefinitions: [],
                 roleRouting: { writer: { tier: 'weak' } }
@@ -271,7 +277,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
             { provider: 'openai', model: 'gpt-4.1', label: 'GPT-4.1' }
         ];
 
-        const { container: customContainer } = mountInspector(
+        const { container: customContainer } = mountEditor(
             baseProps({
                 roleDefinitions,
                 availableModels,
@@ -314,7 +320,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
 
     it('支持选择 Layer 1 强/弱档位、填写 Layer 2 具体模型与 reasoning_effort 并提交保存', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
-        const { container } = mountInspector(
+        const { container } = mountEditor(
             baseProps({
                 availableModels: [
                     { provider: 'deepseek', model: 'deepseek-reasoner', label: 'DeepSeek R1' }
@@ -364,7 +370,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
 
     it('Layer 2 留空时继承 Layer 1；重置 reasoning_effort 回退到 defaultReasoningEffort 且不残留旧 effectiveReasoningEffort', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
-        const { container } = mountInspector(
+        const { container } = mountEditor(
             baseProps({
                 roleDefinitions: [
                     {
@@ -415,17 +421,10 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
         });
     });
 
-    it('modelRouting 仅含裸模型名时，跨 tier 切换依据对应池已知 effectiveProvider 推导而非借用本工种 provider', () => {
-        const { container } = mountInspector(
+    it('poolRoutes 仅含裸模型名时，跨 tier 切换依据对应池已知 effectiveProvider 推导而非借用本工种 provider', () => {
+        const { container } = mountEditor(
             baseProps({
-                modelPool: {
-                    fastModel: 'deepseek-chat',
-                    strongModel: 'claude-sonnet-4-5',
-                    auditModel: 'gpt-4.1',
-                    inputTokens: 0,
-                    cacheReadTokens: 0
-                },
-                modelRouting: {
+                poolRoutes: {
                     strong_creative: 'claude-sonnet-4-5',
                     fast_retrieval: 'deepseek-chat',
                     audit: 'gpt-4.1'
@@ -451,14 +450,14 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
         expect(librarianRow?.textContent).not.toContain('deepseek:claude-opus-4');
     });
 
-    it('切换 bookRoot 时即使两书同为 roleRouting: {} 也重置未保存草稿与提示状态', async () => {
+    it('切换 resetKey 时即使两书同为 roleRouting: {} 也重置未保存草稿与提示状态', async () => {
         const onSave = vi.fn(async (_payload: SaveModelRoutingRequest) => undefined);
         const propsA = baseProps({
-            bookRoot: '/books/a',
+            resetKey: '/books/a',
             roleRouting: {},
             onSaveModelRouting: onSave
         });
-        const { container, rerender } = mountInspector(propsA);
+        const { container, rerender } = mountEditor(propsA);
 
         const writerTier = container.querySelector<HTMLSelectElement>(
             'select[aria-label="writer 档位覆盖"]'
@@ -468,7 +467,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
 
         rerender(
             baseProps({
-                bookRoot: '/books/b',
+                resetKey: '/books/b',
                 roleRouting: {},
                 onSaveModelRouting: onSave
             })
@@ -502,7 +501,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
     });
 
     it('busy 为 true 或保存请求在途时禁用保存按钮，保存失败展示错误提示', async () => {
-        const { container: busyContainer } = mountInspector(
+        const { container: busyContainer } = mountEditor(
             baseProps({
                 busy: true,
                 onSaveModelRouting: vi.fn()
@@ -515,7 +514,7 @@ describe('RightOpsInspector 分角色两层模型覆盖面板', () => {
 
         const deferred = Promise.withResolvers<void>();
         const onSave = vi.fn(() => deferred.promise);
-        const { container } = mountInspector(
+        const { container } = mountEditor(
             baseProps({
                 busy: false,
                 onSaveModelRouting: onSave

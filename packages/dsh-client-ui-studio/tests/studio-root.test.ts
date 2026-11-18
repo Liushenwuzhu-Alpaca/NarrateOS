@@ -22,7 +22,7 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
         saveModelRouting: vi.fn(),
         fetchViewEntities: vi.fn(), fetchViewHorizon: vi.fn(), fetchViewThreads: vi.fn(),
         fetchViewTelemetry: vi.fn(), fetchViewSignals: vi.fn(), fetchViewHalt: vi.fn(),
-        stepChapter: vi.fn(), syncManuscripts: vi.fn(), runDreaming: vi.fn(),
+        stepChapter: vi.fn(), syncManuscripts: vi.fn(), runDreaming: vi.fn(), harvestVoice: vi.fn(),
         postSignal: vi.fn(), deleteSignal: vi.fn(), requestHalt: vi.fn(),
         startYolo: vi.fn(), stopYolo: vi.fn(), subscribeNarrateEvents: vi.fn()
     };
@@ -146,6 +146,7 @@ beforeEach(() => {
     });
     vi.mocked(api.syncManuscripts).mockResolvedValue({ status: 'SYNCED', dirtyChapters: [], downstreamConflicts: [] });
     vi.mocked(api.runDreaming).mockResolvedValue({ skipped: true });
+    vi.mocked(api.harvestVoice).mockResolvedValue({ harvestedCount: 0, skipped: true, samples: [] });
     vi.mocked(api.postSignal).mockImplementation(async (signal) => ({ status: 'QUEUED', signal }));
     vi.mocked(api.deleteSignal).mockResolvedValue({ status: 'DELETED', remaining: 0 });
     vi.mocked(api.requestHalt).mockResolvedValue({ haltRequested: true, activeTask: 'IDLE' });
@@ -475,7 +476,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(container.querySelector('.ns-prose')?.textContent).toContain(draft);
     });
 
-    it('在检查器修改分角色模型覆盖并保存后调用 saveModelRouting 且刷新 status', async () => {
+    it('在工具页签修改分角色模型覆盖并保存后调用 saveModelRouting 且刷新 status，检查器保留只读三池遥测', async () => {
         const baseStatus = statusPayload('/books/a');
         let currentStatus: NarrateStatusPayload = {
             ...baseStatus,
@@ -538,7 +539,17 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         });
 
         const container = await mountStudio();
+
+        // 检查器仅保留只读三池模型路由，不再重复渲染分角色覆盖表单
         await click(buttonByText(container, '检查器'));
+        expect(container.textContent).toContain('三池模型路由 (modelRouting)');
+        expect(container.querySelector('select[aria-label="librarian 档位覆盖"]')).toBeNull();
+
+        // 工具页签直接挂载 RoleRoutingEditor 位于当前三池模型路由下方
+        await click(buttonByText(container, '工具'));
+        const toolsPanel = container.querySelector<HTMLElement>('[aria-label="运维工具与模型池"]');
+        expect(toolsPanel).not.toBeNull();
+        expect(toolsPanel?.textContent).toContain('当前三池模型路由');
 
         const librarianTier = container.querySelector<HTMLSelectElement>(
             'select[aria-label="librarian 档位覆盖"]'
@@ -577,7 +588,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         ).toContain('openai:gpt-4.1');
     });
 
-    it('切书至同样 roleRouting: {} 的 B 书时重置检查器未保存草稿与提示，roleDefinitions 缺省时显示占位提示', async () => {
+    it('切书至同样 roleRouting: {} 的 B 书时重置工具页签未保存草稿与提示，roleDefinitions 缺省时显示占位提示', async () => {
         const statusByBook: Record<string, NarrateStatusPayload> = {
             '/books/a': {
                 ...statusPayload('/books/a'),
@@ -623,7 +634,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         vi.mocked(api.fetchStatus).mockImplementation(async () => statusByBook[activeBookRoot]!);
 
         const container = await mountStudio();
-        await click(buttonByText(container, '检查器'));
+        await click(buttonByText(container, '工具'));
 
         const writerTier = container.querySelector<HTMLSelectElement>(
             'select[aria-label="writer 档位覆盖"]'
@@ -659,5 +670,29 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         };
         await emit({ event: 'stage', data: { stage: 'COMMITTED', chapterNumber: 2 } });
         expect(container.textContent).toContain('等待服务端下发工种配置 (roleDefinitions)...');
+    });
+
+    it('在工具页签点击声纹采集 (Voice Harvest) 调用 harvestVoice 并展示结果提示', async () => {
+        vi.mocked(api.harvestVoice).mockResolvedValueOnce({
+            harvestedCount: 2,
+            skipped: false,
+            samples: [
+                { id: 'v1', tag: '冷峻克制', text: '把门关上。' },
+                { id: 'v2', tag: '压低声线', text: '别往外说。' }
+            ]
+        });
+
+        const container = await mountStudio();
+        await click(buttonByText(container, '工具'));
+
+        const harvestBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button.ns-tool-card')).find(
+            (btn) => btn.textContent?.includes('声纹采集 (Voice Harvest)')
+        );
+        expect(harvestBtn).toBeDefined();
+
+        await click(harvestBtn!);
+
+        expect(api.harvestVoice).toHaveBeenCalledWith(1);
+        expect(document.body.textContent).toContain('2');
     });
 });

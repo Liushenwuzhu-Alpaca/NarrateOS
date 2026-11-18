@@ -17,6 +17,20 @@ export type PipelineStageId =
 /** 单个流水线节点状态（dormant = Dreaming 条件未达的虚线弱态） */
 export type StageNodeStatus = 'idle' | 'active' | 'done' | 'healing' | 'halt' | 'dormant';
 
+/** 流水线节点单次工种尝试会话记录（同一节点可按序保留多次尝试，如 WRITER / LOCAL_PATCH / REWRITE） */
+export interface StageAttemptSession {
+    runId?: string | undefined;
+    stage: string;
+    role?: string | undefined;
+    status: string;
+    sessionId: string;
+    parentSessionId?: string | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
+    mode?: string | undefined;
+    updatedAt?: string | undefined;
+}
+
 /** 流水线节点运行态信息 */
 export interface StageNodeState {
     status: StageNodeStatus;
@@ -34,6 +48,8 @@ export interface StageNodeState {
     mode?: string | undefined;
     /** 所属运行批次 ID (.ops/runs.jsonl runId) */
     runId?: string | undefined;
+    /** 当前阶段按顺序保留的全部尝试会话记录 */
+    sessions?: StageAttemptSession[] | undefined;
 }
 
 /** 主内容区视图页签 */
@@ -226,6 +242,8 @@ export interface CenterWorkbenchProps {
     onRefreshViews?: (() => Promise<void> | void) | undefined;
     /** 只读重试读取当前章详情（细纲 error 态入口，不触发 Sync/生成） */
     onRetryChapterDetail?: (() => void) | undefined;
+    /** 点击任意阶段节点时通知父组件当前检视的阶段 ID */
+    onInspectStage?: ((stageId: PipelineStageId) => void) | undefined;
     /** 点击已绑定会话的阶段节点，在右侧打开 DSH 原生 Conversation / Trajectory 检查器 */
     onSelectStageSession?: ((selection: StageSessionSelection) => void) | undefined;
 }
@@ -880,16 +898,21 @@ function parseUnifiedDiff(rawDiff: string, defaultFileName: string): ParsedDiffH
 
 /**
  * 后端 SSE 阶段名 -> 展示节点映射。
- * PROSE_GATE 是 0-LLM 确定性步骤，不占节点：其事件折叠为 Writer 节点上的门禁徽标。
+ * PROSE_GATE / LOCAL_PATCH / REWRITE 归并到 WRITER 节点；REPLAN 归并到 PLANNER 节点。
  */
 const SSE_STAGE_ALIAS: Readonly<Record<string, PipelineStageId>> = {
     PROSE_GATE: 'WRITER',
-    STATIC_GATE: 'WRITER'
+    STATIC_GATE: 'WRITER',
+    LOCAL_PATCH: 'WRITER',
+    PATCH: 'WRITER',
+    REWRITE: 'WRITER',
+    REPLAN: 'PLANNER'
 };
 
 /** 将后端阶段名归一化为展示节点 ID（未知阶段返回 null） */
 export function resolveStageId(stageName: string): PipelineStageId | null {
-    const aliased = SSE_STAGE_ALIAS[stageName] ?? stageName;
+    const normalized = stageName.trim().toUpperCase();
+    const aliased = SSE_STAGE_ALIAS[normalized] ?? normalized;
     return (STAGE_ORDER as readonly string[]).includes(aliased)
         ? (aliased as PipelineStageId)
         : null;
@@ -1079,6 +1102,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     onDraftDirtyChange,
     onRetryChapterDetail,
     onDraftControlReady,
+    onInspectStage,
     onSelectStageSession
 }) => {
     // 显示与保存均以已采纳的详情章身份为准；详情未加载时才回退到导航意图/当前章
@@ -2104,6 +2128,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                         }
                                         onClick={() => {
                                             setInspectedStageId(stage.id);
+                                            onInspectStage?.(stage.id);
                                             if (boundSessionId && onSelectStageSession) {
                                                 onSelectStageSession({
                                                     stageId: stage.id,
@@ -2220,7 +2245,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 ) : inspectedStageDef.id === 'WRITER' ? (
                                     <div className="ns-inspector-cleanroom-note" role="note">
                                         <strong>只读说明：</strong>
-                                        该历史章节的 Writer 未绑定原生会话（净室直调历史记录），门禁与遥测明细请在右侧「检查器」或 <code>.ops/traces/</code> 查看。
+                                        该历史章节的 Writer 未绑定原生会话（早期历史记录未留存会话轨迹），门禁与遥测明细请在右侧「检查器」查看。
                                     </div>
                                 ) : null}
                             </div>
