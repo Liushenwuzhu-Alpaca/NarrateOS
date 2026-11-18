@@ -7,8 +7,11 @@ import { promisify } from 'node:util';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import {
     BookSwitchConflictError,
+    RoleReasoningEffortSchema,
+    RoleTierOverrideSchema,
     serializeEntityMarkdown,
-    TxLockConflictError
+    TxLockConflictError,
+    type RoleModelOverride
 } from '@narrateos/dsh-book-store';
 import {
     AdmissionClosedError,
@@ -117,6 +120,109 @@ async function runGitCommand(bookRoot: string, args: string[]): Promise<string |
     } catch {
         return null;
     }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 校验并清洗 PUT /api/narrate/model-routing 请求载荷（剥离空字符串与 null 覆盖项） */
+function parseModelRoutingRequest(body: Record<string, unknown>): {
+    model_routing?: Record<string, string> | undefined;
+    role_routing?: Record<string, RoleModelOverride> | undefined;
+} {
+    if (body['model_routing'] === undefined && body['role_routing'] === undefined) {
+        throw new PathValidationError('请求体至少需要包含 model_routing 或 role_routing');
+    }
+
+    const result: {
+        model_routing?: Record<string, string> | undefined;
+        role_routing?: Record<string, RoleModelOverride> | undefined;
+    } = {};
+
+    if (body['model_routing'] !== undefined) {
+        if (!isPlainObject(body['model_routing'])) {
+            throw new PathValidationError('model_routing 必须为键值对对象');
+        }
+        const cleanedModelRouting: Record<string, string> = {};
+        for (const [poolKey, rawVal] of Object.entries(body['model_routing'])) {
+            if (rawVal === null || rawVal === undefined) {
+                continue;
+            }
+            if (typeof rawVal !== 'string') {
+                throw new PathValidationError(`model_routing.${poolKey} 必须为字符串`);
+            }
+            const trimmed = rawVal.trim();
+            if (trimmed.length > 0) {
+                cleanedModelRouting[poolKey] = trimmed;
+            }
+        }
+        result.model_routing = cleanedModelRouting;
+    }
+
+    if (body['role_routing'] !== undefined) {
+        if (!isPlainObject(body['role_routing'])) {
+            throw new PathValidationError('role_routing 必须为角色覆盖映射对象');
+        }
+        const cleanedRoleRouting: Record<string, RoleModelOverride> = {};
+        for (const [roleId, rawEntry] of Object.entries(body['role_routing'])) {
+            if (rawEntry === null || rawEntry === undefined) {
+                continue;
+            }
+            if (!isPlainObject(rawEntry)) {
+                throw new PathValidationError(`role_routing.${roleId} 必须为对象`);
+            }
+
+            const cleanedEntry: RoleModelOverride = {};
+
+            if (rawEntry['tier'] !== undefined && rawEntry['tier'] !== null && rawEntry['tier'] !== '') {
+                const tierParsed = RoleTierOverrideSchema.safeParse(rawEntry['tier']);
+                if (!tierParsed.success) {
+                    throw new PathValidationError(
+                        `role_routing.${roleId}.tier 非法，仅允许 strong | weak`
+                    );
+                }
+                cleanedEntry.tier = tierParsed.data;
+            }
+
+            if (rawEntry['model'] !== undefined && rawEntry['model'] !== null) {
+                if (typeof rawEntry['model'] !== 'string') {
+                    throw new PathValidationError(`role_routing.${roleId}.model 必须为字符串`);
+                }
+                const trimmedModel = rawEntry['model'].trim();
+                if (trimmedModel.length > 0) {
+                    cleanedEntry.model = trimmedModel;
+                }
+            }
+
+            if (
+                rawEntry['reasoning_effort'] !== undefined &&
+                rawEntry['reasoning_effort'] !== null &&
+                rawEntry['reasoning_effort'] !== ''
+            ) {
+                const effortParsed = RoleReasoningEffortSchema.safeParse(
+                    rawEntry['reasoning_effort']
+                );
+                if (!effortParsed.success) {
+                    throw new PathValidationError(
+                        `role_routing.${roleId}.reasoning_effort 非法，仅允许 off | low | medium | high | max`
+                    );
+                }
+                cleanedEntry.reasoning_effort = effortParsed.data;
+            }
+
+            if (
+                cleanedEntry.tier !== undefined ||
+                cleanedEntry.model !== undefined ||
+                cleanedEntry.reasoning_effort !== undefined
+            ) {
+                cleanedRoleRouting[roleId] = cleanedEntry;
+            }
+        }
+        result.role_routing = cleanedRoleRouting;
+    }
+
+    return result;
 }
 
 function sendErrorResponse(res: ServerResponse, err: unknown): void {
@@ -286,7 +392,11 @@ export function registerNarrateRoutes(
                 }
             }
 
-            const pendingSignalsCount = await controller.countPendingSignals();
+            const [pendingSignalsCount, roleDefinitions, availableModels] = await Promise.all([
+                controller.countPendingSignals(),
+                controller.resolveRoleDefinitions(snapshot.config, store.bookRoot),
+                controller.listAvailableModels(snapshot.config)
+            ]);
             const rt = controller.runtimeStatus;
 
             sendJson(res, 200, {
@@ -305,6 +415,9 @@ export function registerNarrateRoutes(
                     controller.poolRouting,
                     snapshot.config.model_routing
                 ),
+                roleRouting: snapshot.config.role_routing ?? {},
+                roleDefinitions,
+                availableModels,
                 pendingSignalsCount,
                 yolo: rt.yolo,
                 runtime: {
@@ -312,6 +425,32 @@ export function registerNarrateRoutes(
                     haltRequested: rt.haltRequested
                 }
             });
+        } catch (err) {
+            sendErrorResponse(res, err);
+        }
+    };
+
+    const handleModelRouting = async (req: IncomingMessage, res: ServerResponse) => {
+        if (!assertMethod(req, res, 'PUT')) return;
+        let body: Record<string, unknown>;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        let parsed: ReturnType<typeof parseModelRoutingRequest>;
+        try {
+            parsed = parseModelRoutingRequest(body);
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
+
+        try {
+            const saved = await controller.updateModelRouting(parsed);
+            sendJson(res, 200, saved);
         } catch (err) {
             sendErrorResponse(res, err);
         }
@@ -884,6 +1023,11 @@ export function registerNarrateRoutes(
         }),
         webServer.register({ kind: 'exact', path: '/api/narrate/boot', handler: handleBoot }),
         webServer.register({ kind: 'exact', path: '/api/narrate/status', handler: handleStatus }),
+        webServer.register({
+            kind: 'exact',
+            path: '/api/narrate/model-routing',
+            handler: handleModelRouting
+        }),
         webServer.register({ kind: 'exact', path: '/api/narrate/chapters', handler: handleChapters }),
         webServer.register({ kind: 'exact', path: '/api/narrate/chapter', handler: handleChapter }),
         webServer.register({ kind: 'exact', path: '/api/narrate/runs', handler: handleRuns }),

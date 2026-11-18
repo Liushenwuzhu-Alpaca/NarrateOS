@@ -1069,4 +1069,226 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         const booted = await bootPromise;
         expect(ctx2.narrateStore.bookRoot).toBe(booted.bookRoot);
     });
+
+    it('GET /api/narrate/status 暴露 roleRouting/roleDefinitions/availableModels，PUT /api/narrate/model-routing 支持校验、空值清洗、落盘读写与忙碌 409', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-routing-books-'));
+        tempDirs.push(booksRoot);
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'routing-api-book');
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot, booksRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+        const web = createMockWebServer(ctx);
+
+        const stepEntered = createDeferred<void>();
+        const stepRelease = createDeferred<void>();
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    stepEntered.resolve();
+                    await stepRelease.promise;
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '路由接口测试',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '核对接口',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对账册。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('# 路由接口测试\n\n沈默合上账册。')
+        });
+
+        // 注入可枚举提供商/模型（含故意抛错的 provider 验证静默降级）
+        Object.assign(ctx.llm as unknown as Record<string, unknown>, {
+            listProviders: () => [
+                { id: 'deepseek-official', name: 'DeepSeek' },
+                { id: 'openai', name: 'OpenAI' },
+                { id: 'broken-provider', name: 'Broken' }
+            ],
+            listModels: async (provider: string) => {
+                if (provider === 'deepseek-official') {
+                    return [
+                        { provider, id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+                        { provider, id: 'deepseek-flash', name: 'DeepSeek Flash' }
+                    ];
+                }
+                if (provider === 'openai') {
+                    return [{ provider, id: 'gpt-5-prose', name: 'GPT-5 Prose' }];
+                }
+                throw new Error('provider listing unavailable');
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            booksRoot,
+            heartbeatIntervalMs: 0,
+            poolRouting: {
+                strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+                fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
+                audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
+            }
+        });
+        registerCleanup(() => pipeFiber.dispose());
+
+        // 1. GET /api/narrate/status 验证新增字段
+        const statusBefore = await web.invoke('GET', '/api/narrate/status');
+        expect(statusBefore.statusCode).toBe(200);
+        expect(statusBefore.json['roleRouting']).toEqual({});
+        const roleDefsBefore = statusBefore.json['roleDefinitions'] as Array<{
+            id: string;
+            defaultPool: string;
+            effectivePool: string;
+            effectiveProvider: string;
+            effectiveModel: string;
+        }>;
+        expect(roleDefsBefore.map((r) => r.id)).toEqual([
+            'librarian',
+            'planner',
+            'writer',
+            'patch',
+            'fact-checker',
+            'extractor',
+            'dreamer',
+            'boot-compiler'
+        ]);
+        const availableModels = statusBefore.json['availableModels'] as Array<{
+            provider: string;
+            model: string;
+            label?: string;
+        }>;
+        expect(availableModels).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ provider: 'deepseek-official', model: 'deepseek-v4-pro' }),
+                expect.objectContaining({ provider: 'deepseek-official', model: 'deepseek-flash' }),
+                expect.objectContaining({ provider: 'openai', model: 'gpt-5-prose', label: 'GPT-5 Prose' })
+            ])
+        );
+
+        // 2. PUT /api/narrate/model-routing 校验非法参数 -> 400
+        expect((await web.invoke('PUT', '/api/narrate/model-routing', {})).statusCode).toBe(400);
+        expect(
+            (
+                await web.invoke('PUT', '/api/narrate/model-routing', {
+                    role_routing: 'bad-type'
+                })
+            ).statusCode
+        ).toBe(400);
+        expect(
+            (
+                await web.invoke('PUT', '/api/narrate/model-routing', {
+                    role_routing: { writer: { tier: 'invalid-tier' } }
+                })
+            ).statusCode
+        ).toBe(400);
+        expect(
+            (
+                await web.invoke('PUT', '/api/narrate/model-routing', {
+                    role_routing: { writer: { reasoning_effort: 'extreme' } }
+                })
+            ).statusCode
+        ).toBe(400);
+
+        // 3. PUT /api/narrate/model-routing 支持空值清洗与落盘读写 -> 200
+        const putRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+            model_routing: {
+                strong_creative: 'deepseek-v4-pro',
+                fast_retrieval: '   '
+            },
+            role_routing: {
+                librarian: { tier: 'strong', model: '', reasoning_effort: null },
+                writer: { model: 'openai:gpt-5-prose', reasoning_effort: 'high' },
+                patch: { tier: '', model: '   ', reasoning_effort: '' }
+            }
+        });
+        expect(putRes.statusCode).toBe(200);
+        expect(putRes.json['status']).toBe('ok');
+        expect(putRes.json['roleRouting']).toEqual({
+            librarian: { tier: 'strong' },
+            writer: { model: 'openai:gpt-5-prose', reasoning_effort: 'high' }
+        });
+        const updatedRoleDefs = putRes.json['roleDefinitions'] as Array<{
+            id: string;
+            effectiveTier?: string | null;
+            effectivePool: string;
+            effectiveProvider: string;
+            effectiveModel: string;
+            effectiveReasoningEffort?: string;
+        }>;
+        const librarianDef = updatedRoleDefs.find((r) => r.id === 'librarian');
+        expect(librarianDef).toMatchObject({
+            effectiveTier: 'strong',
+            effectivePool: 'strong_creative',
+            effectiveProvider: 'deepseek-official',
+            effectiveModel: 'deepseek-v4-pro'
+        });
+        const writerDef = updatedRoleDefs.find((r) => r.id === 'writer');
+        expect(writerDef).toMatchObject({
+            effectiveTier: null,
+            effectivePool: 'strong_creative',
+            effectiveProvider: 'openai',
+            effectiveModel: 'gpt-5-prose',
+            effectiveReasoningEffort: 'high'
+        });
+
+        const persistedConfig = await ctx.narrateStore.openStore(bookRoot).readBookConfig();
+        expect(persistedConfig.role_routing).toEqual({
+            librarian: { tier: 'strong' },
+            writer: { model: 'openai:gpt-5-prose', reasoning_effort: 'high' }
+        });
+
+        // 4. 在途 STEPPING 任务期间调用 PUT /api/narrate/model-routing -> 409
+        const stepPromise = ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '测试并发写配置 409'
+        });
+        await stepEntered.promise;
+        const busyPutRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+            role_routing: { librarian: { tier: 'weak' } }
+        });
+        expect(busyPutRes.statusCode).toBe(409);
+        stepRelease.resolve();
+        await stepPromise;
+
+        // 5. .ops/tx.lock 被外部事务占用时调用 PUT /api/narrate/model-routing -> 409
+        await ctx.narrateStore.openStore(bookRoot).withTxLock(async () => {
+            const lockConflictRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+                role_routing: { librarian: { tier: 'weak' } }
+            });
+            expect(lockConflictRes.statusCode).toBe(409);
+        });
+    });
 });

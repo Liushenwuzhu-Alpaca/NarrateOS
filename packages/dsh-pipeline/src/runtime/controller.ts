@@ -11,8 +11,11 @@ import {
     TxLockPayloadSchema,
     type BookConfig,
     type ForkParallelWindowOptions,
+    type LlmPool,
     type MergeParallelWindowOptions,
     type NarrateStoreService,
+    type ReasoningEffortLevel,
+    type RoleModelOverride,
     type RunRecord,
     type SystemPort
 } from '@narrateos/dsh-book-store';
@@ -40,21 +43,28 @@ import { SyncPipeline } from '../pipeline/sync-pipeline.js';
 import { harvestVoiceFromChapter } from '../pipeline/voice-harvest.js';
 import { VolumePipeline } from '../pipeline/volume-pipeline.js';
 import { RoleLoader } from '../roles/role-loader.js';
-import { DshLlmAdapter } from '../runner/dsh-llm-adapter.js';
+import {
+    DshLlmAdapter,
+    resolveRoleReasoningEffort,
+    resolveRoleRoute
+} from '../runner/dsh-llm-adapter.js';
 import { RoleRunner } from '../runner/role-runner.js';
 import {
     ExtendedRunRecordSchema,
     OpsSignalSchema,
     type AdvanceVolumeOptions,
     type AdvanceVolumeResult,
+    type AvailableModelItem,
     type ExtendedRunRecord,
     type HealConflictsOptions,
     type HealConflictsResult,
     type LlmPoolRouting,
     type OpsSignal,
+    type RoleDefinitionItem,
     type RunDreamingOptions,
     type RunDreamingResult,
     type RuntimeTaskKind,
+    type SaveModelRoutingResult,
     type StageSessionDetail,
     type StageSessionEvent,
     type StageSessionEventItem,
@@ -71,6 +81,29 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_STALE_MS = 30_000;
 export const DEFAULT_YOLO_GOAL = '按既定主线与人物弧光自然推进下一章';
+
+/** 规范顺序的 8 个标准工种 ID */
+export const CANONICAL_ROLE_IDS = [
+    'librarian',
+    'planner',
+    'writer',
+    'patch',
+    'fact-checker',
+    'extractor',
+    'dreamer',
+    'boot-compiler'
+] as const;
+
+const CANONICAL_ROLE_DEFAULT_POOLS: Record<(typeof CANONICAL_ROLE_IDS)[number], LlmPool> = {
+    librarian: 'fast_retrieval',
+    planner: 'strong_creative',
+    writer: 'strong_creative',
+    patch: 'strong_creative',
+    'fact-checker': 'audit',
+    extractor: 'fast_retrieval',
+    dreamer: 'strong_creative',
+    'boot-compiler': 'strong_creative'
+};
 
 export interface NarrateControllerConfig {
     bookRoot?: string | undefined;
@@ -297,6 +330,14 @@ export class NarrateRuntimeController {
                 try {
                     const bookCfg = await this.storeService.openStore(this.bookRoot).readBookConfig();
                     return bookCfg.model_routing;
+                } catch {
+                    return undefined;
+                }
+            },
+            resolveBookConfig: async () => {
+                if (!this.bookRoot) return undefined;
+                try {
+                    return await this.storeService.openStore(this.bookRoot).readBookConfig();
                 } catch {
                     return undefined;
                 }
@@ -1586,6 +1627,223 @@ export class NarrateRuntimeController {
             });
         }
         return { chapters };
+    }
+
+    /** 按规范顺序解析 8 个工种的默认配置与当前生效模型路由 */
+    async resolveRoleDefinitions(
+        bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'>,
+        bookRoot?: string
+    ): Promise<RoleDefinitionItem[]> {
+        const targetBookRoot = bookRoot ?? this.bookRoot ?? undefined;
+        const definitions: RoleDefinitionItem[] = [];
+
+        for (const roleId of CANONICAL_ROLE_IDS) {
+            let defaultPool: LlmPool = CANONICAL_ROLE_DEFAULT_POOLS[roleId];
+            let defaultReasoningEffort: ReasoningEffortLevel | undefined;
+
+            try {
+                const roleCfg = await this.roleLoader.loadRoleConfig(roleId, targetBookRoot);
+                defaultPool = roleCfg.pool;
+                defaultReasoningEffort = roleCfg.reasoningEffort;
+            } catch {
+                // 预设目录缺失或单书覆写异常时回退到标准默认池定义
+            }
+
+            const roleOverride = bookConfig?.role_routing?.[roleId];
+            const effectiveTier =
+                roleOverride?.tier === 'strong' || roleOverride?.tier === 'weak'
+                    ? roleOverride.tier
+                    : null;
+            const effectivePool: LlmPool =
+                effectiveTier === 'strong'
+                    ? 'strong_creative'
+                    : effectiveTier === 'weak'
+                      ? 'fast_retrieval'
+                      : defaultPool;
+            const route = resolveRoleRoute(this.poolRouting, roleId, defaultPool, bookConfig);
+            const effectiveReasoningEffort = resolveRoleReasoningEffort(
+                roleId,
+                defaultReasoningEffort,
+                bookConfig
+            );
+
+            definitions.push({
+                id: roleId,
+                defaultPool,
+                ...(defaultReasoningEffort !== undefined ? { defaultReasoningEffort } : {}),
+                effectiveTier,
+                effectivePool,
+                effectiveProvider: route.provider,
+                effectiveModel: route.model,
+                ...(effectiveReasoningEffort !== undefined ? { effectiveReasoningEffort } : {})
+            });
+        }
+
+        return definitions;
+    }
+
+    /** 探测并汇总当前运行时所有可用模型候选（去重，任何枚举异常静默降级） */
+    async listAvailableModels(
+        bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'>
+    ): Promise<AvailableModelItem[]> {
+        const seen = new Map<string, AvailableModelItem>();
+
+        const addCandidate = (rawProvider: string, rawModel: string, label?: string): void => {
+            let provider = rawProvider.trim();
+            let model = rawModel.trim();
+            if (model.length === 0) return;
+
+            const colonIdx = model.indexOf(':');
+            if (colonIdx > 0 && colonIdx < model.length - 1) {
+                const parsedProvider = model.slice(0, colonIdx).trim();
+                const parsedModel = model.slice(colonIdx + 1).trim();
+                if (parsedProvider.length > 0 && parsedModel.length > 0) {
+                    provider = parsedProvider;
+                    model = parsedModel;
+                }
+            }
+            if (provider.length === 0) {
+                provider = this.poolRouting.strong_creative.provider;
+            }
+
+            const key = `${provider}\0${model}`;
+            const existing = seen.get(key);
+            const cleanLabel = label?.trim();
+            if (!existing) {
+                seen.set(key, {
+                    provider,
+                    model,
+                    ...(cleanLabel && cleanLabel !== model ? { label: cleanLabel } : {})
+                });
+            } else if (!existing.label && cleanLabel && cleanLabel !== model) {
+                existing.label = cleanLabel;
+            }
+        };
+
+        const llm = this.ctx.llm as unknown as {
+            listProviders?: () => Array<{ id?: unknown; name?: unknown }>;
+            listModels?: (
+                provider: string
+            ) => Promise<Array<{ id?: unknown; model?: unknown; name?: unknown }>>;
+        };
+
+        if (llm && typeof llm.listProviders === 'function') {
+            try {
+                const providers = llm.listProviders();
+                if (Array.isArray(providers)) {
+                    for (const providerInfo of providers) {
+                        const providerId =
+                            typeof providerInfo?.id === 'string' ? providerInfo.id.trim() : '';
+                        if (!providerId || typeof llm.listModels !== 'function') {
+                            continue;
+                        }
+                        try {
+                            const models = await llm.listModels(providerId);
+                            if (!Array.isArray(models)) continue;
+                            for (const modelInfo of models) {
+                                const modelId =
+                                    typeof modelInfo?.id === 'string'
+                                        ? modelInfo.id
+                                        : typeof modelInfo?.model === 'string'
+                                          ? modelInfo.model
+                                          : '';
+                                const modelName =
+                                    typeof modelInfo?.name === 'string' ? modelInfo.name : undefined;
+                                if (modelId.trim().length > 0) {
+                                    addCandidate(providerId, modelId, modelName);
+                                }
+                            }
+                        } catch {
+                            // 单个 provider 枚举失败静默降级
+                        }
+                    }
+                }
+            } catch {
+                // listProviders 异常静默降级
+            }
+        }
+
+        for (const target of Object.values(this.poolRouting)) {
+            addCandidate(target.provider, target.model);
+        }
+
+        if (bookConfig?.model_routing) {
+            for (const [poolKey, rawModel] of Object.entries(bookConfig.model_routing)) {
+                const poolTarget =
+                    poolKey === 'strong_creative' ||
+                    poolKey === 'fast_retrieval' ||
+                    poolKey === 'audit'
+                        ? this.poolRouting[poolKey]
+                        : this.poolRouting.strong_creative;
+                addCandidate(poolTarget.provider, rawModel);
+            }
+        }
+
+        if (bookConfig?.role_routing) {
+            for (const [roleId, override] of Object.entries(bookConfig.role_routing)) {
+                if (!override?.model) continue;
+                const defaultPool =
+                    CANONICAL_ROLE_DEFAULT_POOLS[
+                        roleId as (typeof CANONICAL_ROLE_IDS)[number]
+                    ] ?? 'strong_creative';
+                const effectivePool: LlmPool =
+                    override.tier === 'strong'
+                        ? 'strong_creative'
+                        : override.tier === 'weak'
+                          ? 'fast_retrieval'
+                          : defaultPool;
+                addCandidate(this.poolRouting[effectivePool].provider, override.model);
+            }
+        }
+
+        return Array.from(seen.values());
+    }
+
+    /** 在非忙碌状态与事务锁保护下更新单书 world/book_config.yaml 模型路由配置 */
+    async updateModelRouting(input: {
+        model_routing?: Record<string, string> | undefined;
+        role_routing?: Record<string, RoleModelOverride> | undefined;
+    }): Promise<SaveModelRoutingResult> {
+        this.assertAdmissionOpen();
+        if (this.activeTask !== 'IDLE' || this.yoloState.running) {
+            throw new TaskConflictError(
+                `当前正在执行任务 (${this.yoloState.running ? 'YOLO' : this.activeTask})，禁止修改模型路由配置`
+            );
+        }
+
+        const store = this.requireBookStore();
+        return await store.withTxLock(async () => {
+            const currentConfig = await store.readBookConfig();
+            const nextConfig: BookConfig = { ...currentConfig };
+
+            if (input.model_routing !== undefined) {
+                if (Object.keys(input.model_routing).length > 0) {
+                    nextConfig.model_routing = input.model_routing;
+                } else {
+                    delete nextConfig.model_routing;
+                }
+            }
+
+            if (input.role_routing !== undefined) {
+                if (Object.keys(input.role_routing).length > 0) {
+                    nextConfig.role_routing = input.role_routing;
+                } else {
+                    delete nextConfig.role_routing;
+                }
+            }
+
+            await store.writeBookConfig(nextConfig);
+
+            return {
+                status: 'ok',
+                modelRouting: resolveStatusModelRouting(
+                    this.poolRouting,
+                    nextConfig.model_routing
+                ),
+                roleRouting: nextConfig.role_routing ?? {},
+                roleDefinitions: await this.resolveRoleDefinitions(nextConfig, store.bookRoot)
+            };
+        });
     }
 
     private async assertNoActiveTxLock(message: string): Promise<void> {

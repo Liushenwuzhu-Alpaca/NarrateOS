@@ -101,6 +101,48 @@ function splitParagraphs(text: string): string[] {
 }
 
 /**
+ * 校验并兜底补全章首 `# <标题名称>` 行：
+ * - 若首行非空文本已匹配 `/^#\s+\S/` 则原样保留；
+ * - 否则剥离 `chapterTitle` 前导 `第X章` 编号（空标题兜底为章节数字），在正文顶端拼接 `# ${headingText}\n\n`。
+ */
+export function ensureChapterHeading(
+    prose: string,
+    chapterNumber: number,
+    chapterTitle?: string
+): string {
+    const trimmed = prose.trim();
+    const firstLine = trimmed.split(/\r?\n/, 1)[0]?.trim() ?? '';
+    if (/^#\s+\S/.test(firstLine)) {
+        return trimmed;
+    }
+    const strippedTitle = (chapterTitle ?? '')
+        .trim()
+        .replace(/^第[0-9零一二三四五六七八九十百千万两]+章[：:\s-]*/, '')
+        .trim();
+    const headingText = strippedTitle.length > 0 ? strippedTitle : String(chapterNumber);
+    return trimmed.length > 0 ? `# ${headingText}\n\n${trimmed}` : `# ${headingText}`;
+}
+
+/** 从当前卷 L2_cards Markdown 中提取最近至多 limit 条章节卡片 */
+function extractRecentL2Cards(rawCardContent: string | null, limit = 2): string {
+    if (!rawCardContent || rawCardContent.trim().length === 0) {
+        return '';
+    }
+    const normalized = rawCardContent.replace(/\r\n/g, '\n');
+    const entryMatches = [
+        ...normalized.matchAll(/^##\s+ch_\d{4}\b[\s\S]*?(?=^##\s+ch_\d{4}\b|(?![\s\S]))/gm)
+    ];
+    if (entryMatches.length === 0) {
+        return '';
+    }
+    return entryMatches
+        .slice(-limit)
+        .map((m) => m[0].trim())
+        .filter((block) => block.length > 0)
+        .join('\n\n');
+}
+
+/**
  * 单章 6 阶段生产管线：
  * - 多轮探查工种 (`Librarian`, `Planner`, `Fact Checker`, `Extractor`) 经 RoleRunner (ctx.agents.create + yield_*) 执行；
  * - 文学执笔与局部修补 (`Writer`, `Patch`) 经净室零工具单轮流 (ctx.llm) 执行，物理剥离禁区与隐秘视图；
@@ -461,7 +503,11 @@ export class ChapterPipeline {
             updatedVoicePool = drafted.updatedVoicePool;
 
             while (true) {
-                activeProse = stripBlockingTags(activeProse).cleanText.trim();
+                activeProse = ensureChapterHeading(
+                    stripBlockingTags(activeProse).cleanText.trim(),
+                    chapterNumber,
+                    activeOutline.chapter_title
+                );
 
                 // Step 4: StaticProseGate (0 Token)
                 emit('PROSE_GATE', chapterNumber, '运行 0 Token 静态文风门禁');
@@ -674,6 +720,11 @@ export class ChapterPipeline {
         }
 
         // Step 6: WAL 第 1 粒度提交 (feat + outline snapshot) -> Extractor -> WAL 第 2 粒度提交 (state)
+        activeProse = ensureChapterHeading(
+            activeProse,
+            chapterNumber,
+            activeOutline.chapter_title
+        );
         await this.store.beginDraft(chapterNumber);
         const featRes = await this.store.commitDraft(
             chapterNumber,
@@ -759,9 +810,18 @@ export class ChapterPipeline {
                     extraParts.push(`称谓: ${e.metadata.contextual_titles.join('、')}`);
                 }
                 const suffix = extraParts.length > 0 ? ` (${extraParts.join(' | ')})` : '';
-                return `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}${suffix}`;
+                return `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}${suffix} [last_seen_ch=${e.metadata.last_seen_ch}]`;
             })
             .join('\n');
+
+        const coldArchiveSection =
+            snapshot.coldArchiveIds.length > 0
+                ? [
+                      '',
+                      '## 冷宫休眠实体清单 (entities/cold_archive/)',
+                      snapshot.coldArchiveIds.map((id) => `- ${id}`).join('\n')
+                  ]
+                : [];
 
         const worldSummary = snapshot.worldState.summaryMarkdown.trim();
         const prevTailSlice = previousChapter?.fullText?.trim()
@@ -778,6 +838,7 @@ export class ChapterPipeline {
             '',
             '## 可用实体档案列表',
             entityList || '(暂无实体)',
+            ...coldArchiveSection,
             '',
             `## 本章目标 (${formatChapterKey(chapterNumber)}, story_day=${targetDay})`,
             chapterGoal,
@@ -1011,7 +1072,11 @@ export class ChapterPipeline {
         });
         addUsage(totalUsage, response.usage);
 
-        const cleanProse = stripBlockingTags(response.text).cleanText.trim();
+        const cleanProse = ensureChapterHeading(
+            stripBlockingTags(response.text).cleanText.trim(),
+            chapterNumber,
+            outline.chapter_title
+        );
         return {
             prose: cleanProse,
             writerView,
@@ -1219,7 +1284,25 @@ export class ChapterPipeline {
             .map((profile) => serializeEntityMarkdown(profile))
             .join('\n\n');
 
+        const currentVolume = snapshot.worldState.frontmatter.current_volume;
+        const cardRelPath = `index/L2_cards/vol_${String(currentVolume).padStart(2, '0')}_cards.md`;
+        const [worldStateRaw, openThreadsRaw, rawVolumeCards] = await Promise.all([
+            readOptionalText(join(this.store.bookRoot, 'world/world_state.md')),
+            readOptionalText(join(this.store.bookRoot, 'world/open_threads.md')),
+            readOptionalText(join(this.store.bookRoot, cardRelPath))
+        ]);
+        const recentL2Cards = extractRecentL2Cards(rawVolumeCards, 2);
+
         const taskPrompt = [
+            ...(worldStateRaw && worldStateRaw.trim().length > 0
+                ? [`## 当前世界状态全文 (world/world_state.md)\n${worldStateRaw.trim()}`]
+                : []),
+            ...(openThreadsRaw && openThreadsRaw.trim().length > 0
+                ? [`## 当前跨卷伏笔台账 (world/open_threads.md)\n${openThreadsRaw.trim()}`]
+                : []),
+            ...(recentL2Cards
+                ? [`## 当前卷近期章节卡片 (${cardRelPath})\n${recentL2Cards}`]
+                : []),
             `## 当前实体档案视图\n${entitySummary || '(暂无实体)'}`,
             `## 第 ${chapterNumber} 章定稿正文 (mode=${timelineMode}, story_day=${targetDay})\n${prose}`,
             '',
@@ -1260,8 +1343,6 @@ export class ChapterPipeline {
             extracted.entity_patches as EntityPatch[]
         );
         const telemetry = computeTelemetry(prose);
-        const currentVolume = snapshot.worldState.frontmatter.current_volume;
-        const cardRelPath = `index/L2_cards/vol_${String(currentVolume).padStart(2, '0')}_cards.md`;
         const branchPath = parallel
             ? `.ops/parallel_deltas/${parallel.windowId}/${parallel.branchId}.json`
             : undefined;

@@ -3,6 +3,8 @@ import type {
     DirtyChapter,
     LlmPool,
     PlannerOutline,
+    RoleModelOverride,
+    RoleTierOverride,
     StructuredRetryOptions,
     TelemetryMetrics,
     TimelineMode,
@@ -87,7 +89,40 @@ export interface StageSessionDetail {
     parentSessionId?: string | undefined;
     mode?: string | undefined;
     live: boolean;
+    startedAt?: string | undefined;
+    finishedAt?: string | undefined;
+    modelId?: string | undefined;
+    usage?: TokenUsage | undefined;
+    reasoning?: string | undefined;
+    thinkingChars?: number | undefined;
     events: StageSessionEventItem[];
+}
+
+/** 单个工种的默认配置与生效模型路由摘要 (对应 status.roleDefinitions[]) */
+export interface RoleDefinitionItem {
+    id: string;
+    defaultPool: LlmPool;
+    defaultReasoningEffort?: string | undefined;
+    effectiveTier?: RoleTierOverride | null | undefined;
+    effectivePool: string;
+    effectiveProvider: string;
+    effectiveModel: string;
+    effectiveReasoningEffort?: string | undefined;
+}
+
+/** 运行时探测到的可用模型候选 (对应 status.availableModels[]) */
+export interface AvailableModelItem {
+    provider: string;
+    model: string;
+    label?: string | undefined;
+}
+
+/** 模型路由保存响应载荷 (对应 PUT /api/narrate/model-routing) */
+export interface SaveModelRoutingResult {
+    status: 'ok';
+    modelRouting: Record<string, string>;
+    roleRouting: Record<string, RoleModelOverride>;
+    roleDefinitions: RoleDefinitionItem[];
 }
 
 /** 扩展后的 .ops/runs.jsonl 会话索引记录 */
