@@ -1,7 +1,9 @@
+import { existsSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
     generateStructuredJson,
+    NodeSystemAdapter,
     StaticProseGate,
     type BookStore,
     type LlmPort,
@@ -229,13 +231,16 @@ export async function harvestVoiceWithPool(
     }
 
     if (options.writeToDisk !== false) {
+        const effectiveSystem = options.system ?? new NodeSystemAdapter();
+        const shouldCommitGit =
+            options.system !== undefined || existsSync(join(options.store.bookRoot, '.git'));
         await options.store.runWithTxLock(async () => {
-            if (options.system) {
+            if (shouldCommitGit) {
                 await options.store.recordPendingWrites(['.ops/voice_samples.yaml']);
             }
             await options.store.writeVoiceSamples(nextPool);
-            if (options.system) {
-                await options.system.commitPaths(
+            if (shouldCommitGit) {
+                await effectiveSystem.commitPaths(
                     options.store.bookRoot,
                     ['.ops/voice_samples.yaml'],
                     `chore(${formatChapterKey(chapterNumber)}): harvest voice samples`

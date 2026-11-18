@@ -27,10 +27,32 @@ import {
     writeHealPlan,
     writeSignalsCursorState
 } from './helpers.js';
-import { harvestVoiceWithPool } from './voice-harvest.js';
+import { harvestVoiceFromChapter, harvestVoiceWithPool } from './voice-harvest.js';
 
 const tempDirs: string[] = [];
 const cleanupCallbacks: Array<() => Promise<void> | void> = [];
+
+async function isWorkingTreeClean(bookRoot: string): Promise<boolean> {
+    return await new bookStorePlugin.NodeSystemAdapter().isWorkingTreeClean(bookRoot);
+}
+
+async function setupBookGitignoreAndCommit(
+    bookRoot: string,
+    extraPaths: readonly string[],
+    message: string
+): Promise<void> {
+    // 仅忽略运行时日志/追踪文件（故意不忽略 .ops/pending_writes.json 与 .ops/signals_cursor.json，以严格验证原子提交与清理）
+    await writeFile(
+        join(bookRoot, '.gitignore'),
+        ['.ops/traces/', '.ops/session_logs/', '.ops/runs.jsonl', ''].join('\n'),
+        'utf8'
+    );
+    await new bookStorePlugin.NodeSystemAdapter().commitPaths(
+        bookRoot,
+        ['.gitignore', ...extraPaths],
+        message
+    );
+}
 
 function registerCleanup(fn: () => Promise<void> | void): void {
     cleanupCallbacks.push(fn);
@@ -410,6 +432,16 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             ].join('\n') + '\n',
             'utf8'
         );
+        await setupBookGitignoreAndCommit(
+            bookRoot,
+            [
+                'entities/cold_archive/char_099.md',
+                'world/book_config.yaml',
+                '.ops/voice_samples.yaml',
+                '.ops/signals.jsonl'
+            ],
+            'test: commit chapter-invariants fixtures'
+        );
 
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
@@ -530,10 +562,11 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(bootReplaced?.source).toBe('chapter_harvest');
         expect(bootReplaced?.text).toContain('茶壶嘴冒出的白气');
 
-        // ISS-058: 未来第 2 章信号未被吞掉，当章第 1 章信号已被记入 consumedIds；续写第 2 章仅消费未来信号不重复注入第 1 章信号
+        // ISS-058 & ISS-004: 未来第 2 章信号未被吞掉，当章第 1 章信号已被记入 consumedIds 且随 state 原子提交（工作区干净）
         const cursorState = await readSignalsCursorState(bookRoot);
         expect(cursorState.consumedIds.length).toBe(1);
         expect(cursorState.consumedLines).toBe(0);
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
 
         const resCh2 = await ctx.narratePipeline.stepChapter({
             chapterNumber: 2,
@@ -545,6 +578,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         const cursorAfterCh2 = await readSignalsCursorState(bookRoot);
         expect(cursorAfterCh2.consumedIds.length).toBe(2);
         expect(cursorAfterCh2.consumedLines).toBe(2);
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
     });
 
     it('Q3: tryRunLocalPatch 严禁吞掉 AbortError 强停信号', async () => {
@@ -610,15 +644,14 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(existsSync(join(bookRoot, '.ops/safe_halt.json'))).toBe(false);
     });
 
-    it('Q4.2 / Q5: Dreaming 读取 config.dreaming、注入离场/超期 WARPED/复现异象锚点并移除卷中冷宫搬迁诱导', async () => {
+    it('Q4.2 / Q5: Dreaming 读取 config.dreaming（默认 promote_anchor_min_chapters=2）、注入超期 WARPED/复现异象锚点并移除卷中冷宫搬迁诱导', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'dreaming-prescans', {
             storyDay: 10,
-            currentChapter: 4,
+            currentChapter: 3,
             extraChapters: {
                 'ch_0001.md': '# 第一章\n\n黑铜钥匙留在门边。\n',
                 'ch_0002.md': '# 第二章\n\n黑铜钥匙压着账册。\n',
-                'ch_0003.md': '# 第三章\n\n黑铜钥匙发出轻响。\n',
-                'ch_0004.md': '# 第四章\n\n沈默清点货物。\n'
+                'ch_0003.md': '# 第三章\n\n沈默清点货物。\n'
             }
         });
 
@@ -635,11 +668,6 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                 '',
                 '## ch_0002 (day:2)',
                 '- 主干剧情：账册压着黑铜钥匙。',
-                '- 异象锚点：黑铜钥匙',
-                '- 出场实体：char_001',
-                '',
-                '## ch_0003 (day:3)',
-                '- 主干剧情：黑铜钥匙再次出现。',
                 '- 异象锚点：黑铜钥匙',
                 '- 出场实体：char_001'
             ].join('\n') + '\n',
@@ -687,7 +715,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         registerCleanup(() => pipeFiber.dispose());
 
         const dreamRes = await ctx.narratePipeline.runDreaming({
-            currentChapter: 4,
+            currentChapter: 3,
             coldArchiveCandidateIds: ['char_001']
         });
 
@@ -938,6 +966,11 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
         registerCleanup(() => pipeFiber.dispose());
 
+        await setupBookGitignoreAndCommit(
+            bookRoot,
+            ['index/L2_cards/vol_01_cards.md'],
+            'test: commit tier2 L2 card fixture'
+        );
         const store = ctx.narrateStore.openStore();
         let syncInsideLock = false;
         let syncCalled = false;
@@ -969,7 +1002,219 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(res.results[0]?.action).toBe('PATCHED_IN_PLACE');
         expect(syncCalled).toBe(true);
         expect(syncInsideLock).toBe(false);
+        expect(existsSync(join(bookRoot, '.ops/pending_writes.json'))).toBe(false);
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
         const l2After = await readFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), 'utf8');
         expect(l2After).toContain('- 异象锚点：无');
+    });
+
+    it('Reviewer 复审回归: harvestVoiceFromChapter 默认提交 Git、冷宫唤醒实体过 yield_verdict 引文验真、future_horizon/WARPED/未知vis 续行剥离与 Tier 1/2 洁净工作区', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'reviewer-regressions', {
+            storyDay: 2,
+            currentChapter: 2,
+            extraChapters: {
+                'ch_0001.md': '# 第一章\n\n沈默左手拎着黄铜提灯。\n',
+                'ch_0002.md': '# 第二章\n\n沈默右手握着铁扳手。\n'
+            }
+        });
+        await mkdir(join(bookRoot, 'entities/cold_archive'), { recursive: true });
+        await writeFile(
+            join(bookRoot, 'entities/cold_archive/char_099.md'),
+            [
+                '---',
+                'entity_id: char_099',
+                'entity_type: character',
+                'canonical_name: 程三爷',
+                'unique_aliases: ["程三"]',
+                'status: ACTIVE',
+                'last_seen_ch: 1',
+                '---',
+                '',
+                '## 1. 固有属性锁 (Innate Locks)',
+                '- [slot:identity | vis:PUBLIC | owner:char_099] 旧港老验船师',
+                '',
+                '## 2. 当前状态槽 (Acquired State)',
+                '- [slot:residence | vis:PUBLIC | owner:char_099] 退隐老码头茶馆',
+                '- [slot:secret | vis:OMNISCIENT_SECRET | owner:char_099] 暗藏半张沉船海图',
+                '  > 续行说明：海图藏在茶壶底座暗格里',
+                '',
+                '## 3. 历史履历 (Irreversible Trajectory)',
+                '',
+                '## 4. 近期缓冲 (Recent Buffer)',
+                ''
+            ].join('\n'),
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/future_horizon.md'),
+            '# 未来惯性\n\n- [day:5] 港务稽查队将在三号码头封锁仓库\n',
+            'utf8'
+        );
+        await setupBookGitignoreAndCommit(
+            bookRoot,
+            ['entities/cold_archive/char_099.md', 'world/future_horizon.md'],
+            'test: commit reviewer-regressions fixtures'
+        );
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const store = ctx.narrateStore.openStore();
+
+        // 1. harvestVoiceFromChapter 不传 system 时仍自动原子提交 .ops/voice_samples.yaml 并清理 pending_writes.json
+        const harvestOnlyRes = await harvestVoiceFromChapter({
+            store,
+            llm: {
+                generate: async () => ({
+                    text: JSON.stringify({
+                        samples: [
+                            {
+                                tag: '动作白描',
+                                text: '煤油灯焰晃了一寸，铜钥匙在桌面划出一道细痕。'
+                            }
+                        ]
+                    }),
+                    usage: { inputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 15 }
+                })
+            },
+            chapterNumber: 1
+        });
+        expect(harvestOnlyRes.harvestedCount).toBe(1);
+        expect(existsSync(join(bookRoot, '.ops/pending_writes.json'))).toBe(false);
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
+
+        // 2. 唤醒冷宫实体 char_099 参与单章：FactChecker 引用 entities/char_099.md 可通过 stagingOverlay 验真，
+        // 且 Patch 物理剥离 world/future_horizon.md 与 OMNISCIENT_SECRET 续行的 quote_source
+        let fcRound = 0;
+        let patchPromptSeen = '';
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001', 'char_099'],
+                        wakeup_entity_ids: ['char_099'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '冷宫验真',
+                        target_word_count: 1200,
+                        focus_cast: ['char_001', 'char_099'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '茶馆核查',
+                        scene_plan: [
+                            { scene_index: 1, location: '茶馆', summary: '会面', is_spotlight: true }
+                        ],
+                        outline_text: '沈默与程三爷在茶馆会面。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_patched_draft')) {
+                    patchPromptSeen = taskPrompt;
+                    await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 1,
+                                end_paragraph: 1,
+                                replacement_paragraphs: ['程三爷把铜茶壶推到桌沿，抬手掸去袖口盐霜。']
+                            }
+                        ]
+                    });
+                    await execTool('yield_patched_draft', { summary: '安全修补' });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    fcRound += 1;
+                    if (fcRound === 1) {
+                        await execTool('yield_verdict', {
+                            passed: false,
+                            issues: [
+                                {
+                                    severity: 'LOCAL_PATCH',
+                                    paragraph_index: 1,
+                                    description: '请依据程三爷在茶馆现身细节改写动作。',
+                                    quote_draft: '程三爷提起沉船海图。',
+                                    quote_source: '退隐老码头茶馆',
+                                    source_ref: 'entities/char_099.md'
+                                },
+                                {
+                                    severity: 'LOCAL_PATCH',
+                                    paragraph_index: 1,
+                                    description: '请收敛茶馆对话节奏。',
+                                    quote_draft: '程三爷提起沉船海图。',
+                                    quote_source: '海图藏在茶壶底座暗格里',
+                                    source_ref: 'entities/char_099.md'
+                                },
+                                {
+                                    severity: 'LOCAL_PATCH',
+                                    paragraph_index: 1,
+                                    description: '请保持当前夜间巡检氛围。',
+                                    quote_draft: '程三爷提起沉船海图。',
+                                    quote_source: '港务稽查队将在三号码头封锁仓库',
+                                    source_ref: 'world/future_horizon.md'
+                                }
+                            ]
+                        });
+                        return;
+                    }
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成冷宫唤醒与引文脱敏验证。',
+                        prose_anchors: ['茶壶'],
+                        appeared_entity_ids: ['char_001', 'char_099'],
+                        next_chapter_options: ['继续追查']
+                    });
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks('# 冷宫验真\n\n程三爷提起沉船海图，茶壶底座微微一震。\n')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const stepRes = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 3,
+            chapterGoal: '测试冷宫唤醒实体 yield_verdict 验真与受限引文剥离'
+        });
+        expect(stepRes.status).toBe('COMMITTED');
+        expect(patchPromptSeen).toContain('退隐老码头茶馆');
+        expect(patchPromptSeen).not.toContain('海图藏在茶壶底座暗格里');
+        expect(patchPromptSeen).not.toContain('港务稽查队将在三号码头封锁仓库');
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
+
+        // 3. 验证 Tier 1 RETCON 后同样清理 pending_writes.json 并保持工作区干净
+        const tier1Res = await ctx.narratePipeline.healCrossChapterConflicts([
+            {
+                conflictId: 'c-tier1-clean',
+                chapterA: 1,
+                quoteA: '沈默左手拎着黄铜提灯。',
+                chapterB: 2,
+                quoteB: '沈默右手握着铁扳手。',
+                description: '雨夜描述微差',
+                severityHint: 'SOFT_MINOR'
+            }
+        ]);
+        expect(tier1Res.results[0]?.action).toBe('RETCON_SIGNAL');
+        expect(existsSync(join(bookRoot, '.ops/pending_writes.json'))).toBe(false);
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
     });
 });

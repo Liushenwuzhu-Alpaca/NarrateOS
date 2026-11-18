@@ -140,7 +140,7 @@ const RESTRICTED_DIRECTIVE_CLAUSE_RE =
     /OMNISCIENT_SECRET|\bWARPED\b|\bSELF_ONLY(?:_[A-Z0-9_]*)?\b|CHARTER_SECRET|DIRECTOR_SECRET|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale|author_charter|arc_director_plan/i;
 
 const RESTRICTED_SOURCE_REF_RE =
-    /(?:^|\/)(?:world\/)?(?:author_charter\.md|arc_director_plan\.md)$/i;
+    /(?:^|\/)(?:world\/)?(?:author_charter\.md|arc_director_plan\.md|future_horizon\.md)$/i;
 
 function isAbortError(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
@@ -171,8 +171,24 @@ function isRestrictedFactQuoteSource(
         const normQuote = normalizeForQuoteMatch(issue.quote_source);
         if (normQuote.length > 0 && ref.startsWith('entities/')) {
             const entityId = ref.replace(/^entities\/(?:cold_archive\/)?/, '').replace(/\.md$/, '');
+            const visibleProfile = writerView.entities[entityId];
+            if (!visibleProfile) {
+                return true;
+            }
+            const visibleRendered = renderEntityProfile(visibleProfile, {
+                compactCard: false,
+                stripWarped: true,
+                cleanroomDisplay: true
+            });
+            if (!normalizeForQuoteMatch(visibleRendered).includes(normQuote)) {
+                return true;
+            }
+
             const rawProfile = snapshot.entities[entityId];
             if (rawProfile) {
+                if (rawProfile.metadata.status === 'WARPED') {
+                    return true;
+                }
                 const povSet = new Set(writerView.povCharIds);
                 const allRawEntries = [
                     ...rawProfile.innateLocks,
@@ -181,13 +197,17 @@ function isRestrictedFactQuoteSource(
                     ...rawProfile.recentBuffer
                 ];
                 const hitsRestricted = allRawEntries.some((entry) => {
+                    const entryText = [entry.text, ...entry.continuationLines].join(' ');
                     const isRestricted =
                         entry.status === 'WARPED' ||
                         entry.visibility === 'OMNISCIENT_SECRET' ||
+                        entry.rawInvalidVisibility !== undefined ||
                         (entry.visibility === 'SELF_ONLY' &&
+                            !povSet.has(entry.owner ?? entityId)) ||
+                        /\b(?:OMNISCIENT_SECRET|WARPED)\b/i.test(entryText) ||
+                        (/\bSELF_ONLY\b/i.test(entryText) &&
                             !povSet.has(entry.owner ?? entityId));
                     if (!isRestricted) return false;
-                    const entryText = [entry.text, ...entry.continuationLines].join(' ');
                     return normalizeForQuoteMatch(entryText).includes(normQuote);
                 });
                 if (hitsRestricted) {
@@ -541,12 +561,22 @@ export class ChapterPipeline {
                 }
             }
 
+            const wokenColdIds = new Set<string>();
             const recoveryWakeupIds = [
                 ...povCharIds,
                 ...(recoveredOutline?.focus_cast ?? []),
                 ...(recoveredOutline?.background_cast ?? [])
             ];
-            snapshot = await this.wakeColdArchiveEntitiesInMemory(snapshot, recoveryWakeupIds);
+            snapshot = await this.wakeColdArchiveEntitiesInMemory(
+                snapshot,
+                recoveryWakeupIds,
+                wokenColdIds
+            );
+            const recoveryStagingOverlay = this.buildEffectiveStagingOverlay(
+                branchStagingOverlay,
+                snapshot,
+                wokenColdIds
+            );
 
             const recoveryVoicePool = await this.readVoicePool();
             let recoveredUpdatedVoicePool: VoiceSamplePool | undefined;
@@ -563,6 +593,11 @@ export class ChapterPipeline {
             }
 
             const recoverySignals = await this.loadActiveSignals(activeCh, lookbackChapters);
+            const recoverySignalCursorUpdate =
+                !options.chapterGoal.includes('[待响应运维信号]') &&
+                recoverySignals.hasCursorChanges
+                    ? recoverySignals.nextCursorState
+                    : undefined;
             const featCommitSha = await this.system
                 .currentRevision(this.store.bookRoot)
                 .catch(() => '');
@@ -592,15 +627,9 @@ export class ChapterPipeline {
                 options,
                 parallel,
                 allowedChapterFiles,
-                stagingOverlay: branchStagingOverlay
+                stagingOverlay: recoveryStagingOverlay,
+                signalCursorUpdate: recoverySignalCursorUpdate
             });
-
-            if (
-                !options.chapterGoal.includes('[待响应运维信号]') &&
-                recoverySignals.hasCursorChanges
-            ) {
-                await writeSignalsCursorState(this.store.bookRoot, recoverySignals.nextCursorState);
-            }
 
             return {
                 status: 'COMMITTED',
@@ -721,13 +750,23 @@ export class ChapterPipeline {
             .filter((s) => s.type === 'SPOTLIGHT_TRIGGER' && Boolean(s.entity_id))
             .map((s) => s.entity_id!);
 
-        // 冷宫返场唤醒：将 Librarian 选中/唤醒及 POV/切镜涉及的冷宫实体临时加载入本章快照
-        snapshot = await this.wakeColdArchiveEntitiesInMemory(snapshot, [
-            ...povCharIds,
-            ...librarianOut.wakeup_entity_ids,
-            ...librarianOut.selected_entity_ids,
-            ...spotlightEntityIds
-        ]);
+        const wokenColdIds = new Set<string>();
+        // 冷宫返场唤醒：将 Librarian 选中/唤醒及 POV/切镜涉及的冷宫实体临时加载入本章快照与内存覆盖层
+        snapshot = await this.wakeColdArchiveEntitiesInMemory(
+            snapshot,
+            [
+                ...povCharIds,
+                ...librarianOut.wakeup_entity_ids,
+                ...librarianOut.selected_entity_ids,
+                ...spotlightEntityIds
+            ],
+            wokenColdIds
+        );
+        let effectiveStagingOverlay = this.buildEffectiveStagingOverlay(
+            branchStagingOverlay,
+            snapshot,
+            wokenColdIds
+        );
 
         const mergedSelectedEntityIds = Array.from(
             new Set([
@@ -805,7 +844,7 @@ export class ChapterPipeline {
                 attempt: plannerAttempt,
                 triggerReason: totalReplans > 0 ? 'FACT_PLAN_CONFLICT' : undefined,
                 allowedChapterFiles,
-                stagingOverlay: branchStagingOverlay,
+                stagingOverlay: effectiveStagingOverlay,
                 signal: options.signal,
                 onStageSession: options.onStageSession
             });
@@ -823,9 +862,18 @@ export class ChapterPipeline {
                 );
             }
 
-            // 将 Planner 点查补入的 focus_cast / background_cast 唤醒并并入下游可见实体集
+            // 将 Planner 点查补入的 focus_cast / background_cast 唤醒并并入下游可见实体集与内存覆盖层
             const plannerCastIds = [...activeOutline.focus_cast, ...activeOutline.background_cast];
-            snapshot = await this.wakeColdArchiveEntitiesInMemory(snapshot, plannerCastIds);
+            snapshot = await this.wakeColdArchiveEntitiesInMemory(
+                snapshot,
+                plannerCastIds,
+                wokenColdIds
+            );
+            effectiveStagingOverlay = this.buildEffectiveStagingOverlay(
+                branchStagingOverlay,
+                snapshot,
+                wokenColdIds
+            );
             activeCastSelectedIds = Array.from(
                 new Set([...activeCastSelectedIds, ...plannerCastIds])
             );
@@ -1011,7 +1059,7 @@ export class ChapterPipeline {
                     totalUsage,
                     options,
                     allowedChapterFiles,
-                    branchStagingOverlay
+                    effectiveStagingOverlay
                 );
                 lastFactIssues = verifiedIssues;
 
@@ -1189,6 +1237,11 @@ export class ChapterPipeline {
             { outline: activeOutline }
         );
 
+        const signalCursorUpdate =
+            !options.chapterGoal.includes('[待响应运维信号]') && signalPlan.hasCursorChanges
+                ? signalPlan.nextCursorState
+                : undefined;
+
         emit('EXTRACTOR', chapterNumber, '增量抽取实体状态与四联遥测');
         const stateRes = await this.runExtractorAndCommitState({
             snapshot,
@@ -1207,15 +1260,9 @@ export class ChapterPipeline {
             options,
             parallel,
             allowedChapterFiles,
-            stagingOverlay: branchStagingOverlay
+            stagingOverlay: effectiveStagingOverlay,
+            signalCursorUpdate
         });
-
-        if (
-            !options.chapterGoal.includes('[待响应运维信号]') &&
-            signalPlan.hasCursorChanges
-        ) {
-            await writeSignalsCursorState(this.store.bookRoot, signalPlan.nextCursorState);
-        }
 
         emit('COMMITTED', chapterNumber, `第 ${chapterNumber} 章双粒度提交完成`);
         return {
@@ -1900,6 +1947,9 @@ export class ChapterPipeline {
         parallel?: { windowId: string; branchId: string } | undefined;
         allowedChapterFiles?: string[] | undefined;
         stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
+        signalCursorUpdate?:
+            | { consumedLines: number; consumedIds: string[] }
+            | undefined;
     }): Promise<{
         stateCommitSha: string;
         updatedEntities: string[];
@@ -1923,7 +1973,8 @@ export class ChapterPipeline {
             options,
             parallel,
             allowedChapterFiles,
-            stagingOverlay
+            stagingOverlay,
+            signalCursorUpdate
         } = params;
 
         const extractorView = this.slicer.slice({
@@ -2114,6 +2165,7 @@ export class ChapterPipeline {
         const plannedPaths = [
             '.ops/telemetry.jsonl',
             '.ops/next_chapter_options.json',
+            ...(signalCursorUpdate ? ['.ops/signals_cursor.json'] : []),
             ...(effectiveVoicePool ? ['.ops/voice_samples.yaml'] : []),
             ...(branchPath
                 ? [branchPath]
@@ -2143,6 +2195,10 @@ export class ChapterPipeline {
         );
 
         const extraCommitPaths: string[] = ['.ops/telemetry.jsonl'];
+        if (signalCursorUpdate) {
+            await writeSignalsCursorState(this.store.bookRoot, signalCursorUpdate);
+            extraCommitPaths.push('.ops/signals_cursor.json');
+        }
         if (effectiveVoicePool) {
             await this.store.writeVoiceSamples(effectiveVoicePool);
             extraCommitPaths.push('.ops/voice_samples.yaml');
@@ -2424,7 +2480,8 @@ export class ChapterPipeline {
 
     private async wakeColdArchiveEntitiesInMemory(
         snapshot: BookSnapshot,
-        candidateIds: readonly string[]
+        candidateIds: readonly string[],
+        wokenColdIds?: Set<string>
     ): Promise<BookSnapshot> {
         if (snapshot.coldArchiveIds.length === 0 || candidateIds.length === 0) {
             return snapshot;
@@ -2442,6 +2499,11 @@ export class ChapterPipeline {
         if (Object.keys(loaded).length === 0) {
             return snapshot;
         }
+        if (wokenColdIds) {
+            for (const id of Object.keys(loaded)) {
+                wokenColdIds.add(id);
+            }
+        }
         return {
             ...snapshot,
             entities: {
@@ -2449,6 +2511,25 @@ export class ChapterPipeline {
                 ...loaded
             }
         };
+    }
+
+    private buildEffectiveStagingOverlay(
+        baseOverlay: Map<string, string | null> | undefined,
+        snapshot: BookSnapshot,
+        wokenColdIds: ReadonlySet<string>
+    ): Map<string, string | null> | undefined {
+        if (wokenColdIds.size === 0) {
+            return baseOverlay;
+        }
+        const merged = new Map<string, string | null>(baseOverlay ?? []);
+        for (const id of wokenColdIds) {
+            const profile = snapshot.entities[id];
+            const relPath = `entities/${id}.md`;
+            if (profile && !merged.has(relPath)) {
+                merged.set(relPath, serializeEntityMarkdown(profile));
+            }
+        }
+        return merged.size > 0 ? merged : undefined;
     }
 
     private async buildParallelStagingOverlay(

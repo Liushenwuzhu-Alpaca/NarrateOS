@@ -65,7 +65,7 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_DREAM_WORD_THRESHOLD = 15000;
 const DEFAULT_DREAM_BUFFER_LIMIT = 6;
 const DEFAULT_WARPED_ARCHIVE_AFTER_DAYS = 3;
-const DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS = 3;
+const DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS = 2;
 const DEFAULT_HEAL_GIT_LOG_MAX_COUNT = 2000;
 
 function isAbortError(err: unknown): boolean {
@@ -624,6 +624,8 @@ export class DreamingPipeline {
                 // 级别 1：软微瑕 -> 短锁内投递 RETCON 信号
                 if (severity === 'SOFT_MINOR') {
                     await this.store.withTxLock(async () => {
+                        const sigRelPath = '.ops/signals.jsonl';
+                        await this.store.recordPendingWrites([sigRelPath]);
                         const sigPath = await appendSignalJsonl(this.store.bookRoot, {
                             type: 'RETCON',
                             created_at: new Date().toISOString(),
@@ -638,6 +640,9 @@ export class DreamingPipeline {
                             [sigPath],
                             `fix(${formatChapterTag(conflict.chapterB)}): emit RETCON signal for ${conflict.conflictId}`
                         );
+                        await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), {
+                            force: true
+                        });
                     });
                     results.push({
                         conflictId: conflict.conflictId,
@@ -676,7 +681,7 @@ export class DreamingPipeline {
                             );
                         }
 
-                        const snapshot = await this.store.loadSnapshot();
+                        let snapshot = await this.store.loadSnapshot();
                         const { cardRelPath, cardVolume, cardRaw, section } =
                             await this.locateChapterL2Card(
                                 conflict.chapterB,
@@ -687,7 +692,7 @@ export class DreamingPipeline {
                             snapshot.worldState.frontmatter.story_day
                         );
 
-                        // 为净室 Patch 装配正向文风锁与出场实体卡片（严禁暴露全知禁区与 WARPED）
+                        // 为净室 Patch 装配正向文风锁与出场实体卡片（若出场含冷宫归档角色则先唤醒载入，严禁暴露全知禁区与 WARPED）
                         const staticVoiceRaw = await readOptionalText(
                             join(this.store.bookRoot, 'world/static_base_and_voice.md')
                         );
@@ -699,6 +704,22 @@ export class DreamingPipeline {
                             section && section.appearedEntityIds.length > 0
                                 ? section.appearedEntityIds
                                 : Object.keys(snapshot.entities);
+                        const coldSet = new Set(snapshot.coldArchiveIds);
+                        const missingColdIds = focusEntityIds.filter(
+                            (id) => coldSet.has(id) && !snapshot.entities[id]
+                        );
+                        if (missingColdIds.length > 0) {
+                            const wokenCold = await this.store.readColdArchivedEntities(missingColdIds);
+                            if (Object.keys(wokenCold).length > 0) {
+                                snapshot = {
+                                    ...snapshot,
+                                    entities: {
+                                        ...snapshot.entities,
+                                        ...wokenCold
+                                    }
+                                };
+                            }
+                        }
                         const writerView = slicer.slice({
                             snapshot,
                             forRole: 'writer',
@@ -825,6 +846,9 @@ export class DreamingPipeline {
                             [relChapterPath, cardRelPath, '.ops/tx_state.json'],
                             `fix(${formatChapterTag(conflict.chapterB)}): cleanroom patch single-point conflict & refresh L2/hash`
                         );
+                        await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), {
+                            force: true
+                        });
 
                         return {
                             missing: false as const,
