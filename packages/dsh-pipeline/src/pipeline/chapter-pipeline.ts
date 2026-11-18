@@ -69,7 +69,8 @@ import {
     type OpsSignal,
     type StageSessionEvent,
     type StepChapterOptions,
-    type StepChapterResult
+    type StepChapterResult,
+    type WriterAssemblyReport
 } from '../schemas.js';
 import {
     addUsage,
@@ -150,7 +151,7 @@ function isAbortError(err: unknown): boolean {
     return err.message === 'SAFE_HALT_REQUESTED' || err.message === 'Aborted';
 }
 
-function resolveDefaultEngineCraftPluginDir(): string {
+export function resolveDefaultEngineCraftPluginDir(): string {
     const currentDir = dirname(fileURLToPath(import.meta.url));
     return resolve(currentDir, '../../../../plugins/craft');
 }
@@ -801,6 +802,7 @@ export class ChapterPipeline {
         let activeProse = '';
         let activeCastSelectedIds = mergedSelectedEntityIds;
         let updatedVoicePool: VoiceSamplePool | undefined;
+        let latestWriterAssemblyReport: WriterAssemblyReport | undefined;
         let lastGateViolations: GateViolation[] = [];
         let lastFactIssues: FactCheckIssue[] = [];
 
@@ -905,6 +907,12 @@ export class ChapterPipeline {
             activeProse = drafted.prose;
             let activeWriterView = drafted.writerView;
             updatedVoicePool = drafted.updatedVoicePool;
+            latestWriterAssemblyReport = drafted.assemblyReport;
+            try {
+                options.onWriterAssembled?.(drafted.assemblyReport);
+            } catch {
+                // 避免诊断回调异常中断主流程
+            }
 
             while (true) {
                 activeProse = ensureChapterHeading(
@@ -934,6 +942,18 @@ export class ChapterPipeline {
                         this.gate.evaluate(activeProse, proseGateOptions)
                     );
                     lastGateViolations = gateResult.violations;
+                    const gateTelemetry = computeTelemetry(activeProse);
+                    try {
+                        options.onGateResult?.({
+                            chapter: chapterNumber,
+                            passed: gateResult.passed,
+                            violations: gateResult.violations,
+                            recommendedAction: gateResult.recommendedAction,
+                            metrics: gateTelemetry
+                        });
+                    } catch {
+                        // 避免诊断回调异常中断主流程
+                    }
                     await traceArtifact('prose_gate.result', gateResult);
                     await traceEvent('gate.result', {
                         passed: gateResult.passed,
@@ -1022,6 +1042,12 @@ export class ChapterPipeline {
                             activeProse = rewritten.prose;
                             activeWriterView = rewritten.writerView;
                             updatedVoicePool = rewritten.updatedVoicePool;
+                            latestWriterAssemblyReport = rewritten.assemblyReport;
+                            try {
+                                options.onWriterAssembled?.(rewritten.assemblyReport);
+                            } catch {
+                                // 避免诊断回调异常中断主流程
+                            }
                             continue;
                         }
 
@@ -1062,6 +1088,19 @@ export class ChapterPipeline {
                     effectiveStagingOverlay
                 );
                 lastFactIssues = verifiedIssues;
+                try {
+                    options.onCheckerResult?.({
+                        chapter: chapterNumber,
+                        passed: verifiedIssues.length === 0,
+                        issueCount: verifiedIssues.length,
+                        issues: verifiedIssues,
+                        replanCount: totalReplans,
+                        rewriteCount: totalRewrites,
+                        patchRounds: totalPatchRounds
+                    });
+                } catch {
+                    // 避免诊断回调异常中断主流程
+                }
 
                 if (verifiedIssues.length === 0) {
                     break outerLoop;
@@ -1196,6 +1235,12 @@ export class ChapterPipeline {
                     activeProse = rewritten.prose;
                     activeWriterView = rewritten.writerView;
                     updatedVoicePool = rewritten.updatedVoicePool;
+                    latestWriterAssemblyReport = rewritten.assemblyReport;
+                    try {
+                        options.onWriterAssembled?.(rewritten.assemblyReport);
+                    } catch {
+                        // 避免诊断回调异常中断主流程
+                    }
                     continue;
                 }
 
@@ -1278,7 +1323,10 @@ export class ChapterPipeline {
             telemetry: stateRes.telemetry,
             totalUsage,
             updatedEntities: stateRes.updatedEntities,
-            nextChapterOptions: stateRes.nextChapterOptions
+            nextChapterOptions: stateRes.nextChapterOptions,
+            ...(latestWriterAssemblyReport
+                ? { writerAssemblyReport: latestWriterAssemblyReport }
+                : {})
         };
     }
 
@@ -1621,6 +1669,7 @@ export class ChapterPipeline {
         prose: string;
         writerView: ReturnType<ViewSlicer['slice']>;
         updatedVoicePool?: VoiceSamplePool | undefined;
+        assemblyReport: WriterAssemblyReport;
     }> {
         const effectiveEntityIds = Array.from(
             new Set([...params.selectedEntityIds, ...params.povCharIds])
@@ -1700,10 +1749,29 @@ export class ChapterPipeline {
             params.chapterNumber,
             params.outline.chapter_title
         );
+        const assemblyReport: WriterAssemblyReport = {
+            chapterNumber: params.chapterNumber,
+            estimatedTokens: assembled.diagnostics.estimatedTokens,
+            budget: assembled.diagnostics.budget,
+            evictionLevel: assembled.diagnostics.evictionLevel,
+            truncated: assembled.diagnostics.truncated,
+            appliedEvictions: assembled.diagnostics.appliedEvictions,
+            staticPrefixHash: assembled.diagnostics.staticPrefixHash,
+            selectedVoiceSample: assembled.diagnostics.selectedVoiceSample
+                ? {
+                      id: assembled.diagnostics.selectedVoiceSample.id,
+                      tag: assembled.diagnostics.selectedVoiceSample.tag,
+                      ...(assembled.diagnostics.selectedVoiceSample.source !== undefined
+                          ? { source: assembled.diagnostics.selectedVoiceSample.source }
+                          : {})
+                  }
+                : null
+        };
         return {
             prose: cleanProse,
             writerView,
-            updatedVoicePool: assembled.diagnostics.updatedVoicePool
+            updatedVoicePool: assembled.diagnostics.updatedVoicePool,
+            assemblyReport
         };
     }
 
