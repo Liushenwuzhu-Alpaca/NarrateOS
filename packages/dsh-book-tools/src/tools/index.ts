@@ -4,3 +4,4 @@ export * from './book-read.js';
 export * from './book-grep.js';
 export * from './book-glob.js';
 export * from './book-edit.js';
+export * from './patch-paragraphs.js';

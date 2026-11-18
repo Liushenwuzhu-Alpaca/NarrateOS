@@ -319,3 +319,16 @@ export const BootBundleOutputSchema = z.object({
     contract_conflicts: z.array(z.string().min(1)).default([])
 });
 export type BootBundleOutput = z.infer<typeof BootBundleOutputSchema>;
+
+/** Patch 局部修补终态提交输入 Schema (yield_patched_draft) */
+export const YieldPatchedDraftInputSchema = z.object({
+    summary: z.string().optional()
+});
+export type YieldPatchedDraftInput = z.infer<typeof YieldPatchedDraftInputSchema>;
+
+/** Patch 局部修补终态交付结果 */
+export interface YieldPatchedDraftResult {
+    patchedProse: string;
+    editCount: number;
+    summary?: string | undefined;
+}

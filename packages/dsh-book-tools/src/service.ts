@@ -8,6 +8,7 @@ import type {
     EntityProfile,
     NarrationSubjectivity,
     NarrateStoreService,
+    ProseGateOptions,
     TimelineMode
 } from '@narrateos/dsh-book-store';
 import {
@@ -23,14 +24,18 @@ import {
     createBookGlobTool,
     createBookGrepTool,
     createBookReadTool,
+    createPatchParagraphsTool,
+    InMemoryDraftPatchSession,
     PathFence,
-    ReadQuotaCounter
+    ReadQuotaCounter,
+    splitParagraphs
 } from './tools/index.js';
 import {
     createYieldBootBundleTool,
     createYieldContextPackTool,
     createYieldDreamCommitTool,
     createYieldOutlineTool,
+    createYieldPatchedDraftTool,
     createYieldStatePatchTool,
     createYieldVerdictTool
 } from './yield/index.js';
@@ -56,7 +61,12 @@ export const Config = Schema.object({
 });
 
 /** 支持的受控读写工具名称 */
-export type ControlledBookToolName = 'book_read' | 'book_grep' | 'book_glob' | 'book_edit';
+export type ControlledBookToolName =
+    | 'book_read'
+    | 'book_grep'
+    | 'book_glob'
+    | 'book_edit'
+    | 'patch_paragraphs';
 
 /** 支持的终态门禁工具名称 */
 export type YieldToolName =
@@ -65,7 +75,8 @@ export type YieldToolName =
     | 'yield_verdict'
     | 'yield_state_patch'
     | 'yield_dream_commit'
-    | 'yield_boot_bundle';
+    | 'yield_boot_bundle'
+    | 'yield_patched_draft';
 
 /** 按 runId 与角色配置实例化受控工具集的参数 */
 export interface BuildRoleToolsOptions {
@@ -109,6 +120,10 @@ export interface BuildRoleToolsOptions {
     reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
     /** 叙述人称主观度（用于 yield_boot_bundle 门禁） */
     narrationSubjectivity?: NarrationSubjectivity | undefined;
+    /** 静态文风门禁配置（用于 patch_paragraphs 与 yield_patched_draft） */
+    proseGateOptions?: ProseGateOptions | undefined;
+    /** 是否在 yield_patched_draft 提交时强制复检 StaticProseGate（默认 true） */
+    enforceProseGateOnYield?: boolean | undefined;
 }
 
 /** 一次运行的受控工具集实例与状态控制器 */
@@ -149,14 +164,37 @@ export class NarrateToolsService {
             throw new Error('NarrateToolsService 已卸载，拒绝创建工具集');
         }
 
+        const requestedTools = options.tools ?? ['book_read', 'book_grep', 'book_glob', 'book_edit'];
+        const usesPatchSession =
+            requestedTools.includes('patch_paragraphs') || options.yieldTool === 'yield_patched_draft';
+        const hasDiskTools =
+            requestedTools.some((toolName) => toolName !== 'patch_paragraphs') ||
+            (options.yieldTool !== undefined && options.yieldTool !== 'yield_patched_draft');
+        const isPureInMemoryPatch = usesPatchSession && !hasDiskTools;
+
+        let patchSession: InMemoryDraftPatchSession | undefined;
+        if (usesPatchSession) {
+            if (
+                typeof options.draftText !== 'string' ||
+                options.draftText.trim().length === 0 ||
+                splitParagraphs(options.draftText).length === 0
+            ) {
+                throw new Error('patch_paragraphs / yield_patched_draft 需要有效的非空 draftText');
+            }
+            patchSession = new InMemoryDraftPatchSession(options.draftText, options.proseGateOptions);
+        }
+
         const resolvedRoot = options.bookRoot ?? this.narrateStore.bookRoot ?? this.defaultBookRoot;
-        if (!resolvedRoot || resolvedRoot.trim().length === 0) {
+        if (!isPureInMemoryPatch && (!resolvedRoot || resolvedRoot.trim().length === 0)) {
             throw new Error('buildRoleTools 需要有效的 bookRoot（或先通过 narrateStore.switchBook 选书）');
         }
-        const bookRoot = resolve(resolvedRoot);
+        const bookRoot =
+            resolvedRoot && resolvedRoot.trim().length > 0
+                ? resolve(resolvedRoot)
+                : resolve('__in_memory_patch__');
         const runId = options.runId ?? randomUUID();
 
-        const createdStaging = !this.narrateStore.staging.has(runId);
+        const createdStaging = !isPureInMemoryPatch && !this.narrateStore.staging.has(runId);
         if (createdStaging) {
             this.narrateStore.staging.begin(runId, bookRoot);
         }
@@ -173,7 +211,6 @@ export class NarrateToolsService {
         let yielded = false;
         let yieldResult: unknown = undefined;
 
-        const requestedTools = options.tools ?? ['book_read', 'book_grep', 'book_glob', 'book_edit'];
         const toolList: ToolDefinition[] = [];
 
         for (const toolName of requestedTools) {
@@ -210,6 +247,12 @@ export class NarrateToolsService {
                         store: this.narrateStore,
                         runId,
                         fence
+                    })
+                );
+            } else if (toolName === 'patch_paragraphs') {
+                toolList.push(
+                    createPatchParagraphsTool({
+                        session: patchSession!
                     })
                 );
             }
@@ -279,6 +322,15 @@ export class NarrateToolsService {
             toolList.push(
                 createYieldBootBundleTool({
                     narrationSubjectivity: options.narrationSubjectivity,
+                    onYield: recordYield
+                })
+            );
+        } else if (options.yieldTool === 'yield_patched_draft') {
+            toolList.push(
+                createYieldPatchedDraftTool({
+                    session: patchSession!,
+                    proseGateOptions: options.proseGateOptions,
+                    enforceProseGateOnYield: options.enforceProseGateOnYield,
                     onYield: recordYield
                 })
             );
@@ -357,7 +409,14 @@ export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
             const disposeBootTool = toolCtx.tools.register(
                 createLockCharterAndBootTool({
                     booksRoot: service.booksRoot,
-                    system: ctx.narrateStore.system
+                    system: ctx.narrateStore.system,
+                    onBookBooted: async (res) => {
+                        try {
+                            await ctx.narrateStore.switchBook(res.bookRoot);
+                        } catch {
+                            /* 若遇在途锁冲突不回滚已落盘建库结果 */
+                        }
+                    }
                 })
             );
             const disposeGuard = registerMainSessionWriteGuard(

@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
+import { ToolsService, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
 import { NodeSystemAdapter } from '@narrateos/dsh-book-store';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -328,5 +330,56 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         expect(props['open_threads']?.description).toContain('15');
         expect(props['future_horizon_events']?.description).toContain('story_day');
         expect(props['voice_samples']?.description).toContain('StaticProseGate');
+    });
+
+    it('apply(ctx) 注册的 lock_charter_and_boot 成功建库后自动 switchBook，遇到在途锁冲突时不回滚已落盘目录', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsSvcFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsSvcFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin);
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const bootTool = ctx.tools.get('lock_charter_and_boot');
+        expect(bootTool).toBeDefined();
+
+        const execCtx: ToolRunContext = {
+            token: Symbol('boot') as ToolRunContext['token'],
+            callId: 'call-boot-switch-1' as ToolRunContext['callId'],
+            rootCallId: 'call-boot-switch-1' as ToolRunContext['rootCallId'],
+            name: 'lock_charter_and_boot',
+            arguments: {},
+            signal: new AbortController().signal,
+            deferContext() {},
+            concludeTurn() {}
+        };
+
+        // 1. 无冲突：开书后自动切换 ctx.narrateStore.bookRoot 至新书目录
+        const firstInput = buildMinimalValidBootInput({ book_slug: 'auto-switch-book' });
+        const firstRes = (await bootTool!.execute(firstInput, execCtx)) as {
+            bookRoot: string;
+            halted: boolean;
+        };
+        expect(firstRes.halted).toBe(true);
+        expect(ctx.narrateStore.bookRoot).toBe(firstRes.bookRoot);
+
+        // 2. 存在在途 runId 锁冲突时：switchBook 被拒绝但不影响建库成功与磁盘产物保留
+        ctx.narrateStore.beginRun('in-flight-run');
+        try {
+            const secondInput = buildMinimalValidBootInput({ book_slug: 'conflict-safe-book' });
+            const secondRes = (await bootTool!.execute(secondInput, execCtx)) as {
+                bookRoot: string;
+                halted: boolean;
+            };
+            expect(secondRes.halted).toBe(true);
+            expect(existsSync(join(secondRes.bookRoot, 'world/author_charter.md'))).toBe(true);
+            expect(ctx.narrateStore.bookRoot).toBe(firstRes.bookRoot);
+        } finally {
+            ctx.narrateStore.endRun('in-flight-run');
+        }
     });
 });
