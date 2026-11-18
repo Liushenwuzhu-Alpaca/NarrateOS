@@ -9,6 +9,8 @@ import type {
     EntitiesViewPayload,
     HaltResponse,
     HaltViewPayload,
+    HarvestVoiceRequest,
+    HarvestVoiceResponse,
     MarkdownViewPayload,
     NarrateStatusPayload,
     PostSignalRequest,
@@ -222,6 +224,18 @@ export function runDreaming(payload: DreamRequest = {}): Promise<DreamResponse> 
     });
 }
 
+/** 从当前或指定章节触发声纹采集 (Voice Harvest) */
+export function harvestVoice(chapterNumber?: number): Promise<HarvestVoiceResponse> {
+    const body: HarvestVoiceRequest =
+        chapterNumber !== undefined && Number.isFinite(chapterNumber)
+            ? { chapterNumber }
+            : {};
+    return requestJson<HarvestVoiceResponse>('/api/narrate/voice-harvest', {
+        method: 'POST',
+        body
+    });
+}
+
 /** 向 .ops/signals.jsonl 投递一次性导演信号 */
 export function postSignal(payload: PostSignalRequest): Promise<PostSignalResponse> {
     return requestJson<PostSignalResponse>('/api/narrate/signals', {
@@ -276,6 +290,7 @@ const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
     'chapter_synced',
     'chapter:phase',
     'stage',
+    'stage:session',
     'gate:result',
     'checker:result',
     'dream:started',

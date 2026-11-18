@@ -1,12 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { POOL_LABELS, RoleRoutingEditor } from './RoleRoutingEditor';
+import type { StageAttemptSession } from './CenterWorkbench';
+import { POOL_LABELS } from './RoleRoutingEditor';
 import { computeCacheHitRate } from './token-telemetry';
-import type {
-    AvailableModelItem,
-    RoleDefinitionItem,
-    RoleModelOverride,
-    SaveModelRoutingRequest
-} from './types';
 
 /** 1. WAL & 事务锁状态 */
 export interface WalLockTelemetry {
@@ -55,6 +50,8 @@ export interface StageArtifactTelemetry {
     strippedItemsSummary?: string | null;
     /** 绑定到当前阶段的 DSH Agent Session ID（可选） */
     sessionId?: string | null;
+    /** 当前阶段按顺序保留的全部工种尝试会话轨迹（可选） */
+    sessions?: StageAttemptSession[] | undefined;
 }
 
 /** 4. Static Prose Gate & 四联遥测 */
@@ -164,18 +161,8 @@ export interface RightOpsInspectorProps {
     onTriggerDreaming?: () => void;
     /** 查看/定位挂起冲突详情回调 */
     onInspectHalt?: () => void;
-    /** 当前作品根目录（用于切书时重置分角色路由草稿） */
-    bookRoot?: string | null;
     /** 真实三池模型路由配置 (可选，缺省回退至 modelPool) */
     modelRouting?: ModelRoutingSnapshot | null;
-    /** 分角色两层模型路由覆盖配置 (可选) */
-    roleRouting?: Record<string, RoleModelOverride> | null;
-    /** 后端下发的工种默认定义与解析后生效模型列表 (可选) */
-    roleDefinitions?: RoleDefinitionItem[] | null;
-    /** 后端注册的可用模型候选清单 (可选) */
-    availableModels?: AvailableModelItem[] | null;
-    /** 保存分角色模型路由覆盖配置回调 (可选) */
-    onSaveModelRouting?: (payload: SaveModelRoutingRequest) => Promise<void> | void;
     /** 活跃实体列表 (可选) */
     entities?: InspectorEntityItem[];
     /** 未收伏笔列表 (可选) */
@@ -312,12 +299,7 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
         busy = false,
         onTriggerDreaming,
         onInspectHalt,
-        bookRoot = null,
         modelRouting = null,
-        roleRouting = null,
-        roleDefinitions = null,
-        availableModels = null,
-        onSaveModelRouting,
         entities,
         openThreads,
         volumeProgress = null,
@@ -756,17 +738,6 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                             </div>
                         </div>
 
-                        {/* 分角色两层模型覆盖编辑器 */}
-                        <RoleRoutingEditor
-                            resetKey={bookRoot}
-                            poolRoutes={resolvedRouting}
-                            roleRouting={roleRouting}
-                            roleDefinitions={roleDefinitions}
-                            availableModels={availableModels}
-                            busy={busy}
-                            onSaveModelRouting={onSaveModelRouting}
-                        />
-
                         {/* 静态前缀与 budget 降级状态：仅有真实测量时才画比例与级别 */}
                         <div className="ns-i-card">
                             <div className="ns-i-card-head">
@@ -855,6 +826,45 @@ export function RightOpsInspector(props: RightOpsInspectorProps): React.ReactEle
                                             查看原生轨迹
                                         </button>
                                     )}
+                                </div>
+                            )}
+                            {stageArtifact.sessions && stageArtifact.sessions.length > 0 && (
+                                <div className="ns-i-stage-sessions" aria-label="关联会话轨迹列表">
+                                    <div className="ns-i-stage-sessions-title">
+                                        关联会话轨迹列表 ({stageArtifact.sessions.length})
+                                    </div>
+                                    <div className="ns-i-stage-sessions-list">
+                                        {stageArtifact.sessions.map((item, idx) => (
+                                            <button
+                                                key={item.sessionId || `${item.stage}-${idx}`}
+                                                type="button"
+                                                className="ns-i-stage-session-item"
+                                                data-attempt-session-id={item.sessionId}
+                                                disabled={!onInspectStageSession}
+                                                onClick={() => onInspectStageSession?.(item.sessionId)}
+                                            >
+                                                <span className="ns-i-stage-session-main">
+                                                    <span className="ns-mono ns-i-stage-session-stage">
+                                                        {item.stage}
+                                                        {typeof item.attempt === 'number'
+                                                            ? ` #${item.attempt}`
+                                                            : ''}
+                                                    </span>
+                                                    <span className="ns-pill ns-pill-muted ns-mono">
+                                                        {item.status}
+                                                    </span>
+                                                </span>
+                                                {item.triggerReason ? (
+                                                    <span className="ns-i-stage-session-reason">
+                                                        {item.triggerReason}
+                                                    </span>
+                                                ) : null}
+                                                <span className="ns-mono ns-i-muted ns-i-stage-session-id">
+                                                    {item.sessionId}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
                             )}
                         </div>

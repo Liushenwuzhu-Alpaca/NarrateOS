@@ -822,4 +822,77 @@ export const INSPECTOR_CSS = `
     line-height: 1.4;
     overflow-wrap: anywhere;
 }
+
+.ns-i-stage-sessions {
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--ns-border-1);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ns-i-stage-sessions-title {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ns-text-3);
+}
+
+.ns-i-stage-sessions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.ns-i-stage-session-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--ns-border-1);
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-base);
+    color: var(--ns-text-2);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.ns-i-stage-session-item:hover:not(:disabled) {
+    border-color: var(--ns-brand-line);
+    background: var(--ns-bg-hover);
+}
+
+.ns-i-stage-session-item:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.ns-i-stage-session-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    width: 100%;
+}
+
+.ns-i-stage-session-stage {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ns-text-1);
+}
+
+.ns-i-stage-session-reason {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--ns-text-3);
+    overflow-wrap: anywhere;
+}
+
+.ns-i-stage-session-id {
+    font-size: 10.5px;
+    word-break: break-all;
+}
 `;

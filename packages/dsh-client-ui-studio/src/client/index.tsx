@@ -17,6 +17,7 @@ import {
     fetchViewSignals,
     fetchViewTelemetry,
     fetchViewThreads,
+    harvestVoice,
     postSignal,
     requestHalt,
     runDreaming,
@@ -40,6 +41,7 @@ import {
     type PendingSignalItem,
     type PipelineStageId,
     type SafeHaltInfo,
+    type StageAttemptSession,
     type StageNodeState,
     type StageNodeStatus,
     type StageSessionSelection,
@@ -63,6 +65,7 @@ import {
     type StageArtifactTelemetry,
     type VolumeProgressSnapshot
 } from './RightOpsInspector';
+import { RoleRoutingEditor } from './RoleRoutingEditor';
 import {
     StageSessionViewer,
     type StudioRenderStageConversation,
@@ -301,7 +304,7 @@ function mapRunStatusToStageStatus(rawStatus: string): StageNodeStatus {
     if (normalized === 'running' || normalized === 'active' || normalized === 'in_progress') {
         return 'active';
     }
-    if (normalized === 'healing' || normalized === 'patch' || normalized === 'replan') {
+    if (normalized === 'healing' || normalized === 'patch' || normalized === 'replan' || normalized === 'rewrite') {
         return 'healing';
     }
     if (normalized === 'halt' || normalized === 'failed' || normalized === 'error' || normalized === 'blocked') {
@@ -313,6 +316,73 @@ function mapRunStatusToStageStatus(rawStatus: string): StageNodeStatus {
     return 'done';
 }
 
+function resolveRepairBadge(stageName: string): string | undefined {
+    const upper = stageName.trim().toUpperCase();
+    if (upper === 'LOCAL_PATCH' || upper === 'PATCH') return '门禁 Patch';
+    if (upper === 'REWRITE') return 'Rewrite';
+    if (upper === 'REPLAN') return 'Replan';
+    return undefined;
+}
+
+function isRunningSessionStatus(status: string): boolean {
+    const normalized = status.trim().toLowerCase();
+    return normalized === 'running' || normalized === 'active' || normalized === 'in_progress';
+}
+
+function upsertStageSession(
+    list: readonly StageAttemptSession[] | undefined,
+    entry: StageAttemptSession
+): StageAttemptSession[] {
+    const prev = list ? [...list] : [];
+    const existingIdx = prev.findIndex((item) => item.sessionId === entry.sessionId);
+    if (existingIdx >= 0) {
+        const existing = prev[existingIdx]!;
+        const incomingUpper = entry.stage.trim().toUpperCase();
+        const keepExistingStage =
+            incomingUpper === 'PROSE_GATE' || incomingUpper === 'STATIC_GATE';
+        prev[existingIdx] = {
+            ...existing,
+            ...entry,
+            stage: keepExistingStage ? existing.stage : entry.stage,
+            ...(entry.role !== undefined ? { role: entry.role } : existing.role !== undefined ? { role: existing.role } : {}),
+            ...(entry.runId !== undefined ? { runId: entry.runId } : existing.runId !== undefined ? { runId: existing.runId } : {}),
+            ...(entry.parentSessionId !== undefined
+                ? { parentSessionId: entry.parentSessionId }
+                : existing.parentSessionId !== undefined
+                  ? { parentSessionId: existing.parentSessionId }
+                  : {}),
+            ...(entry.attempt !== undefined ? { attempt: entry.attempt } : existing.attempt !== undefined ? { attempt: existing.attempt } : {}),
+            ...(entry.triggerReason !== undefined
+                ? { triggerReason: entry.triggerReason }
+                : existing.triggerReason !== undefined
+                  ? { triggerReason: existing.triggerReason }
+                  : {}),
+            ...(entry.mode !== undefined ? { mode: entry.mode } : existing.mode !== undefined ? { mode: existing.mode } : {})
+        };
+        return prev;
+    }
+
+    // 新 sessionId 开启新尝试时，将同阶段之前仍标记为 running 的历史尝试收敛为 completed
+    const finalizedPrev = prev.map((item) =>
+        isRunningSessionStatus(item.status) ? { ...item, status: 'completed' } : item
+    );
+    finalizedPrev.push(entry);
+    return finalizedPrev;
+}
+
+function mergeStageSessions(
+    base: readonly StageAttemptSession[] | undefined,
+    incoming: readonly StageAttemptSession[] | undefined
+): StageAttemptSession[] {
+    let acc: StageAttemptSession[] = base ? [...base] : [];
+    if (incoming) {
+        for (const item of incoming) {
+            acc = upsertStageSession(acc, item);
+        }
+    }
+    return acc;
+}
+
 function deriveHistoricalStageOverrides(
     runs: readonly StageRunRecord[]
 ): Partial<Record<PipelineStageId, StageNodeState>> {
@@ -320,17 +390,51 @@ function deriveHistoricalStageOverrides(
     for (const run of runs) {
         const stageId = resolveStageId(run.stage);
         if (!stageId) continue;
+        const existing = mapped[stageId];
         const sessionId = asString(run.sessionId);
         const parentSessionId = asString(run.parentSessionId);
         const mode = asString(run.mode);
+        const role = asString(run.role);
+        const triggerReason = asString(run.triggerReason);
+        const updatedAt = run.finishedAt ?? run.startedAt ?? run.timestamp;
+        const badge = resolveRepairBadge(run.stage) ?? existing?.badge;
+        const sessions =
+            sessionId !== undefined
+                ? upsertStageSession(existing?.sessions, {
+                      runId: run.runId,
+                      stage: run.stage,
+                      status: run.status,
+                      sessionId,
+                      ...(role !== undefined ? { role } : {}),
+                      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                      ...(run.attempt !== undefined ? { attempt: run.attempt } : {}),
+                      ...(triggerReason !== undefined ? { triggerReason } : {}),
+                      ...(mode !== undefined ? { mode } : {}),
+                      ...(updatedAt !== undefined ? { updatedAt } : {})
+                  })
+                : existing?.sessions;
         mapped[stageId] = {
             status: mapRunStatusToStageStatus(run.status),
             summary: DEFAULT_STAGE_SUMMARIES[stageId],
-            updatedAt: run.finishedAt ?? run.startedAt ?? run.timestamp,
+            updatedAt: updatedAt ?? existing?.updatedAt,
             runId: run.runId,
-            ...(sessionId !== undefined ? { sessionId } : {}),
-            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-            ...(mode !== undefined ? { mode } : {})
+            ...(badge !== undefined ? { badge } : {}),
+            ...(sessionId !== undefined
+                ? { sessionId }
+                : existing?.sessionId !== undefined
+                  ? { sessionId: existing.sessionId }
+                  : {}),
+            ...(parentSessionId !== undefined
+                ? { parentSessionId }
+                : existing?.parentSessionId !== undefined
+                  ? { parentSessionId: existing.parentSessionId }
+                  : {}),
+            ...(mode !== undefined
+                ? { mode }
+                : existing?.mode !== undefined
+                  ? { mode: existing.mode }
+                  : {}),
+            ...(sessions && sessions.length > 0 ? { sessions } : {})
         };
     }
     return mapped;
@@ -379,6 +483,7 @@ export function NarrateStudioRoot({
     const [stageOverrides, setStageOverrides] = useState<Partial<Record<PipelineStageId, StageNodeState>>>({});
     const [historicalRuns, setHistoricalRuns] = useState<StageRunRecord[]>([]);
     const [liveRunChapter, setLiveRunChapter] = useState<number | null>(null);
+    const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId | null>(null);
     const [selectedStageSession, setSelectedStageSession] = useState<StageSessionSelection | null>(null);
     const [liveTelemetry, setLiveTelemetry] = useState<TelemetryItem | null>(null);
     const [gateViolations, setGateViolations] = useState<ProseGateViolationItem[]>([]);
@@ -390,6 +495,7 @@ export function NarrateStudioRoot({
     });
 
     const [loading, setLoading] = useState<boolean>(true);
+    const [harvestingVoice, setHarvestingVoice] = useState<boolean>(false);
     const [bootModalOpen, setBootModalOpen] = useState<boolean>(false);
     const [activeViewKind, setActiveViewKind] = useState<MaterializedViewKind | null>(null);
     const [externalViewCommand, setExternalViewCommand] = useState<ExternalViewCommand | undefined>(undefined);
@@ -543,6 +649,11 @@ export function NarrateStudioRoot({
             }
             setSelectedChapter(detail.chapterNumber);
             setChapterDetail(detail);
+            setInspectedStageId((prev) =>
+                selectedChapterRef.current !== null && selectedChapterRef.current !== detail.chapterNumber
+                    ? null
+                    : prev
+            );
             void loadRunsForChapter(detail.chapterNumber);
         } catch (err) {
             if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
@@ -718,6 +829,7 @@ export function NarrateStudioRoot({
                 currentBookRootRef.current = bookRoot;
                 setHaltWaiting(false);
                 setStageOverrides({});
+                setInspectedStageId(null);
                 setHistoricalRuns([]);
                 setLiveRunChapter(null);
                 setSelectedStageSession(null);
@@ -730,13 +842,14 @@ export function NarrateStudioRoot({
             }
             if (switchingBookRef.current) return;
 
-            if (event === 'stage' || event === 'chapter:phase') {
+            if (event === 'stage' || event === 'chapter:phase' || event === 'stage:session') {
                 const stageName = asString(data['stage']) ?? asString(data['phase']);
                 if (!stageName) return;
 
                 if (stageName === 'STARTING') {
                     setHaltWaiting(false);
                     setStageOverrides({});
+                    setInspectedStageId(null);
                     setLiveRunChapter(asNumber(data['chapterNumber']) ?? asNumber(data['chapter']) ?? null);
                     setLatestSseStage('LIBRARIAN');
                     setStatus((prev) =>
@@ -757,8 +870,20 @@ export function NarrateStudioRoot({
                         const next: Partial<Record<PipelineStageId, StageNodeState>> = { ...prev };
                         for (const id of STAGE_SEQUENCE) {
                             const cur = next[id];
-                            if (cur && cur.status === 'active') {
-                                next[id] = { ...cur, status: 'halt' };
+                            if (cur && (cur.status === 'active' || cur.status === 'healing')) {
+                                next[id] = {
+                                    ...cur,
+                                    status: 'halt',
+                                    ...(cur.sessions
+                                        ? {
+                                              sessions: cur.sessions.map((item) =>
+                                                  isRunningSessionStatus(item.status)
+                                                      ? { ...item, status: 'failed' }
+                                                      : item
+                                              )
+                                          }
+                                        : {})
+                                };
                             }
                         }
                         return next;
@@ -778,11 +903,27 @@ export function NarrateStudioRoot({
                 const rawSessionId = asString(data['activeSessionId']) ?? asString(data['sessionId']);
                 const rawParentSessionId = asString(data['parentSessionId']);
                 const rawMode = asString(data['mode']);
+                const role = asString(data['role']);
+                const attempt = asNumber(data['attempt']);
+                const triggerReason = asString(data['triggerReason']);
+                const rawStatus = asString(data['status']);
                 const runId = asString(data['runId']);
                 const resolvedStage = resolveStageId(stageName);
                 if (resolvedStage && (message || rawSessionId || runId)) {
-                    // PROSE_GATE 每章例行校验,只是 Writer 运行中;LOCAL_PATCH 才是拦截返修
-                    const isPatch = stageName === 'LOCAL_PATCH';
+                    const upperStage = stageName.trim().toUpperCase();
+                    const repairBadge = resolveRepairBadge(stageName);
+                    // PROSE_GATE 每章例行校验,只是 Writer 运行中;LOCAL_PATCH / REWRITE / REPLAN 属于返修重演
+                    const isHealing =
+                        upperStage === 'LOCAL_PATCH' ||
+                        upperStage === 'PATCH' ||
+                        upperStage === 'REWRITE' ||
+                        upperStage === 'REPLAN';
+                    const nodeStatus: StageNodeStatus = isHealing
+                        ? 'healing'
+                        : rawStatus
+                          ? mapRunStatusToStageStatus(rawStatus)
+                          : 'active';
+                    const sessionStatus = rawStatus ?? (isHealing ? 'running' : 'running');
                     const sessionId = rawSessionId;
                     const parentSessionId = rawParentSessionId;
                     const mode = rawMode;
@@ -793,28 +934,56 @@ export function NarrateStudioRoot({
                             const id = STAGE_SEQUENCE[i]!;
                             if (id === resolvedStage || id === 'DREAMING') continue;
                             const existing = next[id];
-                            if (i < resolvedIdx && existing && existing.status === 'active') {
-                                next[id] = { ...existing, status: 'done' };
+                            if (i < resolvedIdx && existing && (existing.status === 'active' || existing.status === 'healing')) {
+                                next[id] = {
+                                    ...existing,
+                                    status: 'done',
+                                    ...(existing.sessions
+                                        ? {
+                                              sessions: existing.sessions.map((item) =>
+                                                  isRunningSessionStatus(item.status)
+                                                      ? { ...item, status: 'completed' }
+                                                      : item
+                                              )
+                                          }
+                                        : {})
+                                };
                             }
                         }
                         const current = next[resolvedStage];
+                        const nextSessions =
+                            sessionId !== undefined
+                                ? upsertStageSession(current?.sessions, {
+                                      stage: stageName,
+                                      status: sessionStatus,
+                                      sessionId,
+                                      ...(runId !== undefined ? { runId } : {}),
+                                      ...(role !== undefined ? { role } : {}),
+                                      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                                      ...(attempt !== undefined ? { attempt } : {}),
+                                      ...(triggerReason !== undefined ? { triggerReason } : {}),
+                                      ...(mode !== undefined ? { mode } : {}),
+                                      ...(timestamp !== undefined ? { updatedAt: timestamp } : {})
+                                  })
+                                : current?.sessions;
                         next[resolvedStage] = {
                             ...current,
-                            status: isPatch ? 'healing' : 'active',
+                            status: nodeStatus,
                             summary: message ?? current?.summary ?? DEFAULT_STAGE_SUMMARIES[resolvedStage],
                             updatedAt: timestamp ?? current?.updatedAt,
-                            ...(isPatch ? { badge: '门禁 Patch' } : {}),
+                            ...(repairBadge !== undefined ? { badge: repairBadge } : {}),
                             ...(sessionId !== undefined ? { sessionId } : {}),
                             ...(parentSessionId !== undefined ? { parentSessionId } : {}),
                             ...(mode !== undefined ? { mode } : {}),
-                            ...(runId !== undefined ? { runId } : {})
+                            ...(runId !== undefined ? { runId } : {}),
+                            ...(nextSessions && nextSessions.length > 0 ? { sessions: nextSessions } : {})
                         };
                         return next;
                     });
                     if (sessionId !== undefined) {
                         setSelectedStageSession((prev) =>
                             prev && prev.sessionId === sessionId
-                                ? { ...prev, status: isPatch ? 'healing' : 'active' }
+                                ? { ...prev, status: nodeStatus }
                                 : prev
                         );
                     }
@@ -837,7 +1006,19 @@ export function NarrateStudioRoot({
                             if (id === 'DREAMING') continue;
                             const cur = next[id];
                             if (cur && (cur.status === 'active' || cur.status === 'healing')) {
-                                next[id] = { ...cur, status: 'done' };
+                                next[id] = {
+                                    ...cur,
+                                    status: 'done',
+                                    ...(cur.sessions
+                                        ? {
+                                              sessions: cur.sessions.map((item) =>
+                                                  isRunningSessionStatus(item.status)
+                                                      ? { ...item, status: 'completed' }
+                                                      : item
+                                              )
+                                          }
+                                        : {})
+                                };
                             }
                         }
                         return next;
@@ -1098,6 +1279,7 @@ export function NarrateStudioRoot({
             setSelectedChapter(null);
             setHistoricalRuns([]);
             setStageOverrides({});
+            setInspectedStageId(null);
             setLiveRunChapter(null);
             setSelectedStageSession(null);
             try {
@@ -1229,6 +1411,28 @@ export function NarrateStudioRoot({
         await runDreaming({ force: true });
         await Promise.all([loadStatus(), loadViews()]);
     }, [loadStatus, loadViews]);
+
+    const handleHarvestVoice = useCallback(async () => {
+        if (harvestingVoice || switchingBookRef.current) return;
+        const targetChapter =
+            selectedChapterRef.current !== null && selectedChapterRef.current > 0
+                ? selectedChapterRef.current
+                : undefined;
+        setHarvestingVoice(true);
+        try {
+            const res = await harvestVoice(targetChapter);
+            if (res.skipped) {
+                showToast('声纹采集已跳过（当前章节暂无可采集对白样本）');
+            } else {
+                showToast(`声纹采集完成：新增 ${res.harvestedCount} 条样本`);
+            }
+            await Promise.allSettled([loadStatus(), loadViews()]);
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : String(err), 'error');
+        } finally {
+            setHarvestingVoice(false);
+        }
+    }, [harvestingVoice, loadStatus, loadViews, showToast]);
 
     const handleSaveModelRouting = useCallback(
         async (payload: SaveModelRoutingRequest) => {
@@ -1486,29 +1690,76 @@ export function NarrateStudioRoot({
         if (!shouldOverlayLive) {
             return historicalStageOverrides;
         }
+        const sameChapterAsSelected =
+            liveRunChapter === null ||
+            selectedChapter === null ||
+            liveRunChapter === selectedChapter;
         const merged: Partial<Record<PipelineStageId, StageNodeState>> = {
             ...historicalStageOverrides
         };
         for (const id of STAGE_SEQUENCE) {
             const live = stageOverrides[id];
             if (live) {
+                const mergedSessions = sameChapterAsSelected
+                    ? mergeStageSessions(merged[id]?.sessions, live.sessions)
+                    : mergeStageSessions(undefined, live.sessions);
                 merged[id] = {
-                    ...merged[id],
-                    ...live
+                    ...(sameChapterAsSelected ? merged[id] : undefined),
+                    ...live,
+                    ...(mergedSessions.length > 0 ? { sessions: mergedSessions } : {})
                 };
             }
         }
         return merged;
     }, [chapters, historicalStageOverrides, liveRunChapter, selectedChapter, stageOverrides]);
 
-    const stageArtifact = useMemo(() => {
+    const stageArtifact = useMemo<StageArtifactTelemetry>(() => {
+        const sseResolved = latestSseStage
+            ? latestSseStage === 'COMMITTED'
+                ? 'EXTRACTOR'
+                : resolveStageId(latestSseStage)
+            : null;
+        const targetStageId = inspectedStageId ?? sseResolved;
+
+        if (targetStageId) {
+            const nodeState = effectiveStages[targetStageId];
+            const idx = STAGE_SEQUENCE.indexOf(targetStageId);
+            const meta = PIPELINE_STAGE_META.find((item) => item.id === targetStageId);
+            const base =
+                !inspectedStageId || inspectedStageId === sseResolved
+                    ? deriveStageArtifact(latestSseStage)
+                    : {
+                          selectedStageIndex: idx >= 0 ? idx : 0,
+                          stageName: meta?.label ?? targetStageId,
+                          stageStatus: nodeState?.badge ?? nodeState?.status ?? '就绪',
+                          stageSummary:
+                              nodeState?.summary ?? DEFAULT_STAGE_SUMMARIES[targetStageId]
+                      };
+            return {
+                ...base,
+                ...(nodeState?.sessionId ? { sessionId: nodeState.sessionId } : {}),
+                ...(nodeState?.sessions && nodeState.sessions.length > 0
+                    ? { sessions: nodeState.sessions }
+                    : {})
+            };
+        }
+
         const base = deriveStageArtifact(latestSseStage);
-        const resolved = latestSseStage ? resolveStageId(latestSseStage) : null;
-        const boundSession = resolved ? effectiveStages[resolved]?.sessionId ?? null : null;
-        return boundSession ? { ...base, sessionId: boundSession } : base;
-    }, [effectiveStages, latestSseStage]);
+        const allSessions = STAGE_SEQUENCE.flatMap((id) => effectiveStages[id]?.sessions ?? []);
+        const latestSession =
+            allSessions.length > 0 ? allSessions[allSessions.length - 1]!.sessionId : null;
+        return {
+            ...base,
+            ...(latestSession ? { sessionId: latestSession } : {}),
+            ...(allSessions.length > 0 ? { sessions: allSessions } : {})
+        };
+    }, [effectiveStages, inspectedStageId, latestSseStage]);
 
     const handleSelectStageSession = useCallback((selection: StageSessionSelection) => {
+        const resolved = resolveStageId(selection.stageId);
+        if (resolved) {
+            setInspectedStageId(resolved);
+        }
         setSelectedStageSession(selection);
         setRightTab('session');
         setRightOpen(true);
@@ -1516,23 +1767,41 @@ export function NarrateStudioRoot({
 
     const handleInspectStageSessionById = useCallback(
         (sessionId: string) => {
-            const matchedId = STAGE_SEQUENCE.find(
-                (id) => effectiveStages[id]?.sessionId === sessionId
-            );
+            let matchedId: PipelineStageId | undefined;
+            let matchedAttempt: StageAttemptSession | undefined;
+            for (const id of STAGE_SEQUENCE) {
+                const found = effectiveStages[id]?.sessions?.find(
+                    (item) => item.sessionId === sessionId
+                );
+                if (found) {
+                    matchedId = id;
+                    matchedAttempt = found;
+                    break;
+                }
+            }
+            if (!matchedId) {
+                matchedId = STAGE_SEQUENCE.find(
+                    (id) => effectiveStages[id]?.sessionId === sessionId
+                );
+            }
             const meta = matchedId
                 ? PIPELINE_STAGE_META.find((item) => item.id === matchedId)
                 : undefined;
             const nodeState = matchedId ? effectiveStages[matchedId] : undefined;
+            const parentSessionId = matchedAttempt?.parentSessionId ?? nodeState?.parentSessionId;
+            const mode = matchedAttempt?.mode ?? nodeState?.mode;
+            const runId = matchedAttempt?.runId ?? nodeState?.runId;
+            const status = matchedAttempt
+                ? mapRunStatusToStageStatus(matchedAttempt.status)
+                : (nodeState?.status ?? 'done');
             handleSelectStageSession({
                 stageId: matchedId ?? 'STAGE',
                 stageLabel: meta?.label ?? stageArtifact.stageName,
                 sessionId,
-                ...(nodeState?.parentSessionId !== undefined
-                    ? { parentSessionId: nodeState.parentSessionId }
-                    : {}),
-                ...(nodeState?.mode !== undefined ? { mode: nodeState.mode } : {}),
-                runId: nodeState?.runId,
-                status: nodeState?.status ?? 'done'
+                ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+                ...(mode !== undefined ? { mode } : {}),
+                ...(runId !== undefined ? { runId } : {}),
+                status
             });
         },
         [effectiveStages, handleSelectStageSession, stageArtifact.stageName]
@@ -1642,6 +1911,7 @@ export function NarrateStudioRoot({
                         void loadChapterByNumber(chapterDetail.chapterNumber);
                     }
                 }}
+                onInspectStage={(stageId) => setInspectedStageId(stageId)}
                 onSelectStageSession={handleSelectStageSession}
             />
 
@@ -1755,7 +2025,6 @@ export function NarrateStudioRoot({
 
                     {rightTab === 'insp' ? (
                         <RightOpsInspector
-                            bookRoot={status?.bookRoot ?? null}
                             walLock={{
                                 walPhase: status?.walPhase ?? 'IDLE',
                                 timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
@@ -1790,14 +2059,10 @@ export function NarrateStudioRoot({
                             }}
                             haltDiagnostic={haltDiagnostic}
                             modelRouting={status?.modelRouting ?? null}
-                            roleRouting={status?.roleRouting ?? null}
-                            roleDefinitions={status?.roleDefinitions ?? null}
-                            availableModels={status?.availableModels ?? null}
                             entities={inspectorEntities}
                             openThreads={inspectorOpenThreads}
                             volumeProgress={inspectorVolumeProgress}
                             busy={isBusy}
-                            onSaveModelRouting={handleSaveModelRouting}
                             onSelectEntity={() => {
                                 handleOpenView('entities');
                                 if (isNarrow) setRightOpen(false);
@@ -1881,6 +2146,25 @@ export function NarrateStudioRoot({
 
                             <button
                                 type="button"
+                                className="ns-tool-card"
+                                disabled={isBusy || harvestingVoice}
+                                onClick={() => {
+                                    void handleHarvestVoice();
+                                }}
+                            >
+                                <span className="ns-tool-icon" aria-hidden="true">♪</span>
+                                <span>
+                                    <b>{harvestingVoice ? '正在采集声纹…' : '声纹采集 (Voice Harvest)'}</b>
+                                    <small>
+                                        {selectedChapter
+                                            ? `从 Ch.${String(selectedChapter).padStart(4, '0')} 提取人物对话声纹标本`
+                                            : '从当前最新章节提取人物对话声纹标本'}
+                                    </small>
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
                                 className="ns-tool-card ns-tool-card-danger"
                                 onClick={() => {
                                     void handleRequestHalt();
@@ -1917,6 +2201,29 @@ export function NarrateStudioRoot({
                                     <span className="ns-mono">{modelPools.auditModel}</span>
                                 </div>
                             </section>
+
+                            <RoleRoutingEditor
+                                resetKey={status?.bookRoot ?? null}
+                                poolRoutes={{
+                                    strong_creative:
+                                        status?.modelRouting?.['strong_creative'] ||
+                                        modelPools.strongModel ||
+                                        '--',
+                                    fast_retrieval:
+                                        status?.modelRouting?.['fast_retrieval'] ||
+                                        modelPools.fastModel ||
+                                        '--',
+                                    audit:
+                                        status?.modelRouting?.['audit'] ||
+                                        modelPools.auditModel ||
+                                        '--'
+                                }}
+                                roleRouting={status?.roleRouting ?? null}
+                                roleDefinitions={status?.roleDefinitions ?? null}
+                                availableModels={status?.availableModels ?? null}
+                                busy={isBusy}
+                                onSaveModelRouting={handleSaveModelRouting}
+                            />
                         </div>
                     ) : null}
                 </div>

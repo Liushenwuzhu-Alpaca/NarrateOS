@@ -3,6 +3,7 @@ import { fetchRunDetail } from './api';
 import type { StageNodeStatus } from './CenterWorkbench';
 import type {
     RunDetailPayload,
+    RunDetailRequestInput,
     RunDetailToolCall,
     RunDetailTurn,
     StageSessionDetailEvent,
@@ -141,12 +142,135 @@ function renderToolCallList(calls: readonly RunDetailToolCall[] | undefined, key
                             <pre className="ns-session-pre ns-mono">{argsText}</pre>
                         ) : null}
                         {resultText ? (
-                            <pre className="ns-session-pre ns-session-pre-result ns-mono">{resultText}</pre>
+                            <details className="ns-session-tool-result-details" open>
+                                <summary className="ns-mono">
+                                    tool-result ({resultText.length} chars)
+                                </summary>
+                                <pre className="ns-session-pre ns-session-pre-result ns-mono">
+                                    {resultText}
+                                </pre>
+                            </details>
                         ) : null}
                     </div>
                 );
             })}
         </div>
+    );
+}
+
+/** 渲染完整 LLM 请求输入快照（systemPrompt、taskPromptBlocks、采样与路由参数） */
+function renderRequestInputSection(
+    requestInput: RunDetailRequestInput | undefined
+): React.ReactNode {
+    if (!requestInput) return null;
+    const paramEntries: Array<[string, string]> = [];
+    if (requestInput.pool) paramEntries.push(['pool', requestInput.pool]);
+    if (typeof requestInput.temperature === 'number') {
+        paramEntries.push(['temperature', String(requestInput.temperature)]);
+    }
+    if (requestInput.reasoningEffort) {
+        paramEntries.push(['reasoningEffort', requestInput.reasoningEffort]);
+    }
+    if (typeof requestInput.maxTokens === 'number') {
+        paramEntries.push(['maxTokens', String(requestInput.maxTokens)]);
+    }
+    if (Array.isArray(requestInput.tools) && requestInput.tools.length > 0) {
+        paramEntries.push(['tools', requestInput.tools.join(', ')]);
+    }
+    const knownKeys = new Set([
+        'systemPrompt',
+        'taskPromptBlocks',
+        'pool',
+        'temperature',
+        'reasoningEffort',
+        'maxTokens',
+        'tools'
+    ]);
+    for (const [key, val] of Object.entries(requestInput)) {
+        if (knownKeys.has(key) || val === undefined || val === null) continue;
+        const formatted = formatDetailValue(val);
+        if (formatted) {
+            paramEntries.push([key, formatted]);
+        }
+    }
+    const taskBlocks = Array.isArray(requestInput.taskPromptBlocks)
+        ? requestInput.taskPromptBlocks
+        : [];
+
+    return (
+        <details
+            className="ns-session-turn-thinking ns-session-request-input"
+            data-session-request-input="true"
+        >
+            <summary>完整请求输入 (requestInput)</summary>
+            <div className="ns-session-request-body">
+                {paramEntries.length > 0 ? (
+                    <dl className="ns-session-kv ns-mono">
+                        {paramEntries.map(([k, v]) => (
+                            <React.Fragment key={k}>
+                                <dt>{k}</dt>
+                                <dd>{v}</dd>
+                            </React.Fragment>
+                        ))}
+                    </dl>
+                ) : null}
+                {requestInput.systemPrompt ? (
+                    <div className="ns-session-request-block">
+                        <div className="ns-session-request-label ns-mono">systemPrompt</div>
+                        <pre className="ns-session-pre">{requestInput.systemPrompt}</pre>
+                    </div>
+                ) : null}
+                {taskBlocks.length > 0 ? (
+                    <div className="ns-session-request-block">
+                        <div className="ns-session-request-label ns-mono">
+                            taskPromptBlocks ({taskBlocks.length})
+                        </div>
+                        {taskBlocks.map((block, idx) => (
+                            <pre key={`task-block-${idx}`} className="ns-session-pre">
+                                {block}
+                            </pre>
+                        ))}
+                    </div>
+                ) : null}
+            </div>
+        </details>
+    );
+}
+
+/** 渲染实时原生视图下方补充的完整 tool-result 原文折叠区 */
+function renderToolResultsSupplementary(
+    calls: readonly RunDetailToolCall[]
+): React.ReactNode {
+    const withResults = calls.filter(
+        (call) => call.result !== undefined && formatDetailValue(call.result).length > 0
+    );
+    if (withResults.length === 0) return null;
+    return (
+        <details
+            className="ns-session-turn-thinking ns-session-tool-result-details"
+            data-session-tool-results="true"
+        >
+            <summary>完整工具返回原文 ({withResults.length})</summary>
+            <div className="ns-session-tool-list">
+                {withResults.map((call, idx) => {
+                    const resultText = formatDetailValue(call.result);
+                    return (
+                        <div
+                            key={call.id ?? `sup-tool-${idx}`}
+                            className="ns-session-tool-call"
+                        >
+                            <div className="ns-session-tool-head ns-mono">
+                                <strong>{call.name}</strong>
+                                {call.status ? <span className="ns-muted">{call.status}</span> : null}
+                            </div>
+                            <pre className="ns-session-pre ns-session-pre-result ns-mono">
+                                {resultText}
+                            </pre>
+                        </div>
+                    );
+                })}
+            </div>
+        </details>
     );
 }
 
@@ -348,8 +472,7 @@ export function StageSessionViewer({
     const shouldFetchDetail = Boolean(
         selection &&
             !selection.cleanroom &&
-            selection.sessionId &&
-            (!sessionsService || !SessionProvider || !renderStageConversation || Boolean(retainError))
+            selection.sessionId
     );
 
     useEffect(() => {
@@ -442,7 +565,14 @@ export function StageSessionViewer({
             ((Array.isArray(runDetail.turns) && runDetail.turns.length > 0) ||
                 topLevelThinking ||
                 mergedToolCalls.length > 0 ||
-                topLevelOutput)
+                topLevelOutput ||
+                runDetail.requestInput)
+    );
+    const hasSupplementary = Boolean(
+        runDetail?.requestInput ||
+            mergedToolCalls.some(
+                (call) => call.result !== undefined && formatDetailValue(call.result).length > 0
+            )
     );
 
     return (
@@ -489,6 +619,21 @@ export function StageSessionViewer({
                     </div>
                 ) : null}
 
+                {runDetail?.modelId || typeof runDetail?.thinkingChars === 'number' ? (
+                    <div className="ns-session-model-row ns-mono" data-session-model-meta="true">
+                        {runDetail?.modelId ? (
+                            <span className="ns-pill ns-pill-muted" title={runDetail.modelId}>
+                                model: {runDetail.modelId}
+                            </span>
+                        ) : null}
+                        {typeof runDetail?.thinkingChars === 'number' ? (
+                            <span className="ns-pill ns-pill-muted">
+                                thinking: {runDetail.thinkingChars} chars
+                            </span>
+                        ) : null}
+                    </div>
+                ) : null}
+
                 {!selection.cleanroom ? (
                     <div className="ns-session-view-ring" role="group" aria-label="原生会话视图切换">
                         <button
@@ -514,28 +659,36 @@ export function StageSessionViewer({
             <div className="ns-session-body">
                 {selection.cleanroom ? (
                     <div className="ns-session-fallback" role="status">
-                        <div className="ns-session-fallback-title">净室单轮执行（无 Agent Session）</div>
+                        <div className="ns-session-fallback-title">净室隔离执行（未绑定原生会话）</div>
                         <p>
-                            Writer（含局部 Patch）直接调用 <code>ctx.llm</code> 单轮零工具生成，不创建多轮 Agent Session。
-                            门禁指标、缓存命中与 Token 统计请切换至「检查器」页签，原始净室载荷见作品
-                            <code>.ops/traces/</code>。
+                            Writer（零工具单轮净室 Agent）与 Patch（纯内存段落编辑多轮净室 Agent）均经{' '}
+                            <code>ctx.agents.create</code> 隔离运行并留存会话轨迹；当前节点未绑定可回放的{' '}
+                            <code>sessionId</code>（可能为早期历史章节），门禁指标与 Token 统计请切换至「检查器」页签查看。
                         </p>
                     </div>
                 ) : canMountNative && SessionProvider && renderStageConversation && activeSessionRef ? (
-                    <div
-                        className="ns-stage-session-embed"
-                        data-stage-session-mode={viewMode}
-                        data-session-ready={readyState}
-                    >
-                        {readyState === 'loading' ? (
-                            <div className="ns-session-loading-bar" role="status">
-                                正在加载原生 {viewMode === 'chat' ? 'Conversation' : 'Trajectory'} 会话…
+                    <>
+                        <div
+                            className="ns-stage-session-embed"
+                            data-stage-session-mode={viewMode}
+                            data-session-ready={readyState}
+                        >
+                            {readyState === 'loading' ? (
+                                <div className="ns-session-loading-bar" role="status">
+                                    正在加载原生 {viewMode === 'chat' ? 'Conversation' : 'Trajectory'} 会话…
+                                </div>
+                            ) : null}
+                            <SessionProvider key={activeSessionRef.sessionId} session={activeSessionRef}>
+                                {renderStageConversation({ view: viewMode })}
+                            </SessionProvider>
+                        </div>
+                        {hasSupplementary && runDetail ? (
+                            <div className="ns-session-supplementary">
+                                {renderRequestInputSection(runDetail.requestInput)}
+                                {renderToolResultsSupplementary(mergedToolCalls)}
                             </div>
                         ) : null}
-                        <SessionProvider key={activeSessionRef.sessionId} session={activeSessionRef}>
-                            {renderStageConversation({ view: viewMode })}
-                        </SessionProvider>
-                    </div>
+                    </>
                 ) : (
                     <div className="ns-session-fallback" data-session-fallback="true">
                         <div className="ns-session-fallback-title">
@@ -580,6 +733,7 @@ export function StageSessionViewer({
 
                         {hasDetailBody && runDetail ? (
                             <div className="ns-session-detail" data-session-detail="true">
+                                {renderRequestInputSection(runDetail.requestInput)}
                                 {topLevelThinking ? (
                                     <details className="ns-session-turn-thinking" open>
                                         <summary>Thinking</summary>

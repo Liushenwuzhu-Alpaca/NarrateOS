@@ -3438,6 +3438,14 @@ details.ns-acc[open] summary {
     white-space: nowrap;
 }
 
+.ns-session-model-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 10.5px;
+}
+
 .ns-session-view-ring {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -3471,18 +3479,60 @@ details.ns-acc[open] summary {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    gap: 8px;
+    overflow-y: auto;
 }
 
 .ns-stage-session-embed {
-    flex: 1;
-    min-height: 0;
+    flex: 1 1 auto;
+    min-height: 220px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     border: 1px solid var(--ns-border-1);
     border-radius: var(--ns-r-md);
     background: var(--ns-bg-base);
+}
+
+.ns-session-supplementary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--ns-border-1);
+    border-radius: var(--ns-r-md);
+    background: var(--ns-bg-card);
+    flex-shrink: 0;
+}
+
+.ns-session-request-body {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ns-session-request-block {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.ns-session-request-label {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--ns-text-3);
+}
+
+.ns-session-tool-result-details {
+    font-size: 11px;
+    color: var(--ns-text-3);
+}
+
+.ns-session-tool-result-details summary {
+    cursor: pointer;
+    font-weight: 500;
+    color: var(--ns-text-2);
 }
 
 .ns-stage-session-embed [data-composer-seat] {

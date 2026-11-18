@@ -18,6 +18,7 @@ import {
     STAGE_CONVERSATION_SLOT,
     StageConversationSlotPanel
 } from '../src/client/index.js';
+import { resolveStageId } from '../src/client/CenterWorkbench.js';
 import {
     StageSessionViewer,
     type StudioSessionReference,
@@ -845,5 +846,300 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(detailEl?.textContent).toContain('book_read');
         expect(detailEl?.textContent).toContain('yield_context_pack');
         expect(detailEl?.textContent).toContain('ContextPack 已提交');
+    });
+
+    it('LOCAL_PATCH/REWRITE 映射到 WRITER、REPLAN 映射到 PLANNER，历史与实时多尝试序列在检查器按顺序展示并可点击下钻', async () => {
+        expect(resolveStageId('LOCAL_PATCH')).toBe('WRITER');
+        expect(resolveStageId('REWRITE')).toBe('WRITER');
+        expect(resolveStageId('REPLAN')).toBe('PLANNER');
+
+        runsByChapter.set(1, [
+            {
+                runId: 'run-ch1',
+                chapter: 1,
+                stage: 'PLANNER',
+                role: 'planner',
+                sessionId: 'sess-ch1-plan-1',
+                status: 'completed',
+                attempt: 1
+            },
+            {
+                runId: 'run-ch1',
+                chapter: 1,
+                stage: 'REPLAN',
+                role: 'planner',
+                sessionId: 'sess-ch1-replan-2',
+                status: 'completed',
+                attempt: 2,
+                triggerReason: 'FactChecker: 潮汐时间矛盾'
+            },
+            {
+                runId: 'run-ch1',
+                chapter: 1,
+                stage: 'WRITER',
+                role: 'writer',
+                sessionId: 'sess-ch1-writer-1',
+                status: 'completed',
+                attempt: 1,
+                mode: 'one-shot'
+            },
+            {
+                runId: 'run-ch1',
+                chapter: 1,
+                stage: 'LOCAL_PATCH',
+                role: 'patch',
+                sessionId: 'sess-ch1-patch-2',
+                status: 'completed',
+                attempt: 2,
+                triggerReason: 'StaticProseGate: 2 处套话违规'
+            },
+            {
+                runId: 'run-ch1',
+                chapter: 1,
+                stage: 'REWRITE',
+                role: 'writer',
+                sessionId: 'sess-ch1-rewrite-3',
+                status: 'completed',
+                attempt: 3,
+                triggerReason: 'FactChecker: 第 2 段港口锚泊冲突'
+            }
+        ]);
+
+        const { container } = await mountStudio();
+        await openStageStrip(container);
+
+        // 历史节点绑定最新一次尝试
+        expect(stageNode(container, 'PLANNER').dataset.sessionId).toBe('sess-ch1-replan-2');
+        expect(stageNode(container, 'WRITER').dataset.sessionId).toBe('sess-ch1-rewrite-3');
+
+        // 点击 WRITER 节点后切到检查器页签，可见 WRITER 的全部 3 次尝试轨迹
+        await click(stageNode(container, 'WRITER'));
+        const inspTab = container.querySelector<HTMLButtonElement>('#ns-right-tab-insp')!;
+        await click(inspTab);
+
+        const attemptList = container.querySelector('[aria-label="关联会话轨迹列表"]');
+        expect(attemptList).not.toBeNull();
+        const attemptButtons = Array.from(
+            attemptList!.querySelectorAll<HTMLButtonElement>('button[data-attempt-session-id]')
+        );
+        expect(attemptButtons.map((b) => b.getAttribute('data-attempt-session-id'))).toEqual([
+            'sess-ch1-writer-1',
+            'sess-ch1-patch-2',
+            'sess-ch1-rewrite-3'
+        ]);
+        expect(attemptButtons[1]?.textContent).toContain('LOCAL_PATCH');
+        expect(attemptButtons[1]?.textContent).toContain('StaticProseGate: 2 处套话违规');
+        expect(attemptButtons[1]?.textContent).toContain('completed');
+
+        // 点击历史 LOCAL_PATCH 尝试 -> 打开该次 session 的 StageSessionViewer
+        await click(attemptButtons[1]!);
+        expect(container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')).toBe(
+            'true'
+        );
+        expect(
+            container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')
+        ).toBe('sess-ch1-patch-2');
+
+        // 实时 SSE stage:session 多轮累加：WRITER -> LOCAL_PATCH -> REWRITE
+        await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
+        await emit({
+            event: 'stage:session',
+            data: {
+                stage: 'WRITER',
+                role: 'writer',
+                chapter: 3,
+                runId: 'run-live-3',
+                sessionId: 'sess-live-w1',
+                attempt: 1,
+                status: 'running',
+                mode: 'one-shot'
+            }
+        });
+        await emit({
+            event: 'stage:session',
+            data: {
+                stage: 'LOCAL_PATCH',
+                role: 'patch',
+                chapter: 3,
+                runId: 'run-live-3',
+                sessionId: 'sess-live-p2',
+                attempt: 2,
+                triggerReason: 'StaticProseGate: 1 处微距词',
+                status: 'running'
+            }
+        });
+
+        expect(stageNode(container, 'WRITER').dataset.sessionId).toBe('sess-live-p2');
+        await click(inspTab);
+        const liveAttemptIds = Array.from(
+            container.querySelectorAll<HTMLButtonElement>(
+                '[aria-label="关联会话轨迹列表"] button[data-attempt-session-id]'
+            )
+        ).map((b) => b.getAttribute('data-attempt-session-id'));
+        expect(liveAttemptIds).toEqual(['sess-live-w1', 'sess-live-p2']);
+    });
+
+    it('StageSessionViewer 修正净室文字说明，并在归档回放与实时视图下方展示 modelId、thinkingChars、requestInput 与完整 tool-result', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+
+        // 1. cleanroom: true 占位提示使用最新的 ctx.agents.create 说明，不再误报 ctx.llm / .ops/traces/
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'WRITER',
+                        stageLabel: '3. Writer',
+                        sessionId: 'legacy-cleanroom',
+                        status: 'done',
+                        cleanroom: true
+                    }
+                })
+            );
+        });
+        expect(container.textContent).toContain('ctx.agents.create');
+        expect(container.textContent).not.toContain('直接调用 ctx.llm');
+        expect(container.textContent).not.toContain('.ops/traces/');
+
+        // 2. 归档回放展示 modelId、thinkingChars、可折叠 requestInput 与完整 tool-result
+        const longToolResult = 'FULL_PARAGRAPH_START_' + '甲'.repeat(1200) + '_FULL_PARAGRAPH_END';
+        vi.mocked(api.fetchRunDetail).mockResolvedValue({
+            sessionId: 'sess-req-archive',
+            runId: 'run-req-1',
+            stage: 'LOCAL_PATCH',
+            status: 'completed',
+            modelId: 'anthropic:claude-sonnet-4-5',
+            thinkingChars: 428,
+            requestInput: {
+                pool: 'strong_creative',
+                temperature: 0.4,
+                reasoningEffort: 'low',
+                maxTokens: 4096,
+                tools: ['patch_paragraphs', 'yield_patched_draft'],
+                systemPrompt: '系统提示：仅使用 patch_paragraphs 净室修改指定段落。',
+                taskPromptBlocks: ['[0] 原文第一段', '[1] 原文第二段']
+            },
+            events: [
+                {
+                    seq: 0,
+                    kind: 'thinking',
+                    text: '定位到第 1 段存在违规套话'
+                },
+                {
+                    seq: 1,
+                    kind: 'tool-call',
+                    toolName: 'patch_paragraphs',
+                    callId: 'call-p1',
+                    text: '{"edits":[{"start_paragraph":1,"end_paragraph":1,"replacement_paragraphs":["改写后第二段"]}]}'
+                },
+                {
+                    seq: 2,
+                    kind: 'tool-result',
+                    toolName: 'patch_paragraphs',
+                    callId: 'call-p1',
+                    text: longToolResult,
+                    status: 'completed'
+                }
+            ]
+        });
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'WRITER',
+                        stageLabel: '3. Writer',
+                        sessionId: 'sess-req-archive',
+                        runId: 'run-req-1',
+                        status: 'done'
+                    }
+                })
+            );
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(container.textContent).toContain('anthropic:claude-sonnet-4-5');
+        expect(container.textContent).toContain('428');
+        const reqDetails = container.querySelector<HTMLDetailsElement>(
+            'details[data-session-request-input="true"]'
+        );
+        expect(reqDetails).not.toBeNull();
+        expect(reqDetails?.textContent).toContain('systemPrompt');
+        expect(reqDetails?.textContent).toContain('仅使用 patch_paragraphs 净室修改指定段落');
+        expect(reqDetails?.textContent).toContain('[0] 原文第一段');
+        expect(reqDetails?.textContent).toContain('0.4');
+        expect(reqDetails?.textContent).toContain('low');
+        expect(reqDetails?.textContent).toContain('patch_paragraphs, yield_patched_draft');
+        expect(container.textContent).toContain(longToolResult);
+
+        // 3. 实时原生视图 (canMountNative=true) 下方同样展示 requestInput、modelId、thinkingChars 与完整 tool-result
+        const mockSessions: StudioSessionsService = {
+            retain: vi.fn((target) => ({
+                sessionId: typeof target === 'string' ? target : target.childSessionId,
+                ready: Promise.resolve(),
+                release: vi.fn()
+            }))
+        };
+        vi.mocked(api.fetchRunDetail).mockResolvedValue({
+            sessionId: 'sess-req-live',
+            runId: 'run-req-live',
+            stage: 'WRITER',
+            status: 'running',
+            modelId: 'deepseek:deepseek-reasoner',
+            thinkingChars: 910,
+            requestInput: {
+                pool: 'strong_creative',
+                temperature: 0.7,
+                reasoningEffort: 'medium',
+                systemPrompt: '写手净室系统指令',
+                taskPromptBlocks: ['本章细纲：夜探码头']
+            },
+            events: [
+                {
+                    seq: 0,
+                    kind: 'tool-result',
+                    toolName: 'patch_paragraphs',
+                    callId: 'call-live-1',
+                    text: 'LIVE_TOOL_RESULT_COMPLETE',
+                    status: 'completed'
+                }
+            ]
+        });
+
+        await act(async () => {
+            root.render(
+                createElement(StageSessionViewer, {
+                    selection: {
+                        stageId: 'WRITER',
+                        stageLabel: '3. Writer',
+                        sessionId: 'sess-req-live',
+                        runId: 'run-req-live',
+                        status: 'active'
+                    },
+                    sessionsService: mockSessions,
+                    SessionProvider: ({ children }) => createElement('div', { 'data-native-live': 'true' }, children),
+                    renderStageConversation: ({ view }) =>
+                        createElement('div', { 'data-native-view': view }, 'native-body')
+                })
+            );
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(container.querySelector('[data-native-live="true"]')).not.toBeNull();
+        expect(container.textContent).toContain('deepseek:deepseek-reasoner');
+        expect(container.textContent).toContain('910');
+        const liveReqDetails = container.querySelector<HTMLDetailsElement>(
+            'details[data-session-request-input="true"]'
+        );
+        expect(liveReqDetails).not.toBeNull();
+        expect(liveReqDetails?.textContent).toContain('写手净室系统指令');
+        expect(liveReqDetails?.textContent).toContain('本章细纲：夜探码头');
+        expect(container.textContent).toContain('LIVE_TOOL_RESULT_COMPLETE');
     });
 });
