@@ -654,6 +654,7 @@ function deriveHistoricalStageOverrides(
 ): Partial<Record<PipelineStageId, StageNodeState>> {
     const mapped: Partial<Record<PipelineStageId, StageNodeState>> = {};
     for (const run of runs) {
+        if (typeof run?.stage !== 'string') continue;
         const stageId = resolveStageId(run.stage);
         if (!stageId) continue;
         const existing = mapped[stageId];
@@ -1186,6 +1187,25 @@ export function NarrateStudioRoot({
                 chapterRequestSeqRef.current += 1;
                 runsRequestSeqRef.current += 1;
                 currentBookRootRef.current = bookRoot;
+                setActiveParallelWindowId('');
+                setActiveParallelBranchId('');
+                setActiveViewKind(null);
+                viewCommandNonceRef.current += 1;
+                setExternalViewCommand({
+                    viewTab: 'prose',
+                    nonce: viewCommandNonceRef.current
+                });
+                setEntitiesView(null);
+                setHorizonView(null);
+                setThreadsView(null);
+                setSignalsView(null);
+                setHaltView(null);
+                setFactChecker({
+                    totalChecked: 0,
+                    verifiedPassCount: 0,
+                    filteredOutCount: 0,
+                    blockedCount: 0
+                });
                 setChapterDetail(null);
                 setSelectedChapter(null);
                 setHaltWaiting(false);
@@ -1776,6 +1796,8 @@ export function NarrateStudioRoot({
             try {
                 await selectBook({ bookRoot });
                 currentBookRootRef.current = bookRoot;
+                setActiveParallelWindowId('');
+                setActiveParallelBranchId('');
                 setHaltWaiting(false);
                 setEntitiesView(null);
                 setHorizonView(null);
@@ -1860,11 +1882,36 @@ export function NarrateStudioRoot({
 
     const handleStepOne = useCallback(
         async (options?: StepChapterRequest) => {
-            const res = await stepChapter(options ?? {});
+            const worldParallelWindow =
+                asString(status?.worldState['parallel_window_id']) ??
+                asString(status?.worldState['parallelWindowId']) ??
+                '';
+            const worldParallelBranch =
+                asString(status?.worldState['parallel_branch_id']) ??
+                asString(status?.worldState['parallelBranchId']) ??
+                '';
+            const isParallelActive =
+                String(status?.worldState.timeline_mode ?? '') === 'PARALLEL' ||
+                Boolean(activeParallelWindowId);
+            let nextOptions: StepChapterRequest = options ? { ...options } : {};
+            if (isParallelActive && options?.timelineMode !== 'FLASHBACK') {
+                const resolvedWindowId =
+                    options?.parallelWindowId ?? (activeParallelWindowId || worldParallelWindow);
+                const resolvedBranchId =
+                    options?.parallelBranchId ??
+                    (activeParallelBranchId || worldParallelBranch || 'branch-a');
+                nextOptions = {
+                    ...nextOptions,
+                    timelineMode: 'PARALLEL',
+                    ...(resolvedWindowId ? { parallelWindowId: resolvedWindowId } : {}),
+                    ...(resolvedBranchId ? { parallelBranchId: resolvedBranchId } : {})
+                };
+            }
+            const res = await stepChapter(nextOptions);
             setRevealNonce((n) => n + 1);
             await refreshAll(res.chapterNumber);
         },
-        [refreshAll]
+        [activeParallelBranchId, activeParallelWindowId, refreshAll, status?.worldState]
     );
 
     const handleStartYolo = useCallback(
@@ -2559,6 +2606,8 @@ export function NarrateStudioRoot({
                     setActiveViewKind(kind);
                     void loadViews();
                 }}
+                onCodexTabChange={(kind) => setActiveViewKind(kind)}
+                onCloseCodex={() => setActiveViewKind(null)}
                 onDismissSignal={(idx) => {
                     void handleDismissSignal(idx);
                 }}
@@ -2589,7 +2638,15 @@ export function NarrateStudioRoot({
                         void loadChapterByNumber(chapterDetail.chapterNumber);
                     }
                 }}
-                onInspectStage={(stageId) => setInspectedStageId(stageId)}
+                onInspectStage={(stageId) => {
+                    setInspectedStageId(stageId);
+                    const node = effectiveStages[stageId];
+                    if (!node?.sessionId && stageId !== 'WRITER') {
+                        setSelectedStageSession(null);
+                        setRightTab('trace');
+                        setRightOpen(true);
+                    }
+                }}
                 onSelectStageSession={handleSelectStageSession}
             />
 
@@ -2816,6 +2873,8 @@ export function NarrateStudioRoot({
                     workspaceEpochRef.current += 1;
                     chapterRequestSeqRef.current += 1;
                     currentBookRootRef.current = data.bookRoot;
+                    setActiveParallelWindowId('');
+                    setActiveParallelBranchId('');
                     setChapterDetail(null);
                     setSelectedChapter(null);
                     showToast(`新书编译完成：${data.bookRoot}`);
@@ -2869,9 +2928,20 @@ export function NarrateStudioRoot({
                     setParallelSubmitting(true);
                     setParallelError(null);
                     try {
+                        const alreadyParallel =
+                            String(status?.worldState.timeline_mode ?? '') === 'PARALLEL' ||
+                            Boolean(activeParallelWindowId);
+                        const resolvedBranch = payload.branchId?.trim() || 'branch-a';
+                        if (alreadyParallel) {
+                            setActiveParallelWindowId(payload.windowId);
+                            setActiveParallelBranchId(resolvedBranch);
+                            setParallelModalOpen(false);
+                            showToast(`已切换并行支线：${resolvedBranch}（窗口 ${payload.windowId}）`);
+                            return;
+                        }
                         await forkParallelWindow({ windowId: payload.windowId });
                         setActiveParallelWindowId(payload.windowId);
-                        setActiveParallelBranchId(payload.branchId ?? '');
+                        setActiveParallelBranchId(resolvedBranch);
                         setParallelModalOpen(false);
                         showToast(`已开启多线并行窗口：${payload.windowId}`);
                         await refreshAll(selectedChapterRef.current);

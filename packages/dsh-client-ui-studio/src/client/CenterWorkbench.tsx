@@ -268,6 +268,8 @@ export interface CenterWorkbenchProps {
     onToggleRight?: (() => void) | undefined;
     onOpenInspector?: (() => void) | undefined;
     onOpenCodex?: ((kind: MaterializedViewKind) => void) | undefined;
+    onCodexTabChange?: ((kind: MaterializedViewKind) => void) | undefined;
+    onCloseCodex?: (() => void) | undefined;
     onDismissSignal?: ((index: number) => void) | undefined;
     onSelectChapter?: ((chapterNumber: number) => void) | undefined;
     onStepOne?: ((options?: StepChapterRequest) => Promise<void> | void) | undefined;
@@ -296,6 +298,14 @@ interface StageDefinition {
     shortDesc: string;
     defaultSummary: string;
 }
+
+const ACTIVE_TASK_LABELS: Record<string, string> = {
+    STEPPING: '正在执笔推进',
+    SYNCING: '正在同步台账',
+    DREAMING: '正在整理设定',
+    ADVANCING_VOLUME: '正在封存换卷',
+    BOOTING: '正在建库编译'
+};
 
 const PIPELINE_STAGES: readonly StageDefinition[] = [
     {
@@ -542,6 +552,8 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
     onNewBook,
     onToggleRight,
     onOpenCodex,
+    onCodexTabChange,
+    onCloseCodex,
     onRestoreStashedDraft,
     onDiscardStashedDraft,
     onDismissSignal,
@@ -913,6 +925,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
             return;
         }
         setMainSurface('chapter');
+        onCloseCodex?.();
         setChapterTab('prose');
         if (!isEditing) {
             setDraftContent(chapterDetail.content);
@@ -1284,6 +1297,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
 
     const handleFocusNoteDock = (kind: 'DIRECTOR_NOTE' | 'RETCON', prefill: string) => {
         setMainSurface('chapter');
+        onCloseCodex?.();
         setNoteKind(kind);
         if (!noteText.trim() && prefill) {
             setNoteText(prefill);
@@ -1447,7 +1461,9 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 : `YOLO 连写中 · 第 ${currentChapter + 1} 章`}
                         </span>
                     ) : activeTask !== 'IDLE' ? (
-                        <span className="ns-badge ns-badge-accent">{activeTask}</span>
+                        <span className="ns-badge ns-badge-accent">
+                            {ACTIVE_TASK_LABELS[activeTask] ?? '正在处理'}
+                        </span>
                     ) : null}
 
                     {timelineMode === 'PARALLEL' || parallelWindowId ? (
@@ -1848,6 +1864,7 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                                 className="ns-btn ns-btn-warn ns-btn-xs"
                                 onClick={() => {
                                     setMainSurface('chapter');
+                                    onCloseCodex?.();
                                     setChapterTab('prose');
                                     setDraftBaseline(chapterDetail?.content ?? '');
                                     setDraftContent(stashedDraft.content);
@@ -1909,10 +1926,14 @@ export const CenterWorkbench: React.FC<CenterWorkbenchProps> = ({
                         coldArchiveCount={materializedViews?.coldArchiveCount ?? 0}
                         horizonMarkdown={materializedViews?.horizonMarkdown}
                         threadsMarkdown={materializedViews?.threadsMarkdown}
-                        onSelectTab={(tab) => setCodexTab(tab)}
+                        onSelectTab={(tab) => {
+                            setCodexTab(tab);
+                            onCodexTabChange?.(tab);
+                        }}
                         onBackToProse={() =>
                             runWithViewTransition(() => {
                                 setMainSurface('chapter');
+                                onCloseCodex?.();
                             })
                         }
                     />
