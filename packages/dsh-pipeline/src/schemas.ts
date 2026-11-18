@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
     DirtyChapter,
+    GateViolation,
     LlmPool,
     PlannerOutline,
     RoleModelOverride,
@@ -11,6 +12,7 @@ import type {
     TokenUsage,
     TxState
 } from '@narrateos/dsh-book-store';
+import type { FactCheckIssue } from '@narrateos/dsh-book-tools';
 
 /** 单个模型池路由目标 */
 export interface LlmRouteTarget {
@@ -171,6 +173,42 @@ export interface EngineProgressEvent {
     attempt?: number | undefined;
 }
 
+/** 写手净室前缀装配诊断报告 (对应 PrefixAssembler.assembleWriterRequest) */
+export interface WriterAssemblyReport {
+    chapterNumber: number;
+    estimatedTokens: number;
+    budget: number | null;
+    evictionLevel: number;
+    truncated: boolean;
+    appliedEvictions: string[];
+    staticPrefixHash: string;
+    selectedVoiceSample: {
+        id: string;
+        tag: string;
+        source?: string | undefined;
+    } | null;
+}
+
+/** StaticProseGate 单轮检测结果回调载荷 */
+export interface GateResultEvent {
+    chapter: number;
+    passed: boolean;
+    violations: GateViolation[];
+    recommendedAction: string;
+    metrics?: Partial<TelemetryMetrics> | undefined;
+}
+
+/** Fact Checker 单轮核查结果回调载荷 */
+export interface CheckerResultEvent {
+    chapter: number;
+    passed: boolean;
+    issueCount: number;
+    issues: FactCheckIssue[];
+    replanCount: number;
+    rewriteCount: number;
+    patchRounds: number;
+}
+
 /** stepChapter 调用参数 */
 export interface StepChapterOptions {
     chapterNumber?: number | undefined;
@@ -183,6 +221,9 @@ export interface StepChapterOptions {
     signal?: AbortSignal | undefined;
     onProgress?: ((event: EngineProgressEvent) => void) | undefined;
     onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+    onGateResult?: ((event: GateResultEvent) => void) | undefined;
+    onCheckerResult?: ((event: CheckerResultEvent) => void) | undefined;
+    onWriterAssembled?: ((report: WriterAssemblyReport) => void) | undefined;
 }
 
 /** 单章执行结果 */
@@ -201,6 +242,7 @@ export interface StepChapterResult {
     totalUsage: TokenUsage;
     updatedEntities: string[];
     nextChapterOptions: string[];
+    writerAssemblyReport?: WriterAssemblyReport | undefined;
 }
 
 /** syncManuscripts 调用参数 */
@@ -471,3 +513,16 @@ export interface YoloRuntimeState {
     currentStage: string | null;
     loopPromise: Promise<void> | null;
 }
+
+/** 离线连续性审计疑似冲突入参校验 Schema (POST /api/narrate/heal) */
+export const SuspectedConflictSchema = z.object({
+    conflictId: z.string().min(1),
+    chapterA: z.number().int().positive(),
+    quoteA: z.string().min(1),
+    chapterB: z.number().int().positive(),
+    quoteB: z.string().min(1),
+    description: z.string().min(1),
+    hasLegitimateTransfer: z.boolean().optional(),
+    severityHint: ConflictSeveritySchema.optional(),
+    downstreamDependentChapters: z.array(z.number().int().positive()).optional()
+});

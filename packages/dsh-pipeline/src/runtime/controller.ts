@@ -1,26 +1,32 @@
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { appendFile, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { Context } from '@deepseek-ai/cordis';
 import {
     BookStore,
     BookSwitchConflictError,
     NodeSystemAdapter,
+    parseL2CardSections,
     TxLockConflictError,
     TxLockPayloadSchema,
     type BookConfig,
+    type BookSnapshot,
     type ForkParallelWindowOptions,
     type LlmPool,
     type MergeParallelWindowOptions,
+    type NarrationSubjectivity,
     type NarrateStoreService,
     type ReasoningEffortLevel,
     type RoleModelOverride,
-    type RunRecord,
     type SystemPort
 } from '@narrateos/dsh-book-store';
 import type {
     BootBundleOutput,
+    FactCheckIssue,
     LockCharterAndBootInput,
     LockCharterAndBootResult,
     NarrateToolsService
@@ -31,13 +37,23 @@ import {
     SafeHaltError,
     TaskConflictError
 } from '../errors.js';
-import { ChapterPipeline } from '../pipeline/chapter-pipeline.js';
+import {
+    ChapterPipeline,
+    resolveDefaultEngineCraftPluginDir
+} from '../pipeline/chapter-pipeline.js';
 import { DreamingPipeline } from '../pipeline/dreaming-pipeline.js';
 import {
+    appendJsonlLineSafe,
     CHAPTER_FILE_RE,
+    clearHealPlan,
+    createEmptyUsage,
+    readHealPlan,
+    readNextChapterOptions,
     readOptionalText,
-    readSignalsCursor,
-    writeSignalsCursor
+    readSignalsCursorState,
+    resolveSignalId,
+    writeHealPlan,
+    type HealPlan
 } from '../pipeline/helpers.js';
 import { SyncPipeline } from '../pipeline/sync-pipeline.js';
 import { harvestVoiceFromChapter } from '../pipeline/voice-harvest.js';
@@ -55,6 +71,7 @@ import {
     type AdvanceVolumeOptions,
     type AdvanceVolumeResult,
     type AvailableModelItem,
+    type DownstreamConflictReport,
     type ExtendedRunRecord,
     type HealConflictsOptions,
     type HealConflictsResult,
@@ -74,8 +91,12 @@ import {
     type SyncManuscriptsOptions,
     type SyncManuscriptsResult,
     type VoiceHarvestResult,
+    type WriterAssemblyReport,
     type YoloRuntimeState
 } from '../schemas.js';
+
+const execFileAsync = promisify(execFile);
+const MAX_SYMLINK_DEPTH = 32;
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -123,7 +144,45 @@ export interface BootFromModalPayload {
     premiseOrSeed?: string | undefined;
     sourceMaterial?: string | undefined;
     t0Anchor?: string | undefined;
+    commitments?: string[] | undefined;
+    excludedCliches?: string[] | undefined;
+    authorizationBoundary?: string | undefined;
+    narrationSubjectivity?: NarrationSubjectivity | undefined;
+    tokensPerChar?: number | undefined;
+    writerTokenBudget?: number | null | undefined;
+    maxAutoRollbackChapters?: number | undefined;
+    craftPlugins?: string[] | undefined;
+    modelRouting?: Record<string, string> | undefined;
 }
+
+export interface OpeningBeatProgressItem {
+    index: number;
+    status: 'PENDING' | 'DONE';
+    rawStatus: string;
+    completedChapter?: string | undefined;
+    text: string;
+}
+
+export interface OpeningBeatsProgress {
+    total: number;
+    completed: number;
+    pending: number;
+    beats: OpeningBeatProgressItem[];
+}
+
+export interface VolumeProgressSummary {
+    currentVolume: number;
+    volumeLabel: string;
+    volumeTitle?: string | undefined;
+    completedChapters: number;
+    totalChapters: number | null;
+    futureHorizon?: string | undefined;
+    milestoneLock?: string | undefined;
+}
+
+export type StepChapterInputOptions = Omit<StepChapterOptions, 'chapterGoal'> & {
+    chapterGoal?: string | undefined;
+};
 
 function parseJsonLines(raw: string | null): unknown[] {
     if (raw === null) return [];
@@ -217,9 +276,50 @@ export function mapRawSessionEventsToItems(
     return items;
 }
 
+function resolveRealPathWithFallback(targetPath: string, depth = 0): string | null {
+    if (depth > MAX_SYMLINK_DEPTH) {
+        return null;
+    }
+    let current = resolve(targetPath);
+    const suffixParts: string[] = [];
+
+    while (true) {
+        try {
+            const st = lstatSync(current);
+            if (st.isSymbolicLink()) {
+                const linkTarget = readlinkSync(current);
+                const nextTarget = resolve(dirname(current), linkTarget);
+                const resolvedTarget = resolveRealPathWithFallback(nextTarget, depth + 1);
+                if (resolvedTarget === null) {
+                    return null;
+                }
+                return suffixParts.length > 0
+                    ? join(resolvedTarget, ...suffixParts)
+                    : resolvedTarget;
+            }
+            const real = realpathSync(current);
+            return suffixParts.length > 0 ? join(real, ...suffixParts) : real;
+        } catch (err: unknown) {
+            const code = (err as { code?: string }).code;
+            if (code !== 'ENOENT') {
+                return null;
+            }
+            const parent = dirname(current);
+            if (parent === current) {
+                return suffixParts.length > 0 ? join(current, ...suffixParts) : current;
+            }
+            suffixParts.unshift(basename(current));
+            current = parent;
+        }
+    }
+}
+
 export function isSubPath(parentDir: string, candidatePath: string): boolean {
-    const parent = resolve(parentDir);
-    const target = resolve(candidatePath);
+    const parent = resolveRealPathWithFallback(parentDir);
+    const target = resolveRealPathWithFallback(candidatePath);
+    if (parent === null || target === null) {
+        return false;
+    }
     const rel = relative(parent, target);
     return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
 }
@@ -282,6 +382,8 @@ export class NarrateRuntimeController {
     private readonly sseClients = new Set<ServerResponse>();
     private readonly backgroundPromises = new Set<Promise<unknown>>();
     private readonly activeStageSessions = new Map<string, StageSessionEvent>();
+    private readonly signalQueues = new Map<string, Promise<void>>();
+    private readonly disposeBookSwitched: () => void;
 
     private activeTask: RuntimeTaskKind = 'IDLE';
     private haltRequested = false;
@@ -290,6 +392,21 @@ export class NarrateRuntimeController {
     private activePromise: Promise<unknown> | null = null;
     private telemetryOffsetLines = 0;
     private signalsConsumedLines = 0;
+    private yoloGeneration = 0;
+    private bookSwitchHandledByEvent = false;
+    private ensureDefaultBookPromise: Promise<string | null> | null = null;
+    private lastWriterAssemblyReport: WriterAssemblyReport | null = null;
+    private currentFactCheckerFilteredOutCount = 0;
+    private lastCheckerResult: {
+        chapter: number;
+        passed: boolean;
+        issueCount: number;
+        issues: FactCheckIssue[];
+        filteredOutCount: number;
+        replanCount: number;
+        rewriteCount: number;
+        patchRounds: number;
+    } | null = null;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     private readonly yoloState: YoloRuntimeState = {
@@ -319,7 +436,10 @@ export class NarrateRuntimeController {
         this.booksRoot = resolve(
             config.booksRoot ?? storeService.booksRoot ?? toolsService.booksRoot ?? './books'
         );
-        this.pluginSearchDirs = config.pluginSearchDirs ?? [];
+        this.pluginSearchDirs =
+            config.pluginSearchDirs && config.pluginSearchDirs.length > 0
+                ? config.pluginSearchDirs
+                : [resolveDefaultEngineCraftPluginDir()];
         this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
         this.roleLoader = new RoleLoader(config.presetRoot);
 
@@ -352,9 +472,26 @@ export class NarrateRuntimeController {
             llmAdapter: this.llmAdapter,
             poolRouting: config.poolRouting,
             onStageEvent: (evt) => {
+                if (
+                    evt.stage === 'FACT_CHECKER' &&
+                    evt.kind === 'tool-result' &&
+                    evt.toolName === 'yield_verdict' &&
+                    evt.status === 'error'
+                ) {
+                    this.currentFactCheckerFilteredOutCount += 1;
+                }
                 this.emitEvent('stage:event', evt);
             }
         });
+
+        this.disposeBookSwitched =
+            typeof this.storeService.onBookSwitched === 'function'
+                ? this.storeService.onBookSwitched(async (event) => {
+                      if (this.shuttingDown) return;
+                      this.bookSwitchHandledByEvent = true;
+                      await this.onBookSwitchedSync(event.nextBookRoot);
+                  })
+                : () => {};
 
         const heartbeatMs = config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
         if (heartbeatMs > 0) {
@@ -489,46 +626,96 @@ export class NarrateRuntimeController {
         }
     }
 
-    /** 统计 .ops/signals.jsonl 未消费信号条数 */
-    async countPendingSignals(): Promise<number> {
-        const bookRoot = this.bookRoot;
-        if (!bookRoot) return 0;
-        const raw = await readOptionalText(join(bookRoot, '.ops/signals.jsonl'));
-        const all = parseJsonLines(raw);
-        let cursor = await readSignalsCursor(bookRoot);
-        if (all.length < cursor) {
-            cursor = 0;
-            await writeSignalsCursor(bookRoot, 0);
-        }
-        this.signalsConsumedLines = cursor;
-        return all.length - cursor;
+    private runSignalSerialized<T>(bookRoot: string, fn: () => Promise<T>): Promise<T> {
+        const key = resolve(bookRoot);
+        const prev = this.signalQueues.get(key) ?? Promise.resolve();
+        const task = prev.then(fn, fn);
+        const settled = task.then(
+            () => undefined,
+            () => undefined
+        );
+        this.signalQueues.set(key, settled);
+        void settled.finally(() => {
+            if (this.signalQueues.get(key) === settled) {
+                this.signalQueues.delete(key);
+            }
+        });
+        return task;
     }
 
-    private async consumePendingSignals(): Promise<unknown[]> {
-        const bookRoot = this.bookRoot;
-        if (!bookRoot) return [];
+    /** 纯只读解析当前激活作品的信号列表与未消费切片（严禁触发任何磁盘写入） */
+    async listSignalsView(explicitBookRoot?: string): Promise<{
+        signals: unknown[];
+        pending: unknown[];
+        pendingCount: number;
+    }> {
+        const bookRoot = explicitBookRoot ?? this.bookRoot;
+        if (!bookRoot) {
+            return { signals: [], pending: [], pendingCount: 0 };
+        }
         const raw = await readOptionalText(join(bookRoot, '.ops/signals.jsonl'));
         const all = parseJsonLines(raw);
-        let cursor = await readSignalsCursor(bookRoot);
-        if (all.length < cursor) {
-            cursor = 0;
+        if (all.length === 0) {
+            return { signals: [], pending: [], pendingCount: 0 };
         }
-        const pending = all.slice(cursor);
-        this.signalsConsumedLines = all.length;
-        await writeSignalsCursor(bookRoot, all.length);
-        return pending;
+
+        const cursorState = await readSignalsCursorState(bookRoot);
+        const consumedIds = new Set<string>(cursorState.consumedIds);
+        if (
+            consumedIds.size === 0 &&
+            cursorState.consumedLines > 0 &&
+            cursorState.consumedLines <= all.length
+        ) {
+            for (let idx = 0; idx < cursorState.consumedLines; idx += 1) {
+                const item = all[idx];
+                if (item && typeof item === 'object' && !('raw' in item)) {
+                    consumedIds.add(resolveSignalId(item as Record<string, unknown>));
+                }
+            }
+        }
+
+        const pending = all.filter((item) => {
+            if (!item || typeof item !== 'object' || 'raw' in item) {
+                return false;
+            }
+            const id = resolveSignalId(item as Record<string, unknown>);
+            return !consumedIds.has(id);
+        });
+
+        return {
+            signals: all,
+            pending,
+            pendingCount: pending.length
+        };
+    }
+
+    /** 统计 .ops/signals.jsonl 未消费信号条数（100% 纯只读零写盘） */
+    async countPendingSignals(): Promise<number> {
+        const view = await this.listSignalsView();
+        return view.pendingCount;
+    }
+
+    private async onBookSwitchedSync(nextBookRoot: string): Promise<void> {
+        this.telemetryOffsetLines = 0;
+        const cursorState = await readSignalsCursorState(nextBookRoot);
+        this.signalsConsumedLines = cursorState.consumedLines;
+        this.activeStageSessions.clear();
+        this.lastWriterAssemblyReport = null;
+        this.lastCheckerResult = null;
+        this.currentFactCheckerFilteredOutCount = 0;
+
+        this.emitEvent('book_switched', {
+            bookRoot: nextBookRoot,
+            timestamp: new Date().toISOString()
+        });
     }
 
     private async switchBookInternal(nextBookRoot: string): Promise<BookStore> {
+        this.bookSwitchHandledByEvent = false;
         const switched = await this.storeService.switchBook(nextBookRoot);
-        this.telemetryOffsetLines = 0;
-        this.signalsConsumedLines = await readSignalsCursor(switched.bookRoot);
-        this.activeStageSessions.clear();
-
-        this.emitEvent('book_switched', {
-            bookRoot: switched.bookRoot,
-            timestamp: new Date().toISOString()
-        });
+        if (!this.bookSwitchHandledByEvent) {
+            await this.onBookSwitchedSync(switched.bookRoot);
+        }
         return switched;
     }
 
@@ -567,125 +754,143 @@ export class NarrateRuntimeController {
 
     /**
      * 读取指定 sessionId 的阶段运行实时/历史明细：
-     * 1. 优先读取 RoleRunner 内存活跃会话明细与 live agent session 快照；
-     * 2. 回退读取持久化文件 .ops/session_logs/<sessionId>.json；
-     * 3. 兜底回查 .ops/runs.jsonl 元数据（若存在）。
+     * 1. 显式传入当前激活 bookRoot 调用 RoleRunner.getSessionDetail(sessionId, bookRoot)；
+     * 2. 兼容旧数组格式 .ops/session_logs/<sessionId>.json 与原始 DSH 事件映射；
+     * 3. 兜底回查当前 bookRoot 的 .ops/runs.jsonl 元数据。
      */
-    async getSessionDetail(sessionId: string): Promise<StageSessionDetail | null> {
+    async getSessionDetail(
+        sessionId: string,
+        explicitBookRoot?: string
+    ): Promise<StageSessionDetail | null> {
         if (!/^[a-zA-Z0-9_.-]+$/.test(sessionId)) {
             throw new PathValidationError('非法的 sessionId 格式');
         }
 
-        const liveDetail = this.roleRunner.getLiveSessionDetail(sessionId);
-        if (liveDetail) {
-            return liveDetail;
+        const bookRoot = explicitBookRoot ?? this.bookRoot ?? undefined;
+        if (!bookRoot) {
+            return null;
         }
 
-        const bookRoot = this.bookRoot;
-        if (bookRoot) {
-            const logRaw = await readOptionalText(
-                join(bookRoot, '.ops/session_logs', `${sessionId}.json`)
-            );
-            if (logRaw !== null) {
-                try {
-                    const parsed: unknown = JSON.parse(logRaw);
-                    if (Array.isArray(parsed)) {
-                        const runs = await this.listRunRecords();
-                        const matchedRun = [...runs]
-                            .reverse()
-                            .find((r) => r.sessionId === sessionId);
-                        return {
-                            sessionId,
-                            ...(matchedRun?.runId ? { runId: matchedRun.runId } : {}),
-                            ...(matchedRun?.stage ? { stage: matchedRun.stage } : {}),
-                            ...(matchedRun?.role ? { role: matchedRun.role } : {}),
-                            ...(matchedRun?.chapter !== undefined
-                                ? { chapter: matchedRun.chapter }
-                                : {}),
-                            status: matchedRun?.status ?? 'completed',
-                            live: false,
-                            events: mapRawSessionEventsToItems(
-                                parsed,
-                                matchedRun?.startedAt ?? new Date(0).toISOString()
-                            )
-                        };
-                    }
-                    if (parsed && typeof parsed === 'object') {
-                        const obj = parsed as StageSessionDetail & { events?: unknown[] };
-                        if (
-                            Array.isArray(obj.events) &&
-                            obj.events.some(
-                                (ev) =>
-                                    ev &&
-                                    typeof ev === 'object' &&
-                                    !('kind' in ev) &&
-                                    'type' in ev
-                            )
-                        ) {
-                            return {
-                                ...obj,
-                                events: mapRawSessionEventsToItems(
-                                    obj.events,
-                                    new Date(0).toISOString()
-                                )
-                            };
-                        }
-                        return obj;
-                    }
-                } catch {
-                    // 损坏日志回退检查其他来源
-                }
-            }
-
-            const runs = await this.listRunRecords();
-            const matched = [...runs].reverse().find((r) => r.sessionId === sessionId);
-            if (matched) {
-                let events: StageSessionEventItem[] = [];
-                // 若宿主仍保有实时/历史 session，尝试从 ctx.agents 读取事件快照
-                try {
-                    const liveAgent = (
-                        this.ctx as unknown as {
-                            agents?: { get?: (id: string) => { session?: { snapshotEvents?: () => unknown[] } } };
-                        }
-                    ).agents?.get?.(sessionId);
-                    const snap = liveAgent?.session?.snapshotEvents?.();
-                    if (Array.isArray(snap)) {
-                        events = mapRawSessionEventsToItems(snap, matched.startedAt);
-                    }
-                } catch {
-                    // 忽略无实时句柄
-                }
+        const runnerDetail = await this.roleRunner.getSessionDetail(sessionId, bookRoot);
+        if (
+            runnerDetail &&
+            typeof runnerDetail.sessionId === 'string' &&
+            Array.isArray(runnerDetail.events)
+        ) {
+            if (
+                runnerDetail.events.some(
+                    (ev) =>
+                        ev &&
+                        typeof ev === 'object' &&
+                        !('kind' in ev) &&
+                        'type' in ev
+                )
+            ) {
                 return {
-                    sessionId: matched.sessionId,
-                    runId: matched.runId,
-                    stage: matched.stage,
-                    role: matched.role,
-                    chapter: matched.chapter,
-                    status: matched.status,
-                    ...(matched.parentSessionId
-                        ? { parentSessionId: matched.parentSessionId }
-                        : {}),
-                    ...(matched.mode ? { mode: matched.mode } : {}),
-                    ...(matched.attempt !== undefined ? { attempt: matched.attempt } : {}),
-                    ...(matched.triggerReason ? { triggerReason: matched.triggerReason } : {}),
-                    live: matched.status === 'running',
-                    events
+                    ...runnerDetail,
+                    events: mapRawSessionEventsToItems(
+                        runnerDetail.events,
+                        runnerDetail.startedAt ?? new Date(0).toISOString()
+                    )
                 };
             }
+            return runnerDetail;
+        }
+
+        const logRaw = await readOptionalText(
+            join(bookRoot, '.ops/session_logs', `${sessionId}.json`)
+        );
+        if (logRaw !== null) {
+            try {
+                const parsed: unknown = JSON.parse(logRaw);
+                if (Array.isArray(parsed)) {
+                    const runs = await this.listRunRecords();
+                    const matchedRun = [...runs]
+                        .reverse()
+                        .find((r) => r.sessionId === sessionId);
+                    return {
+                        sessionId,
+                        ...(matchedRun?.runId ? { runId: matchedRun.runId } : {}),
+                        ...(matchedRun?.stage ? { stage: matchedRun.stage } : {}),
+                        ...(matchedRun?.role ? { role: matchedRun.role } : {}),
+                        ...(matchedRun?.chapter !== undefined
+                            ? { chapter: matchedRun.chapter }
+                            : {}),
+                        status: matchedRun?.status ?? 'completed',
+                        live: false,
+                        events: mapRawSessionEventsToItems(
+                            parsed,
+                            matchedRun?.startedAt ?? new Date(0).toISOString()
+                        )
+                    };
+                }
+            } catch {
+                // 损坏日志回退检查 runs.jsonl
+            }
+        }
+
+        const runs = await this.listRunRecords();
+        const matched = [...runs].reverse().find((r) => r.sessionId === sessionId);
+        if (matched) {
+            let events: StageSessionEventItem[] = [];
+            try {
+                const liveAgent = (
+                    this.ctx as unknown as {
+                        agents?: {
+                            get?: (id: string) => { session?: { snapshotEvents?: () => unknown[] } };
+                        };
+                    }
+                ).agents?.get?.(sessionId);
+                const snap = liveAgent?.session?.snapshotEvents?.();
+                if (Array.isArray(snap)) {
+                    events = mapRawSessionEventsToItems(snap, matched.startedAt);
+                }
+            } catch {
+                // 忽略无实时句柄
+            }
+            return {
+                sessionId: matched.sessionId,
+                runId: matched.runId,
+                stage: matched.stage,
+                role: matched.role,
+                chapter: matched.chapter,
+                status: matched.status,
+                ...(matched.parentSessionId
+                    ? { parentSessionId: matched.parentSessionId }
+                    : {}),
+                ...(matched.mode ? { mode: matched.mode } : {}),
+                ...(matched.attempt !== undefined ? { attempt: matched.attempt } : {}),
+                ...(matched.triggerReason ? { triggerReason: matched.triggerReason } : {}),
+                live: matched.status === 'running',
+                events
+            };
         }
 
         return null;
     }
 
-    /** 创建单章生产管线实例 */
+    /** 创建单章生产管线实例（合并引擎插件搜索目录与当前作品 plugins/ 目录） */
     private createChapterPipeline(store: BookStore): ChapterPipeline {
+        const searchDirs = Array.from(
+            new Set([...this.pluginSearchDirs, join(store.bookRoot, 'plugins')])
+        );
         return new ChapterPipeline({
             store,
             roleRunner: this.roleRunner,
             roleLoader: this.roleLoader,
             llm: this.llmAdapter,
             system: this.system,
-            pluginSearchDirs: this.pluginSearchDirs
+            pluginSearchDirs: searchDirs
+        });
+    }
+
+    /** 创建手稿增量同步管线实例 */
+    private createSyncPipeline(store: BookStore): SyncPipeline {
+        return new SyncPipeline({
+            store,
+            llm: this.llmAdapter,
+            system: this.system,
+            roleRunner: this.roleRunner
         });
     }
 
@@ -732,110 +937,238 @@ export class NarrateRuntimeController {
         });
     };
 
+    /** 读取未显式提供目标时的默认/延续方向（优先衔接 .ops/next_chapter_options.json） */
+    private async resolveEffectiveChapterGoal(
+        store: BookStore,
+        rawGoal?: string
+    ): Promise<string> {
+        const trimmed = rawGoal?.trim() ?? '';
+        if (trimmed.length > 0 && trimmed !== DEFAULT_YOLO_GOAL) {
+            return trimmed;
+        }
+        try {
+            const [txState, nextOpts] = await Promise.all([
+                store.readTxState(),
+                readNextChapterOptions(store.bookRoot)
+            ]);
+            if (
+                nextOpts &&
+                nextOpts.options.length > 0 &&
+                (nextOpts.source_chapter === txState.last_committed_ch ||
+                    nextOpts.source_chapter === 0)
+            ) {
+                const primary = nextOpts.options[0]!;
+                if (nextOpts.options.length === 1) {
+                    return primary;
+                }
+                const restText = nextOpts.options
+                    .slice(1)
+                    .map((opt, idx) => `${idx + 2}. ${opt}`)
+                    .join('\n');
+                return `${primary}\n\n[其余延续候选方向]\n${restText}`;
+            }
+        } catch {
+            // 候选方向缺失或解析失败时安全回退默认目标
+        }
+        return trimmed.length > 0 ? trimmed : DEFAULT_YOLO_GOAL;
+    }
+
+    /** 检查第 1 章校准是否已被确认（.ops/opening_calibration.json confirmed === true） */
+    private async isOpeningCalibrationConfirmed(bookRoot: string): Promise<boolean> {
+        const raw = await readOptionalText(join(bookRoot, '.ops/opening_calibration.json'));
+        if (raw === null) return false;
+        try {
+            const parsed = JSON.parse(raw) as { confirmed?: unknown };
+            return parsed.confirmed === true;
+        } catch {
+            return false;
+        }
+    }
+
     /** 执行单章推进（同步等待完成） */
     async stepChapter(
-        options: StepChapterOptions,
-        fromYolo = false
+        options: StepChapterInputOptions,
+        context: boolean | { fromYolo?: boolean | undefined; fromHeal?: boolean | undefined } = false
     ): Promise<StepChapterResult> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
+        const fromYolo = typeof context === 'boolean' ? context : context.fromYolo === true;
+        const fromHeal = typeof context === 'object' && context.fromHeal === true;
 
-        return await this.runExclusiveTask(
-            'STEPPING',
-            async (signal) => {
-                this.activeStageSessions.clear();
-                this.emitEvent('chapter:phase', {
-                    phase: 'STARTING',
-                    chapterNumber: options.chapterNumber ?? null,
-                    chapterGoal: options.chapterGoal
+        const runCore = async (signal: AbortSignal): Promise<StepChapterResult> => {
+            const effectiveGoal = await this.resolveEffectiveChapterGoal(store, options.chapterGoal);
+            this.activeStageSessions.clear();
+            this.emitEvent('chapter:phase', {
+                phase: 'STARTING',
+                chapterNumber: options.chapterNumber ?? null,
+                chapterGoal: effectiveGoal
+            });
+
+            let emittedGateInChapter = false;
+            let emittedCheckerInChapter = false;
+            this.currentFactCheckerFilteredOutCount = 0;
+
+            const pipeline = this.createChapterPipeline(store);
+            try {
+                const resData = await pipeline.stepChapter({
+                    ...options,
+                    chapterGoal: effectiveGoal,
+                    signal: options.signal ?? signal,
+                    onStageSession: (evt) => {
+                        this.handleStageSession(evt);
+                        options.onStageSession?.(evt);
+                    },
+                    onWriterAssembled: (report) => {
+                        this.lastWriterAssemblyReport = report;
+                        options.onWriterAssembled?.(report);
+                    },
+                    onGateResult: (gateEvt) => {
+                        emittedGateInChapter = true;
+                        this.emitEvent('gate:result', {
+                            chapter: gateEvt.chapter,
+                            passed: gateEvt.passed,
+                            clicheDensityPer1k: gateEvt.metrics?.clicheDensityPer1k,
+                            mattr500: gateEvt.metrics?.mattr500,
+                            kontoyiannisEntropy: gateEvt.metrics?.kontoyiannisEntropy,
+                            kontoyiannisHk: gateEvt.metrics?.kontoyiannisEntropy,
+                            sentenceLengthCv: gateEvt.metrics?.sentenceLengthCv,
+                            recommendedAction: gateEvt.recommendedAction,
+                            violations: gateEvt.violations.map((v) => ({
+                                rule: v.ruleId,
+                                ruleId: v.ruleId,
+                                detail: v.message,
+                                message: v.message,
+                                line: v.line,
+                                column: v.column,
+                                paragraphIndex: v.paragraphIndex,
+                                patched: false
+                            }))
+                        });
+                        options.onGateResult?.(gateEvt);
+                    },
+                    onCheckerResult: (checkerEvt) => {
+                        emittedCheckerInChapter = true;
+                        const filteredOutCount = this.currentFactCheckerFilteredOutCount;
+                        this.currentFactCheckerFilteredOutCount = 0;
+                        const checkerPayload = {
+                            chapter: checkerEvt.chapter,
+                            passed: checkerEvt.passed,
+                            issueCount: checkerEvt.issueCount,
+                            issues: checkerEvt.issues,
+                            filteredOutCount,
+                            replanCount: checkerEvt.replanCount,
+                            rewriteCount: checkerEvt.rewriteCount,
+                            patchRounds: checkerEvt.patchRounds
+                        };
+                        this.lastCheckerResult = checkerPayload;
+                        this.emitEvent('checker:result', checkerPayload);
+                        options.onCheckerResult?.(checkerEvt);
+                    },
+                    onProgress: (evt) => {
+                        if (this.yoloState.running) {
+                            this.yoloState.currentStage = evt.stage;
+                        }
+                        if (!evt.activeSessionId) {
+                            // 进入新一轮子调用前清理同阶段上一轮残留会话，避免在 onStageSession 到达前误绑旧 sessionId
+                            this.activeStageSessions.delete(evt.stage);
+                        }
+                        const sessionEvt = this.activeStageSessions.get(evt.stage);
+                        const activeSessionId =
+                            evt.activeSessionId ?? sessionEvt?.sessionId;
+                        const runId = evt.runId ?? sessionEvt?.runId;
+                        const attempt = sessionEvt?.attempt;
+                        const triggerReason = sessionEvt?.triggerReason;
+
+                        this.emitEvent('stage', {
+                            stage: evt.stage,
+                            chapterNumber: evt.chapterNumber,
+                            message: evt.message,
+                            timestamp: evt.timestamp,
+                            ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
+                            ...(runId ? { runId } : {}),
+                            ...(attempt !== undefined ? { attempt } : {}),
+                            ...(triggerReason ? { triggerReason } : {})
+                        });
+                        this.emitEvent('chapter:phase', {
+                            phase: evt.stage,
+                            chapterNumber: evt.chapterNumber,
+                            message: evt.message,
+                            ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
+                            ...(runId ? { runId } : {}),
+                            ...(attempt !== undefined ? { attempt } : {}),
+                            ...(triggerReason ? { triggerReason } : {})
+                        });
+                        options.onProgress?.({
+                            ...evt,
+                            ...(activeSessionId ? { activeSessionId } : {}),
+                            ...(runId ? { runId } : {})
+                        });
+                    }
                 });
 
-                const pipeline = this.createChapterPipeline(store);
-                try {
-                    const resData = await pipeline.stepChapter({
-                        ...options,
-                        signal: options.signal ?? signal,
-                        onStageSession: (evt) => {
-                            this.handleStageSession(evt);
-                            options.onStageSession?.(evt);
-                        },
-                        onProgress: (evt) => {
-                            if (this.yoloState.running) {
-                                this.yoloState.currentStage = evt.stage;
-                            }
-                            if (!evt.activeSessionId) {
-                                // 进入新一轮子调用前清理同阶段上一轮残留会话，避免在 onStageSession 到达前误绑旧 sessionId
-                                this.activeStageSessions.delete(evt.stage);
-                            }
-                            const sessionEvt = this.activeStageSessions.get(evt.stage);
-                            const activeSessionId =
-                                evt.activeSessionId ?? sessionEvt?.sessionId;
-                            const runId = evt.runId ?? sessionEvt?.runId;
-                            const attempt = sessionEvt?.attempt;
-                            const triggerReason = sessionEvt?.triggerReason;
-
-                            this.emitEvent('stage', {
-                                stage: evt.stage,
-                                chapterNumber: evt.chapterNumber,
-                                message: evt.message,
-                                timestamp: evt.timestamp,
-                                ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
-                                ...(runId ? { runId } : {}),
-                                ...(attempt !== undefined ? { attempt } : {}),
-                                ...(triggerReason ? { triggerReason } : {})
-                            });
-                            this.emitEvent('chapter:phase', {
-                                phase: evt.stage,
-                                chapterNumber: evt.chapterNumber,
-                                message: evt.message,
-                                ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
-                                ...(runId ? { runId } : {}),
-                                ...(attempt !== undefined ? { attempt } : {}),
-                                ...(triggerReason ? { triggerReason } : {})
-                            });
-                            options.onProgress?.({
-                                ...evt,
-                                ...(activeSessionId ? { activeSessionId } : {}),
-                                ...(runId ? { runId } : {})
-                            });
-                        }
-                    });
-
+                if (resData.writerAssemblyReport) {
+                    this.lastWriterAssemblyReport = resData.writerAssemblyReport;
+                }
+                if (!emittedGateInChapter) {
                     this.emitEvent('gate:result', {
                         chapter: resData.chapterNumber,
+                        passed: true,
                         clicheDensityPer1k: resData.telemetry.clicheDensityPer1k,
                         mattr500: resData.telemetry.mattr500,
-                        sentenceLengthCv: resData.telemetry.sentenceLengthCv
+                        kontoyiannisEntropy: resData.telemetry.kontoyiannisEntropy,
+                        kontoyiannisHk: resData.telemetry.kontoyiannisEntropy,
+                        sentenceLengthCv: resData.telemetry.sentenceLengthCv,
+                        violations: []
                     });
-                    this.emitEvent('checker:result', {
+                }
+                if (!emittedCheckerInChapter) {
+                    const filteredOutCount = this.currentFactCheckerFilteredOutCount;
+                    this.currentFactCheckerFilteredOutCount = 0;
+                    const fallbackChecker = {
                         chapter: resData.chapterNumber,
+                        passed: true,
+                        issueCount: 0,
+                        issues: [] as FactCheckIssue[],
+                        filteredOutCount,
                         replanCount: resData.replanCount,
                         rewriteCount: resData.rewriteCount,
                         patchRounds: resData.patchRounds
-                    });
-                    this.emitEvent('chapter:phase', {
-                        phase: 'COMMITTED',
-                        chapterNumber: resData.chapterNumber,
-                        manuscriptPath: resData.manuscriptPath,
-                        featCommitSha: resData.featCommitSha,
-                        stateCommitSha: resData.stateCommitSha
-                    });
-                    await this.flushTelemetryEvents();
-                    this.signalsConsumedLines = await readSignalsCursor(store.bookRoot);
-                    return resData;
-                } catch (err) {
-                    this.emitEvent('chapter:phase', {
-                        phase: 'FAILED',
-                        error: err instanceof Error ? err.message : String(err)
-                    });
-                    throw err;
+                    };
+                    this.lastCheckerResult = fallbackChecker;
+                    this.emitEvent('checker:result', fallbackChecker);
                 }
-            },
-            { allowDuringYolo: fromYolo }
-        );
+                this.emitEvent('chapter:phase', {
+                    phase: 'COMMITTED',
+                    chapterNumber: resData.chapterNumber,
+                    manuscriptPath: resData.manuscriptPath,
+                    featCommitSha: resData.featCommitSha,
+                    stateCommitSha: resData.stateCommitSha,
+                    ...(resData.writerAssemblyReport
+                        ? { writerAssemblyReport: resData.writerAssemblyReport }
+                        : {})
+                });
+                await this.flushTelemetryEvents();
+                const cursorState = await readSignalsCursorState(store.bookRoot);
+                this.signalsConsumedLines = cursorState.consumedLines;
+                return resData;
+            } catch (err) {
+                this.emitEvent('chapter:phase', {
+                    phase: 'FAILED',
+                    error: err instanceof Error ? err.message : String(err)
+                });
+                throw err;
+            }
+        };
+
+        if (fromHeal) {
+            const healSignal = options.signal ?? this.activeAbortController?.signal ?? new AbortController().signal;
+            return await runCore(healSignal);
+        }
+
+        return await this.runExclusiveTask('STEPPING', runCore, { allowDuringYolo: fromYolo });
     }
 
-    /** 启动 YOLO 连跑 */
+    /** 启动 YOLO 连跑（在任何 await 前同步原子预占运行锁与代数令牌） */
     async startYolo(options: {
         targetChapters?: number | undefined;
         defaultGoal?: string | undefined;
@@ -856,8 +1189,9 @@ export class NarrateRuntimeController {
             throw new TaskConflictError('已有任务或 YOLO 连跑正在执行中');
         }
 
-        await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止启动 YOLO 连跑');
-
+        // 在任何 await 前同步预占锁并递增代数令牌，杜绝双击并发穿透与清理竞态
+        this.yoloGeneration += 1;
+        const currentGen = this.yoloGeneration;
         this.haltRequested = false;
         this.yoloState.running = true;
         this.yoloState.stopRequested = false;
@@ -865,7 +1199,20 @@ export class NarrateRuntimeController {
         this.yoloState.targetChapters = targetChapters;
         this.yoloState.currentStage = 'STARTING';
 
-        this.yoloState.loopPromise = this.runYoloLoop(targetChapters, defaultGoal);
+        try {
+            await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止启动 YOLO 连跑');
+            this.assertAdmissionOpen();
+        } catch (err) {
+            if (this.yoloGeneration === currentGen) {
+                this.yoloState.running = false;
+                this.yoloState.stopRequested = false;
+                this.yoloState.currentStage = null;
+                this.yoloState.loopPromise = null;
+            }
+            throw err;
+        }
+
+        this.yoloState.loopPromise = this.runYoloLoop(targetChapters, defaultGoal, currentGen);
 
         return {
             status: 'STARTED',
@@ -874,31 +1221,21 @@ export class NarrateRuntimeController {
         };
     }
 
-    private async runYoloLoop(targetChapters: number, defaultGoal: string): Promise<void> {
-        let lastNextChapterOptions: string[] = [];
+    private async runYoloLoop(
+        targetChapters: number,
+        defaultGoal: string,
+        currentGen: number
+    ): Promise<void> {
         try {
             while (
                 !this.yoloState.stopRequested &&
                 !this.shuttingDown &&
+                !this.haltRequested &&
                 (targetChapters === 0 || this.yoloState.completedChapters < targetChapters)
             ) {
-                const pendingSignals = await this.consumePendingSignals();
-                let chapterGoal = defaultGoal;
-                if (defaultGoal === DEFAULT_YOLO_GOAL && lastNextChapterOptions.length > 0) {
-                    const optionsText = lastNextChapterOptions
-                        .map((opt, idx) => `${idx + 1}. ${opt}`)
-                        .join('\n');
-                    chapterGoal = `${defaultGoal}\n\n[上章延续候选方向（请择优展开其一）]\n${optionsText}`;
-                }
-                if (pendingSignals.length > 0) {
-                    const summary = pendingSignals.map((s) => JSON.stringify(s)).join('; ');
-                    chapterGoal = `${chapterGoal}\n\n[待响应运维信号] ${summary}`;
-                }
-
+                const store = this.requireBookStore();
+                const chapterGoal = await this.resolveEffectiveChapterGoal(store, defaultGoal);
                 const stepRes = await this.stepChapter({ chapterGoal }, true);
-                lastNextChapterOptions = Array.isArray(stepRes.nextChapterOptions)
-                    ? stepRes.nextChapterOptions
-                    : [];
                 this.yoloState.completedChapters += 1;
 
                 if (
@@ -906,6 +1243,9 @@ export class NarrateRuntimeController {
                     this.shuttingDown ||
                     this.haltRequested
                 ) {
+                    if (!this.shuttingDown) {
+                        this.haltRequested = false;
+                    }
                     this.emitEvent('yolo_halted', {
                         reason: 'STOP_REQUESTED',
                         completedChapters: this.yoloState.completedChapters,
@@ -914,21 +1254,52 @@ export class NarrateRuntimeController {
                     return;
                 }
 
+                // Q2: opening.pause_after_chapter_1 为 true 且首章尚未确认校准时，在章末安全点优雅停机
+                if (stepRes.chapterNumber === 1) {
+                    const bookConfig = await store.readBookConfig();
+                    const calibrationConfirmed = await this.isOpeningCalibrationConfirmed(
+                        store.bookRoot
+                    );
+                    if (bookConfig.opening?.pause_after_chapter_1 === true && !calibrationConfirmed) {
+                        this.yoloState.stopRequested = true;
+                        this.emitEvent('yolo_halted', {
+                            reason: 'PAUSE_AFTER_CHAPTER_1',
+                            chapterNumber: 1,
+                            completedChapters: this.yoloState.completedChapters,
+                            message: '第 1 章已定稿，按 opening.pause_after_chapter_1 配置停机等待作者检阅校准',
+                            timestamp: new Date().toISOString()
+                        });
+                        return;
+                    }
+                }
+
                 this.yoloState.currentStage = 'DREAMING';
-                const dreamRes = await this.runDreaming(
+                await this.runDreaming(
                     { currentChapter: stepRes.chapterNumber },
                     true
                 );
-                if (!dreamRes.skipped) {
-                    this.emitEvent('dream:completed', {
-                        skipped: dreamRes.skipped,
-                        committedPaths: dreamRes.committedPaths,
-                        spotlightTriggerCount: dreamRes.spotlightTriggerCount
+
+                if (
+                    this.yoloState.stopRequested ||
+                    this.shuttingDown ||
+                    this.haltRequested
+                ) {
+                    if (!this.shuttingDown) {
+                        this.haltRequested = false;
+                    }
+                    this.emitEvent('yolo_halted', {
+                        reason: 'STOP_REQUESTED',
+                        completedChapters: this.yoloState.completedChapters,
+                        timestamp: new Date().toISOString()
                     });
+                    return;
                 }
             }
 
             if (this.yoloState.stopRequested || this.haltRequested) {
+                if (!this.shuttingDown) {
+                    this.haltRequested = false;
+                }
                 this.emitEvent('yolo_halted', {
                     reason: 'STOP_REQUESTED',
                     completedChapters: this.yoloState.completedChapters,
@@ -949,9 +1320,11 @@ export class NarrateRuntimeController {
                 timestamp: new Date().toISOString()
             });
         } finally {
-            this.yoloState.running = false;
-            this.yoloState.currentStage = null;
-            this.yoloState.loopPromise = null;
+            if (this.yoloGeneration === currentGen) {
+                this.yoloState.running = false;
+                this.yoloState.currentStage = null;
+                this.yoloState.loopPromise = null;
+            }
         }
     }
 
@@ -977,6 +1350,44 @@ export class NarrateRuntimeController {
         };
     }
 
+    private async persistSyncStateDiffAdvisories(
+        bookRoot: string,
+        syncRes: SyncManuscriptsResult
+    ): Promise<void> {
+        const advisories = syncRes.stateDiffAdvisories ?? [];
+        const filePath = join(bookRoot, '.ops/sync_conflicts.json');
+        const raw = await readOptionalText(filePath);
+        if (raw === null && advisories.length === 0) {
+            return;
+        }
+        let existing: Record<string, unknown> = {};
+        if (raw !== null && raw.trim().length > 0) {
+            try {
+                const parsed = JSON.parse(raw) as unknown;
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    existing = parsed as Record<string, unknown>;
+                }
+            } catch {
+                existing = {};
+            }
+        }
+        const merged = {
+            updatedAt:
+                typeof existing['updatedAt'] === 'string'
+                    ? existing['updatedAt']
+                    : new Date().toISOString(),
+            dirtyChapters: Array.isArray(existing['dirtyChapters'])
+                ? existing['dirtyChapters']
+                : syncRes.dirtyChapters.map((d) => d.chapterNumber),
+            conflicts: Array.isArray(existing['conflicts'])
+                ? existing['conflicts']
+                : syncRes.downstreamConflicts,
+            stateDiffAdvisories: advisories
+        };
+        await mkdir(join(bookRoot, '.ops'), { recursive: true });
+        await writeFile(filePath, `${JSON.stringify(merged, null, 4)}\n`, 'utf8');
+    }
+
     /** 手稿真源增量同步 (Sync) */
     async syncManuscripts(
         options: SyncManuscriptsOptions = {}
@@ -989,18 +1400,16 @@ export class NarrateRuntimeController {
 
         return await this.runExclusiveTask('SYNCING', async (signal) => {
             this.emitEvent('sync:started', { timestamp: new Date().toISOString() });
-            const syncPipeline = new SyncPipeline({
-                store,
-                llm: this.llmAdapter,
-                system: this.system
-            });
+            const syncPipeline = this.createSyncPipeline(store);
             const syncRes = await syncPipeline.syncManuscripts({
                 signal: options.signal ?? signal
             });
+            await this.persistSyncStateDiffAdvisories(store.bookRoot, syncRes);
             this.emitEvent('sync:completed', {
                 status: syncRes.status,
                 dirtyChapters: syncRes.dirtyChapters.length,
-                downstreamConflicts: syncRes.downstreamConflicts.length
+                downstreamConflicts: syncRes.downstreamConflicts.length,
+                stateDiffAdvisories: syncRes.stateDiffAdvisories ?? []
             });
             return syncRes;
         });
@@ -1051,17 +1460,15 @@ export class NarrateRuntimeController {
                     timestamp: new Date().toISOString()
                 });
 
-                const syncPipeline = new SyncPipeline({
-                    store,
-                    llm: this.llmAdapter,
-                    system: this.system
-                });
+                const syncPipeline = this.createSyncPipeline(store);
                 const result = await syncPipeline.syncManuscripts({ signal });
+                await this.persistSyncStateDiffAdvisories(bookRoot, result);
                 this.emitEvent('chapter_synced', {
                     chapterNumber,
                     status: result.status,
                     dirtyChapters: result.dirtyChapters.length,
                     downstreamConflicts: result.downstreamConflicts.length,
+                    stateDiffAdvisories: result.stateDiffAdvisories ?? [],
                     timestamp: new Date().toISOString()
                 });
                 await rm(backupPath, { force: true });
@@ -1108,19 +1515,228 @@ export class NarrateRuntimeController {
         );
     }
 
-    /** 触发三级跨章自愈 */
+    private async rerunFromHealPlan(
+        store: BookStore,
+        plan: HealPlan,
+        effectiveSignal: AbortSignal
+    ): Promise<void> {
+        const startChapter = plan.nextChapter;
+        const endChapter = Math.max(startChapter, plan.toChapter);
+
+        for (let ch = startChapter; ch <= endChapter; ch += 1) {
+            if (this.haltRequested || this.shuttingDown || effectiveSignal.aborted) {
+                await writeHealPlan(store.bookRoot, {
+                    conflictId: plan.conflictId,
+                    backupTag: plan.backupTag,
+                    fromChapter: plan.fromChapter,
+                    toChapter: plan.toChapter,
+                    nextChapter: ch,
+                    constraint: plan.constraint
+                });
+                if (!this.shuttingDown) {
+                    this.haltRequested = false;
+                }
+                const haltErr = new Error('HEAL_HALT_REQUESTED');
+                haltErr.name = 'AbortError';
+                throw haltErr;
+            }
+
+            const baseGoal = await this.resolveEffectiveChapterGoal(store);
+            const chapterGoal = `${baseGoal}\n\n[跨章自愈重跑约束 (${plan.conflictId})]\n${plan.constraint}`;
+            await this.stepChapter(
+                {
+                    chapterNumber: ch,
+                    chapterGoal,
+                    signal: effectiveSignal
+                },
+                { fromHeal: true }
+            );
+
+            await writeHealPlan(store.bookRoot, {
+                conflictId: plan.conflictId,
+                backupTag: plan.backupTag,
+                fromChapter: plan.fromChapter,
+                toChapter: plan.toChapter,
+                nextChapter: ch + 1,
+                constraint: plan.constraint
+            });
+        }
+
+        await clearHealPlan(store.bookRoot);
+    }
+
+    private async clearSyncConflictsFile(bookRoot: string): Promise<void> {
+        const filePath = join(bookRoot, '.ops/sync_conflicts.json');
+        const raw = await readOptionalText(filePath);
+        if (raw === null) return;
+        await writeFile(
+            filePath,
+            `${JSON.stringify(
+                {
+                    updatedAt: new Date().toISOString(),
+                    dirtyChapters: [],
+                    conflicts: []
+                },
+                null,
+                4
+            )}\n`,
+            'utf8'
+        );
+    }
+
+    private async executeHealCrossChapterConflictsInTask(
+        store: BookStore,
+        conflicts: SuspectedConflict[],
+        options: HealConflictsOptions,
+        signal: AbortSignal
+    ): Promise<HealConflictsResult> {
+        this.emitEvent('heal:started', {
+            conflictCount: conflicts.length,
+            timestamp: new Date().toISOString()
+        });
+        const pipeline = this.createDreamingPipeline(store);
+        const effectiveSignal = options.signal ?? signal;
+
+        const defaultOnAutoRerun: NonNullable<HealConflictsOptions['onAutoRerun']> = async (
+            ctx
+        ) => {
+            const diskPlan = await readHealPlan(store.bookRoot);
+            const effectivePlan: HealPlan = diskPlan ?? {
+                conflictId: ctx.conflict.conflictId,
+                backupTag: ctx.backupTag,
+                fromChapter: ctx.conflict.chapterB,
+                toChapter: ctx.conflict.chapterB,
+                nextChapter: ctx.conflict.chapterB,
+                constraint: ctx.constraint,
+                updatedAt: new Date().toISOString()
+            };
+            await this.rerunFromHealPlan(store, effectivePlan, effectiveSignal);
+            return { success: true, stillConflicting: false };
+        };
+
+        const res = await pipeline.healCrossChapterConflicts(conflicts, {
+            ...options,
+            onAutoRerun: options.onAutoRerun ?? defaultOnAutoRerun,
+            signal: effectiveSignal
+        });
+        this.emitEvent('heal:completed', {
+            resultCount: res.results.length,
+            quarantined: res.quarantined,
+            timestamp: new Date().toISOString()
+        });
+        return res;
+    }
+
+    /** 触发三级跨章自愈（默认挂载基于 .ops/heal_plan.json 的自动重跑闭环） */
     async healCrossChapterConflicts(
         conflicts: SuspectedConflict[],
         options: HealConflictsOptions = {}
     ): Promise<HealConflictsResult> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
+        return await this.runExclusiveTask('DREAMING', async (signal) =>
+            await this.executeHealCrossChapterConflictsInTask(store, conflicts, options, signal)
+        );
+    }
+
+    /** 从 .ops/heal_plan.json 断点或 .ops/sync_conflicts.json 读取并执行三级跨章自愈 */
+    async healFromSyncConflicts(
+        options: HealConflictsOptions = {}
+    ): Promise<HealConflictsResult> {
+        this.assertAdmissionOpen();
+        const store = this.requireBookStore();
         return await this.runExclusiveTask('DREAMING', async (signal) => {
-            const pipeline = this.createDreamingPipeline(store);
-            return await pipeline.healCrossChapterConflicts(conflicts, {
-                ...options,
-                signal: options.signal ?? signal
-            });
+            const effectiveSignal = options.signal ?? signal;
+            const pendingPlan = await readHealPlan(store.bookRoot);
+            if (pendingPlan && pendingPlan.nextChapter <= pendingPlan.toChapter) {
+                this.emitEvent('heal:started', {
+                    conflictCount: 1,
+                    resumedFromPlan: true,
+                    timestamp: new Date().toISOString()
+                });
+                await this.rerunFromHealPlan(store, pendingPlan, effectiveSignal);
+                await this.clearSyncConflictsFile(store.bookRoot);
+                const resumedRes: HealConflictsResult = {
+                    results: [
+                        {
+                            conflictId: pendingPlan.conflictId ?? 'heal-resume',
+                            action: 'AUTO_ROLLED_BACK_AND_RERUN',
+                            backupTag: pendingPlan.backupTag
+                        }
+                    ],
+                    quarantined: false,
+                    quarantineReport: null,
+                    usage: createEmptyUsage()
+                };
+                this.emitEvent('heal:completed', {
+                    resultCount: resumedRes.results.length,
+                    quarantined: false,
+                    resumedFromPlan: true,
+                    timestamp: new Date().toISOString()
+                });
+                return resumedRes;
+            }
+
+            const raw = await readOptionalText(join(store.bookRoot, '.ops/sync_conflicts.json'));
+            let conflicts: SuspectedConflict[] = [];
+            let fromDiskFile = false;
+
+            if (raw !== null) {
+                try {
+                    const parsed = JSON.parse(raw) as {
+                        dirtyChapters?: unknown;
+                        conflicts?: unknown;
+                    };
+                    const dirtyList = Array.isArray(parsed.dirtyChapters)
+                        ? parsed.dirtyChapters.filter((n): n is number => typeof n === 'number' && n > 0)
+                        : [];
+                    if (Array.isArray(parsed.conflicts)) {
+                        fromDiskFile = true;
+                        conflicts = parsed.conflicts.flatMap((rawItem, idx) => {
+                            if (!rawItem || typeof rawItem !== 'object') return [];
+                            const item = rawItem as DownstreamConflictReport;
+                            if (
+                                typeof item.chapterNumber !== 'number' ||
+                                typeof item.quote !== 'string' ||
+                                typeof item.description !== 'string'
+                            ) {
+                                return [];
+                            }
+                            const chapterA =
+                                typeof item.dirtyChapter === 'number' && item.dirtyChapter > 0
+                                    ? item.dirtyChapter
+                                    : (dirtyList[0] ?? 1);
+                            const quoteA =
+                                typeof item.dirtyQuote === 'string' && item.dirtyQuote.trim().length > 0
+                                    ? item.dirtyQuote
+                                    : item.quote;
+                            return [
+                                {
+                                    conflictId: `sync-${chapterA}-ch${item.chapterNumber}-${idx + 1}`,
+                                    chapterA,
+                                    quoteA,
+                                    chapterB: item.chapterNumber,
+                                    quoteB: item.quote,
+                                    description: item.description
+                                }
+                            ];
+                        });
+                    }
+                } catch {
+                    throw new PathValidationError('.ops/sync_conflicts.json 格式损坏，无法解析冲突清单');
+                }
+            }
+
+            const res = await this.executeHealCrossChapterConflictsInTask(
+                store,
+                conflicts,
+                options,
+                signal
+            );
+            if (fromDiskFile && !res.quarantined && conflicts.length > 0) {
+                await this.clearSyncConflictsFile(store.bookRoot);
+            }
+            return res;
         });
     }
 
@@ -1128,14 +1744,30 @@ export class NarrateRuntimeController {
     async harvestVoiceFromChapter(chapterNumber = 1): Promise<VoiceHarvestResult> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
-        return await this.runExclusiveTask('SYNCING', async (signal) =>
-            harvestVoiceFromChapter({
+        return await this.runExclusiveTask('SYNCING', async (signal) => {
+            const snapshot = await store.loadSnapshot();
+            const entityNames = Array.from(
+                new Set(
+                    Object.values(snapshot.entities).flatMap((profile) => [
+                        profile.metadata.canonical_name,
+                        ...profile.metadata.unique_aliases
+                    ])
+                )
+            );
+            return await harvestVoiceFromChapter({
                 store,
                 llm: this.llmAdapter,
+                system: this.system,
+                entityNames,
                 chapterNumber,
                 signal
-            })
-        );
+            });
+        });
+    }
+
+    /** harvestVoiceFromChapter 别名（向后兼容调用方命名） */
+    async harvestVoiceSamples(chapterNumber = 1): Promise<VoiceHarvestResult> {
+        return await this.harvestVoiceFromChapter(chapterNumber);
     }
 
     /** 执行五步原子换卷或封笔 */
@@ -1182,6 +1814,70 @@ export class NarrateRuntimeController {
         );
     }
 
+    private isDirectBootInput(
+        input: LockCharterAndBootInput | BootFromModalPayload
+    ): input is LockCharterAndBootInput {
+        return 'book_slug' in input;
+    }
+
+    private async assertBootTargetEmpty(targetRoot: string): Promise<void> {
+        try {
+            const entries = await readdir(targetRoot);
+            if (entries.length > 0) {
+                throw new TaskConflictError(`开书目标目录非空，禁止覆盖已有作品: ${targetRoot}`);
+            }
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
+            }
+        }
+    }
+
+    private async migrateBootStagingLogs(
+        bootStagingRoot: string,
+        targetBookRoot: string
+    ): Promise<void> {
+        const targetOpsDir = join(targetBookRoot, '.ops');
+        await mkdir(targetOpsDir, { recursive: true });
+
+        const stagingRunsRaw = await readOptionalText(join(bootStagingRoot, '.ops/runs.jsonl'));
+        if (stagingRunsRaw !== null && stagingRunsRaw.trim().length > 0) {
+            const normalizedLines = stagingRunsRaw
+                .split(/\r?\n/)
+                .map((l) => l.trim())
+                .filter((l) => l.length > 0);
+            if (normalizedLines.length > 0) {
+                const targetRunsPath = join(targetOpsDir, 'runs.jsonl');
+                const existingRuns = await readOptionalText(targetRunsPath);
+                const prefix =
+                    existingRuns !== null && existingRuns.length > 0 && !existingRuns.endsWith('\n')
+                        ? '\n'
+                        : '';
+                await appendFile(targetRunsPath, `${prefix}${normalizedLines.join('\n')}\n`, 'utf8');
+            }
+        }
+
+        const stagingLogsDir = join(bootStagingRoot, '.ops/session_logs');
+        try {
+            const logFiles = await readdir(stagingLogsDir);
+            if (logFiles.length > 0) {
+                const targetLogsDir = join(targetOpsDir, 'session_logs');
+                await mkdir(targetLogsDir, { recursive: true });
+                for (const fileName of logFiles) {
+                    if (!fileName.endsWith('.json')) continue;
+                    await copyFile(
+                        join(stagingLogsDir, fileName),
+                        join(targetLogsDir, fileName)
+                    );
+                }
+            }
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
+            }
+        }
+    }
+
     /** 开新书编译（支持直接传入 LockCharterAndBootInput 或 Modal 请求经 boot-compiler 编译） */
     async bootBook(
         input: LockCharterAndBootInput | BootFromModalPayload
@@ -1196,16 +1892,24 @@ export class NarrateRuntimeController {
 
         return await this.runExclusiveTask('BOOTING', async (signal) => {
             let bootRes: LockCharterAndBootResult;
-            if ('commitments' in input) {
+            if (this.isDirectBootInput(input)) {
+                const targetRoot = resolve(this.booksRoot, input.book_slug);
+                if (!isSubPath(this.booksRoot, targetRoot)) {
+                    throw new PathValidationError('禁止路径穿越');
+                }
+                await this.assertBootTargetEmpty(targetRoot);
                 bootRes = await this.toolsService.lockCharterAndBoot(input, {
                     booksRoot: this.booksRoot,
-                    system: this.system
+                    system: this.system,
+                    onBookBooted: undefined
                 });
             } else {
                 const targetRoot = resolve(this.booksRoot, input.slug);
                 if (!isSubPath(this.booksRoot, targetRoot)) {
                     throw new PathValidationError('禁止路径穿越');
                 }
+                // 在启动多轮 boot-compiler LLM 前先校验目标目录不存在或为空，零白费 Token
+                await this.assertBootTargetEmpty(targetRoot);
 
                 const roleCfg = await this.roleLoader.loadRoleConfig('boot-compiler');
                 const taskPrompt = [
@@ -1213,7 +1917,19 @@ export class NarrateRuntimeController {
                     `- 作品标识: ${input.slug}`,
                     `- 书名: ${input.title}`,
                     `- 初始主视角实体 ID: ${input.povCharacter}`,
+                    input.narrationSubjectivity
+                        ? `- 叙述人称主观度: ${input.narrationSubjectivity}`
+                        : '',
                     input.t0Anchor ? `- T0 原话现场锚点: ${input.t0Anchor}` : '',
+                    input.commitments && input.commitments.length > 0
+                        ? `- 核心创作承诺:\n${input.commitments.map((c) => `  - ${c}`).join('\n')}`
+                        : '',
+                    input.excludedCliches && input.excludedCliches.length > 0
+                        ? `- 已排除廉价套路:\n${input.excludedCliches.map((c) => `  - ${c}`).join('\n')}`
+                        : '',
+                    input.authorizationBoundary
+                        ? `- 授权边界: ${input.authorizationBoundary}`
+                        : '',
                     input.premiseOrSeed ? `- 核心创意与设定:\n${input.premiseOrSeed}` : '',
                     input.sourceMaterial ? `- 外部参考设定:\n${input.sourceMaterial}` : '',
                     '',
@@ -1222,7 +1938,7 @@ export class NarrateRuntimeController {
                     .filter(Boolean)
                     .join('\n');
 
-                // boot-compiler 在建库目录尚未存在时执行，暂存与运行索引在临时/booksRoot 上隔离运行
+                // boot-compiler 在建库目录尚未存在时执行，暂存与运行索引在临时目录隔离运行
                 const bootStagingRoot = resolve(this.booksRoot, `.boot-staging-${randomUUID()}`);
                 await mkdir(bootStagingRoot, { recursive: true });
                 try {
@@ -1231,6 +1947,9 @@ export class NarrateRuntimeController {
                         stage: 'BOOT_COMPILER',
                         chapterNumber: 0,
                         bookRoot: bootStagingRoot,
+                        ...(input.narrationSubjectivity !== undefined
+                            ? { narrationSubjectivity: input.narrationSubjectivity }
+                            : {}),
                         taskPrompt,
                         signal,
                         onStageSession: this.handleStageSession
@@ -1243,13 +1962,47 @@ export class NarrateRuntimeController {
                         );
                     }
 
+                    const resolvedT0Anchor =
+                        input.t0Anchor && input.t0Anchor.trim().length > 0
+                            ? input.t0Anchor.trim()
+                            : bundle.world_summary;
+                    const resolvedCommitments =
+                        input.commitments && input.commitments.length > 0
+                            ? input.commitments
+                            : [`核心叙事承诺：${bundle.world_summary}`];
+
                     bootRes = await this.toolsService.lockCharterAndBoot(
                         {
                             book_slug: input.slug,
                             title: input.title,
                             pov_character: input.povCharacter,
-                            t0_anchor: input.t0Anchor ?? bundle.world_summary,
-                            commitments: [`核心叙事承诺：${bundle.world_summary}`],
+                            t0_anchor: resolvedT0Anchor,
+                            commitments: resolvedCommitments,
+                            ...(input.excludedCliches && input.excludedCliches.length > 0
+                                ? { excluded_cliches: input.excludedCliches }
+                                : {}),
+                            ...(input.authorizationBoundary &&
+                            input.authorizationBoundary.trim().length > 0
+                                ? { authorization_boundary: input.authorizationBoundary.trim() }
+                                : {}),
+                            ...(input.narrationSubjectivity !== undefined
+                                ? { narration_subjectivity: input.narrationSubjectivity }
+                                : {}),
+                            ...(input.tokensPerChar !== undefined
+                                ? { tokens_per_char: input.tokensPerChar }
+                                : {}),
+                            ...(input.writerTokenBudget !== undefined
+                                ? { writer_token_budget: input.writerTokenBudget }
+                                : {}),
+                            ...(input.maxAutoRollbackChapters !== undefined
+                                ? { max_auto_rollback_chapters: input.maxAutoRollbackChapters }
+                                : {}),
+                            ...(input.craftPlugins !== undefined
+                                ? { craft_plugins: input.craftPlugins }
+                                : {}),
+                            ...(input.modelRouting !== undefined
+                                ? { model_routing: input.modelRouting }
+                                : {}),
                             stage_ceiling: bundle.stage_ceiling,
                             opening_sequence_beats: bundle.opening_sequence_beats,
                             unrevealed_pivots: bundle.unrevealed_pivots,
@@ -1266,20 +2019,24 @@ export class NarrateRuntimeController {
                         },
                         {
                             booksRoot: this.booksRoot,
-                            system: this.system
+                            system: this.system,
+                            onBookBooted: undefined
                         }
                     );
+
+                    await this.migrateBootStagingLogs(bootStagingRoot, bootRes.bookRoot);
                 } finally {
                     await rm(bootStagingRoot, { recursive: true, force: true }).catch(() => {});
                 }
             }
 
             await this.switchBookInternal(bootRes.bookRoot);
+            bootRes.switchedBook = true;
             return bootRes;
         });
     }
 
-    /** 投递微调信号到 .ops/signals.jsonl */
+    /** 投递微调信号到 .ops/signals.jsonl（按 bookRoot 串行互斥并自动赋予唯一 id） */
     async enqueueSignal(rawInput: Record<string, unknown>): Promise<OpsSignal> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
@@ -1315,8 +2072,14 @@ export class NarrateRuntimeController {
                   ? rawInput['target_chapter']
                   : defaultChapter;
 
+        const signalId =
+            typeof rawInput['id'] === 'string' && rawInput['id'].trim().length > 0
+                ? rawInput['id'].trim()
+                : `sig_${randomUUID()}`;
+
         const parsed = OpsSignalSchema.safeParse({
             ...rawInput,
+            id: signalId,
             type: normalizedType,
             reason,
             chapter,
@@ -1332,19 +2095,18 @@ export class NarrateRuntimeController {
         }
 
         const signalRecord = parsed.data;
-        const opsDir = join(bookRoot, '.ops');
-        await mkdir(opsDir, { recursive: true });
-        await appendFile(
-            join(opsDir, 'signals.jsonl'),
-            `${JSON.stringify(signalRecord)}\n`,
-            'utf8'
-        );
+        await this.runSignalSerialized(bookRoot, async () => {
+            await appendJsonlLineSafe(
+                join(bookRoot, '.ops/signals.jsonl'),
+                JSON.stringify(signalRecord)
+            );
+        });
 
         this.emitEvent('signal:received', signalRecord);
         return signalRecord;
     }
 
-    /** 撤回一条未消费信号 */
+    /** 撤回一条未消费信号（按 bookRoot 串行互斥并基于 consumedIds / 游标双重拦截） */
     async deleteSignal(
         createdAt: string,
         reason: string
@@ -1353,91 +2115,129 @@ export class NarrateRuntimeController {
         const store = this.requireBookStore();
         const bookRoot = store.bookRoot;
 
-        await this.assertNoActiveTxLock('流水线运行中（.ops/tx.lock），禁止撤回纸条');
+        return await this.runSignalSerialized(bookRoot, async () => {
+            await this.assertNoActiveTxLock('流水线运行中（.ops/tx.lock），禁止撤回纸条');
 
-        const filePath = join(bookRoot, '.ops/signals.jsonl');
-        const raw = await readOptionalText(filePath);
-        if (raw === null) {
-            return null;
-        }
+            const filePath = join(bookRoot, '.ops/signals.jsonl');
+            const raw = await readOptionalText(filePath);
+            if (raw === null) {
+                return null;
+            }
 
-        const kept: string[] = [];
-        let removedIdx = -1;
-        let lineIdx = 0;
-        for (const line of raw.split(/\r?\n/)) {
-            const trimmed = line.trim();
-            if (trimmed.length === 0) continue;
-            const currentIdx = lineIdx;
-            lineIdx += 1;
-            if (removedIdx < 0) {
-                try {
-                    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-                    const parsedReason =
-                        typeof parsed['reason'] === 'string'
-                            ? parsed['reason']
-                            : typeof parsed['content'] === 'string'
-                              ? parsed['content']
-                              : typeof parsed['instruction'] === 'string'
-                                ? parsed['instruction']
-                                : null;
-                    if (parsed['created_at'] === createdAt && parsedReason === reason) {
-                        removedIdx = currentIdx;
-                        continue;
+            const nonEmptyLines = raw
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0);
+            const cursorState = await readSignalsCursorState(bookRoot);
+            const consumedIds = new Set<string>(cursorState.consumedIds);
+            if (
+                consumedIds.size === 0 &&
+                cursorState.consumedLines > 0 &&
+                cursorState.consumedLines <= nonEmptyLines.length
+            ) {
+                for (let idx = 0; idx < cursorState.consumedLines; idx += 1) {
+                    try {
+                        const obj = JSON.parse(nonEmptyLines[idx]!) as Record<string, unknown>;
+                        consumedIds.add(resolveSignalId(obj));
+                    } catch {
+                        // 忽略损坏行
                     }
-                } catch {
-                    // 损坏行保持原样
                 }
             }
-            kept.push(trimmed);
-        }
 
-        if (removedIdx < 0) {
-            return null;
-        }
+            const kept: string[] = [];
+            let removedIdx = -1;
+            let removedSigId: string | null = null;
+            for (let idx = 0; idx < nonEmptyLines.length; idx += 1) {
+                const trimmed = nonEmptyLines[idx]!;
+                if (removedIdx < 0) {
+                    try {
+                        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+                        const parsedReason =
+                            typeof parsed['reason'] === 'string'
+                                ? parsed['reason']
+                                : typeof parsed['content'] === 'string'
+                                  ? parsed['content']
+                                  : typeof parsed['instruction'] === 'string'
+                                    ? parsed['instruction']
+                                    : null;
+                        if (parsed['created_at'] === createdAt && parsedReason === reason) {
+                            removedIdx = idx;
+                            removedSigId = resolveSignalId(parsed);
+                            continue;
+                        }
+                    } catch {
+                        // 损坏行保持原样
+                    }
+                }
+                kept.push(trimmed);
+            }
 
-        const persistedCursor = await readSignalsCursor(bookRoot);
-        const totalLines = kept.length + 1;
-        const effectiveCursor =
-            persistedCursor <= totalLines ? persistedCursor : this.signalsConsumedLines;
-        if (removedIdx < effectiveCursor) {
-            throw new TaskConflictError('目标信号已被流水线消费，禁止撤回');
-        }
+            if (removedIdx < 0) {
+                return null;
+            }
 
-        await writeFile(filePath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8');
-        this.emitEvent('signal:withdrawn', { created_at: createdAt, reason });
-        return { status: 'WITHDRAWN', remaining: kept.length };
+            const effectiveCursor =
+                cursorState.consumedLines <= nonEmptyLines.length
+                    ? cursorState.consumedLines
+                    : this.signalsConsumedLines;
+            const alreadyConsumed =
+                (removedSigId !== null && consumedIds.has(removedSigId)) ||
+                (cursorState.consumedIds.length === 0 && removedIdx < effectiveCursor);
+            if (alreadyConsumed) {
+                throw new TaskConflictError('目标信号已被流水线消费，禁止撤回');
+            }
+
+            await writeFile(filePath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 'utf8');
+            this.emitEvent('signal:withdrawn', {
+                ...(removedSigId ? { id: removedSigId } : {}),
+                created_at: createdAt,
+                reason
+            });
+            return { status: 'WITHDRAWN', remaining: kept.length };
+        });
     }
 
-    /** 请求在安全检查点停机 */
-    requestHalt(): { haltRequested: boolean; activeTask: RuntimeTaskKind } {
+    /** 请求停机：默认 force=false 为软安全点停机（不 abort 在途请求）；force=true 立即中断在途调用 */
+    requestHalt(options?: { force?: boolean | undefined }): {
+        haltRequested: boolean;
+        force: boolean;
+        activeTask: RuntimeTaskKind;
+    } {
+        const force = options?.force === true;
         this.haltRequested = true;
         this.yoloState.stopRequested = true;
-        this.activeAbortController?.abort(new Error('SAFE_HALT_REQUESTED'));
+        if (force) {
+            this.activeAbortController?.abort(new Error('SAFE_HALT_REQUESTED'));
+        }
         this.emitEvent('halt:requested', {
             activeTask: this.activeTask,
+            force,
             timestamp: new Date().toISOString()
         });
         return {
             haltRequested: true,
+            force,
             activeTask: this.activeTask
         };
     }
 
     /**
      * 有序排空停机：
-     * 1. 立即关闭新任务准入闸门；
-     * 2. 向在途任务与 YOLO 发送收束信号；
+     * 1. 立即关闭新任务准入闸门并释放外部事件订阅；
+     * 2. 向在途任务与 YOLO 发送强制收束信号；
      * 3. 等待活跃 RoleRunner 句柄、后台任务与 WAL/Git 提交彻底排空；
      *    超时时仅广播 halt:waiting 告警，不强杀 .ops/tx.lock 或提前卸载路由。
      */
     async shutdown(): Promise<void> {
         this.shuttingDown = true;
+        this.disposeBookSwitched();
         if (this.heartbeatTimer !== null) {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = null;
         }
 
-        this.requestHalt();
+        this.requestHalt({ force: true });
 
         const waitAllPending = async () => {
             const pending: Promise<unknown>[] = [];
@@ -1576,18 +2376,38 @@ export class NarrateRuntimeController {
 
     /** 宿主未显式指定单书时，自动激活 booksRoot 下第一部有效作品以便命令与控制面开箱即用 */
     async ensureDefaultBookSelected(): Promise<string | null> {
-        if (this.bookRoot || this.shuttingDown || this.activeTask !== 'IDLE') {
+        if (this.bookRoot || this.shuttingDown) {
             return this.bookRoot;
         }
-        try {
-            const { books } = await this.listBooks();
-            if (books.length > 0 && !this.bookRoot && !this.shuttingDown && this.activeTask === 'IDLE') {
-                await this.switchBook(books[0]!.bookRoot);
-            }
-        } catch {
-            // 扫描失败或并发切换时保持静默，由后续显式 switchBook 或 bootBook 处理
+        if (this.ensureDefaultBookPromise) {
+            return await this.ensureDefaultBookPromise;
         }
-        return this.bookRoot;
+        if (this.activeTask !== 'IDLE') {
+            return this.bookRoot;
+        }
+        let task: Promise<string | null> | null = null;
+        task = (async () => {
+            try {
+                const { books } = await this.listBooks();
+                if (
+                    books.length > 0 &&
+                    !this.bookRoot &&
+                    !this.shuttingDown &&
+                    this.activeTask === 'IDLE'
+                ) {
+                    await this.switchBook(books[0]!.bookRoot);
+                }
+            } catch {
+                // 扫描失败或并发切换时保持静默，由后续显式 switchBook 或 bootBook 处理
+            } finally {
+                if (this.ensureDefaultBookPromise === task) {
+                    this.ensureDefaultBookPromise = null;
+                }
+            }
+            return this.bookRoot;
+        })();
+        this.ensureDefaultBookPromise = task;
+        return await task;
     }
 
     /** 列出当前作品章节摘要 */
@@ -1848,7 +2668,29 @@ export class NarrateRuntimeController {
                 }
             }
 
-            await store.writeBookConfig(nextConfig);
+            let hasGitHead = false;
+            try {
+                await this.system.currentRevision(store.bookRoot);
+                hasGitHead = true;
+            } catch {
+                hasGitHead = false;
+            }
+
+            if (hasGitHead) {
+                await store.recordPendingWrites(['world/book_config.yaml']);
+                try {
+                    await store.writeBookConfig(nextConfig);
+                    await this.system.commitPaths(
+                        store.bookRoot,
+                        ['world/book_config.yaml'],
+                        'chore(config): update model routing'
+                    );
+                } finally {
+                    await rm(join(store.bookRoot, '.ops/pending_writes.json'), { force: true });
+                }
+            } else {
+                await store.writeBookConfig(nextConfig);
+            }
 
             return {
                 status: 'ok',
@@ -1862,43 +2704,250 @@ export class NarrateRuntimeController {
         });
     }
 
-    private async assertNoActiveTxLock(message: string): Promise<void> {
-        const bookRoot = this.bookRoot;
-        if (!bookRoot) return;
+    /** 查询当前激活（或指定）作品 .ops/tx.lock 是否正被活跃进程持有 */
+    async isTxLockHeld(explicitBookRoot?: string): Promise<boolean> {
+        const bookRoot = explicitBookRoot ?? this.bookRoot;
+        if (!bookRoot) return false;
         const lockPath = join(bookRoot, '.ops/tx.lock');
         const raw = await readOptionalText(lockPath);
-        if (raw === null) return;
+        if (raw === null) return false;
 
-        let active = false;
         try {
             const parsed = TxLockPayloadSchema.safeParse(JSON.parse(raw));
             if (parsed.success) {
                 try {
                     process.kill(parsed.data.pid, 0);
-                    active = true;
+                    return true;
                 } catch (err: unknown) {
-                    active =
-                        !(
-                            err !== null &&
-                            typeof err === 'object' &&
-                            'code' in err &&
-                            err.code === 'ESRCH'
-                        );
+                    return !(
+                        err !== null &&
+                        typeof err === 'object' &&
+                        'code' in err &&
+                        err.code === 'ESRCH'
+                    );
                 }
-            } else {
-                const fileStat = await stat(lockPath);
-                active = Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;
             }
+            const fileStat = await stat(lockPath);
+            return Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;
         } catch {
             try {
                 const fileStat = await stat(lockPath);
-                active = Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;
+                return Date.now() - fileStat.mtimeMs < DEFAULT_LOCK_STALE_MS;
             } catch {
-                active = false;
+                return false;
+            }
+        }
+    }
+
+    /** 返回最近一次写手净室前缀装配诊断报告 */
+    getLastWriterAssemblyReport(): WriterAssemblyReport | null {
+        return this.lastWriterAssemblyReport;
+    }
+
+    /** 解析 world/arc_director_plan.md 开篇序列节拍进度 */
+    async readOpeningBeatsProgress(bookRoot: string): Promise<OpeningBeatsProgress | null> {
+        const raw = await readOptionalText(join(bookRoot, 'world/arc_director_plan.md'));
+        if (raw === null) return null;
+
+        const lines = raw.replace(/\r\n/g, '\n').split('\n');
+        let inSection = false;
+        const beats: OpeningBeatProgressItem[] = [];
+
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (/^##\s+Opening\s+Sequence\s+Beats/i.test(trimmed)) {
+                inSection = true;
+                continue;
+            }
+            if (inSection && /^##\s+/.test(trimmed)) {
+                break;
+            }
+            if (!inSection || !trimmed.startsWith('- ')) continue;
+
+            const body = trimmed.slice(2).trim();
+            const statusMatch = /^\[(?:status:\s*)?((?:PENDING|DONE)(?:\s+[^\]]*)?)\]\s*(.+)$/i.exec(
+                body
+            );
+            const rawStatus = statusMatch?.[1]?.trim() ?? 'PENDING';
+            const text = statusMatch?.[2]?.trim() ?? body;
+            const isDone = /^DONE\b/i.test(rawStatus);
+            const chMatch = /\b(ch_\d{4})\b/i.exec(rawStatus);
+
+            beats.push({
+                index: beats.length + 1,
+                status: isDone ? 'DONE' : 'PENDING',
+                rawStatus,
+                ...(chMatch?.[1] ? { completedChapter: chMatch[1] } : {}),
+                text
+            });
+        }
+
+        if (beats.length === 0) return null;
+        const completed = beats.filter((b) => b.status === 'DONE').length;
+        return {
+            total: beats.length,
+            completed,
+            pending: beats.length - completed,
+            beats
+        };
+    }
+
+    /** 读取最近一次 feat / state Git 提交 SHA（单次 git log 批量扫描） */
+    async readRecentCommitShas(bookRoot: string): Promise<{
+        featCommitSha: string | null;
+        stateCommitSha: string | null;
+    }> {
+        try {
+            const { stdout } = await execFileAsync(
+                'git',
+                ['-C', bookRoot, 'log', '-n', '20', '--format=%H%x09%s'],
+                { encoding: 'utf8', maxBuffer: 1024 * 1024 }
+            );
+            let featCommitSha: string | null = null;
+            let stateCommitSha: string | null = null;
+            for (const line of stdout.split(/\r?\n/)) {
+                const tabIdx = line.indexOf('\t');
+                if (tabIdx <= 0) continue;
+                const sha = line.slice(0, tabIdx).trim();
+                const subject = line.slice(tabIdx + 1).trim();
+                if (!featCommitSha && /^feat(?:\([^)]+\))?:/i.test(subject)) {
+                    featCommitSha = sha;
+                }
+                if (!stateCommitSha && /^state(?:\([^)]+\))?:/i.test(subject)) {
+                    stateCommitSha = sha;
+                }
+                if (featCommitSha && stateCommitSha) break;
+            }
+            return { featCommitSha, stateCommitSha };
+        } catch {
+            return { featCommitSha: null, stateCommitSha: null };
+        }
+    }
+
+    /** 汇总当前卷进度与 future_horizon 摘要 */
+    async readVolumeProgress(
+        store: BookStore,
+        snapshot: BookSnapshot
+    ): Promise<VolumeProgressSummary> {
+        const currentVolume = snapshot.worldState.frontmatter.current_volume;
+        const volPad = String(currentVolume).padStart(2, '0');
+        const [l1Raw, cardRaw, horizonRaw] = await Promise.all([
+            readOptionalText(join(store.bookRoot, 'index/L1_volumes.md')),
+            readOptionalText(join(store.bookRoot, `index/L2_cards/vol_${volPad}_cards.md`)),
+            readOptionalText(join(store.bookRoot, 'world/future_horizon.md'))
+        ]);
+
+        let volumeTitle: string | undefined;
+        let totalChapters: number | null = null;
+        if (l1Raw) {
+            for (const line of l1Raw.replace(/\r\n/g, '\n').split('\n')) {
+                const isCurVol =
+                    new RegExp(`\\bvol_0?${currentVolume}\\b`, 'i').test(line) ||
+                    new RegExp(`第\\s*${currentVolume}\\s*卷`).test(line);
+                if (!isCurVol) continue;
+                const cleanedTitle = line
+                    .replace(/^[-*#>\s]+/, '')
+                    .replace(new RegExp(`^(?:vol_0?${currentVolume}|第\\s*${currentVolume}\\s*卷)\\s*[:：-]?\\s*`, 'i'), '')
+                    .trim();
+                if (cleanedTitle.length > 0 && !volumeTitle) {
+                    volumeTitle = cleanedTitle;
+                }
+                const chRange = /ch_(\d{4})\s*[-~至]\s*ch_(\d{4})/i.exec(line);
+                const cnRange = /第\s*(\d+)\s*[-~至]\s*第?\s*(\d+)\s*章/.exec(line);
+                const m = chRange ?? cnRange;
+                if (m?.[1] && m[2]) {
+                    const start = Number(m[1]);
+                    const end = Number(m[2]);
+                    if (end >= start) {
+                        totalChapters = end - start + 1;
+                    }
+                }
             }
         }
 
-        if (active) {
+        const completedChapters = cardRaw ? parseL2CardSections(cardRaw).sections.length : 0;
+        const futureHorizon = horizonRaw?.trim() ? horizonRaw.trim().slice(0, 240) : undefined;
+        return {
+            currentVolume,
+            volumeLabel: `第 ${currentVolume} 卷`,
+            ...(volumeTitle ? { volumeTitle } : {}),
+            completedChapters,
+            totalChapters,
+            ...(futureHorizon ? { futureHorizon } : {})
+        };
+    }
+
+    /** 收集状态栏与检查器诊断扩展字段（100% 纯只读） */
+    async getDiagnosticsStatus(store: BookStore, snapshot: BookSnapshot) {
+        const bookRoot = store.bookRoot;
+        const [
+            txLockHeld,
+            recentCommits,
+            dreamWatermark,
+            signalsView,
+            nextOpts,
+            openingBeats,
+            volumeProgress,
+            healPlan,
+            syncConflictsRaw
+        ] = await Promise.all([
+            this.isTxLockHeld(bookRoot),
+            this.readRecentCommitShas(bookRoot),
+            store.readDreamWatermark(),
+            this.listSignalsView(bookRoot),
+            readNextChapterOptions(bookRoot),
+            this.readOpeningBeatsProgress(bookRoot),
+            this.readVolumeProgress(store, snapshot),
+            readHealPlan(bookRoot),
+            readOptionalText(join(bookRoot, '.ops/sync_conflicts.json'))
+        ]);
+
+        const watermarkCh = dreamWatermark?.last_dream_ch ?? 0;
+        const dirtyEntityCount = Object.values(snapshot.entities).filter(
+            (profile) => profile.metadata.last_seen_ch > watermarkCh
+        ).length;
+        const dirtyEntityThreshold = snapshot.config.dreaming?.buffer_limit ?? 6;
+        const spotlightQueue = signalsView.pending.filter(
+            (sig) =>
+                sig !== null &&
+                typeof sig === 'object' &&
+                (sig as { type?: unknown }).type === 'SPOTLIGHT_TRIGGER'
+        );
+
+        let syncConflictsCount = 0;
+        if (syncConflictsRaw !== null) {
+            try {
+                const parsed = JSON.parse(syncConflictsRaw) as { conflicts?: unknown };
+                if (Array.isArray(parsed.conflicts)) {
+                    syncConflictsCount = parsed.conflicts.length;
+                }
+            } catch {
+                // 忽略损坏文件
+            }
+        }
+
+        return {
+            txLockHeld,
+            featCommitSha: recentCommits.featCommitSha,
+            stateCommitSha: recentCommits.stateCommitSha,
+            recentCommits,
+            writerAssemblyReport: this.lastWriterAssemblyReport,
+            lastCheckerResult: this.lastCheckerResult,
+            dreamWatermark,
+            dirtyEntityCount,
+            dirtyEntityThreshold,
+            spotlightQueue,
+            nextChapterOptions: nextOpts?.options ?? [],
+            nextChapterOptionsSourceChapter: nextOpts?.source_chapter ?? null,
+            openingBeats,
+            volumeProgress,
+            healPlan,
+            syncConflictsCount
+        };
+    }
+
+    private async assertNoActiveTxLock(message: string): Promise<void> {
+        if (await this.isTxLockHeld()) {
             throw new TxLockConflictError(message);
         }
     }
@@ -1906,7 +2955,7 @@ export class NarrateRuntimeController {
     private async runExclusiveTask<T>(
         kind: Exclude<RuntimeTaskKind, 'IDLE'>,
         fn: (signal: AbortSignal) => Promise<T>,
-        options?: { allowDuringYolo?: boolean }
+        options?: { allowDuringYolo?: boolean; allowDuringHeal?: boolean }
     ): Promise<T> {
         this.assertAdmissionOpen();
         if (this.yoloState.running && !options?.allowDuringYolo) {
@@ -1917,7 +2966,15 @@ export class NarrateRuntimeController {
         }
 
         this.activeTask = kind;
-        this.haltRequested = false;
+        // 仅在从完全空闲启动顶层独立任务时清理历史残留 haltRequested；YOLO 章节与 Dreaming 间隙绝不吞掉停机信号
+        if (
+            !options?.allowDuringYolo &&
+            !options?.allowDuringHeal &&
+            !this.yoloState.running &&
+            !this.shuttingDown
+        ) {
+            this.haltRequested = false;
+        }
         const ac = new AbortController();
         this.activeAbortController = ac;
 
@@ -1928,6 +2985,14 @@ export class NarrateRuntimeController {
                 this.activeTask = 'IDLE';
                 this.activeAbortController = null;
                 this.activePromise = null;
+                if (
+                    !options?.allowDuringYolo &&
+                    !options?.allowDuringHeal &&
+                    !this.yoloState.running &&
+                    !this.shuttingDown
+                ) {
+                    this.haltRequested = false;
+                }
                 this.emitEvent('task:idle', { task: kind });
             }
         })();

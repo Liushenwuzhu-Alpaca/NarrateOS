@@ -1,9 +1,11 @@
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { promisify } from 'node:util';
 import { Context } from '@deepseek-ai/cordis';
 import { isNativeConfigSchema } from '@deepseek-ai/dsh-app-boot';
 import type { Agent } from '@deepseek-ai/dsh-agent';
@@ -1641,5 +1643,1140 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             chapterNumber: 1
         });
         expect(rejectedHarvestRes.statusCode).toBe(422);
+    });
+});
+
+describe('Wave 3B 收口回归集成测试', () => {
+    const execFileAsync = promisify(execFile);
+
+    async function setupWave3bWorkspace(
+        slug: string,
+        opts: {
+            selectBookRoot?: boolean;
+            booksRoot?: string;
+            exactSlugInBooksRoot?: boolean;
+            onAgent?: Parameters<typeof createHeadlessMockServices>[1]['onAgent'];
+            onLlmStream?: Parameters<typeof createHeadlessMockServices>[1]['onLlmStream'];
+            configOverrides?: Record<string, unknown>;
+        } = {}
+    ) {
+        let booksRoot = opts.booksRoot;
+        let bookRoot = await createGitBookWorkspace(tempDirs, slug);
+        if (opts.exactSlugInBooksRoot) {
+            if (!booksRoot) {
+                booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-books-root-'));
+                tempDirs.push(booksRoot);
+            }
+            const targetBookRoot = join(booksRoot, slug);
+            await rename(bookRoot, targetBookRoot);
+            bookRoot = targetBookRoot;
+        } else if (!booksRoot) {
+            booksRoot = join(bookRoot, '..');
+        }
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, {
+            ...(opts.selectBookRoot !== false ? { bookRoot } : {}),
+            booksRoot
+        });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, {
+            ...(opts.selectBookRoot !== false ? { bookRoot } : {}),
+            booksRoot
+        });
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const web = createMockWebServer(ctx);
+        const cmds = createMockCommandsRuntime(ctx);
+        const mockState = await createHeadlessMockServices(ctx, {
+            onAgent: opts.onAgent ?? (async () => {}),
+            onLlmStream: opts.onLlmStream ?? (() => textToStreamChunks('ok'))
+        });
+        const pipelineFiber = await ctx.plugin(pipelinePlugin, {
+            heartbeatIntervalMs: 60_000,
+            ...(opts.configOverrides ?? {})
+        });
+        registerCleanup(() => pipelineFiber.dispose());
+
+        return { bookRoot, booksRoot, ctx, web, cmds, mockState };
+    }
+
+    it('ISS-027 & ISS-068: service 默认从包目录解析 craft 插件（不依赖 process.cwd），并托管启动 ensureDefaultBookSelected 以便立即卸载排空', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-cwd-craft-books-'));
+        tempDirs.push(booksRoot);
+        const rawBookRoot = await createGitBookWorkspace(tempDirs, 'cwd-craft-and-drain');
+        const bookRoot = join(booksRoot, 'cwd-craft-and-drain');
+        await rename(rawBookRoot, bookRoot);
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const rawCfg = await readFile(cfgPath, 'utf8');
+        await writeFile(cfgPath, `${rawCfg}\ncraft_plugins:\n  - vad-bdi\n`, 'utf8');
+
+        const prevCwd = process.cwd();
+        const unrelatedCwd = await mkdtemp(join(tmpdir(), 'narrate-unrelated-cwd-'));
+        tempDirs.push(unrelatedCwd);
+        process.chdir(unrelatedCwd);
+        try {
+            const ctx = new Context();
+            const promptFiber = await ctx.plugin(SystemPrompt);
+            registerCleanup(() => promptFiber.dispose());
+            const toolsFiber = await ctx.plugin(ToolsService);
+            registerCleanup(() => toolsFiber.dispose());
+            const storeFiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+            registerCleanup(() => storeFiber.dispose());
+            const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+            registerCleanup(() => bookToolsFiber.dispose());
+            createMockWebServer(ctx);
+            await createHeadlessMockServices(ctx, {
+                onAgent: async ({ tools, execTool }) => {
+                    if (tools.has('yield_context_pack')) {
+                        await execTool('yield_context_pack', {
+                            selected_entity_ids: ['char_001'],
+                            recall_queries: [],
+                            selected_lore_files: []
+                        });
+                        return;
+                    }
+                    if (tools.has('yield_outline')) {
+                        await execTool('yield_outline', {
+                            chapter_title: '无关工作目录插件解析测试',
+                            target_word_count: 1000,
+                            focus_cast: ['char_001'],
+                            background_cast: [],
+                            ending_beat: 'HOOK',
+                            director_rationale: '秘辛',
+                            chapter_turn: '插件路径无关测试',
+                            scene_plan: [
+                                { scene_index: 1, location: '码头', summary: '开场', is_spotlight: true }
+                            ],
+                            outline_text: '测试内容。'
+                        });
+                        return;
+                    }
+                    if (tools.has('yield_verdict')) {
+                        await execTool('yield_verdict', { passed: true, issues: [] });
+                        return;
+                    }
+                    if (tools.has('yield_state_patch')) {
+                        await execTool('yield_state_patch', {
+                            entity_patches: [],
+                            story_day_delta: 0,
+                            chapter_summary: '完成',
+                            next_chapter_options: ['继续']
+                        });
+                    }
+                },
+                onLlmStream: () => textToStreamChunks('雨夜码头静得能听见缆绳勒进木桩的声音。')
+            });
+
+            const pipelineFiber = await ctx.plugin(pipelinePlugin, {
+                heartbeatIntervalMs: 60_000
+            });
+            // 立即卸载插件，验证 trackBackgroundTask 安全排空 ensureDefaultBookSelected 无未捕获异常
+            await pipelineFiber.dispose();
+
+            // 重新挂载后等待后台选书完成再从无关 cwd 运行单章，验证仍能稳定加载仓库内 vad-bdi craft 插件
+            const pipelineFiber2 = await ctx.plugin(pipelinePlugin, {
+                heartbeatIntervalMs: 60_000
+            });
+            registerCleanup(() => pipelineFiber2.dispose());
+            await ctx.narratePipeline.ensureDefaultBookSelected();
+
+            const res = await ctx.narratePipeline.stepChapter({
+                chapterNumber: 1,
+                chapterGoal: '在无关 cwd 下验证默认 craft 插件路径解析'
+            });
+            expect(res.status).toBe('COMMITTED');
+        } finally {
+            process.chdir(prevCwd);
+        }
+    });
+
+    it('ISS-012 & ISS-014: 主对话 lock_charter_and_boot 触发切书联动（单次 book_switched SSE）；bootBook 前置拦截非空目录（0 LLM）并迁移 staging 日志与完整契约', async () => {
+        const booksRoot1 = await mkdtemp(join(tmpdir(), 'narrateos-boot-books1-'));
+        tempDirs.push(booksRoot1);
+        const { ctx, web } = await setupWave3bWorkspace('boot-a', {
+            booksRoot: booksRoot1,
+            exactSlugInBooksRoot: true
+        });
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+
+        // 1. 主对话工具 lock_charter_and_boot 触发切书联动与 SSE 单次广播
+        const lockTool = ctx.tools.get('lock_charter_and_boot');
+        expect(lockTool).toBeDefined();
+        await lockTool!.execute(
+            {
+                book_slug: 'boot-via-chat',
+                title: '主对话开书测试',
+                pov_character: 'char_lead',
+                t0_anchor: '开元七年秋夜子时',
+                commitments: ['绝不降智收尾'],
+                excluded_cliches: ['瞳孔骤缩', '嘴角上扬'],
+                narration_subjectivity: 'subjective_first',
+                stage_ceiling: '第一卷暂不揭露幕后总签批人',
+                opening_sequence_beats: [
+                    { craft_focus: '风灯与旧箱', clue_budget: '三号仓编号', completion_sign: '发现缺页' },
+                    { craft_focus: '交接对白', clue_budget: '夜班印章', completion_sign: '确认改签' },
+                    { craft_focus: '拖轮离港', clue_budget: '船号尾数', completion_sign: '锁定去向' }
+                ],
+                current_arc_envelope: '雨夜码头盘库核账。',
+                static_base_and_voice: '深度主观第三人称，冷峻克制。',
+                world_summary: '雾夜港区旧账悬案。',
+                l1_volumes_markdown: '# L1\n\n- vol_01: 码头旧账',
+                entities: [
+                    {
+                        entityId: 'char_lead',
+                        canonicalName: '沈清',
+                        innateLocks: [{ visibility: 'PUBLIC', text: '右腕旧伤' }],
+                        acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '码头账房' }],
+                        irreversibleTrajectory: [{ storyDay: 0, text: '接手查账' }],
+                        recentBuffer: []
+                    }
+                ]
+            },
+            {
+                token: Symbol('boot') as never,
+                callId: 'call-boot' as never,
+                rootCallId: 'call-boot' as never,
+                name: 'lock_charter_and_boot',
+                arguments: {},
+                signal: new AbortController().signal,
+                deferContext() {},
+                concludeTurn() {}
+            }
+        );
+
+        const switchEvents = sse.events.filter(
+            (e) =>
+                e.event === 'book_switched' &&
+                typeof e.data['bookRoot'] === 'string' &&
+                e.data['bookRoot'].endsWith('/boot-via-chat')
+        );
+        expect(switchEvents).toHaveLength(1);
+        const migratedCfg = await readFile(join(booksRoot1, 'boot-via-chat/world/book_config.yaml'), 'utf8');
+        expect(migratedCfg).toContain('subjective_first');
+        expect(migratedCfg).toContain('tokens_per_char');
+        const migratedCharter = await readFile(join(booksRoot1, 'boot-via-chat/world/author_charter.md'), 'utf8');
+        expect(migratedCharter).toContain('瞳孔骤缩');
+        expect(migratedCharter).toContain('开元七年秋夜子时');
+        expect(migratedCharter).toContain('绝不降智收尾');
+
+        // 2. 验证 POST /api/narrate/boot 对非空目标目录在启动 boot-compiler LLM 前直接报 409（0 Agent 调用）
+        const booksRoot2 = await mkdtemp(join(tmpdir(), 'narrateos-boot-books2-'));
+        tempDirs.push(booksRoot2);
+        let bootCompilerCalls = 0;
+        const { ctx: ctx2, web: web2 } = await setupWave3bWorkspace('boot-b', {
+            booksRoot: booksRoot2,
+            exactSlugInBooksRoot: true,
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_boot_bundle')) {
+                    bootCompilerCalls += 1;
+                    await execTool('yield_boot_bundle', {
+                        world_summary: '大历三年冬至雪夜港区奇案。',
+                        static_base_and_voice: '冷静客观第三人称。',
+                        current_arc_envelope: '第一卷围绕港口走私账展开。',
+                        stage_ceiling: '暂不揭露幕后总督。',
+                        opening_sequence_beats: [
+                            { craft_focus: '雪夜盘库', clue_budget: '密信封蜡', completion_sign: '密信现形' },
+                            { craft_focus: '对质', clue_budget: '缺页清单', completion_sign: '锁定内鬼' },
+                            { craft_focus: '封港', clue_budget: '号灯', completion_sign: '船队滞留' }
+                        ],
+                        l1_volumes_markdown: '# L1\n\n- vol_01: 雪夜账册',
+                        entities: [
+                            {
+                                entityId: 'char_lead',
+                                canonicalName: '沈清',
+                                innateLocks: [{ visibility: 'PUBLIC', text: '右腕旧伤' }],
+                                acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '码头账房' }],
+                                irreversibleTrajectory: [{ storyDay: 0, text: '接手查账' }],
+                                recentBuffer: []
+                            }
+                        ]
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+
+        const nonEmptyTarget = join(booksRoot2, 'occupied-slug');
+        await mkdir(nonEmptyTarget, { recursive: true });
+        await writeFile(join(nonEmptyTarget, 'occupant.md'), 'keep', 'utf8');
+
+        const conflictBootRes = await web2.invoke('POST', '/api/narrate/boot', {
+            slug: 'occupied-slug',
+            title: '冲突目录',
+            povCharacter: 'char_lead',
+            mode: 'original',
+            premiseOrSeed: '测试前置冲突拦截'
+        });
+        expect(conflictBootRes.statusCode).toBe(409);
+        expect(bootCompilerCalls).toBe(0);
+
+        // 3. 验证 boot-compiler 建库成功并迁移 .boot-staging-* 中的 runs.jsonl 与 session_logs/*.json
+        const compiledBootRes = await web2.invoke('POST', '/api/narrate/boot', {
+            slug: 'fresh-compiled-book',
+            title: '新编撰书',
+            povCharacter: 'char_lead',
+            mode: 'original',
+            premiseOrSeed: '雪夜港口权谋奇幻',
+            t0_anchor: '大历三年冬至',
+            excluded_cliches: ['倒吸一口凉气'],
+            narration_subjectivity: 'objective_third',
+            commitments: ['因果严格闭环']
+        });
+        expect(compiledBootRes.statusCode).toBe(201);
+        expect(bootCompilerCalls).toBe(1);
+
+        const compiledRoot = join(booksRoot2, 'fresh-compiled-book');
+        const runsRes = await web2.invoke('GET', '/api/narrate/runs');
+        expect(runsRes.statusCode).toBe(200);
+        const bootRuns = (runsRes.json['runs'] as Array<{ stage: string; sessionId: string }>).filter(
+            (r) => r.stage === 'BOOT_COMPILER'
+        );
+        expect(bootRuns.length).toBeGreaterThanOrEqual(1);
+        const detailRes = await web2.invoke(
+            'GET',
+            `/api/narrate/runs/detail?sessionId=${encodeURIComponent(bootRuns[0]!.sessionId)}`
+        );
+        expect(detailRes.statusCode).toBe(200);
+
+        const compiledCfg = await readFile(join(compiledRoot, 'world/book_config.yaml'), 'utf8');
+        expect(compiledCfg).toContain('objective_third');
+        expect(compiledCfg).toContain('tokens_per_char');
+        const charterMd = await readFile(join(compiledRoot, 'world/author_charter.md'), 'utf8');
+        expect(charterMd).toContain('倒吸一口凉气');
+        expect(charterMd).toContain('因果严格闭环');
+        expect(charterMd).toContain('大历三年冬至');
+        expect(ctx2.narratePipeline.bookRoot).toBe(compiledRoot);
+    });
+
+    it('ISS-013 (Q2) & ISS-060 & ISS-064 & ISS-065: pause_after_chapter_1 优雅停机、next_chapter_options 回读与完整诊断状态/SSE', async () => {
+        let observedPlannerGoal = '';
+        let fcRound = 0;
+        const { bookRoot, ctx, web } = await setupWave3bWorkspace('q2-status-sse', {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    observedPlannerGoal = taskPrompt;
+                    await execTool('yield_outline', {
+                        chapter_title: '候选方向推进章',
+                        target_word_count: 1000,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '按候选方向推进',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '盘查货箱', is_spotlight: true }
+                        ],
+                        outline_text: '盘查货箱。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    fcRound += 1;
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '盘查完货箱',
+                        next_chapter_options: ['追查二号码头暗舱', '审讯夜班库管']
+                    });
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks(
+                    '夜潮退去时，码头青石板上留下一行盐渍与铁锈拖痕，风吹得桅杆绳索作响。'
+                )
+        });
+
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const cfgText = await readFile(cfgPath, 'utf8');
+        await writeFile(
+            cfgPath,
+            `${cfgText}\nopening:\n  voice_seed_mode: hybrid_rolling\n  pause_after_chapter_1: true\n`,
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'world/arc_director_plan.md'),
+            [
+                '# 导演禁区与开篇节拍计划',
+                '',
+                '## Opening Sequence Beats',
+                '- [DONE ch_0001] 风灯与旧箱（已定稿）',
+                '- [status: DONE ch_0002] 交接对白（兼容旧格式）',
+                '- [PENDING] 拖轮离港'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+
+        // 启动目标 3 章 YOLO：第 1 章完成后应因 pause_after_chapter_1=true 优雅停机
+        const started = await ctx.narratePipeline.startYolo({ targetChapters: 3 });
+        expect(started.targetChapters).toBe(3);
+        const pauseEvt = await sse.waitForEvent(
+            (e) => e.event === 'yolo_halted' && e.data['reason'] === 'PAUSE_AFTER_CHAPTER_1'
+        );
+        await new Promise((r) => setImmediate(r));
+        expect(pauseEvt).toBeDefined();
+
+        expect(
+            sse.events.filter(
+                (e) =>
+                    (e.event === 'chapter:phase' && e.data['phase'] === 'FAILED') ||
+                    (e.event === 'yolo_halted' && e.data['reason'] === 'ERROR')
+            )
+        ).toEqual([]);
+        const txAfterCh1 = await ctx.narrateStore.openStore().readTxState();
+        expect(txAfterCh1.last_committed_ch).toBe(1);
+
+        // 验证 SSE gate:result 含 kontoyiannisEntropy 与 violations，且 checker:result 已触发
+        const gateEvt = sse.events.find((e) => e.event === 'gate:result');
+        expect(gateEvt).toBeDefined();
+        expect(typeof gateEvt!.data['kontoyiannisEntropy']).toBe('number');
+        expect(Array.isArray(gateEvt!.data['violations'])).toBe(true);
+
+        const checkerEvt = sse.events.find((e) => e.event === 'checker:result');
+        expect(checkerEvt).toBeDefined();
+        expect(checkerEvt!.data['passed']).toBe(true);
+        expect(Array.isArray(checkerEvt!.data['issues'])).toBe(true);
+        expect(checkerEvt!.data['filteredOutCount']).toBe(0);
+        expect(fcRound).toBeGreaterThanOrEqual(1);
+
+        // 验证 GET /api/narrate/status 诊断字段完整（含 [DONE ch_XXXX] 与 [status: DONE] 混合节拍解析）
+        const statusRes = await web.invoke('GET', '/api/narrate/status');
+        expect(statusRes.statusCode).toBe(200);
+        expect(statusRes.json['openingBeats']).toMatchObject({
+            total: 3,
+            completed: 2,
+            pending: 1
+        });
+        expect((statusRes.json['openingBeats'] as { beats: Array<{ completedChapter?: string }> }).beats[0]?.completedChapter).toBe('ch_0001');
+        expect(statusRes.json['txLockHeld']).toBe(false);
+        expect(typeof statusRes.json['featCommitSha']).toBe('string');
+        expect(typeof statusRes.json['stateCommitSha']).toBe('string');
+        expect(statusRes.json['writerAssemblyReport']).toMatchObject({
+            chapterNumber: 1
+        });
+        expect(statusRes.json['nextChapterOptions']).toEqual([
+            '追查二号码头暗舱',
+            '审讯夜班库管'
+        ]);
+        expect(statusRes.json['volumeProgress']).toBeDefined();
+        expect(statusRes.json['dreamWatermark']).toBeDefined();
+        expect(Array.isArray(statusRes.json['spotlightQueue'])).toBe(true);
+
+        // 验证不传目标触发第 2 章时，自动回读 .ops/next_chapter_options.json 第一条方向
+        const stepRes = await web.invoke('POST', '/api/narrate/step', {});
+        expect(stepRes.statusCode).toBe(200);
+        expect(observedPlannerGoal).toContain('追查二号码头暗舱');
+
+        // 验证 .ops/tx.lock 持有期间 status.txLockHeld === true
+        await writeFile(
+            join(bookRoot, '.ops/tx.lock'),
+            JSON.stringify({
+                pid: process.pid,
+                startedAt: new Date().toISOString(),
+                owner: 'test'
+            }),
+            'utf8'
+        );
+        const lockedStatusRes = await web.invoke('GET', '/api/narrate/status');
+        expect(lockedStatusRes.json['txLockHeld']).toBe(true);
+        await rm(join(bookRoot, '.ops/tx.lock'), { force: true });
+    });
+
+    it('ISS-041 & ISS-051: 跨书 runs/detail 严格隔离；SyncPipeline 注入 roleRunner 并暴露 sync_conflicts 与 stateDiffAdvisories', async () => {
+        const sharedBooksRoot = await mkdtemp(join(tmpdir(), 'narrateos-sync-books-'));
+        tempDirs.push(sharedBooksRoot);
+
+        // 先在同级目录建好 bookB
+        const tempBookB = await createGitBookWorkspace(tempDirs, 'sync-book-b');
+        const bookB = join(sharedBooksRoot, 'sync-book-b');
+        await rename(tempBookB, bookB);
+
+        const { bookRoot: bookA, ctx, web } = await setupWave3bWorkspace('sync-book-a', {
+            booksRoot: sharedBooksRoot,
+            exactSlugInBooksRoot: true,
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [
+                            {
+                                entity_id: 'char_001',
+                                acquired_state_ops: [
+                                    {
+                                        op: 'append',
+                                        entry: {
+                                            storyDay: 1,
+                                            visibility: 'PUBLIC',
+                                            text: '蓝皮账本已烧成灰烬'
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        story_day_delta: 0,
+                        chapter_summary: '角色状态已按手改重抽',
+                        next_chapter_options: []
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                const sys = opts.system ?? '';
+                if (sys.includes('手稿增量同步定性器')) {
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            is_prose_polish_only: false,
+                            reason: '手改改变了道具归属，可能与后续章冲突',
+                            affected_entity_ids: ['char_001']
+                        })
+                    );
+                }
+                if (sys.includes('只读连续性冲突扫描器')) {
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            conflicts: [
+                                {
+                                    chapter_number: 2,
+                                    line_number: 1,
+                                    quote: '第 2 章正文：他翻开完好的蓝皮账本核对页码。',
+                                    dirty_chapter: 1,
+                                    dirty_quote: '第 1 章正文：他把蓝皮账本扔进炉膛烧成灰烬。',
+                                    description: '第 1 章已烧毁账本，第 2 章仍完好翻阅'
+                                }
+                            ]
+                        })
+                    );
+                }
+                return textToStreamChunks('ok');
+            }
+        });
+
+        // 1. 验证 runs/detail 按当前激活 bookRoot 严格隔离同名 sessionId
+        await mkdir(join(bookA, '.ops/session_logs'), { recursive: true });
+        await mkdir(join(bookB, '.ops/session_logs'), { recursive: true });
+        await writeFile(
+            join(bookA, '.ops/session_logs/shared-sess.json'),
+            JSON.stringify({ sessionId: 'shared-sess', sourceBook: 'bookA', events: [] }),
+            'utf8'
+        );
+        await writeFile(
+            join(bookB, '.ops/session_logs/shared-sess.json'),
+            JSON.stringify({ sessionId: 'shared-sess', sourceBook: 'bookB', events: [] }),
+            'utf8'
+        );
+
+        const detailA = await web.invoke('GET', '/api/narrate/runs/detail?sessionId=shared-sess');
+        expect(detailA.statusCode).toBe(200);
+        expect(detailA.json['sourceBook']).toBe('bookA');
+
+        await ctx.narratePipeline.switchBook(bookB);
+        const detailB = await web.invoke('GET', '/api/narrate/runs/detail?sessionId=shared-sess');
+        expect(detailB.statusCode).toBe(200);
+        expect(detailB.json['sourceBook']).toBe('bookB');
+        await ctx.narratePipeline.switchBook(bookA);
+
+        // 2. 构造两章已提交基线并手改第 1 章触发历史脏章同步与冲突扫描
+        const store = ctx.narrateStore.openStore();
+        await store.beginDraft(1);
+        await store.commitDraft(1, '第 1 章正文：他把蓝皮账本锁进抽屉。\n');
+        await store.applyStatePatch(1, []);
+        await store.beginDraft(2);
+        await store.commitDraft(2, '第 2 章正文：他翻开完好的蓝皮账本核对页码。\n');
+        await store.applyStatePatch(2, []);
+
+        await writeFile(
+            join(bookA, 'manuscripts/ch_0001.md'),
+            '第 1 章正文：他把蓝皮账本扔进炉膛烧成灰烬。\n',
+            'utf8'
+        );
+
+        const syncRes = await ctx.narratePipeline.syncManuscripts();
+        expect(syncRes.downstreamConflicts).toHaveLength(1);
+        expect(syncRes.stateDiffAdvisories?.length).toBeGreaterThanOrEqual(1);
+        expect(syncRes.stateDiffAdvisories![0]).toContain('char_001');
+
+        const viewRes = await web.invoke('GET', '/api/narrate/views?kind=sync_conflicts');
+        expect(viewRes.statusCode).toBe(200);
+        expect((viewRes.json['conflicts'] as unknown[]).length).toBe(1);
+        expect((viewRes.json['stateDiffAdvisories'] as string[])[0]).toContain('char_001');
+    });
+
+    it('ISS-052 & ISS-063: POST /api/narrate/heal 端到端 Tier 3 回滚自动重跑并清理 heal_plan.json，且斜杠命令参数全解析', async () => {
+        const capturedPlanners: string[] = [];
+        let writerCount = 0;
+        const { bookRoot, ctx, web, cmds } = await setupWave3bWorkspace('heal-and-cmds', {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    capturedPlanners.push(taskPrompt);
+                    await execTool('yield_outline', {
+                        chapter_title: '自愈重跑测试章',
+                        target_word_count: 1000,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '按指令与自愈约束重写',
+                        scene_plan: [
+                            { scene_index: 1, location: '石阶', summary: '避开冲突重写', is_spotlight: true }
+                        ],
+                        outline_text: '他站在石阶前凭口头密语核对货单。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '已重演并修正',
+                        next_chapter_options: []
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                const sys = opts.system ?? '';
+                if (sys.includes('连续性自愈裁判')) {
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            severity: 'CASCADING_HARD',
+                            reason: '第 2 章严重依赖已烧毁的账本，需回滚重跑',
+                            downstream_dependent: true
+                        })
+                    );
+                }
+                writerCount += 1;
+                if (writerCount === 1) {
+                    return textToStreamChunks('第一夜，他把蓝皮账本锁进抽屉，屋檐外风声紧得像拉满的弓。');
+                }
+                if (writerCount === 2) {
+                    return textToStreamChunks('次日正午，他翻开完好的蓝皮账本核对页码，纸页干爽平整。');
+                }
+                return textToStreamChunks('他站在石阶前只凭半句口头密语核对货单，全程未翻动任何账本。');
+            }
+        });
+
+        // 1. 先跑通第 1、2 章形成完整 Git 与 txState 基线
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 1, chapterGoal: '第1章' });
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 2, chapterGoal: '第2章' });
+
+        // 2. 通过 POST /api/narrate/heal 触发 Tier 3 回滚自动重跑（chapterA=1, chapterB=2 => 回滚至 ch1 并自动重跑 ch2）
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+        const healRouteRes = await web.invoke('POST', '/api/narrate/heal', {
+            maxAutoRollbackChapters: 3,
+            conflicts: [
+                {
+                    conflictId: 'c-tier3-1',
+                    chapterA: 1,
+                    quoteA: '第一夜，他把蓝皮账本锁进抽屉，屋檐外风声紧得像拉满的弓。',
+                    chapterB: 2,
+                    quoteB: '次日正午，他翻开完好的蓝皮账本核对页码，纸页干爽平整。',
+                    description: '第 2 章出现冲突道具',
+                    severityHint: 'CASCADING_HARD'
+                }
+            ]
+        });
+        expect(healRouteRes.statusCode).toBe(200);
+        expect(healRouteRes.json['quarantined']).toBe(false);
+        const healDone = await sse.waitForEvent((e) => e.event === 'heal:completed');
+        expect(healDone.data['quarantined']).toBe(false);
+        expect(writerCount).toBe(3); // Ch.01 + Ch.02 + 自愈重跑 Ch.02
+        expect(capturedPlanners[capturedPlanners.length - 1]).toContain('c-tier3-1');
+
+        // heal_plan.json 应已清理
+        await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
+
+        // 3. 验证 /narrate-step 高级参数解析（MAINLINE/PARALLEL/FLASHBACK + --day/--pov/--window/--branch）
+        await ctx.narratePipeline.forkParallelWindow({ windowId: 'win_dock' });
+        const stepCmdRes = await cmds.invokeCommand(
+            'narrate-step',
+            '--mode PARALLEL --day 7 --pov char_001 --window win_dock --branch br_alpha 码头潜伏支线'
+        );
+        expect(stepCmdRes.kind).toBe('success');
+        expect(stepCmdRes.text).toContain('mode=PARALLEL');
+        expect(stepCmdRes.text).toContain('day=7');
+        expect(stepCmdRes.text).toContain('pov=char_001');
+        await sse.waitForEvent(
+            (e) => e.event === 'chapter:phase' && e.data['phase'] === 'COMMITTED' && e.data['chapterNumber'] === 3
+        );
+        await sse.waitForEvent((e) => e.event === 'task:idle' && e.data['task'] === 'STEPPING');
+        expect(capturedPlanners[capturedPlanners.length - 1]).toContain('码头潜伏支线');
+        await ctx.narratePipeline.mergeParallelWindow({ windowId: 'win_dock' });
+
+        // 4. 验证 /narrate-yolo [章数] [默认目标]、/narrate-halt --force 与 /narrate-heal
+        const badStepCmd = await cmds.invokeCommand('narrate-step', '--mode INVALID 目标');
+        expect(badStepCmd.kind).toBe('error');
+
+        const yoloCmdRes = await cmds.invokeCommand('narrate-yolo', '1 沿街追查线索');
+        expect(yoloCmdRes.kind).toBe('success');
+        expect(yoloCmdRes.text).toContain('沿街追查线索');
+        await sse.waitForEvent(
+            (e) => e.event === 'yolo_completed' || e.event === 'yolo_halted'
+        );
+        await new Promise((r) => setImmediate(r));
+
+        const haltCmdRes = await cmds.invokeCommand('narrate-halt', '--force');
+        expect(haltCmdRes.kind).toBe('success');
+        expect(haltCmdRes.text).toContain('force=true');
+
+        const healCmdRes = await cmds.invokeCommand('narrate-heal', '--max-rollback 2');
+        expect(healCmdRes).toEqual({
+            kind: 'success',
+            text: expect.stringContaining('maxRollback=2')
+        });
+    });
+
+    it('ISS-057 & ISS-058 & ISS-061: 并发 startYolo 原子锁定；信号队列零写盘只读查询、并发串行入队及软/硬双档停机', async () => {
+        let writerEntered = createDeferred<void>();
+        let writerDeferred = createDeferred<void>();
+        let observedAbortSignals: boolean[] = [];
+        let dreamingCalls = 0;
+
+        const { bookRoot, ctx, web } = await setupWave3bWorkspace('concurrency-signal-halt', {
+            onAgent: async ({ tools, execTool, signal }) => {
+                if (tools.size === 0) {
+                    writerEntered.resolve();
+                    const onAbort = () => {
+                        observedAbortSignals.push(true);
+                        writerDeferred.resolve();
+                    };
+                    signal.addEventListener('abort', onAbort, { once: true });
+                    await writerDeferred.promise;
+                    signal.removeEventListener('abort', onAbort);
+                    observedAbortSignals.push(signal.aborted);
+                    if (signal.aborted) {
+                        const err = new Error('Aborted');
+                        err.name = 'AbortError';
+                        throw err;
+                    }
+                    return;
+                }
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '软停机与信号测试',
+                        target_word_count: 1000,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '软停机与信号测试',
+                        scene_plan: [
+                            { scene_index: 1, location: '港口', summary: '推进剧情', is_spotlight: true }
+                        ],
+                        outline_text: '推进港口剧情。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '提交完成',
+                        next_chapter_options: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_dream_commit')) {
+                    dreamingCalls += 1;
+                    await execTool('yield_dream_commit', {
+                        summary: '不应在软停机后执行'
+                    });
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks('雨歇之后，铁锚重新沉入浅水，灯塔光束掠过防波堤。')
+        });
+
+        // 1. 信号队列并发入队自动赋予唯一 id，且 countPendingSignals / status / views?kind=signals 纯只读零写盘
+        const [sig1, sig2] = await Promise.all([
+            ctx.narratePipeline.enqueueSignal({ type: 'DIRECTOR_NOTE', reason: '并发信号 A' }),
+            ctx.narratePipeline.enqueueSignal({ type: 'DIRECTOR_NOTE', reason: '并发信号 B' })
+        ]);
+        expect(sig1.id).toBeDefined();
+        expect(sig2.id).toBeDefined();
+        expect(sig1.id).not.toBe(sig2.id);
+
+        await rm(join(bookRoot, '.ops/signals_cursor.json'), { force: true });
+        expect(await ctx.narratePipeline.countPendingSignals()).toBe(2);
+        await web.invoke('GET', '/api/narrate/status');
+        await web.invoke('GET', '/api/narrate/views?kind=signals');
+        await expect(stat(join(bookRoot, '.ops/signals_cursor.json'))).rejects.toThrow();
+
+        // 2. 并发双击 startYolo：仅一个成功，另一个抛出 409 冲突，且 running 保持 true
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+        const raceResults = await Promise.allSettled([
+            ctx.narratePipeline.startYolo({ targetChapters: 2 }),
+            ctx.narratePipeline.startYolo({ targetChapters: 2 })
+        ]);
+        expect(raceResults.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+        expect(raceResults.filter((r) => r.status === 'rejected')).toHaveLength(1);
+        expect(ctx.narratePipeline.runtimeStatus.yolo.running).toBe(true);
+
+        // 等待第 1 章进入 WRITER 后发出默认软停机 (force=false)
+        await writerEntered.promise;
+        const softHaltRes = await web.invoke('POST', '/api/narrate/halt', {});
+        expect(softHaltRes.statusCode).toBe(202);
+        expect(softHaltRes.json['force']).toBe(false);
+
+        // 放行在途 Writer：不应收到 abort，且第 1 章完章提交，不启动第 2 章，也不跑 Dreaming
+        writerDeferred.resolve();
+        await sse.waitForEvent(
+            (e) => e.event === 'yolo_halted' || e.event === 'yolo_completed'
+        );
+        await new Promise((r) => setImmediate(r));
+        expect(observedAbortSignals).toEqual([false]);
+        const txAfterSoftHalt = await ctx.narrateStore.openStore().readTxState();
+        expect(txAfterSoftHalt.last_committed_ch).toBe(1);
+        expect(dreamingCalls).toBe(0);
+
+        // 3. 验证 force: true 硬中断立即触发 AbortSignal 且不消费未提交章的新信号
+        await ctx.narratePipeline.enqueueSignal({ type: 'DIRECTOR_NOTE', reason: '硬中断后仍保留' });
+        writerEntered = createDeferred<void>();
+        writerDeferred = createDeferred<void>();
+        observedAbortSignals = [];
+        const preHaltEventsCount = sse.events.length;
+        await ctx.narratePipeline.startYolo({ targetChapters: 2 });
+        await writerEntered.promise;
+        const hardHaltRes = await web.invoke('POST', '/api/narrate/halt', { force: true });
+        expect(hardHaltRes.statusCode).toBe(202);
+        expect(hardHaltRes.json['force']).toBe(true);
+        await sse.waitForEvent(
+            (e) =>
+                sse.events.indexOf(e) >= preHaltEventsCount &&
+                (e.event === 'yolo_halted' || e.event === 'yolo_completed')
+        );
+        await new Promise((r) => setImmediate(r));
+        expect(observedAbortSignals).toContain(true);
+        expect(await ctx.narratePipeline.countPendingSignals()).toBe(1);
+    });
+
+    it('ISS-064, 065, 067, 068, 069: 软链拦截、批量 git log、SafeHalt 双套字段与严格 400 入参校验', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-sec-books-'));
+        tempDirs.push(booksRoot);
+        let fcAttemptInTest = 0;
+        const { bookRoot, ctx, web } = await setupWave3bWorkspace('security-and-validation', {
+            booksRoot,
+            exactSlugInBooksRoot: true,
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: 'SafeHalt 测试',
+                        target_word_count: 1000,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '验证批量 git log 与 SafeHalt 事件',
+                        scene_plan: [
+                            { scene_index: 1, location: '仓库', summary: '触发拦截', is_spotlight: true }
+                        ],
+                        outline_text: '触发拦截。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    fcAttemptInTest += 1;
+                    if (fcAttemptInTest === 1) {
+                        // 首次刻意提交未在基准语料存在的假原句，触发双原句验真过滤并由下一跳修正
+                        try {
+                            await execTool('yield_verdict', {
+                                passed: false,
+                                issues: [
+                                    {
+                                        severity: 'PLAN_CONFLICT',
+                                        paragraph_index: 0,
+                                        description: '无根据幻觉指控',
+                                        quote_draft: '他推开仓库木门',
+                                        quote_source: '不存在于语料库中的幻觉原句',
+                                        source_ref: 'world/world_state.md'
+                                    }
+                                ]
+                            });
+                        } catch {
+                            // 继续用真实双原句提交以触发 REPLAN -> SAFE_HALT
+                        }
+                    }
+                    await execTool('yield_verdict', {
+                        passed: false,
+                        issues: [
+                            {
+                                severity: 'PLAN_CONFLICT',
+                                paragraph_index: 0,
+                                description: '持续死循环触发 SAFE_HALT',
+                                quote_draft: '他推开仓库木门',
+                                quote_source: '海港处于封港戒备前夕，旧账房与泊位调度仍在运转。',
+                                source_ref: 'world/world_state.md'
+                            }
+                        ]
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('他推开仓库木门，看见墙上的旧钟停在三点整。')
+        });
+
+        // 1. 写入已提交章节 manuscripts/ch_0001.md 验证 GET /api/narrate/chapters 批量 git log 解析
+        await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '第一章正文内容。\n', 'utf8');
+        await execFileAsync('git', ['-C', bookRoot, 'add', '.']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'add ch1 for batch log']);
+
+        const chaptersRes = await web.invoke('GET', '/api/narrate/chapters');
+        expect(chaptersRes.statusCode).toBe(200);
+        const chItems = chaptersRes.json['chapters'] as Array<{ chapterNumber: number; commitSha: string | null }>;
+        expect(
+            chItems.some(
+                (c) => c.chapterNumber === 1 && typeof c.commitSha === 'string' && c.commitSha.length >= 7
+            )
+        ).toBe(true);
+
+        // 2. 验证 books/ 下外部软链与循环软链（ELOOP）均被 isSubPath Fail-Closed 阻断并返回 400
+        const outsideDir = await mkdtemp(join(tmpdir(), 'outside-symlink-target-'));
+        tempDirs.push(outsideDir);
+        await mkdir(join(outsideDir, 'world'), { recursive: true });
+        await writeFile(join(outsideDir, 'world/book_config.yaml'), 'title: evil\n', 'utf8');
+        await symlink(outsideDir, join(booksRoot, 'evil-link'));
+        const evilSelectRes = await web.invoke('POST', '/api/narrate/book/select', {
+            slug: 'evil-link'
+        });
+        expect(evilSelectRes.statusCode).toBe(400);
+
+        await symlink('evil-loop', join(booksRoot, 'evil-loop'));
+        const loopSelectRes = await web.invoke('POST', '/api/narrate/book/select', {
+            slug: 'evil-loop'
+        });
+        expect(loopSelectRes.statusCode).toBe(400);
+
+        // 3. 验证严格 Zod 400 参数校验
+        expect((await web.invoke('POST', '/api/narrate/yolo/start', { maxChapters: 'abc' })).statusCode).toBe(400);
+        expect((await web.invoke('POST', '/api/narrate/yolo/start', { maxChapters: -1.5 })).statusCode).toBe(400);
+        expect((await web.invoke('POST', '/api/narrate/dream', { force: 'yes' })).statusCode).toBe(400);
+        expect((await web.invoke('POST', '/api/narrate/halt', { force: 'yes' })).statusCode).toBe(400);
+        expect((await web.invoke('POST', '/api/narrate/heal', { maxAutoRollbackChapters: -1 })).statusCode).toBe(400);
+        expect(
+            (await web.invoke('POST', '/api/narrate/heal', { conflicts: [{ conflictId: '' }] })).statusCode
+        ).toBe(400);
+
+        // 4. 触发 SAFE_HALT 验证 checker:result 先于 SAFE_HALT 广播（含 issues 与 filteredOutCount），且 views?kind=halt 同时提供双套字段
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+        await expect(
+            ctx.narratePipeline.stepChapter({ chapterNumber: 2, chapterGoal: '测试 SAFE_HALT' })
+        ).rejects.toThrow();
+
+        const checkerFailEvt = sse.events.find((e) => e.event === 'checker:result' && e.data['passed'] === false);
+        expect(checkerFailEvt).toBeDefined();
+        expect(Array.isArray(checkerFailEvt!.data['issues'])).toBe(true);
+        expect((checkerFailEvt!.data['issues'] as unknown[]).length).toBeGreaterThanOrEqual(1);
+        expect(checkerFailEvt!.data['filteredOutCount']).toBeGreaterThanOrEqual(1);
+
+        const haltViewRes = await web.invoke('GET', '/api/narrate/views?kind=halt');
+        expect(haltViewRes.statusCode).toBe(200);
+        const haltObj = haltViewRes.json['safeHalt'] as Record<string, unknown>;
+        expect(haltObj['reason']).toBeDefined();
+        expect(haltObj['halt_reason']).toBeDefined();
+        expect(haltObj['chapter']).toBe(2);
+        expect(haltObj['chapter_number']).toBe(2);
+    });
+
+    it('ISS-004 & ISS-052 & Q4.2: model-routing WAL 原子提交保持洁净工作区；空闲 halt 不毒化后续 heal；YOLO 单发 dream:completed；多章自愈中断后无参 heal 断点续跑', async () => {
+        let writerSeq = 0;
+        let haltDuringSecondHealChapter = false;
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-heal-resume-books-'));
+        tempDirs.push(booksRoot);
+        let controllerRef: typeof ctx.narratePipeline | undefined;
+
+        const { bookRoot, ctx, web } = await setupWave3bWorkspace('heal-resume-wal', {
+            booksRoot,
+            exactSlugInBooksRoot: true,
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '断点续跑测试章',
+                        target_word_count: 1000,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: taskPrompt.includes('第 2 章') ? 'Ch2' : 'Ch3',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '对账', is_spotlight: true }
+                        ],
+                        outline_text: '他站在码头核对货单。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成一章',
+                        next_chapter_options: ['继续']
+                    });
+                    return;
+                }
+                if (tools.has('yield_dream_commit')) {
+                    await execTool('yield_dream_commit', {
+                        summary: 'Dreaming 整理完成',
+                        chapter_number: 1,
+                        accumulated_words: 100,
+                        spotlight_triggers: []
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                const sys = opts.system ?? '';
+                if (sys.includes('连续性自愈裁判')) {
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            severity: 'CASCADING_HARD',
+                            reason: '连环冲突需回滚重跑 ch2..ch3',
+                            downstream_dependent: true
+                        })
+                    );
+                }
+                writerSeq += 1;
+                if (writerSeq === 1) {
+                    return textToStreamChunks('第一夜，他把蓝皮账本锁进抽屉。');
+                }
+                if (writerSeq === 2) {
+                    return textToStreamChunks('次日清晨，他翻开完好的蓝皮账本记下船号。');
+                }
+                if (writerSeq === 3) {
+                    return textToStreamChunks('第三日午后，账房依然摆放着那本完好的蓝皮账本。');
+                }
+                if (haltDuringSecondHealChapter && writerSeq === 4) {
+                    // 在第 2 章重跑期间发起软停机，验证 ch2 完成后于 ch3 之前停在断点
+                    haltDuringSecondHealChapter = false;
+                    controllerRef?.requestHalt({ force: false });
+                }
+                return textToStreamChunks('他站在石阶前只凭口头密语完成核对，全程未碰账本。');
+            }
+        });
+        controllerRef = ctx.narratePipeline;
+
+        // 1. 验证 PUT /api/narrate/model-routing 走 WAL 登记 + git commitPaths 提交且工作区洁净
+        const routePutRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+            model_routing: { strong_creative: 'deepseek-chat' }
+        });
+        expect(routePutRes.statusCode).toBe(200);
+        const statusOut = await execFileAsync('git', ['-C', bookRoot, 'status', '--porcelain']);
+        expect(statusOut.stdout.trim()).toBe('');
+        await expect(stat(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+
+        // 2. 验证 YOLO 运行 Dreaming 时只发送单次 dream:completed SSE（不重复发送）
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const cfgText = await readFile(cfgPath, 'utf8');
+        await writeFile(
+            cfgPath,
+            cfgText.replace('word_threshold: 15000', 'word_threshold: 1'),
+            'utf8'
+        );
+        await execFileAsync('git', ['-C', bookRoot, 'add', 'world/book_config.yaml']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'tune dream word threshold for test']);
+
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+        await ctx.narratePipeline.startYolo({ targetChapters: 1 });
+        await sse.waitForEvent((e) => e.event === 'yolo_completed' || e.event === 'yolo_halted');
+        await new Promise((r) => setImmediate(r));
+        expect(sse.events.filter((e) => e.event === 'dream:completed')).toHaveLength(1);
+
+        // 3. 推进 ch2 与 ch3，并在完全空闲时调用 POST /api/narrate/halt（验证不毒化后续 heal）
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 2, chapterGoal: 'Ch2' });
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 3, chapterGoal: 'Ch3' });
+
+        const idleHaltRes = await web.invoke('POST', '/api/narrate/halt', {});
+        expect(idleHaltRes.statusCode).toBe(202);
+
+        // 4. 触发覆盖 ch2..ch3 的 Tier 3 自愈，并在 ch2 重跑时软停机，保留 nextChapter: 3 断点
+        haltDuringSecondHealChapter = true;
+        const interruptedHealRes = await web.invoke('POST', '/api/narrate/heal', {
+            maxAutoRollbackChapters: 3,
+            conflicts: [
+                {
+                    conflictId: 'c-multi-resume',
+                    chapterA: 1,
+                    quoteA: '第一夜，他把蓝皮账本锁进抽屉。',
+                    chapterB: 2,
+                    quoteB: '次日清晨，他翻开完好的蓝皮账本记下船号。',
+                    description: '第 1~3 章账本存在状态连环冲突',
+                    severityHint: 'CASCADING_HARD'
+                }
+            ]
+        });
+        expect(interruptedHealRes.statusCode).toBe(500);
+        const planMidRaw = JSON.parse(
+            await readFile(join(bookRoot, '.ops/heal_plan.json'), 'utf8')
+        ) as { nextChapter: number; toChapter: number };
+        expect(planMidRaw).toMatchObject({ nextChapter: 3, toChapter: 3 });
+        expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(2);
+
+        // 5. 空闲后无参调用 POST /api/narrate/heal，验证从 heal_plan.json 自动续跑第 3 章并清理断点
+        const resumedHealRes = await web.invoke('POST', '/api/narrate/heal', {});
+        expect(resumedHealRes.statusCode).toBe(200);
+        expect(resumedHealRes.json['quarantined']).toBe(false);
+        expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(3);
+        await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
     });
 });

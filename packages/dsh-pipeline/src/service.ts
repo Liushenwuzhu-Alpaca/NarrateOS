@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import '@deepseek-ai/dsh-agent';
 import '@deepseek-ai/dsh-commands';
@@ -7,6 +9,7 @@ import '@deepseek-ai/dsh-skill';
 import Schema from '@deepseek-ai/schemastery';
 import '@narrateos/dsh-book-store';
 import '@narrateos/dsh-book-tools';
+import { resolveDefaultEngineCraftPluginDir } from './pipeline/chapter-pipeline.js';
 import type { LlmPoolRouting } from './schemas.js';
 import { registerNarrateCommands } from './runtime/commands.js';
 import { NarrateRuntimeController } from './runtime/controller.js';
@@ -27,6 +30,8 @@ export interface NarratePipelineConfig {
     booksRoot?: string | undefined;
     /** 外部角色配置与 Skill 预设包目录（可选，默认自动解析 @narrateos/dsh-preset-narrateos） */
     presetRoot?: string | undefined;
+    /** 外部认知与文风插件搜索目录列表（可选，默认自动解析仓库级 plugins/craft 与预设插件目录） */
+    pluginSearchDirs?: string[] | undefined;
     /** 模型池路由映射 */
     poolRouting?: LlmPoolRouting | undefined;
     /** SSE 保活心跳间隔毫秒数（<= 0 时关闭） */
@@ -63,6 +68,9 @@ export const Config = Schema.object({
     booksRoot: Schema.string().description('作品集根目录路径（可选，默认继承 narrateStore.booksRoot）'),
     presetRoot: Schema.string().description(
         '外部角色配置与 Skill 预设包目录（可选，默认解析 @narrateos/dsh-preset-narrateos）'
+    ),
+    pluginSearchDirs: Schema.array(Schema.string()).description(
+        '外部认知与文风插件搜索目录列表（可选，默认自动解析仓库级 plugins/craft 与预设插件目录）'
     ),
     poolRouting: Schema.object({
         strong_creative: Schema.object({
@@ -114,10 +122,25 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
         )
     };
 
+    const resolvedPluginSearchDirs =
+        config.pluginSearchDirs && config.pluginSearchDirs.length > 0
+            ? Array.from(new Set(config.pluginSearchDirs.map((dir) => resolve(dir))))
+            : Array.from(
+                  new Set([
+                      resolveDefaultEngineCraftPluginDir(),
+                      ...(config.presetRoot
+                          ? [join(resolve(config.presetRoot), 'plugins/craft')].filter((dir) =>
+                                existsSync(dir)
+                            )
+                          : [])
+                  ])
+              );
+
     const controller = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, {
         bookRoot: config.bookRoot,
         booksRoot: config.booksRoot,
         presetRoot: config.presetRoot,
+        pluginSearchDirs: resolvedPluginSearchDirs,
         poolRouting: resolvedRouting,
         heartbeatIntervalMs: config.heartbeatIntervalMs,
         shutdownTimeoutMs: config.shutdownTimeoutMs
@@ -125,7 +148,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
 
     ctx.effect(function* () {
         yield ctx.provide('narratePipeline', controller);
-        void controller.ensureDefaultBookSelected();
+        void controller.trackBackgroundTask(controller.ensureDefaultBookSelected());
 
         // 独立子插件隔离 RoleRunner 动态挂载点（session/event 监听与 agents.create 作用域），
         // 确保卸载时先由 controller.shutdown() 排空活跃运行，再释放 runnerFiber。
@@ -173,23 +196,25 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
                 'narrateos-pipeline:skills'
             );
 
-            void registerPresetBootSkill(skillCtx.skills, controller.roleLoader.presetRoot, {
-                isDisposed
-            })
-                .then((fn) => {
-                    if (isDisposed()) {
-                        fn();
-                    } else {
-                        disposeSkill = fn;
-                    }
+            void controller.trackBackgroundTask(
+                registerPresetBootSkill(skillCtx.skills, controller.roleLoader.presetRoot, {
+                    isDisposed
                 })
-                .catch((err: unknown) => {
-                    const logger = (skillCtx as { logger?: { warn?: (msg: string) => void } })
-                        .logger;
-                    logger?.warn?.(
-                        `narrate-boot Skill 异步注册失败（非致命）: ${err instanceof Error ? err.message : String(err)}`
-                    );
-                });
+                    .then((fn) => {
+                        if (isDisposed()) {
+                            fn();
+                        } else {
+                            disposeSkill = fn;
+                        }
+                    })
+                    .catch((err: unknown) => {
+                        const logger = (skillCtx as { logger?: { warn?: (msg: string) => void } })
+                            .logger;
+                        logger?.warn?.(
+                            `narrate-boot Skill 异步注册失败（非致命）: ${err instanceof Error ? err.message : String(err)}`
+                        );
+                    })
+            );
         });
         yield skillFiber.dispose;
 

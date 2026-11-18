@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
+import { z } from 'zod';
 import {
     BookSwitchConflictError,
+    NarrationSubjectivitySchema,
     RoleReasoningEffortSchema,
     RoleTierOverrideSchema,
     serializeEntityMarkdown,
@@ -21,16 +22,18 @@ import {
     ValidationError
 } from '../errors.js';
 import { CHAPTER_FILE_RE, readOptionalText } from '../pipeline/helpers.js';
-import type {
-    AdvanceVolumeOptions,
-    RunDreamingOptions,
-    StepChapterOptions
+import {
+    SuspectedConflictSchema,
+    type AdvanceVolumeOptions,
+    type RunDreamingOptions
 } from '../schemas.js';
 import {
     isSubPath,
     isValidBookDirectory,
     resolveStatusModelRouting,
-    type NarrateRuntimeController
+    type BootFromModalPayload,
+    type NarrateRuntimeController,
+    type StepChapterInputOptions
 } from './controller.js';
 
 const execFileAsync = promisify(execFile);
@@ -241,6 +244,252 @@ function parsePositiveChapterNumber(
     return raw;
 }
 
+function parseWithSchema<TSchema extends z.ZodTypeAny>(
+    schema: TSchema,
+    body: unknown,
+    label: string
+): z.infer<TSchema> {
+    const parsed = schema.safeParse(body);
+    if (!parsed.success) {
+        const msg = parsed.error.issues
+            .map((issue) => `${issue.path.join('.') || label}: ${issue.message}`)
+            .join('; ');
+        throw new PathValidationError(`${label} 参数校验失败: ${msg}`);
+    }
+    return parsed.data;
+}
+
+const BookSelectRequestSchema = z.object({
+    bookRoot: z.string().trim().min(1).optional(),
+    slug: z.string().trim().regex(SLUG_RE, 'slug 格式非法，仅允许字母、数字、下划线与连字符').optional()
+});
+
+const BootBookRequestSchema = z.object({
+    slug: z.string().trim().regex(SLUG_RE, 'slug 必填且仅允许字母、数字、下划线与连字符'),
+    title: z.string().trim().min(1),
+    povCharacter: z.string().trim().min(1),
+    mode: z.enum(['original', 'fanfic']),
+    premiseOrSeed: z.string().optional(),
+    sourceMaterial: z.string().optional(),
+    t0Anchor: z.string().optional(),
+    t0_anchor: z.string().optional(),
+    commitments: z.array(z.string().min(1)).optional(),
+    excludedCliches: z.array(z.string().min(1)).optional(),
+    excluded_cliches: z.array(z.string().min(1)).optional(),
+    authorizationBoundary: z.string().optional(),
+    authorization_boundary: z.string().optional(),
+    narrationSubjectivity: NarrationSubjectivitySchema.optional(),
+    narration_subjectivity: NarrationSubjectivitySchema.optional(),
+    tokensPerChar: z.number().positive().optional(),
+    tokens_per_char: z.number().positive().optional(),
+    writerTokenBudget: z.number().int().positive().nullable().optional(),
+    writer_token_budget: z.number().int().positive().nullable().optional(),
+    maxAutoRollbackChapters: z.number().int().nonnegative().optional(),
+    max_auto_rollback_chapters: z.number().int().nonnegative().optional(),
+    craftPlugins: z.array(z.string()).optional(),
+    craft_plugins: z.array(z.string()).optional(),
+    modelRouting: z.record(z.string(), z.string()).optional(),
+    model_routing: z.record(z.string(), z.string()).optional()
+});
+
+const StepChapterRequestSchema = z.object({
+    chapterGoal: z.string().optional(),
+    chapterNumber: z.number().int().min(1).max(9999).optional(),
+    timelineMode: z.enum(['MAINLINE', 'PARALLEL', 'FLASHBACK']).optional(),
+    targetDay: z.number().int().optional(),
+    parallelWindowId: z.string().min(1).optional(),
+    parallelBranchId: z.string().min(1).optional(),
+    povCharIds: z.array(z.string().min(1)).optional()
+});
+
+const YoloStartRequestSchema = z.object({
+    targetChapters: z.number().int().nonnegative().optional(),
+    maxChapters: z.number().int().nonnegative().optional(),
+    defaultGoal: z.string().optional()
+});
+
+const DreamRequestSchema = z.object({
+    currentChapter: z.number().int().nonnegative().optional(),
+    force: z.boolean().optional(),
+    recentWordDelta: z.number().int().nonnegative().optional(),
+    activeEntityIds: z.array(z.string().min(1)).optional()
+});
+
+const VoiceHarvestRequestSchema = z.object({
+    chapterNumber: z.number().int().min(1).max(9999).optional()
+});
+
+const AdvanceVolumeRequestSchema = z.object({
+    companionEntityIds: z.array(z.string().min(1)).optional(),
+    completeBook: z.boolean().optional()
+});
+
+const ParallelWindowRequestSchema = z.object({
+    windowId: z.string().regex(SLUG_RE, '需要合法 windowId')
+});
+
+const SignalDeleteRequestSchema = z.object({
+    created_at: z.string().min(1),
+    reason: z.string().min(1)
+});
+
+const HaltRequestSchema = z.object({
+    force: z.boolean().optional()
+});
+
+const HealRequestSchema = z.object({
+    conflicts: z.array(SuspectedConflictSchema).optional(),
+    maxAutoRollbackChapters: z.number().int().nonnegative().optional()
+});
+
+/** 为 safe_halt / quarantine_report 补齐向后兼容的 snake_case 与 camelCase 双向映射字段 */
+function normalizeHaltPayload(
+    parsed: unknown,
+    defaultKind: 'SAFE_HALT' | 'QUARANTINED'
+): unknown {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return parsed;
+    }
+    const obj = { ...(parsed as Record<string, unknown>) };
+    if (obj['malformed'] === true) {
+        return obj;
+    }
+
+    const chapterVal =
+        typeof obj['chapterNumber'] === 'number'
+            ? obj['chapterNumber']
+            : typeof obj['chapter'] === 'number'
+              ? obj['chapter']
+              : typeof obj['side_b_chapter'] === 'number'
+                ? obj['side_b_chapter']
+                : undefined;
+    if (chapterVal !== undefined) {
+        obj['chapterNumber'] ??= chapterVal;
+        obj['chapter'] ??= chapterVal;
+        obj['chapter_number'] ??= chapterVal;
+    }
+
+    const reasonVal =
+        typeof obj['reason'] === 'string'
+            ? obj['reason']
+            : typeof obj['halt_reason'] === 'string'
+              ? obj['halt_reason']
+              : typeof obj['message'] === 'string'
+                ? obj['message']
+                : undefined;
+    if (reasonVal !== undefined) {
+        obj['reason'] ??= reasonVal;
+        obj['halt_reason'] ??= reasonVal;
+    }
+
+    const conflictIdVal =
+        typeof obj['conflictId'] === 'string'
+            ? obj['conflictId']
+            : typeof obj['conflict_id'] === 'string'
+              ? obj['conflict_id']
+              : undefined;
+    if (conflictIdVal !== undefined) {
+        obj['conflictId'] ??= conflictIdVal;
+        obj['conflict_id'] ??= conflictIdVal;
+    }
+
+    const affectedVal =
+        typeof obj['affectedChapters'] === 'number'
+            ? obj['affectedChapters']
+            : typeof obj['rollback_chapters'] === 'number'
+              ? obj['rollback_chapters']
+              : undefined;
+    if (affectedVal !== undefined) {
+        obj['affectedChapters'] ??= affectedVal;
+        obj['rollback_chapters'] ??= affectedVal;
+    }
+
+    const rollbackWordsVal =
+        typeof obj['rollbackWords'] === 'number'
+            ? obj['rollbackWords']
+            : typeof obj['rollback_words'] === 'number'
+              ? obj['rollback_words']
+              : undefined;
+    if (rollbackWordsVal !== undefined) {
+        obj['rollbackWords'] ??= rollbackWordsVal;
+        obj['rollback_words'] ??= rollbackWordsVal;
+    }
+
+    const tsVal =
+        typeof obj['timestamp'] === 'string'
+            ? obj['timestamp']
+            : typeof obj['created_at'] === 'string'
+              ? obj['created_at']
+              : undefined;
+    if (tsVal !== undefined) {
+        obj['timestamp'] ??= tsVal;
+        obj['created_at'] ??= tsVal;
+    }
+
+    if (typeof obj['side_a_chapter'] === 'number') {
+        const chA = `ch_${String(obj['side_a_chapter']).padStart(4, '0')}`;
+        const lineA = typeof obj['side_a_line'] === 'number' ? `:${obj['side_a_line']}` : '';
+        obj['leftRef'] ??= `${chA}${lineA}`;
+    }
+    if (typeof obj['side_b_chapter'] === 'number') {
+        const chB = `ch_${String(obj['side_b_chapter']).padStart(4, '0')}`;
+        const lineB = typeof obj['side_b_line'] === 'number' ? `:${obj['side_b_line']}` : '';
+        obj['rightRef'] ??= `${chB}${lineB}`;
+    }
+
+    const issues = Array.isArray(obj['issues']) ? obj['issues'] : [];
+    if (issues.length > 0 && issues[0] && typeof issues[0] === 'object') {
+        const first = issues[0] as Record<string, unknown>;
+        if (typeof first['source_ref'] === 'string') {
+            obj['leftRef'] ??= first['source_ref'];
+        }
+        if (typeof first['quote_source'] === 'string' && first['quote_source'].trim().length > 0) {
+            obj['leftExcerpt'] ??= first['quote_source'];
+        }
+        if (typeof first['quote_draft'] === 'string' && first['quote_draft'].trim().length > 0) {
+            obj['rightExcerpt'] ??= first['quote_draft'];
+        }
+        if (chapterVal !== undefined) {
+            obj['rightRef'] ??= `ch_${String(chapterVal).padStart(4, '0')}`;
+        }
+    }
+
+    if (typeof obj['status'] !== 'string') {
+        obj['status'] = defaultKind;
+    }
+    return obj;
+}
+
+/** 单次批量 git log 解析全部章节最新提交 SHA，杜绝 N 次并发子进程冲击句柄 */
+async function readLatestChapterCommitMap(bookRoot: string): Promise<Map<string, string>> {
+    const map = new Map<string, string>();
+    try {
+        const { stdout } = await execFileAsync(
+            'git',
+            ['-C', bookRoot, 'log', '--name-only', '--format=__COMMIT__%H', '--', 'manuscripts/'],
+            {
+                encoding: 'utf8',
+                maxBuffer: 16 * 1024 * 1024
+            }
+        );
+        let currentSha: string | null = null;
+        for (const rawLine of stdout.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (line.length === 0) continue;
+            if (line.startsWith('__COMMIT__')) {
+                currentSha = line.slice('__COMMIT__'.length).trim() || null;
+                continue;
+            }
+            if (currentSha && line.startsWith('manuscripts/') && !map.has(line)) {
+                map.set(line, currentSha);
+            }
+        }
+    } catch {
+        // 无提交历史或非 Git 目录时返回空映射
+    }
+    return map;
+}
+
 function sendErrorResponse(res: ServerResponse, err: unknown): void {
     if (
         err instanceof BookSwitchConflictError ||
@@ -291,26 +540,27 @@ export function registerNarrateRoutes(
 
     const handleBookSelect = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
+        let body: z.infer<typeof BookSelectRequestSchema>;
+        try {
+            body = parseWithSchema(BookSelectRequestSchema, rawBody, 'book/select');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
+
         let targetRoot: string;
-        if (typeof body['bookRoot'] === 'string' && body['bookRoot'].trim().length > 0) {
-            targetRoot = resolve(controller.booksRoot, body['bookRoot']);
-        } else if (typeof body['slug'] === 'string' && body['slug'].trim().length > 0) {
-            const slug = body['slug'].trim();
-            if (!SLUG_RE.test(slug)) {
-                sendJson(res, 400, {
-                    error: 'slug 格式非法，仅允许字母、数字、下划线与连字符'
-                });
-                return;
-            }
-            targetRoot = resolve(controller.booksRoot, slug);
+        if (body.bookRoot) {
+            targetRoot = resolve(controller.booksRoot, body.bookRoot);
+        } else if (body.slug) {
+            targetRoot = resolve(controller.booksRoot, body.slug);
         } else {
             sendJson(res, 400, { error: '缺少必填参数 bookRoot 或 slug' });
             return;
@@ -343,49 +593,57 @@ export function registerNarrateRoutes(
 
     const handleBoot = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
-        const slug = typeof body['slug'] === 'string' ? body['slug'].trim() : '';
-        const title = typeof body['title'] === 'string' ? body['title'].trim() : '';
-        const povCharacter =
-            typeof body['povCharacter'] === 'string' ? body['povCharacter'].trim() : '';
-        const mode = body['mode'];
+        let body: z.infer<typeof BootBookRequestSchema>;
+        try {
+            body = parseWithSchema(BootBookRequestSchema, rawBody, 'boot');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
 
-        if (!slug || !SLUG_RE.test(slug)) {
-            sendJson(res, 400, { error: 'slug 必填且仅允许字母、数字、下划线与连字符' });
-            return;
-        }
-        if (!title || !povCharacter) {
-            sendJson(res, 400, { error: '缺少必填参数 title 或 povCharacter' });
-            return;
-        }
-        if (mode !== 'original' && mode !== 'fanfic') {
-            sendJson(res, 400, { error: 'mode 必须为 original 或 fanfic' });
-            return;
-        }
+        const t0Anchor = body.t0Anchor ?? body.t0_anchor;
+        const excludedCliches = body.excludedCliches ?? body.excluded_cliches;
+        const authorizationBoundary = body.authorizationBoundary ?? body.authorization_boundary;
+        const narrationSubjectivity = body.narrationSubjectivity ?? body.narration_subjectivity;
+        const tokensPerChar = body.tokensPerChar ?? body.tokens_per_char;
+        const writerTokenBudget =
+            body.writerTokenBudget !== undefined
+                ? body.writerTokenBudget
+                : body.writer_token_budget;
+        const maxAutoRollbackChapters =
+            body.maxAutoRollbackChapters ?? body.max_auto_rollback_chapters;
+        const craftPlugins = body.craftPlugins ?? body.craft_plugins;
+        const modelRouting = body.modelRouting ?? body.model_routing;
+
+        const payload: BootFromModalPayload = {
+            slug: body.slug,
+            title: body.title,
+            povCharacter: body.povCharacter,
+            mode: body.mode,
+            ...(body.premiseOrSeed !== undefined ? { premiseOrSeed: body.premiseOrSeed } : {}),
+            ...(body.sourceMaterial !== undefined ? { sourceMaterial: body.sourceMaterial } : {}),
+            ...(t0Anchor !== undefined ? { t0Anchor } : {}),
+            ...(body.commitments !== undefined ? { commitments: body.commitments } : {}),
+            ...(excludedCliches !== undefined ? { excludedCliches } : {}),
+            ...(authorizationBoundary !== undefined ? { authorizationBoundary } : {}),
+            ...(narrationSubjectivity !== undefined ? { narrationSubjectivity } : {}),
+            ...(tokensPerChar !== undefined ? { tokensPerChar } : {}),
+            ...(writerTokenBudget !== undefined ? { writerTokenBudget } : {}),
+            ...(maxAutoRollbackChapters !== undefined ? { maxAutoRollbackChapters } : {}),
+            ...(craftPlugins !== undefined ? { craftPlugins } : {}),
+            ...(modelRouting !== undefined ? { modelRouting } : {})
+        };
 
         try {
-            const result = await controller.bootBook({
-                slug,
-                title,
-                povCharacter,
-                mode,
-                ...(typeof body['premiseOrSeed'] === 'string'
-                    ? { premiseOrSeed: body['premiseOrSeed'] }
-                    : {}),
-                ...(typeof body['sourceMaterial'] === 'string'
-                    ? { sourceMaterial: body['sourceMaterial'] }
-                    : {}),
-                ...(typeof body['t0Anchor'] === 'string'
-                    ? { t0Anchor: body['t0Anchor'] }
-                    : {})
-            });
+            const result = await controller.bootBook(payload);
             sendJson(res, 201, {
                 status: 'BOOTED',
                 bookRoot: result.bookRoot,
@@ -412,11 +670,13 @@ export function registerNarrateRoutes(
                 }
             }
 
-            const [pendingSignalsCount, roleDefinitions, availableModels] = await Promise.all([
-                controller.countPendingSignals(),
-                controller.resolveRoleDefinitions(snapshot.config, store.bookRoot),
-                controller.listAvailableModels(snapshot.config)
-            ]);
+            const [pendingSignalsCount, roleDefinitions, availableModels, diagnostics] =
+                await Promise.all([
+                    controller.countPendingSignals(),
+                    controller.resolveRoleDefinitions(snapshot.config, store.bookRoot),
+                    controller.listAvailableModels(snapshot.config),
+                    controller.getDiagnosticsStatus(store, snapshot)
+                ]);
             const rt = controller.runtimeStatus;
 
             sendJson(res, 200, {
@@ -443,7 +703,8 @@ export function registerNarrateRoutes(
                 runtime: {
                     activeTask: rt.activeTask,
                     haltRequested: rt.haltRequested
-                }
+                },
+                ...diagnostics
             });
         } catch (err) {
             sendErrorResponse(res, err);
@@ -481,25 +742,11 @@ export function registerNarrateRoutes(
         try {
             const list = await controller.listChapters();
             const bookRoot = controller.requireBookStore().bookRoot;
-            const enriched = await Promise.all(
-                list.chapters.map(async (ch) => {
-                    const gitShaOut = await runGitCommand(bookRoot, [
-                        'log',
-                        '-n',
-                        '1',
-                        '--format=%H',
-                        '--',
-                        `manuscripts/${ch.fileName}`
-                    ]);
-                    return {
-                        ...ch,
-                        commitSha:
-                            gitShaOut && gitShaOut.trim().length > 0
-                                ? gitShaOut.trim()
-                                : null
-                    };
-                })
-            );
+            const commitMap = await readLatestChapterCommitMap(bookRoot);
+            const enriched = list.chapters.map((ch) => ({
+                ...ch,
+                commitSha: commitMap.get(`manuscripts/${ch.fileName}`) ?? null
+            }));
             sendJson(res, 200, { chapters: enriched });
         } catch (err) {
             sendErrorResponse(res, err);
@@ -631,7 +878,10 @@ export function registerNarrateRoutes(
                 sendJson(res, 400, { error: '缺少必填查询参数 sessionId' });
                 return;
             }
-            const detail = await controller.getSessionDetail(sessionId);
+            const detail = await controller.getSessionDetail(
+                sessionId,
+                controller.bookRoot ?? undefined
+            );
             if (!detail) {
                 sendJson(res, 404, { error: `未找到会话明细: ${sessionId}` });
                 return;
@@ -685,15 +935,30 @@ export function registerNarrateRoutes(
                     return;
                 }
                 case 'signals': {
-                    const raw = await readOptionalText(join(bookRoot, '.ops/signals.jsonl'));
-                    const all = parseJsonLines(raw);
-                    const pendingCount = await controller.countPendingSignals();
-                    const consumed = Math.max(0, all.length - pendingCount);
+                    const signalsView = await controller.listSignalsView(bookRoot);
                     sendJson(res, 200, {
                         kind: 'signals',
-                        signals: all,
-                        pending: all.slice(consumed),
-                        pendingCount
+                        signals: signalsView.signals,
+                        pending: signalsView.pending,
+                        pendingCount: signalsView.pendingCount
+                    });
+                    return;
+                }
+                case 'sync_conflicts':
+                case 'conflicts': {
+                    const raw = await readOptionalText(join(bookRoot, '.ops/sync_conflicts.json'));
+                    const parsed = safeParseJson(raw) as Record<string, unknown> | null;
+                    sendJson(res, 200, {
+                        kind: 'sync_conflicts',
+                        syncConflicts: parsed,
+                        conflicts: Array.isArray(parsed?.['conflicts']) ? parsed['conflicts'] : [],
+                        dirtyChapters: Array.isArray(parsed?.['dirtyChapters'])
+                            ? parsed['dirtyChapters']
+                            : [],
+                        stateDiffAdvisories: Array.isArray(parsed?.['stateDiffAdvisories'])
+                            ? parsed['stateDiffAdvisories']
+                            : [],
+                        updatedAt: typeof parsed?.['updatedAt'] === 'string' ? parsed['updatedAt'] : null
                     });
                     return;
                 }
@@ -706,8 +971,11 @@ export function registerNarrateRoutes(
                     );
                     sendJson(res, 200, {
                         kind: 'halt',
-                        safeHalt: safeParseJson(safeHaltRaw),
-                        quarantineReport: safeParseJson(quarantineRaw)
+                        safeHalt: normalizeHaltPayload(safeParseJson(safeHaltRaw), 'SAFE_HALT'),
+                        quarantineReport: normalizeHaltPayload(
+                            safeParseJson(quarantineRaw),
+                            'QUARANTINED'
+                        )
                     });
                     return;
                 }
@@ -717,7 +985,7 @@ export function registerNarrateRoutes(
                 }
                 default:
                     sendJson(res, 400, {
-                        error: '无效的视图类型 kind，允许值: entities|horizon|threads|telemetry|signals|halt|status'
+                        error: '无效的视图类型 kind，允许值: entities|horizon|threads|telemetry|signals|sync_conflicts|halt|status'
                     });
             }
         } catch (err) {
@@ -731,25 +999,27 @@ export function registerNarrateRoutes(
         action: 'fork' | 'merge'
     ) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
-        const windowId = body['windowId'];
-        if (typeof windowId !== 'string' || !SLUG_RE.test(windowId)) {
-            sendJson(res, 400, { error: '需要合法 windowId' });
+        let body: z.infer<typeof ParallelWindowRequestSchema>;
+        try {
+            body = parseWithSchema(ParallelWindowRequestSchema, rawBody, 'parallel');
+        } catch (err) {
+            sendErrorResponse(res, err);
             return;
         }
 
         try {
             const result =
                 action === 'fork'
-                    ? await controller.forkParallelWindow({ windowId })
-                    : await controller.mergeParallelWindow({ windowId });
+                    ? await controller.forkParallelWindow({ windowId: body.windowId })
+                    : await controller.mergeParallelWindow({ windowId: body.windowId });
             sendJson(res, 200, result);
         } catch (err) {
             if (
@@ -768,55 +1038,36 @@ export function registerNarrateRoutes(
 
     const handleStep = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
-        if (typeof body['chapterGoal'] !== 'string' || body['chapterGoal'].trim().length === 0) {
-            sendJson(res, 400, { error: '缺少必填参数 chapterGoal' });
+        let body: z.infer<typeof StepChapterRequestSchema>;
+        try {
+            body = parseWithSchema(StepChapterRequestSchema, rawBody, 'step');
+        } catch (err) {
+            sendErrorResponse(res, err);
             return;
         }
 
         try {
-            const stepOptions: StepChapterOptions = {
-                chapterGoal: body['chapterGoal']
+            const stepOptions: StepChapterInputOptions = {
+                ...(body.chapterGoal !== undefined ? { chapterGoal: body.chapterGoal } : {}),
+                ...(body.chapterNumber !== undefined ? { chapterNumber: body.chapterNumber } : {}),
+                ...(body.timelineMode !== undefined ? { timelineMode: body.timelineMode } : {}),
+                ...(body.parallelWindowId !== undefined
+                    ? { parallelWindowId: body.parallelWindowId }
+                    : {}),
+                ...(body.parallelBranchId !== undefined
+                    ? { parallelBranchId: body.parallelBranchId }
+                    : {}),
+                ...(body.targetDay !== undefined ? { targetDay: body.targetDay } : {}),
+                ...(body.povCharIds !== undefined ? { povCharIds: body.povCharIds } : {})
             };
-            if (body['chapterNumber'] !== undefined) {
-                stepOptions.chapterNumber = parsePositiveChapterNumber(body['chapterNumber']);
-            }
-            if (body['timelineMode'] !== undefined) {
-                const mode = body['timelineMode'];
-                if (mode !== 'MAINLINE' && mode !== 'PARALLEL' && mode !== 'FLASHBACK') {
-                    sendJson(res, 400, {
-                        error: 'timelineMode 必须为 MAINLINE | PARALLEL | FLASHBACK'
-                    });
-                    return;
-                }
-                stepOptions.timelineMode = mode;
-            }
-            if (typeof body['parallelWindowId'] === 'string') {
-                stepOptions.parallelWindowId = body['parallelWindowId'];
-            }
-            if (typeof body['parallelBranchId'] === 'string') {
-                stepOptions.parallelBranchId = body['parallelBranchId'];
-            }
-            if (body['targetDay'] !== undefined) {
-                const targetDay = body['targetDay'];
-                if (typeof targetDay !== 'number' || !Number.isInteger(targetDay)) {
-                    sendJson(res, 400, { error: 'targetDay 必须为整数' });
-                    return;
-                }
-                stepOptions.targetDay = targetDay;
-            }
-            if (Array.isArray(body['povCharIds'])) {
-                stepOptions.povCharIds = body['povCharIds'].filter(
-                    (item): item is string => typeof item === 'string'
-                );
-            }
 
             const result = await controller.stepChapter(stepOptions);
             sendJson(res, 200, result);
@@ -827,22 +1078,27 @@ export function registerNarrateRoutes(
 
     const handleYoloStart = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
+        let body: z.infer<typeof YoloStartRequestSchema>;
+        try {
+            body = parseWithSchema(YoloStartRequestSchema, rawBody, 'yolo/start');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
+
+        const targetChapters = body.targetChapters ?? body.maxChapters;
         try {
             const started = await controller.startYolo({
-                ...(typeof body['targetChapters'] === 'number'
-                    ? { targetChapters: body['targetChapters'] }
-                    : {}),
-                ...(typeof body['defaultGoal'] === 'string'
-                    ? { defaultGoal: body['defaultGoal'] }
-                    : {})
+                ...(targetChapters !== undefined ? { targetChapters } : {}),
+                ...(body.defaultGoal !== undefined ? { defaultGoal: body.defaultGoal } : {})
             });
             sendJson(res, 202, started);
         } catch (err) {
@@ -867,29 +1123,30 @@ export function registerNarrateRoutes(
 
     const handleDream = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
-        const dreamOptions: Partial<RunDreamingOptions> = {};
-        if (typeof body['currentChapter'] === 'number') {
-            dreamOptions.currentChapter = body['currentChapter'];
+        let body: z.infer<typeof DreamRequestSchema>;
+        try {
+            body = parseWithSchema(DreamRequestSchema, rawBody, 'dream');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
         }
-        if (typeof body['force'] === 'boolean') {
-            dreamOptions.force = body['force'];
-        }
-        if (typeof body['recentWordDelta'] === 'number') {
-            dreamOptions.recentWordDelta = body['recentWordDelta'];
-        }
-        if (Array.isArray(body['activeEntityIds'])) {
-            dreamOptions.activeEntityIds = body['activeEntityIds'].filter(
-                (item): item is string => typeof item === 'string'
-            );
-        }
+
+        const dreamOptions: Partial<RunDreamingOptions> = {
+            ...(body.currentChapter !== undefined ? { currentChapter: body.currentChapter } : {}),
+            ...(body.force !== undefined ? { force: body.force } : {}),
+            ...(body.recentWordDelta !== undefined
+                ? { recentWordDelta: body.recentWordDelta }
+                : {}),
+            ...(body.activeEntityIds !== undefined ? { activeEntityIds: body.activeEntityIds } : {})
+        };
 
         try {
             const result = await controller.runDreaming(dreamOptions);
@@ -899,22 +1156,59 @@ export function registerNarrateRoutes(
         }
     };
 
-    const handleVoiceHarvest = async (req: IncomingMessage, res: ServerResponse) => {
+    const handleHeal = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
+        let body: z.infer<typeof HealRequestSchema>;
         try {
-            const chapterNumber =
-                body['chapterNumber'] !== undefined
-                    ? parsePositiveChapterNumber(body['chapterNumber'])
-                    : 1;
-            const result = await controller.harvestVoiceFromChapter(chapterNumber);
+            body = parseWithSchema(HealRequestSchema, rawBody, 'heal');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
+
+        try {
+            const healOptions =
+                body.maxAutoRollbackChapters !== undefined
+                    ? { maxAutoRollbackChapters: body.maxAutoRollbackChapters }
+                    : {};
+            const result =
+                body.conflicts !== undefined
+                    ? await controller.healCrossChapterConflicts(body.conflicts, healOptions)
+                    : await controller.healFromSyncConflicts(healOptions);
+            sendJson(res, 200, result);
+        } catch (err) {
+            sendErrorResponse(res, err);
+        }
+    };
+
+    const handleVoiceHarvest = async (req: IncomingMessage, res: ServerResponse) => {
+        if (!assertMethod(req, res, 'POST')) return;
+        let rawBody: Record<string, unknown>;
+        try {
+            rawBody = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        let body: z.infer<typeof VoiceHarvestRequestSchema>;
+        try {
+            body = parseWithSchema(VoiceHarvestRequestSchema, rawBody, 'voice-harvest');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
+
+        try {
+            const result = await controller.harvestVoiceFromChapter(body.chapterNumber ?? 1);
             sendJson(res, 200, result);
         } catch (err) {
             sendErrorResponse(res, err);
@@ -923,23 +1217,28 @@ export function registerNarrateRoutes(
 
     const handleAdvanceVolume = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
-        const advanceOptions: AdvanceVolumeOptions = {};
-        if (Array.isArray(body['companionEntityIds'])) {
-            advanceOptions.companionEntityIds = body['companionEntityIds'].filter(
-                (item): item is string => typeof item === 'string'
-            );
+        let body: z.infer<typeof AdvanceVolumeRequestSchema>;
+        try {
+            body = parseWithSchema(AdvanceVolumeRequestSchema, rawBody, 'volume/advance');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
         }
-        if (typeof body['completeBook'] === 'boolean') {
-            advanceOptions.completeBook = body['completeBook'];
-        }
+
+        const advanceOptions: AdvanceVolumeOptions = {
+            ...(body.companionEntityIds !== undefined
+                ? { companionEntityIds: body.companionEntityIds }
+                : {}),
+            ...(body.completeBook !== undefined ? { completeBook: body.completeBook } : {})
+        };
 
         try {
             const result = await controller.advanceVolume(advanceOptions);
@@ -969,23 +1268,24 @@ export function registerNarrateRoutes(
 
     const handleSignalDelete = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'DELETE')) return;
-        let body: Record<string, unknown>;
+        let rawBody: Record<string, unknown>;
         try {
-            body = await readJsonBody(req);
+            rawBody = await readJsonBody(req);
         } catch (err) {
             sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
             return;
         }
 
-        const createdAt = typeof body['created_at'] === 'string' ? body['created_at'] : null;
-        const reason = typeof body['reason'] === 'string' ? body['reason'] : null;
-        if (!createdAt || !reason) {
-            sendJson(res, 400, { error: '撤回信号需要 created_at 与 reason 两个匹配字段' });
+        let body: z.infer<typeof SignalDeleteRequestSchema>;
+        try {
+            body = parseWithSchema(SignalDeleteRequestSchema, rawBody, 'signals/delete');
+        } catch (err) {
+            sendErrorResponse(res, err);
             return;
         }
 
         try {
-            const deleted = await controller.deleteSignal(createdAt, reason);
+            const deleted = await controller.deleteSignal(body.created_at, body.reason);
             if (deleted === null) {
                 sendJson(res, 404, {
                     error: '未找到匹配的待撤回信号（可能已被消费或队列已变化）'
@@ -1000,7 +1300,23 @@ export function registerNarrateRoutes(
 
     const handleHalt = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'POST')) return;
-        sendJson(res, 202, controller.requestHalt());
+        let rawBody: Record<string, unknown>;
+        try {
+            rawBody = await readJsonBody(req);
+        } catch (err) {
+            sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+            return;
+        }
+
+        let body: z.infer<typeof HaltRequestSchema>;
+        try {
+            body = parseWithSchema(HaltRequestSchema, rawBody, 'halt');
+        } catch (err) {
+            sendErrorResponse(res, err);
+            return;
+        }
+
+        sendJson(res, 202, controller.requestHalt({ force: body.force }));
     };
 
     const handleEvents = async (req: IncomingMessage, res: ServerResponse) => {
@@ -1082,6 +1398,7 @@ export function registerNarrateRoutes(
         }),
         webServer.register({ kind: 'exact', path: '/api/narrate/sync', handler: handleSync }),
         webServer.register({ kind: 'exact', path: '/api/narrate/dream', handler: handleDream }),
+        webServer.register({ kind: 'exact', path: '/api/narrate/heal', handler: handleHeal }),
         webServer.register({
             kind: 'exact',
             path: '/api/narrate/voice-harvest',
