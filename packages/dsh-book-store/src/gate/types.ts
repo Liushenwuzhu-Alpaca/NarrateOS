@@ -49,10 +49,12 @@ export interface ProseGateOptions {
     enableCrossChapterSimile?: boolean | undefined;
     /** 跨章明喻检测窗口章数（默认 5） */
     crossChapterSimileWindow?: number | undefined;
-    /** 同一具象喻体跨章允许的最多总出现次数阈值，默认 1（即重复 >= 2 次时触发） */
+    /** 同一具象喻体跨章允许的最多出现章节数阈值，默认 1（即历史窗口内出现过且本章复现时触发） */
     crossChapterSimileMaxTotal?: number | undefined;
-    /** 局部 Patch 最大违规段落数阈值（默认 2，超过则建议整章重写） */
+    /** 局部 Patch 最大违规段落数阈值（默认 15，超过则建议整章重写） */
     maxPatchParagraphs?: number | undefined;
+    /** 局部 Patch 最大违规段落占比阈值（默认 0.6，超过则建议整章重写） */
+    maxPatchParagraphRatio?: number | undefined;
     /** 已提取的历史章喻体集合 */
     historicalSimiles?: Iterable<string> | undefined;
     /** 历史章原文列表（将按窗口自动提取喻体） */

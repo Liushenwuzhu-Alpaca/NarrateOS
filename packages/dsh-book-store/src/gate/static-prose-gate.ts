@@ -51,7 +51,8 @@ export class StaticProseGate {
         const segmentation = analyzeParagraphs(text);
         const lineMetas = segmentation.lines;
         const charCount = text.replace(/\s+/g, '').length;
-        const maxPatchParagraphs = options.maxPatchParagraphs ?? 2;
+        const maxPatchParagraphs = options.maxPatchParagraphs ?? 15;
+        const maxPatchParagraphRatio = options.maxPatchParagraphRatio ?? 0.6;
 
         const violations: GateViolation[] = [];
         const exceededRules: GateRuleId[] = [];
@@ -189,11 +190,15 @@ export class StaticProseGate {
             new Set(violations.map((v) => v.paragraphIndex).filter((idx) => idx >= 0))
         ).sort((a, b) => a - b);
 
+        const totalParagraphCount = segmentation.paragraphs.length;
         const violatedParagraphCount = violatedParagraphIndices.length;
+        const violatedParagraphRatio =
+            totalParagraphCount > 0 ? violatedParagraphCount / totalParagraphCount : 0;
         const passed = violations.length === 0;
         const recommendedAction = passed
             ? 'PASS'
-            : violatedParagraphCount <= maxPatchParagraphs
+            : violatedParagraphCount <= maxPatchParagraphs &&
+                violatedParagraphRatio <= maxPatchParagraphRatio
               ? 'PATCH'
               : 'REWRITE';
 
@@ -245,29 +250,34 @@ export class StaticProseGate {
         const windowSize = options.crossChapterSimileWindow ?? 5;
         const maxTotal = options.crossChapterSimileMaxTotal ?? options.rules?.cross_chapter_simile?.maxCount ?? 1;
 
-        const historicalCounts = new Map<string, number>();
+        const historicalChapterCounts = new Map<string, number>();
+
+        if (options.historicalChapters && options.historicalChapters.length > 0 && windowSize > 0) {
+            const recentChapters = options.historicalChapters.slice(-windowSize);
+            for (const ch of recentChapters) {
+                const chapterVehicles = new Set<string>();
+                for (const item of extractConcreteSimiles(ch.text)) {
+                    chapterVehicles.add(item.vehicle);
+                }
+                for (const vehicle of chapterVehicles) {
+                    historicalChapterCounts.set(vehicle, (historicalChapterCounts.get(vehicle) ?? 0) + 1);
+                }
+            }
+        }
 
         if (options.historicalSimiles) {
             for (const simile of options.historicalSimiles) {
                 const normalized = normalizeSimileVehicle(simile);
                 if (normalized.length >= 2) {
-                    historicalCounts.set(normalized, (historicalCounts.get(normalized) ?? 0) + 1);
-                }
-            }
-        }
-
-        if (options.historicalChapters && options.historicalChapters.length > 0) {
-            const recentChapters = options.historicalChapters.slice(-windowSize);
-            for (const ch of recentChapters) {
-                const similes = extractConcreteSimiles(ch.text);
-                for (const item of similes) {
-                    historicalCounts.set(item.vehicle, (historicalCounts.get(item.vehicle) ?? 0) + 1);
+                    historicalChapterCounts.set(
+                        normalized,
+                        Math.max(historicalChapterCounts.get(normalized) ?? 0, 1)
+                    );
                 }
             }
         }
 
         const currentHits: Array<{ lineMeta: LineMeta; vehicle: string; matchedText: string; column: number }> = [];
-        const currentCounts = new Map<string, number>();
 
         for (const lineMeta of lineMetas) {
             if (lineMeta.paragraphIndex < 0) {
@@ -275,7 +285,6 @@ export class StaticProseGate {
             }
             const similes = extractConcreteSimiles(lineMeta.text);
             for (const item of similes) {
-                currentCounts.set(item.vehicle, (currentCounts.get(item.vehicle) ?? 0) + 1);
                 currentHits.push({
                     lineMeta,
                     vehicle: item.vehicle,
@@ -287,8 +296,9 @@ export class StaticProseGate {
 
         const violations: GateViolation[] = [];
         for (const hit of currentHits) {
-            const totalCount = (historicalCounts.get(hit.vehicle) ?? 0) + (currentCounts.get(hit.vehicle) ?? 0);
-            if (totalCount > maxTotal) {
+            const historicalChapterCount = historicalChapterCounts.get(hit.vehicle) ?? 0;
+            const totalChapterCount = historicalChapterCount + 1;
+            if (historicalChapterCount >= 1 && totalChapterCount > maxTotal) {
                 violations.push({
                     ruleId: 'cross_chapter_simile',
                     line: hit.lineMeta.lineNumber,
@@ -296,7 +306,7 @@ export class StaticProseGate {
                     paragraphIndex: hit.lineMeta.paragraphIndex,
                     matchedText: hit.matchedText,
                     lineText: hit.lineMeta.text,
-                    message: `跨章明喻喻体"${hit.vehicle}"累计出现 ${totalCount} 次（上限 ${maxTotal} 次）`
+                    message: `跨章明喻喻体"${hit.vehicle}"已在 ${historicalChapterCount} 个历史章节中出现并在本章复现（跨章累计 ${totalChapterCount} 章，上限 ${maxTotal} 章）`
                 });
             }
         }

@@ -87,7 +87,8 @@ describe('StaticProseGate', () => {
         expect(result.violations.some((v) => v.ruleId === 'filler_cliche' && v.line === 4)).toBe(true);
         expect(result.violations.some((v) => v.ruleId === 'ending_moralizing' && v.line === 5)).toBe(true);
         expect(result.violatedParagraphCount).toBe(1);
-        expect(result.recommendedAction).toBe('PATCH');
+        // 整段文本仅 1 个非空自然段且违规，占比 1/1 (100% > 默认 60%)，建议整章重写
+        expect(result.recommendedAction).toBe('REWRITE');
     });
 
     it('支持按规则开关关闭特定检查', () => {
@@ -402,5 +403,117 @@ describe('StaticProseGate 跨行注释定位与第一人称豁免', () => {
         expect(dirtyRes.exceededRules).toEqual(
             expect.arrayContaining(['tag_residue', 'micro_anatomy', 'filler_cliche', 'ending_moralizing'])
         );
+    });
+});
+
+describe('StaticProseGate 阈值边界、微距距离与跨章喻体章节计数 (ISS-032, ISS-033)', () => {
+    const buildParagraphDraft = (totalParagraphs: number, violatedCount: number): string => {
+        const paragraphs: string[] = [];
+        for (let i = 0; i < totalParagraphs; i += 1) {
+            if (i < violatedCount) {
+                paragraphs.push(`第${i + 1}段他指节泛白，站在门口没动。`);
+            } else {
+                paragraphs.push(`第${i + 1}段码头风声很轻，灯影落在青石板上。`);
+            }
+        }
+        return paragraphs.join('\n\n');
+    };
+
+    it('默认 maxPatchParagraphs=15 与 maxPatchParagraphRatio=0.6 边界及显式覆盖生效', () => {
+        const gate = new StaticProseGate();
+
+        // 30 段中 15 段违规：15 <= 15 且 15/30 (0.5) <= 0.6 -> PATCH
+        const patchAt15 = gate.evaluate(buildParagraphDraft(30, 15));
+        expect(patchAt15.passed).toBe(false);
+        expect(patchAt15.violatedParagraphCount).toBe(15);
+        expect(patchAt15.recommendedAction).toBe('PATCH');
+
+        // 30 段中 16 段违规：16 > 15（即使 16/30 ≈ 0.533 <= 0.6）-> REWRITE
+        const rewriteAt16 = gate.evaluate(buildParagraphDraft(30, 16));
+        expect(rewriteAt16.passed).toBe(false);
+        expect(rewriteAt16.violatedParagraphCount).toBe(16);
+        expect(rewriteAt16.recommendedAction).toBe('REWRITE');
+
+        // 5 段中 3 段违规：3 <= 15 且 3/5 (0.6) <= 0.6 -> PATCH
+        const patchAt60Percent = gate.evaluate(buildParagraphDraft(5, 3));
+        expect(patchAt60Percent.violatedParagraphCount).toBe(3);
+        expect(patchAt60Percent.recommendedAction).toBe('PATCH');
+
+        // 5 段中 4 段违规：4 <= 15 但 4/5 (0.8) > 0.6 -> REWRITE
+        const rewriteAbove60Percent = gate.evaluate(buildParagraphDraft(5, 4));
+        expect(rewriteAbove60Percent.violatedParagraphCount).toBe(4);
+        expect(rewriteAbove60Percent.recommendedAction).toBe('REWRITE');
+
+        // 显式传入 options.maxPatchParagraphs 与 options.maxPatchParagraphRatio 覆盖默认值
+        const customMaxCount = gate.evaluate(buildParagraphDraft(10, 3), {
+            maxPatchParagraphs: 2
+        });
+        expect(customMaxCount.recommendedAction).toBe('REWRITE');
+
+        const customMaxRatio = gate.evaluate(buildParagraphDraft(5, 4), {
+            maxPatchParagraphRatio: 0.9
+        });
+        expect(customMaxRatio.recommendedAction).toBe('PATCH');
+    });
+
+    it('micro_anatomy 支持通配距离匹配指节与喉结套话且严禁跨换行误匹配', () => {
+        const gate = new StaticProseGate();
+
+        const hitResult = gate.evaluate('他攥紧茶杯，指节因用力而泛白，喉结微微滚动。');
+        expect(hitResult.passed).toBe(false);
+        const microHits = hitResult.violations.filter((v) => v.ruleId === 'micro_anatomy');
+        expect(microHits.map((v) => v.matchedText)).toEqual(['指节因用力而泛白', '喉结微微滚动']);
+
+        const multilineClean = gate.evaluate('他低头看着指节\n泛白的手背，喉结\n滚动了一下。');
+        expect(multilineClean.ruleCounts.micro_anatomy).toBe(0);
+        expect(multilineClean.violations.some((v) => v.ruleId === 'micro_anatomy')).toBe(false);
+    });
+
+    it('cross_chapter_simile 第 1 章零历史章内首尾呼应不误报，第 2 章跨章复现才报错且按历史章节去重计数', () => {
+        const gate = new StaticProseGate();
+
+        // 第 1 章零历史章节，章首与章尾各出现 1 次同一喻体呼应 -> 零违规
+        const ch1Text = [
+            '铁门合拢时，门轴发出像生锈的闸刀一样的闷响。',
+            '',
+            '夜雨下得越发急促，巷口无人经过。',
+            '',
+            '他反手扣上门闩，耳畔仿佛又响起那声像生锈的闸刀一样的刮擦。'
+        ].join('\n');
+
+        const ch1Res = gate.evaluate(ch1Text, {
+            enableCrossChapterSimile: true,
+            historicalChapters: []
+        });
+        expect(ch1Res.passed).toBe(true);
+        expect(ch1Res.ruleCounts.cross_chapter_simile).toBe(0);
+
+        // 第 2 章出现同一喻体 -> historicalChapterCount=1，跨章复现报错
+        const ch2Text = '仓库铁卷帘落下，声音像生锈的闸刀一样刺耳。';
+        const ch2Res = gate.evaluate(ch2Text, {
+            enableCrossChapterSimile: true,
+            historicalChapters: [{ chapter: 1, text: ch1Text }]
+        });
+        expect(ch2Res.passed).toBe(false);
+        expect(ch2Res.exceededRules).toContain('cross_chapter_simile');
+        expect(ch2Res.ruleCounts.cross_chapter_simile).toBe(1);
+
+        // 第 1 章出现 2 次只计为 1 个历史章节：若上限设为 2 章，第 2 章合计 2 章仍放行，第 3 章（合计 3 章）才拦截
+        const ch2AllowedWithMax2 = gate.evaluate(ch2Text, {
+            enableCrossChapterSimile: true,
+            crossChapterSimileMaxTotal: 2,
+            historicalChapters: [{ chapter: 1, text: ch1Text }]
+        });
+        expect(ch2AllowedWithMax2.violations.some((v) => v.ruleId === 'cross_chapter_simile')).toBe(false);
+
+        const ch3RejectedWithMax2 = gate.evaluate('风刮过铁皮，像生锈的闸刀一样刮着木框。', {
+            enableCrossChapterSimile: true,
+            crossChapterSimileMaxTotal: 2,
+            historicalChapters: [
+                { chapter: 1, text: ch1Text },
+                { chapter: 2, text: ch2Text }
+            ]
+        });
+        expect(ch3RejectedWithMax2.violations.some((v) => v.ruleId === 'cross_chapter_simile')).toBe(true);
     });
 });
