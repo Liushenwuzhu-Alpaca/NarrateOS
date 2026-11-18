@@ -801,11 +801,32 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
             runAfter: false
         });
 
-        // 4. 运行态强停菜单 -> onRequestHalt({ force: true })
+        // 4. 运行态强停菜单 -> onRequestHalt({ force: true }) 且状态胶囊使用中文创作态文案
         view.rerender({ activeTask: 'STEPPING' });
+        const topHeaderText = view.container.querySelector('.ns-header-left')?.textContent ?? '';
+        expect(topHeaderText).toContain('正在执笔推进');
+        expect(topHeaderText).not.toContain('STEPPING');
         await asyncClick(view.container.querySelector<HTMLButtonElement>('button[aria-label="更多停止选项"]')!);
         await asyncClick(menuItemByTitle(view.container, '立即中断并撤回半截草稿'));
         expect(onRequestHalt).toHaveBeenCalledWith({ force: true });
+        view.unmount();
+    });
+
+    it('全书设定集切换页签与返回正文时同步触发 onCodexTabChange 与 onCloseCodex', () => {
+        const onCodexTabChange = vi.fn();
+        const onCloseCodex = vi.fn();
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            externalViewCommand: { viewTab: 'views', materialKind: 'entities', nonce: 1 },
+            onCodexTabChange,
+            onCloseCodex
+        });
+
+        click(buttonByText(view.container, '未解伏笔 (0)'));
+        expect(onCodexTabChange).toHaveBeenCalledWith('threads');
+
+        click(buttonByText(view.container, '返回第 1 章正文'));
+        expect(onCloseCodex).toHaveBeenCalledTimes(1);
         view.unmount();
     });
 });

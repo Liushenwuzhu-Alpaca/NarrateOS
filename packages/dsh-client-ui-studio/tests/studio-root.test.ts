@@ -849,5 +849,129 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(api.forkParallelWindow).toHaveBeenCalledWith({
             windowId: 'win-dock-night'
         });
+        expect(container.textContent).toContain('多线并行 · win-dock-night');
+
+        // 并行窗口内写下一章应透传 timelineMode: 'PARALLEL', parallelWindowId, parallelBranchId (默认 branch-a)
+        await click(buttonByText(container, '写下一章'));
+        expect(api.stepChapter).toHaveBeenLastCalledWith({
+            timelineMode: 'PARALLEL',
+            parallelWindowId: 'win-dock-night',
+            parallelBranchId: 'branch-a'
+        });
+
+        // 再次打开多线并行弹窗切换支线，校验非法 branchId 并切换至 branch-b，禁止二次调用 forkParallelWindow
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="更多创作整理操作"]')!);
+        const switchItem = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+            (btn) => btn.textContent?.includes('管理 / 合流多线并行窗口')
+        )!;
+        await click(switchItem);
+        const branchInput = document.body.querySelector<HTMLInputElement>('#ns-parallel-branch-id')!;
+        await act(async () => {
+            inputSetter?.call(branchInput, 'bad branch!');
+            branchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        const switchBtn = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(
+            (btn) => btn.textContent?.includes('切换支线继续写')
+        )!;
+        await click(switchBtn);
+        expect(document.body.textContent).toContain('并行支线标识仅允许字母、数字、下划线(_)与连字符(-)');
+        expect(api.forkParallelWindow).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+            inputSetter?.call(branchInput, 'branch-b');
+            branchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await click(switchBtn);
+        expect(api.forkParallelWindow).toHaveBeenCalledTimes(1);
+
+        await click(buttonByText(container, '写下一章'));
+        expect(api.stepChapter).toHaveBeenLastCalledWith({
+            timelineMode: 'PARALLEL',
+            parallelWindowId: 'win-dock-night',
+            parallelBranchId: 'branch-b'
+        });
+
+        // 外部切书清理 parallelWindowId / parallelBranchId
+        activeBookRoot = '/books/b';
+        await emit({ event: 'book_switched', data: { bookRoot: '/books/b' } });
+        expect(container.textContent).not.toContain('多线并行 · win-dock-night');
+    });
+
+    it('全书设定集切 Tab 与返回正文同步左栏高亮，外部 book_switched 重置设定集表面与视图缓存', async () => {
+        vi.mocked(api.fetchViewEntities).mockResolvedValue({
+            kind: 'entities',
+            entities: [{ entityId: 'e1', canonicalName: '陈砚', aliases: [], markdown: '## 1. Innate Locks\n- 审计员' }],
+            coldArchiveCount: 0,
+            coldArchiveIds: []
+        });
+        const container = await mountStudio();
+
+        const leftEntitiesBtn = Array.from(
+            container.querySelectorAll<HTMLButtonElement>('aside.ns-left-pane button.ns-codex-row')
+        ).find((b) => b.textContent?.includes('人物与物品档案'))!;
+        await click(leftEntitiesBtn);
+        expect(leftEntitiesBtn.getAttribute('aria-current')).toBe('page');
+        expect(container.textContent).toContain('全书设定集');
+
+        // 设定集内切换至「未解伏笔」应同步左栏 activeViewKind
+        await click(buttonByText(container, '未解伏笔 (0)'));
+        const leftThreadsBtn = Array.from(
+            container.querySelectorAll<HTMLButtonElement>('aside.ns-left-pane button.ns-codex-row')
+        ).find((b) => b.textContent?.includes('未解伏笔清单'))!;
+        expect(leftThreadsBtn.getAttribute('aria-current')).toBe('page');
+        expect(leftEntitiesBtn.getAttribute('aria-current')).toBeNull();
+
+        // 点击右上角返回正文应清除左栏设定集高亮并回到正文
+        await click(buttonByText(container, '返回第 1 章正文'));
+        expect(leftThreadsBtn.getAttribute('aria-current')).toBeNull();
+        expect(container.textContent).toContain('甲书第一章服务器原稿');
+
+        // 再次进入设定集后接收外部 book_switched，应自动退出设定集并清空旧书实体
+        await click(leftEntitiesBtn);
+        expect(container.querySelector('article.ns-codex-sheet')).not.toBeNull();
+        vi.mocked(api.fetchViewEntities).mockResolvedValue({
+            kind: 'entities',
+            entities: [],
+            coldArchiveCount: 0,
+            coldArchiveIds: []
+        });
+        activeBookRoot = '/books/b';
+        await emit({ event: 'book_switched', data: { bookRoot: '/books/b' } });
+        expect(container.querySelector('article.ns-codex-sheet')).toBeNull();
+        expect(container.textContent).toContain('乙书第一章服务器原稿');
+        expect(leftEntitiesBtn.getAttribute('aria-current')).toBeNull();
+    });
+
+    it('点击无 sessionId 的非 Writer 工序卡片会打开右栏思考过程并清空上一工种残留会话', async () => {
+        vi.mocked(api.fetchRunRecords).mockResolvedValue({
+            runs: [
+                {
+                    runId: 'run-lib-1',
+                    chapter: 1,
+                    stage: 'LIBRARIAN',
+                    role: 'librarian',
+                    sessionId: 'sess-lib-1',
+                    status: 'completed',
+                    attempt: 1
+                }
+            ]
+        });
+        const container = await mountStudio();
+
+        // 展开 3x2 工序矩阵，先点击有 sessionId 的 1. Librarian
+        await click(container.querySelector<HTMLButtonElement>('button.ns-pipeline-toggle-btn')!);
+        await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="LIBRARIAN"]')!);
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('sess-lib-1');
+
+        // 切换到「运行状态」并收起右栏，再点击未运行的 6. Dreamer（无 sessionId）
+        await click(buttonByText(container, '运行状态'));
+        await click(container.querySelector<HTMLButtonElement>('button[aria-label="收起右侧面板"]')!);
+        expect(container.querySelector('aside.ns-right-pane')).toBeNull();
+
+        await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="DREAMING"]')!);
+        expect(container.querySelector('aside.ns-right-pane')).not.toBeNull();
+        expect(container.querySelector('#ns-right-tab-trace')?.getAttribute('aria-selected')).toBe('true');
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBeNull();
+        expect(container.textContent).toContain('未选择工种会话节点');
     });
 });

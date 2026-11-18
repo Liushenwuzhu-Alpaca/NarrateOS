@@ -288,10 +288,15 @@ export const ParallelWindowModal: React.FC<ParallelWindowModalProps> = ({
         if (submitting) return;
         const validWindowId = validateWindowId();
         if (!validWindowId) return;
-        const trimmedBranch = branchId.trim();
+        const rawBranch = branchId.trim();
+        if (rawBranch && !WINDOW_ID_RE.test(rawBranch)) {
+            setValidationError('并行支线标识仅允许字母、数字、下划线(_)与连字符(-)');
+            return;
+        }
+        const resolvedBranch = rawBranch || availableBranches[0] || 'branch-a';
         void onFork({
             windowId: validWindowId,
-            ...(trimmedBranch ? { branchId: trimmedBranch } : {})
+            branchId: resolvedBranch
         });
     };
 
