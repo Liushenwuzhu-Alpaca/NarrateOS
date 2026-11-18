@@ -1,7 +1,9 @@
 import type {
+    BookConfig,
     BookSnapshot,
     EntityEntry,
     EntityProfile,
+    EntryVisibility,
     TimelineMode
 } from '../store/schemas.js';
 
@@ -19,6 +21,7 @@ export interface SliceRequest {
     entityIds?: string[] | undefined;
     parallelBroadcastEntries?: EntityEntry[] | undefined;
     wakeupGapThreshold?: number | undefined;
+    wakeupGapChapters?: number | undefined;
 }
 
 /** 便捷方法参数（省略 forRole 与 snapshot） */
@@ -87,55 +90,181 @@ export interface SlicedView {
 type SectionKey = 'innateLocks' | 'acquiredState' | 'irreversibleTrajectory' | 'recentBuffer';
 
 const DEFAULT_WAKEUP_GAP_THRESHOLD = 30;
+const WARPED_TAG_RE = /\bWARPED\b/i;
 const WRITER_RESTRICTED_DIRECTIVE_RE = /\bWARPED\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+const CLEANROOM_LORE_RESTRICTED_RE =
+    /\bWARPED\b|\bOMNISCIENT_SECRET\b|\bSELF_ONLY\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
+const VALID_VISIBILITIES = new Set(['PUBLIC', 'SELF_ONLY', 'OMNISCIENT_SECRET', 'READER_KNOWN']);
+const UNKNOWN_VIS_TAG_KEY_RE =
+    /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis|rawinvalidvisibility|raw_invalid_visibility)$/i;
+const INLINE_VIS_TAG_RE = /(?:^|[\[\s|])(?:vis|visibility)\s*:\s*([^\s|\]]+)/gi;
 const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+)$/;
+const LIST_ITEM_START_RE = /^\s*(?:[-*+]|\d+\.)\s/;
+const TOP_LEVEL_LIST_ITEM_RE = /^(?:[-*+]|\d+\.)\s/;
+const LIST_CONTINUATION_RE = /^(?:\s+\S|>)/;
 
-/** 剥离写手不可见的 WARPED / Stage Ceiling 导演禁区章节与条目 */
-function stripWriterRestrictedDirectives(raw: string | null | undefined): string | null {
-    if (raw === null || raw === undefined) {
-        return null;
+function hasRestrictedInlineVis(text: string): boolean {
+    INLINE_VIS_TAG_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = INLINE_VIS_TAG_RE.exec(text)) !== null) {
+        const val = (match[1] ?? '').trim().toUpperCase();
+        if (val !== 'PUBLIC' && val !== 'READER_KNOWN') {
+            return true;
+        }
     }
+    return false;
+}
 
+function extractInlineVisibilities(entry: EntityEntry): EntryVisibility[] {
+    const found: EntryVisibility[] = [];
+    const allLines = [entry.text, ...entry.continuationLines];
+    for (const line of allLines) {
+        INLINE_VIS_TAG_RE.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = INLINE_VIS_TAG_RE.exec(line)) !== null) {
+            const upper = (match[1] ?? '').trim().toUpperCase();
+            if (VALID_VISIBILITIES.has(upper)) {
+                found.push(upper as EntryVisibility);
+            }
+        }
+    }
+    return found;
+}
+
+function hasUnknownVisibilityTag(entry: EntityEntry): boolean {
+    if (Boolean((entry as { rawInvalidVisibility?: unknown }).rawInvalidVisibility)) {
+        return true;
+    }
+    if (entry.visibility !== undefined && !VALID_VISIBILITIES.has(entry.visibility.toUpperCase())) {
+        return true;
+    }
+    if (entry.extraTags) {
+        for (const key of Object.keys(entry.extraTags)) {
+            if (UNKNOWN_VIS_TAG_KEY_RE.test(key.trim())) {
+                return true;
+            }
+        }
+    }
+    const allLines = [entry.text, ...entry.continuationLines];
+    for (const line of allLines) {
+        INLINE_VIS_TAG_RE.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = INLINE_VIS_TAG_RE.exec(line)) !== null) {
+            const upper = (match[1] ?? '').trim().toUpperCase();
+            if (!VALID_VISIBILITIES.has(upper)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function stripRestrictedMarkdownBlocks(
+    raw: string,
+    restrictedRe: RegExp,
+    checkInlineVis: boolean
+): string {
     const lines = raw.split(/\r?\n/);
     const kept: string[] = [];
     let skipSectionLevel: number | null = null;
-    let skipIndentedContinuations = false;
 
-    for (const line of lines) {
-        const headingMatch = MARKDOWN_HEADING_RE.exec(line.trim());
-        if (headingMatch?.[1] && headingMatch[2]) {
-            const level = headingMatch[1].length;
-            const headingTitle = headingMatch[2];
-            if (skipSectionLevel !== null && level <= skipSectionLevel) {
-                skipSectionLevel = null;
-            }
-            if (skipSectionLevel === null && WRITER_RESTRICTED_DIRECTIVE_RE.test(headingTitle)) {
-                skipSectionLevel = level;
-                skipIndentedContinuations = false;
-                continue;
-            }
-        }
+    const isRestrictedLine = (line: string): boolean =>
+        restrictedRe.test(line) || (checkInlineVis && hasRestrictedInlineVis(line));
+
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i]!;
+        const trimmed = line.trim();
+        const headingMatch = MARKDOWN_HEADING_RE.exec(trimmed);
 
         if (skipSectionLevel !== null) {
-            continue;
-        }
-
-        if (skipIndentedContinuations) {
-            if (/^\s{2,}\S/.test(line)) {
+            if (headingMatch?.[1]) {
+                const level = headingMatch[1].length;
+                if (level <= skipSectionLevel) {
+                    skipSectionLevel = null;
+                } else {
+                    i += 1;
+                    continue;
+                }
+            } else {
+                i += 1;
                 continue;
             }
-            skipIndentedContinuations = false;
         }
 
-        if (WRITER_RESTRICTED_DIRECTIVE_RE.test(line)) {
-            skipIndentedContinuations = true;
+        if (headingMatch?.[1] && headingMatch[2]) {
+            const level = headingMatch[1].length;
+            if (isRestrictedLine(headingMatch[2]) || isRestrictedLine(line)) {
+                skipSectionLevel = level;
+                i += 1;
+                continue;
+            }
+            kept.push(line);
+            i += 1;
             continue;
         }
 
-        kept.push(line);
+        if (trimmed.length === 0) {
+            kept.push(line);
+            i += 1;
+            continue;
+        }
+
+        if (LIST_ITEM_START_RE.test(line)) {
+            let j = i + 1;
+            while (j < lines.length) {
+                const next = lines[j]!;
+                const nextTrimmed = next.trim();
+                if (nextTrimmed.length === 0) break;
+                if (MARKDOWN_HEADING_RE.test(nextTrimmed)) break;
+                if (TOP_LEVEL_LIST_ITEM_RE.test(next)) break;
+                if (LIST_CONTINUATION_RE.test(next)) {
+                    j += 1;
+                    continue;
+                }
+                break;
+            }
+            const block = lines.slice(i, j);
+            if (!block.some(isRestrictedLine)) {
+                kept.push(...block);
+            }
+            i = j;
+            continue;
+        }
+
+        let j = i + 1;
+        while (j < lines.length) {
+            const next = lines[j]!;
+            const nextTrimmed = next.trim();
+            if (nextTrimmed.length === 0) break;
+            if (MARKDOWN_HEADING_RE.test(nextTrimmed)) break;
+            if (LIST_ITEM_START_RE.test(next)) break;
+            j += 1;
+        }
+        const block = lines.slice(i, j);
+        if (!block.some(isRestrictedLine)) {
+            kept.push(...block);
+        }
+        i = j;
     }
 
     return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 剥离写手不可见的 WARPED / Stage Ceiling 导演禁区章节与条目（含单空格与顶格 > 引用续行） */
+export function stripWriterRestrictedDirectives(raw: string | null | undefined): string | null {
+    if (raw === null || raw === undefined) {
+        return null;
+    }
+    return stripRestrictedMarkdownBlocks(raw, WRITER_RESTRICTED_DIRECTIVE_RE, false);
+}
+
+/** 面向 lore_library 文本的净室清洗：整条/整段剥离 OMNISCIENT_SECRET、SELF_ONLY、WARPED 与受限导演指令 */
+export function sanitizeLoreForWriter(raw: string | null | undefined): string {
+    if (raw === null || raw === undefined) {
+        return '';
+    }
+    return stripRestrictedMarkdownBlocks(raw, CLEANROOM_LORE_RESTRICTED_RE, true);
 }
 
 /**
@@ -185,6 +314,10 @@ function cloneEntry(entry: EntityEntry): EntityEntry {
     if (entry.isNumericLedger !== undefined) cloned.isNumericLedger = entry.isNumericLedger;
     if (entry.extraTags) cloned.extraTags = { ...entry.extraTags };
     if (entry.ledger) cloned.ledger = { ...entry.ledger };
+    const rawInvalidVisibility = (entry as { rawInvalidVisibility?: unknown }).rawInvalidVisibility;
+    if (rawInvalidVisibility !== undefined) {
+        (cloned as { rawInvalidVisibility?: unknown }).rawInvalidVisibility = rawInvalidVisibility;
+    }
     return cloned;
 }
 
@@ -218,9 +351,17 @@ function shouldStripWarped(forRole: SlicerRole): boolean {
     return forRole === 'writer' || forRole === 'extractor';
 }
 
-/** 判定单条实体记录是否被标记为 WARPED 废止（兼容标签状态与文本内联标记） */
+/** 判定单条实体记录是否被标记为 WARPED 废止（兼容标签状态、文本内联与续行） */
 function isWarpedEntry(entry: EntityEntry): boolean {
-    return entry.status === 'WARPED' || /\bWARPED\b/.test(entry.text);
+    if (entry.status === 'WARPED') return true;
+    if (WARPED_TAG_RE.test(entry.text)) return true;
+    if (entry.continuationLines.some((line) => WARPED_TAG_RE.test(line))) return true;
+    if (entry.extraTags) {
+        for (const [k, v] of Object.entries(entry.extraTags)) {
+            if (WARPED_TAG_RE.test(k) || WARPED_TAG_RE.test(v)) return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -239,7 +380,14 @@ export class ViewSlicer {
         const rawPov = request.povCharId ?? frontmatter.pov_character;
         const povCharIds = Array.isArray(rawPov) ? [...rawPov] : [rawPov];
         const povSet = new Set(povCharIds);
-        const wakeupThreshold = request.wakeupGapThreshold ?? DEFAULT_WAKEUP_GAP_THRESHOLD;
+        const configWakeupGap = (
+            snapshot.config as BookConfig & { context_assembly?: { wakeup_gap_chapters?: number } }
+        ).context_assembly?.wakeup_gap_chapters;
+        const wakeupThreshold =
+            request.wakeupGapChapters ??
+            request.wakeupGapThreshold ??
+            configWakeupGap ??
+            DEFAULT_WAKEUP_GAP_THRESHOLD;
         const stripWarped = shouldStripWarped(forRole);
 
         const targetIds = request.entityIds ?? Object.keys(snapshot.entities);
@@ -269,9 +417,13 @@ export class ViewSlicer {
             );
             entities[entityId] = sliced;
 
-            // 长间隔记忆唤醒（严格基于裁剪后的可见信息提取，避免泄露 SELF_ONLY/OMNISCIENT_SECRET）
+            // 长间隔记忆唤醒（FLASHBACK 模式下跳过主线章距重逢提示；严格基于裁剪后的可见信息提取）
             const lastSeenCh = profile.metadata.last_seen_ch;
-            if (lastSeenCh !== undefined && currentCh - lastSeenCh > wakeupThreshold) {
+            if (
+                timelineMode !== 'FLASHBACK' &&
+                lastSeenCh !== undefined &&
+                currentCh - lastSeenCh > wakeupThreshold
+            ) {
                 const gapChapters = currentCh - lastSeenCh;
                 const sensoryCue = this.pickSensoryCue(sliced);
                 memoryWakeupHints.push({
@@ -439,20 +591,32 @@ export class ViewSlicer {
             return 'KEEP';
         }
 
-        const visibility = entry.visibility ?? 'PUBLIC';
+        // Fail-Closed：含非法或未知 vis: 标签的条目对写手一律丢弃
+        if (hasUnknownVisibilityTag(entry)) {
+            return 'DROP';
+        }
+
+        const inlineVisibilities = extractInlineVisibilities(entry);
+        const rawVis = entry.visibility?.toUpperCase() as EntryVisibility | undefined;
+        const effectiveVisibilities: EntryVisibility[] =
+            rawVis !== undefined ? [rawVis, ...inlineVisibilities] : inlineVisibilities;
+
         const effectiveOwner = entry.owner ?? entityId;
         const isOwnedByPov = povSet.has(effectiveOwner);
 
-        switch (visibility) {
-            case 'PUBLIC':
-                return 'KEEP';
-            case 'SELF_ONLY':
-                return isOwnedByPov ? 'KEEP' : 'DROP';
-            case 'OMNISCIENT_SECRET':
-                return 'DROP';
-            case 'READER_KNOWN':
-                return isOwnedByPov ? 'KEEP' : 'CONVERT_TO_IRONY';
+        if (effectiveVisibilities.length === 0) {
+            return 'KEEP';
         }
+        if (effectiveVisibilities.includes('OMNISCIENT_SECRET')) {
+            return 'DROP';
+        }
+        if (effectiveVisibilities.includes('SELF_ONLY') && !isOwnedByPov) {
+            return 'DROP';
+        }
+        if (effectiveVisibilities.includes('READER_KNOWN') && !isOwnedByPov) {
+            return 'CONVERT_TO_IRONY';
+        }
+        return 'KEEP';
     }
 
     /** 过滤 PARALLEL 模式下的全局只读广播条目 */
@@ -489,20 +653,36 @@ export class ViewSlicer {
         section: SectionKey,
         entry: EntityEntry
     ): DramaticIronyHint {
+        const cleanContinuations = entry.continuationLines
+            .map((line) => line.trim())
+            .filter(
+                (line) =>
+                    line.length > 0 &&
+                    !CLEANROOM_LORE_RESTRICTED_RE.test(line) &&
+                    !hasRestrictedInlineVis(line)
+            );
+        const fullText =
+            cleanContinuations.length > 0
+                ? `${entry.text}\n  ${cleanContinuations.join('\n  ')}`
+                : entry.text;
+
         return {
             entityId: profile.metadata.entity_id,
             canonicalName: profile.metadata.canonical_name,
             section,
-            text: entry.text,
+            text: fullText,
             storyDay: entry.storyDay,
             chapter: entry.chapter,
-            formattedHint: `[仅读者已知的戏剧张力点 / 桌下炸弹 - 当前视角角色不知] ${profile.metadata.canonical_name}: ${entry.text}`
+            formattedHint: `[仅读者已知的戏剧张力点 / 桌下炸弹 - 当前视角角色不知] ${profile.metadata.canonical_name}: ${fullText}`
         };
     }
 
     /** 从已裁剪的实体视图中提取感官记忆唤醒半句提示 */
     private pickSensoryCue(slicedProfile: EntityProfile): string {
-        const isPublic = (e: EntityEntry): boolean => (e.visibility ?? 'PUBLIC') === 'PUBLIC';
+        const isPublic = (e: EntityEntry): boolean =>
+            !hasUnknownVisibilityTag(e) &&
+            !extractInlineVisibilities(e).some((v) => v !== 'PUBLIC') &&
+            (e.visibility?.toUpperCase() ?? 'PUBLIC') === 'PUBLIC';
         const publicLock = slicedProfile.innateLocks.find(isPublic);
         if (publicLock) {
             return extractFirstSentence(publicLock.text);

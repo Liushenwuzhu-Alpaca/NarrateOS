@@ -1,6 +1,8 @@
 export {
     ViewSlicer,
+    sanitizeLoreForWriter,
     sliceWorldDocuments,
+    stripWriterRestrictedDirectives,
     type DramaticIronyHint,
     type MemoryWakeupHint,
     type ParallelBroadcastItem,

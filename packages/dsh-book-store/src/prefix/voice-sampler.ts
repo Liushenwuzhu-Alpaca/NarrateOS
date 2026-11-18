@@ -4,13 +4,17 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import type { VoiceSample, VoiceSampleOptions, VoiceSamplePool, VoiceSampleResult } from './types.js';
 
+/** 声纹标本溯源 Schema */
+export const VoiceSampleSourceSchema = z.enum(['author_sample', 'boot_seed', 'chapter_harvest']);
+
 /** 单条声纹标本 Schema */
 export const VoiceSampleSchema = z.object({
     id: z.string().min(1),
     tag: z.string().min(1),
     text: z.string().min(1),
     last_used_ch: z.number().int().nonnegative().default(0),
-    use_count: z.number().int().nonnegative().optional()
+    use_count: z.number().int().nonnegative().optional(),
+    source: VoiceSampleSourceSchema.optional()
 });
 
 /** 声纹标本池 Schema (voice_samples.yaml) */
@@ -30,13 +34,19 @@ export function parseVoiceSamplesYaml(yamlContent: string): VoiceSamplePool {
     }
     const validated = VoiceSamplePoolSchema.parse(parsed);
     return {
-        samples: validated.samples.map((item) => ({
-            id: item.id,
-            tag: item.tag,
-            text: item.text,
-            last_used_ch: item.last_used_ch,
-            use_count: item.use_count ?? 0
-        }))
+        samples: validated.samples.map((item) => {
+            const sample: VoiceSample = {
+                id: item.id,
+                tag: item.tag,
+                text: item.text,
+                last_used_ch: item.last_used_ch,
+                use_count: item.use_count ?? 0
+            };
+            if (item.source !== undefined) {
+                sample.source = item.source;
+            }
+            return sample;
+        })
     };
 }
 

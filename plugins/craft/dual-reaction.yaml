@@ -1,0 +1,11 @@
+id: dual-reaction
+name: 戏眼双反应择优
+version: "1.0.0"
+description: 在核心戏眼节点略过第一顺位惯性反应，采用贴合角色长期执念与性格底色的克制第二反应
+applicable_roles:
+  - planner
+prompt_injection: |
+  [文风插件: 戏眼双反应择优 (dual-reaction)]
+  - 双反应推演: 规划核心戏眼时先识别常规第一顺位外露反应，再将其替换为贴合角色长期执念、利益算计与性格底色的克制第二反应。
+  - 动作微落点: 优先借助微小的动作停顿、视线偏移或器物触碰完成情绪落点，由场面留白传递张力。
+enabled: true

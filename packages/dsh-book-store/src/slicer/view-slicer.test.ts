@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { BookSnapshot, EntityProfile } from '../store/schemas.js';
-import { ViewSlicer, sliceWorldDocuments } from './index.js';
+import type { BookSnapshot, EntityProfile, EntryVisibility } from '../store/schemas.js';
+import {
+    ViewSlicer,
+    sanitizeLoreForWriter,
+    sliceWorldDocuments,
+    stripWriterRestrictedDirectives
+} from './index.js';
 
 function createTestSnapshot(): BookSnapshot {
     const hero: EntityProfile = {
@@ -664,5 +669,237 @@ describe('sliceWorldDocuments', () => {
             povCharId: 'char_001'
         });
         expect(plannerView.entities['char_001']?.acquiredState.some((e) => /\bWARPED\b/.test(e.text))).toBe(true);
+    });
+
+    it('非法或未知 vis: 标签在 writer 视角强制 Fail-Closed 丢弃，planner 保留', () => {
+        const snapshot = createTestSnapshot();
+        const hero = snapshot.entities['char_001']!;
+        hero.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                extraTags: { vis: 'secret_tier' },
+                text: '来自 extraTags 的未知可见性机密',
+                continuationLines: []
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'INTERNAL_ONLY' as unknown as EntryVisibility,
+                text: '枚举外的未知 visibility 字段',
+                continuationLines: []
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '[vis: omniscient_secret] 文本内联小写机密标签',
+                continuationLines: []
+            }
+        );
+
+        const slicer = new ViewSlicer();
+        const writerView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        const writerTexts = writerView.entities['char_001']?.acquiredState.map((e) => e.text) ?? [];
+        expect(writerTexts).not.toContain('来自 extraTags 的未知可见性机密');
+        expect(writerTexts).not.toContain('枚举外的未知 visibility 字段');
+        expect(writerTexts).not.toContain('[vis: omniscient_secret] 文本内联小写机密标签');
+
+        const plannerView = slicer.sliceForPlanner(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        const plannerTexts = plannerView.entities['char_001']?.acquiredState.map((e) => e.text) ?? [];
+        expect(plannerTexts).toContain('来自 extraTags 的未知可见性机密');
+    });
+
+    it('内联 [vis: public] / 归属 POV 的 [vis: SELF_ONLY] / [vis: READER_KNOWN] 不误杀，且兼容 rawInvalidVisibility 跨切片字段', () => {
+        const snapshot = createTestSnapshot();
+        const hero = snapshot.entities['char_001']!;
+        hero.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '[vis: public] 小写公开内联条目',
+                continuationLines: []
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '[vis: SELF_ONLY] 归属当前 POV 的内联自知状态',
+                continuationLines: []
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '普通条目正文',
+                continuationLines: ['  > [vis: OMNISCIENT_SECRET] 续行内联全知底牌']
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '来自 entity-parser 的 rawInvalidVisibility 脏条目',
+                continuationLines: [],
+                rawInvalidVisibility: 'secret_tier'
+            } as unknown as typeof hero.acquiredState[number]
+        );
+        const heroine = snapshot.entities['char_002']!;
+        heroine.acquiredState.push({
+            storyDay: 12,
+            chapter: 44,
+            text: '[vis: READER_KNOWN] 内联读者已知张力点',
+            continuationLines: []
+        });
+
+        const slicer = new ViewSlicer();
+        const writerView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+
+        const heroTexts = writerView.entities['char_001']?.acquiredState.map((e) => e.text) ?? [];
+        expect(heroTexts).toContain('[vis: public] 小写公开内联条目');
+        expect(heroTexts).toContain('[vis: SELF_ONLY] 归属当前 POV 的内联自知状态');
+        expect(heroTexts).not.toContain('普通条目正文');
+        expect(heroTexts).not.toContain('来自 entity-parser 的 rawInvalidVisibility 脏条目');
+
+        expect(
+            writerView.dramaticIronyHints.some((h) => h.text.includes('内联读者已知张力点'))
+        ).toBe(true);
+
+        const plannerView = slicer.sliceForPlanner(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        const clonedInvalid = plannerView.entities['char_001']?.acquiredState.find((e) =>
+            e.text.includes('rawInvalidVisibility')
+        ) as { rawInvalidVisibility?: string } | undefined;
+        expect(clonedInvalid?.rawInvalidVisibility).toBe('secret_tier');
+    });
+
+    it('isWarpedEntry 大小写不敏感并检查 continuationLines，整条剥离废止条目', () => {
+        const snapshot = createTestSnapshot();
+        snapshot.entities['char_001']!.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'PUBLIC',
+                text: '表面正常的行动条目',
+                continuationLines: ['  > 补充：[warped] 该行动线已作废']
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'PUBLIC',
+                text: '[warped] 小写废止标记',
+                continuationLines: []
+            }
+        );
+
+        const slicer = new ViewSlicer();
+        const writerView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        const texts = writerView.entities['char_001']?.acquiredState.map((e) => e.text) ?? [];
+        expect(texts).not.toContain('表面正常的行动条目');
+        expect(texts).not.toContain('[warped] 小写废止标记');
+    });
+
+    it('stripWriterRestrictedDirectives 覆盖单空格缩进与顶格 > 引用续行，sanitizeLoreForWriter 整条整段清洗机密设定', () => {
+        const rawArc = [
+            '- [WARPED] 废止旧计划',
+            ' 单空格缩进说明：不应对写手保留',
+            '> 顶格引用续行：同样应被整条剥离',
+            '- 公开舞台：煤油灯仍在值班室亮着'
+        ].join('\n');
+        const cleanedArc = stripWriterRestrictedDirectives(rawArc) ?? '';
+        expect(cleanedArc).not.toContain('废止旧计划');
+        expect(cleanedArc).not.toContain('单空格缩进说明');
+        expect(cleanedArc).not.toContain('顶格引用续行');
+        expect(cleanedArc).toContain('公开舞台：煤油灯仍在值班室亮着');
+
+        const rawLore = [
+            '# 学院设定',
+            '- 钟楼每晚十一点敲响。',
+            '- [vis: OMNISCIENT_SECRET] 钟楼地基下封存着初代校长契约',
+            ' 单空格续行：大结局前不可披露',
+            '> 顶格引用续行：主角尚不知情',
+            '- [SELF_ONLY] 仅反派自知的密道密码',
+            '',
+            '第一行看似公开的设定描述',
+            '同段第二行包含 director_rationale 导演机密，整段必须剥离。',
+            '',
+            '第二段完全公开的建筑结构描述。'
+        ].join('\n');
+        const cleanedLore = sanitizeLoreForWriter(rawLore);
+        expect(cleanedLore).toContain('钟楼每晚十一点敲响');
+        expect(cleanedLore).toContain('第二段完全公开的建筑结构描述');
+        expect(cleanedLore).not.toContain('OMNISCIENT_SECRET');
+        expect(cleanedLore).not.toContain('单空格续行');
+        expect(cleanedLore).not.toContain('顶格引用续行');
+        expect(cleanedLore).not.toContain('SELF_ONLY');
+        expect(cleanedLore).not.toContain('第一行看似公开的设定描述');
+        expect(cleanedLore).not.toContain('director_rationale');
+    });
+
+    it('FLASHBACK 模式跳过主线章距唤醒，MAINLINE 支持可配 wakeupGapChapters', () => {
+        const snapshot = createTestSnapshot();
+        const slicer = new ViewSlicer();
+
+        const flashbackView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'FLASHBACK',
+            povCharId: 'char_001'
+        });
+        expect(flashbackView.memoryWakeupHints).toHaveLength(0);
+
+        // char_002 last_seen_ch = 10，currentCh = 25 -> 间隔 15 章；阈值设 10 时触发，默认 30 时不触发
+        const customGapView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 25,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001',
+            wakeupGapChapters: 10
+        });
+        expect(customGapView.memoryWakeupHints).toHaveLength(1);
+        expect(customGapView.memoryWakeupHints[0]?.gapChapters).toBe(15);
+    });
+
+    it('createIronyHint 保留非机密 continuationLines 并剔除含 WARPED 或机密标记的续行', () => {
+        const snapshot = createTestSnapshot();
+        const heroine = snapshot.entities['char_002']!;
+        const ironyEntry = heroine.acquiredState.find((e) => e.visibility === 'READER_KNOWN')!;
+        ironyEntry.continuationLines = [
+            '  > 细节：琴凳右下角留有新近刮痕',
+            '  > [OMNISCIENT_SECRET] 秘密：钥匙其实已被掉包'
+        ];
+
+        const slicer = new ViewSlicer();
+        const writerView = slicer.sliceForWriter(snapshot, {
+            targetDay: 12,
+            currentCh: 45,
+            timelineMode: 'MAINLINE',
+            povCharId: 'char_001'
+        });
+        expect(writerView.dramaticIronyHints).toHaveLength(1);
+        const hint = writerView.dramaticIronyHints[0]!;
+        expect(hint.text).toContain('琴凳右下角留有新近刮痕');
+        expect(hint.formattedHint).toContain('琴凳右下角留有新近刮痕');
+        expect(hint.text).not.toContain('OMNISCIENT_SECRET');
+        expect(hint.formattedHint).not.toContain('钥匙其实已被掉包');
     });
 });

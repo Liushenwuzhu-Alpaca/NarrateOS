@@ -1,19 +1,34 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { CraftPluginLoader } from '../plugins/craft-plugin-loader.js';
 import { ScriptedLlmAdapter, hashStaticPrefix } from '../ports/llm.js';
 import type { RecallSlice } from '../recall/index-recall.js';
 import { ViewSlicer } from '../slicer/view-slicer.js';
 import type { BookConfig, BookSnapshot, EntityProfile } from '../store/schemas.js';
 import {
     PrefixAssembler,
+    buildStaticPrefixBlocks,
+    evictDynamicTailToBudget,
     loadVoiceSamples,
     parseVoiceSamplesYaml,
+    renderEntityProfile,
+    renderRecallSlice,
+    resolveCraftPluginsSection,
     sampleVoiceLru,
+    sanitizePositiveText,
     saveVoiceSamples,
+    serializeVoiceSamplesYaml,
+    type CraftPluginDefinition,
     type VoiceSamplePool
 } from './index.js';
+
+const REPO_CRAFT_PLUGINS_DIR = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../plugins/craft'
+);
 
 function createBaseConfig(overrides: Partial<BookConfig> = {}): BookConfig {
     return {
@@ -447,20 +462,35 @@ samples:
         expect(emptyRes.sample).toBeNull();
     });
 
-    it('动态尾完整拼装切片、时间差信封、ops_style_amendments 且零 WARPED 与零规划期插件泄露', () => {
+    it('动态尾完整拼装切片、时间差信封、ops_style_amendments 且零 WARPED 与零规划期插件泄露', async () => {
         const assembler = new PrefixAssembler();
         const slicer = new ViewSlicer();
         const snapshot = createSnapshot({
             craft_plugins: ['vad-bdi', 'dual-reaction', 'scene-act', 'writer-sensory']
         });
-        const customPlugins = {
+        const loader = new CraftPluginLoader();
+        const loadedYamlPlugins = await loader.loadForBook({
+            searchDirs: [REPO_CRAFT_PLUGINS_DIR],
+            enabledPluginIds: ['vad-bdi', 'dual-reaction', 'scene-act']
+        });
+        const customPlugins: Record<string, CraftPluginDefinition> = {
             'writer-sensory': {
                 id: 'writer-sensory',
                 title: '轻量感官落点提示',
                 promptText: '每场收尾停留在具体器物或光线画面。',
-                applicable_roles: ['writer' as const]
+                applicable_roles: ['writer']
             }
         };
+        for (const item of loadedYamlPlugins) {
+            customPlugins[item.plugin.id] = {
+                id: item.plugin.id,
+                title: item.plugin.name,
+                promptText: item.plugin.prompt_injection,
+                applicable_roles: item.plugin.applicable_roles.filter(
+                    (role): role is 'planner' | 'writer' => role === 'planner' || role === 'writer'
+                )
+            };
+        }
 
         const plannerView = slicer.sliceForPlanner(snapshot, { targetDay: 12, currentCh: 45 });
         const writerView = slicer.sliceForWriter(snapshot, { targetDay: 12, currentCh: 45 });
@@ -698,5 +728,451 @@ samples:
         expect(res.diagnostics.estimatedTokens).toBeLessThanOrEqual(targetBudget);
         expect(res.request.dynamicTail).toContain('外围设定A');
         expect(res.request.dynamicTail).not.toContain('外围设定C');
+    });
+
+    it('VoiceSample.source 支持 author_sample / boot_seed / chapter_harvest 无损往返序列化与 LRU 保留', () => {
+        const yamlText = `
+samples:
+  - id: vs_author
+    tag: 白描
+    text: "他把钥匙放在柜台边缘，没有抬头。"
+    last_used_ch: 0
+    source: author_sample
+  - id: vs_boot
+    tag: 动作
+    text: "风铃响了一声，门帘被一只戴手套的手掀开。"
+    last_used_ch: 1
+    source: boot_seed
+  - id: vs_harvest
+    tag: 对话
+    text: "“账本还差两页。”她说完合上钢笔帽。"
+    last_used_ch: 2
+    source: chapter_harvest
+  - id: vs_legacy
+    tag: 兼容旧格式
+    text: "走廊尽头的灯闪烁了两下。"
+    last_used_ch: 3
+`;
+        const parsed = parseVoiceSamplesYaml(yamlText);
+        expect(parsed.samples.map((s) => s.source)).toEqual([
+            'author_sample',
+            'boot_seed',
+            'chapter_harvest',
+            undefined
+        ]);
+
+        const serialized = serializeVoiceSamplesYaml(parsed);
+        const reparsed = parseVoiceSamplesYaml(serialized);
+        expect(reparsed.samples.map((s) => s.source)).toEqual([
+            'author_sample',
+            'boot_seed',
+            'chapter_harvest',
+            undefined
+        ]);
+
+        const lruRes = sampleVoiceLru(reparsed, { currentCh: 5 });
+        expect(lruRes.sample?.id).toBe('vs_author');
+        expect(lruRes.sample?.source).toBe('author_sample');
+    });
+
+    it('assembleWriterRequest 拒绝非 writer 视图，清洗 loreEntries 机密，且 buildStaticPrefixBlocks 不注入单轮冲突话术', () => {
+        const assembler = new PrefixAssembler();
+        const slicer = new ViewSlicer();
+        const snapshot = createSnapshot();
+        const plannerView = slicer.sliceForPlanner(snapshot, { targetDay: 12, currentCh: 45 });
+
+        expect(() =>
+            assembler.assembleWriterRequest({
+                config: snapshot.config,
+                staticPrefix: { volumeNumber: 1, staticBaseAndVoice: '句法简洁。' },
+                slicedView: plannerView,
+                outline: '林雾推门试探。'
+            })
+        ).toThrow("assembleWriterRequest 仅接受 forRole === 'writer'");
+
+        const staticBlocks = buildStaticPrefixBlocks({
+            volumeNumber: 1,
+            staticBaseAndVoice: '句法简洁。'
+        });
+        expect(staticBlocks.join('\n')).not.toContain('单轮作答');
+
+        const writerView = slicer.sliceForWriter(snapshot, { targetDay: 12, currentCh: 45 });
+        const writerRes = assembler.assembleWriterRequest({
+            config: snapshot.config,
+            staticPrefix: { volumeNumber: 1, staticBaseAndVoice: '句法简洁。' },
+            slicedView: writerView,
+            outline: '林雾推门试探。',
+            loreEntries: [
+                [
+                    '- 公开词条：钟楼齿轮每晚十一点响动。',
+                    '- [vis: OMNISCIENT_SECRET] 秘密词条：初代校长遗骸在钟摆内部',
+                    ' 单空格续行：大结局才能揭晓',
+                    '> 顶格引用续行：不可提前曝光',
+                    '- [SELF_ONLY] 仅反派知道的暗门位置'
+                ].join('\n')
+            ]
+        });
+
+        expect(writerRes.request.dynamicTail).toContain('钟楼齿轮每晚十一点响动');
+        expect(writerRes.request.dynamicTail).not.toContain('OMNISCIENT_SECRET');
+        expect(writerRes.request.dynamicTail).not.toContain('单空格续行');
+        expect(writerRes.request.dynamicTail).not.toContain('顶格引用续行');
+        expect(writerRes.request.dynamicTail).not.toContain('SELF_ONLY');
+        expect(writerRes.request.staticPrefixBlocks.join('\n')).not.toContain('单轮作答');
+    });
+
+    it('partitionCast 在 background_cast 为空数组时仍将未列入 focus_cast 的活跃实体兜底归入 backgroundCast', () => {
+        const assembler = new PrefixAssembler();
+        const slicer = new ViewSlicer();
+        const snapshot = createSnapshot();
+        snapshot.entities['item_001'] = {
+            metadata: {
+                entity_id: 'item_001',
+                canonical_name: '黄铜钥匙',
+                unique_aliases: [],
+                contextual_titles: [],
+                historical_anchors: [],
+                last_seen_ch: 44
+            },
+            sectionHeadings: {
+                innateLocks: '## 1. Innate Locks',
+                acquiredState: '## 2. Acquired State & Numeric Ledger',
+                irreversibleTrajectory: '## 3. Irreversible Trajectory',
+                recentBuffer: '## 4. Recent Sliding Buffer & Voice'
+            },
+            innateLocks: [{ visibility: 'PUBLIC', text: '齿面刻有 04 编号', continuationLines: [] }],
+            acquiredState: [{ storyDay: 12, chapter: 44, visibility: 'PUBLIC', text: '放在档案室抽屉内', continuationLines: [] }],
+            irreversibleTrajectory: [],
+            recentBuffer: []
+        };
+
+        const writerView = slicer.sliceForWriter(snapshot, { targetDay: 12, currentCh: 45 });
+        const res = assembler.assembleWriterRequest({
+            config: snapshot.config,
+            staticPrefix: { volumeNumber: 1 },
+            slicedView: writerView,
+            focusCastIds: ['char_001'],
+            backgroundCastIds: [],
+            outline: '林雾查找黄铜钥匙。'
+        });
+
+        expect(res.request.dynamicTail).toContain('神代雪乃');
+        expect(res.request.dynamicTail).toContain('黄铜钥匙');
+        expect(res.request.dynamicTail).toContain('齿面刻有 04 编号');
+    });
+
+    it('cleanroomDisplay 剥离工程标签并动态渲染 isNumericLedger，compactCard 保留全部先天红线、最新状态与声纹续行', () => {
+        const assembler = new PrefixAssembler();
+        const slicer = new ViewSlicer();
+        const snapshot = createSnapshot();
+        const hero = snapshot.entities['char_001']!;
+        hero.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                slotKey: 'location',
+                visibility: 'PUBLIC',
+                owner: 'char_001',
+                status: 'ACTIVE',
+                text: '当前停留在档案室外走廊',
+                continuationLines: []
+            },
+            {
+                isNumericLedger: true,
+                ledger: { 剩余手电电量: '35%', 银元: '12' },
+                text: '',
+                continuationLines: []
+            }
+        );
+
+        const bg = snapshot.entities['char_002']!;
+        bg.innateLocks.push({
+            visibility: 'PUBLIC',
+            text: '左耳对高频金属摩擦声极度厌恶。',
+            continuationLines: []
+        });
+        bg.acquiredState = [
+            { storyDay: 5, chapter: 10, visibility: 'PUBLIC', text: '旧状态：曾在医务室休养', continuationLines: [] },
+            { storyDay: 12, chapter: 44, visibility: 'PUBLIC', text: '最新状态：站在档案室窗边警戒', continuationLines: [] }
+        ];
+        bg.recentBuffer = [
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'PUBLIC',
+                text: '口癖：回答问题前先轻叩笔记本硬壳',
+                continuationLines: ['  > 标本：「钥匙不在我这，你自己看抽屉。」']
+            }
+        ];
+
+        const writerView = slicer.sliceForWriter(snapshot, { targetDay: 12, currentCh: 45 });
+        const writerRes = assembler.assembleWriterRequest({
+            config: snapshot.config,
+            staticPrefix: { volumeNumber: 1 },
+            slicedView: writerView,
+            focusCastIds: ['char_001'],
+            backgroundCastIds: ['char_002'],
+            outline: '林雾核对电量与钥匙。'
+        });
+
+        expect(writerRes.request.dynamicTail).not.toMatch(/\b(?:slot|vis|owner|status):/);
+        expect(writerRes.request.dynamicTail).toContain('（第12天，第44章）');
+        expect(writerRes.request.dynamicTail).toContain('剩余手电电量: 35%');
+        expect(writerRes.request.dynamicTail).toContain('银元: 12');
+
+        const compact = renderEntityProfile(bg, {
+            compactCard: true,
+            stripWarped: true,
+            cleanroomDisplay: true
+        });
+        expect(compact).toContain('右手腕内侧有一道旧烫伤浅疤。');
+        expect(compact).toContain('左耳对高频金属摩擦声极度厌恶。');
+        expect(compact).toContain('最新状态：站在档案室窗边警戒');
+        expect(compact).not.toContain('旧状态：曾在医务室休养');
+        expect(compact).toContain('标本：「钥匙不在我这，你自己看抽屉。」');
+
+        // Planner 模式保持工程标签同时动态渲染 ledger
+        const plannerView = slicer.sliceForPlanner(snapshot, { targetDay: 12, currentCh: 45 });
+        const plannerRes = assembler.assemblePlannerRequest({
+            config: snapshot.config,
+            staticPrefix: { volumeNumber: 1 },
+            slicedView: plannerView,
+            chapterGoal: '核对账本与工程标签。'
+        });
+        expect(plannerRes.request.dynamicTail).toContain('slot:location | vis:PUBLIC | owner:char_001 | status:ACTIVE');
+        expect(plannerRes.request.dynamicTail).toContain('[Tracked Numeric Ledger] 剩余手电电量: 35% | 银元: 12');
+    });
+
+    it('renderRecallSlice 命中机密或 WARPED（含上下文续行）整条丢弃，evictDynamicTailToBudget 按每实体保底 1 条区分必需与可选切片', () => {
+        const baseSlice: RecallSlice = {
+            file: 'manuscripts/vol_01/ch_0005.md',
+            chapterId: 'ch_0005',
+            chapterNumber: 5,
+            chapterDay: 3,
+            targetChapter: 45,
+            targetDay: 12,
+            deltaChapters: 40,
+            deltaDays: 9,
+            line: 10,
+            text: '表面正常的走廊描写。',
+            contextBefore: ['窗外风声渐停。'],
+            contextAfter: ['[OMNISCIENT_SECRET] 其实密道钥匙就在门框上方。'],
+            matchedKeys: ['走廊'],
+            snippet: '窗外风声渐停。\n表面正常的走廊描写。\n[OMNISCIENT_SECRET] 其实密道钥匙就在门框上方。'
+        };
+        expect(renderRecallSlice(baseSlice, true)).toBe('');
+
+        const selfOnlyContextSlice: RecallSlice = {
+            ...baseSlice,
+            text: '看似公开的对话。',
+            contextBefore: ['[SELF_ONLY] 只有反派才知道的暗号'],
+            contextAfter: [],
+            snippet: '看似公开的对话。'
+        };
+        expect(renderRecallSlice(selfOnlyContextSlice, true)).toBe('');
+
+        const snapshot = createSnapshot();
+        const writerView = new ViewSlicer().sliceForWriter(snapshot, { targetDay: 12, currentCh: 45 });
+        const reqSlice1: RecallSlice = {
+            ...baseSlice,
+            requiredEntityId: 'char_001',
+            contextBefore: [],
+            contextAfter: [],
+            text: '必须保底的第一条核心证据。',
+            snippet: '必须保底的第一条核心证据。'
+        };
+        const reqSlice2Dup: RecallSlice = {
+            ...baseSlice,
+            requiredEntityId: 'char_001',
+            chapterId: 'ch_0006',
+            chapterNumber: 6,
+            contextBefore: [],
+            contextAfter: [],
+            text: '同一实体的第二条冗余证据（应归入可选裁剪池，内容较长用于测试裁剪）。' + '冗余补充。'.repeat(12),
+            snippet: '同一实体的第二条冗余证据（应归入可选裁剪池，内容较长用于测试裁剪）。' + '冗余补充。'.repeat(12)
+        };
+
+        // 仅含 1 条保底切片（0 条可选切片），若仍触发 L4 缩减 lore，绝不伪报 L3
+        const onlyRequiredBase = evictDynamicTailToBudget(
+            ['静态前缀'],
+            {
+                opsStyleAmendments: '',
+                craftPluginsSection: '',
+                taskSection: '## 执笔任务\n写第45章',
+                voiceSampleSection: '',
+                futureHorizonSection: '',
+                focusCast: [writerView.entities['char_001']!],
+                backgroundCast: [],
+                dramaticIronyLines: [],
+                memoryWakeupLines: [],
+                parallelBroadcastLines: [],
+                recallSlices: [reqSlice1],
+                loreEntries: ['外围设定条目：' + '旧校舍走廊风声很大。'.repeat(10)],
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            0.6,
+            null
+        );
+        const l4NoFakeL3 = evictDynamicTailToBudget(
+            ['静态前缀'],
+            {
+                opsStyleAmendments: '',
+                craftPluginsSection: '',
+                taskSection: '## 执笔任务\n写第45章',
+                voiceSampleSection: '',
+                futureHorizonSection: '',
+                focusCast: [writerView.entities['char_001']!],
+                backgroundCast: [],
+                dramaticIronyLines: [],
+                memoryWakeupLines: [],
+                parallelBroadcastLines: [],
+                recallSlices: [reqSlice1],
+                loreEntries: ['外围设定条目：' + '旧校舍走廊风声很大。'.repeat(10)],
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            0.6,
+            onlyRequiredBase.estimatedTokens - 20
+        );
+        expect(l4NoFakeL3.evictionLevel).toBe(4);
+        expect(l4NoFakeL3.appliedEvictions.some((e) => e.startsWith('L3:'))).toBe(false);
+        expect(l4NoFakeL3.dynamicTail).toContain('必须保底的第一条核心证据');
+
+        // 当同一 requiredEntityId 有 2 条切片时，第 1 条保底，第 2 条可在 L3 被裁掉
+        const twoSliceBase = evictDynamicTailToBudget(
+            ['静态前缀'],
+            {
+                opsStyleAmendments: '',
+                craftPluginsSection: '',
+                taskSection: '## 执笔任务\n写第45章',
+                voiceSampleSection: '',
+                futureHorizonSection: '',
+                focusCast: [writerView.entities['char_001']!],
+                backgroundCast: [],
+                dramaticIronyLines: [],
+                memoryWakeupLines: [],
+                parallelBroadcastLines: [],
+                recallSlices: [reqSlice1, reqSlice2Dup],
+                loreEntries: [],
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            0.6,
+            null
+        );
+        const l3EvictedDup = evictDynamicTailToBudget(
+            ['静态前缀'],
+            {
+                opsStyleAmendments: '',
+                craftPluginsSection: '',
+                taskSection: '## 执笔任务\n写第45章',
+                voiceSampleSection: '',
+                futureHorizonSection: '',
+                focusCast: [writerView.entities['char_001']!],
+                backgroundCast: [],
+                dramaticIronyLines: [],
+                memoryWakeupLines: [],
+                parallelBroadcastLines: [],
+                recallSlices: [reqSlice1, reqSlice2Dup],
+                loreEntries: [],
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            0.6,
+            twoSliceBase.estimatedTokens - 10
+        );
+        expect(l3EvictedDup.evictionLevel).toBe(3);
+        expect(l3EvictedDup.dynamicTail).toContain('必须保底的第一条核心证据');
+        expect(l3EvictedDup.dynamicTail).not.toContain('同一实体的第二条冗余证据');
+    });
+
+    it('resolveCraftPluginsSection 对未知插件 ID 返回空且不输出占位文本', () => {
+        expect(resolveCraftPluginsSection(['nonexistent-plugin'], 'planner')).toBe('');
+        expect(resolveCraftPluginsSection(['nonexistent-plugin'], 'writer', {})).toBe('');
+    });
+
+    it('cleanroomDisplay 对续行含机密或未知 visibility/rawInvalidVisibility 整条丢弃，sanitizePositiveText 整块剥离续行，且支持可配 fallbackTailChars', () => {
+        const dirtyProfile = createHeroProfile();
+        dirtyProfile.acquiredState.push(
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'PUBLIC',
+                text: '看似正常的行动主行',
+                continuationLines: [
+                    '  > [OMNISCIENT_SECRET] 首条秘密续行',
+                    '  > 次条无标签秘密正文：地下室开关在书架后'
+                ]
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                visibility: 'UNKNOWN_TIER' as unknown as 'PUBLIC',
+                text: '枚举外非法 visibility 条目',
+                continuationLines: ['  > 不应保留的续行']
+            },
+            {
+                storyDay: 12,
+                chapter: 44,
+                text: '带 rawInvalidVisibility 标记的条目',
+                continuationLines: [],
+                rawInvalidVisibility: 'bad_vis'
+            } as unknown as typeof dirtyProfile.acquiredState[number]
+        );
+
+        const rendered = renderEntityProfile(dirtyProfile, {
+            compactCard: false,
+            stripWarped: true,
+            cleanroomDisplay: true
+        });
+        expect(rendered).not.toContain('看似正常的行动主行');
+        expect(rendered).not.toContain('次条无标签秘密正文');
+        expect(rendered).not.toContain('枚举外非法 visibility 条目');
+        expect(rendered).not.toContain('不应保留的续行');
+        expect(rendered).not.toContain('rawInvalidVisibility');
+
+        const cleanedOutline = sanitizePositiveText(
+            [
+                '- 保留的正向节拍',
+                '- [WARPED] 已废止的码头交火方案',
+                ' 单空格续行：不应残留',
+                '> 顶格引用续行：同样不应残留',
+                '- 后续正常动作'
+            ].join('\n')
+        );
+        expect(cleanedOutline).toContain('保留的正向节拍');
+        expect(cleanedOutline).toContain('后续正常动作');
+        expect(cleanedOutline).not.toContain('已废止的码头交火方案');
+        expect(cleanedOutline).not.toContain('单空格续行');
+        expect(cleanedOutline).not.toContain('顶格引用续行');
+
+        const longPrev = '甲乙丙丁'.repeat(200);
+        const tailEvicted = evictDynamicTailToBudget(
+            ['静态前缀'],
+            {
+                opsStyleAmendments: '',
+                craftPluginsSection: '',
+                taskSection: '## 任务\n正文',
+                voiceSampleSection: '',
+                futureHorizonSection: '',
+                focusCast: [],
+                backgroundCast: [],
+                dramaticIronyLines: [],
+                memoryWakeupLines: [],
+                parallelBroadcastLines: [],
+                recallSlices: [],
+                loreEntries: [],
+                previousChapter: { chapterNumber: 44, fullText: longPrev },
+                fallbackTailChars: 40,
+                stripWarped: true,
+                cleanroomDisplay: true
+            },
+            0.6,
+            100
+        );
+        expect(tailEvicted.evictionLevel).toBe(1);
+        expect(tailEvicted.dynamicTail).toContain(`...${longPrev.slice(-40)}`);
+        expect(tailEvicted.dynamicTail).not.toContain(longPrev.slice(-80));
     });
 });
