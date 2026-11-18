@@ -989,4 +989,654 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         ).rejects.toThrow();
         expect(badSpy.concludedCount()).toBe(0);
     });
+
+    it('yield_context_pack 封堵 lore 绕过漏洞、手填切片防伪信封、冷宫读取、支线隔离与 Q1 首次登场豁免', async () => {
+        const bookRoot = await createInitializedGitBook();
+        await writeFile(
+            join(bookRoot, 'lore_library/lore_harbor.md'),
+            '# 北港潮汐条例\n\n子夜涨潮封闸。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'entities/item_new_debut.md'),
+            '---\nentity_id: item_new_debut\ncanonical_name: 铁皮密函\nlast_seen_ch: 0\n---\n\n## 1. Innate Locks\n- [vis: PUBLIC] 火漆未拆\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'entities/cold_archive/char_cold.md'),
+            '---\nentity_id: char_cold\ncanonical_name: 周大川\nlast_seen_ch: 0\n---\n\n## 1. Innate Locks\n- [vis: PUBLIC] 右耳缺角\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0002.md'),
+            '# 第二章 支线专属\n\n支线角色在二章出现。\n',
+            'utf8'
+        );
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-pack-hardening',
+            bookRoot,
+            yieldTool: 'yield_context_pack',
+            targetChapter: 3,
+            targetDay: 3,
+            allowedChapterFiles: ['ch_0001.md']
+        });
+        registerCleanup(() => roleSet.cleanup());
+        const yieldPack = roleSet.toolMap.get('yield_context_pack')!;
+
+        // 1. 挂载 selected_lore_files 不得再绕过 recall_slices.entity_id 校验
+        await expect(
+            yieldPack.execute(
+                {
+                    selected_entity_ids: ['char_001'],
+                    selected_lore_files: ['lore_harbor.md'],
+                    recall_slices: [
+                        { entity_id: 'item_001', file: 'manuscripts/ch_0001.md', snippet: '手里攥着那把黄铜钥匙' }
+                    ]
+                },
+                createSpyExec('yield_context_pack', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 2. 手填 recall_slices 捏造片段或引用支线不可达 ch_0002.md 均必须拒绝
+        await expect(
+            yieldPack.execute(
+                {
+                    selected_entity_ids: ['char_001'],
+                    selected_lore_files: [],
+                    recall_slices: [
+                        { entity_id: 'char_001', file: 'manuscripts/ch_0001.md', snippet: '完全不存在的假台词' }
+                    ]
+                },
+                createSpyExec('yield_context_pack', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        await expect(
+            yieldPack.execute(
+                {
+                    selected_entity_ids: ['char_001'],
+                    selected_lore_files: [],
+                    recall_slices: [
+                        { entity_id: 'char_001', file: 'manuscripts/ch_0002.md', snippet: '支线角色在二章出现' }
+                    ]
+                },
+                createSpyExec('yield_context_pack', {}).exec
+            )
+        ).rejects.toThrow(/禁止读取该章节手稿/);
+
+        // 3. Q1 首次登场豁免：item_new_debut (last_seen_ch=0) + wakeup_entity_ids (char_cold) + 真实手填切片通过并生成时间差信封 & requiredEntityId
+        const okSpy = createSpyExec('yield_context_pack', {});
+        const okRes = (await yieldPack.execute(
+            {
+                selected_entity_ids: ['item_new_debut', 'item_001'],
+                wakeup_entity_ids: ['char_cold'],
+                selected_lore_files: ['lore_harbor.md'],
+                recall_queries: [{ entity_id: 'item_001', focus_chapters: [1] }]
+            },
+            okSpy.exec
+        )) as { accepted: boolean; recalledSliceCount: number };
+        expect(okRes.accepted).toBe(true);
+        expect(okRes.recalledSliceCount).toBeGreaterThanOrEqual(1);
+        const yieldedPack = roleSet.getYieldResult<{ recalledSlices: Array<{ requiredEntityId?: string; deltaChapters: number }> }>();
+        expect(yieldedPack?.recalledSlices[0]?.requiredEntityId).toBe('item_001');
+        expect(yieldedPack?.recalledSlices[0]?.deltaChapters).toBe(2);
+    });
+
+    it('yield_outline 校验实体 ID、禁区/否定禁令拦截、首章 1 拍限制与唯一 is_spotlight 戏眼', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const ch1RoleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-outline-ch1',
+            bookRoot,
+            yieldTool: 'yield_outline',
+            targetChapter: 1
+        });
+        registerCleanup(() => ch1RoleSet.cleanup());
+        const ch1Outline = ch1RoleSet.toolMap.get('yield_outline')!;
+
+        // 1. 拒绝中文人名充当 entity_id
+        await expect(
+            ch1Outline.execute(
+                {
+                    chapter_title: '测试',
+                    target_word_count: 1500,
+                    focus_cast: ['沈默'],
+                    director_rationale: '秘辛',
+                    chapter_turn: '转折',
+                    scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                    outline_text: '沈默翻看账簿。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 2. 拒绝 outline_text 夹带否定禁令词或剧透标签
+        await expect(
+            ch1Outline.execute(
+                {
+                    chapter_title: '测试',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '秘辛',
+                    chapter_turn: '转折',
+                    scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                    outline_text: '沈默翻看账簿，严禁泄露 Stage Ceiling。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 3. 第 1 章 默认 first_chapter_max_beats=1，传入 2 拍被拒
+        await expect(
+            ch1Outline.execute(
+                {
+                    chapter_title: '测试',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '秘辛',
+                    chapter_turn: '转折',
+                    scene_plan: [
+                        { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true },
+                        { scene_index: 2, location: '仓库', summary: '对质', is_spotlight: false }
+                    ],
+                    outline_text: '沈默翻看账簿。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 4. 非首章允许最多 2 拍，但最多 1 个 is_spotlight=true
+        const ch2RoleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-outline-ch2',
+            bookRoot,
+            yieldTool: 'yield_outline',
+            targetChapter: 2
+        });
+        registerCleanup(() => ch2RoleSet.cleanup());
+        const ch2Outline = ch2RoleSet.toolMap.get('yield_outline')!;
+        await expect(
+            ch2Outline.execute(
+                {
+                    chapter_title: '测试',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '秘辛',
+                    chapter_turn: '转折',
+                    scene_plan: [
+                        { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true },
+                        { scene_index: 2, location: '仓库', summary: '对质', is_spotlight: true }
+                    ],
+                    outline_text: '沈默翻看账簿后走进仓库。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 5. ISS-035 分句归一化拦截 director_rationale 实质子句及实体 OMNISCIENT_SECRET 未揭底牌子句
+        await writeFile(
+            join(bookRoot, 'entities/char_001.md'),
+            [
+                '---',
+                'entity_id: char_001',
+                'canonical_name: 沈默',
+                '---',
+                '',
+                '## 1. Innate Locks',
+                '- [vis: PUBLIC] 左肩旧伤',
+                '',
+                '## 2. Acquired State',
+                '- [day:0 | ch:0 | vis: OMNISCIENT_SECRET | slot:hidden_goal] SECRET_GOAL: 沈默其实在暗中替失踪兄长查账',
+                ''
+            ].join('\n'),
+            'utf8'
+        );
+        await expect(
+            ch2Outline.execute(
+                {
+                    chapter_title: '泄底测试一',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '幕后线人真实身份将在第四卷公开，真正的接头人将在第三章才现身，此处暂不点破。',
+                    chapter_turn: '转折',
+                    scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                    outline_text: '沈默在货栈等候，真正的接头人将在第三章才现身。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        await expect(
+            ch2Outline.execute(
+                {
+                    chapter_title: '泄底测试二',
+                    target_word_count: 1500,
+                    focus_cast: ['char_001'],
+                    director_rationale: '日常试探。',
+                    chapter_turn: '转折',
+                    scene_plan: [{ scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }],
+                    outline_text: '旁白点明沈默其实在暗中替失踪兄长查账。'
+                },
+                createSpyExec('yield_outline', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+    });
+
+    it('yield_verdict 废除省略 source_ref 后门，校验 LOCAL_PATCH 段落索引边界与比例上限', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const draft2Para = '# 第一章\n\n沈默站在旧码头边。';
+        const draft6Para = [
+            '# 第一章',
+            '段落一：沈默站在旧码头边。',
+            '段落二：风吹动铁皮门。',
+            '段落三：手里攥着黄铜钥匙。',
+            '段落四：远处传来汽笛声。',
+            '段落五：老周合上账册。'
+        ].join('\n\n');
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet2 = ctx.narrateTools.buildRoleTools({
+            runId: 'run-fc-2para',
+            bookRoot,
+            yieldTool: 'yield_verdict',
+            draftText: draft2Para
+        });
+        registerCleanup(() => roleSet2.cleanup());
+        const verdict2 = roleSet2.toolMap.get('yield_verdict')!;
+
+        // 1. 省略 source_ref / quote_source 必须拒绝
+        await expect(
+            verdict2.execute(
+                {
+                    passed: false,
+                    issues: [
+                        {
+                            severity: 'PLAN_CONFLICT',
+                            paragraph_index: 1,
+                            description: '缺依据路径',
+                            quote_draft: '沈默站在旧码头边。'
+                        }
+                    ]
+                },
+                createSpyExec('yield_verdict', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 2. 2 段草稿单段 LOCAL_PATCH（去重段数===1）豁免比例拦截正常放行
+        const singleRes = (await verdict2.execute(
+            {
+                passed: false,
+                issues: [
+                    {
+                        severity: 'LOCAL_PATCH',
+                        paragraph_index: 1,
+                        description: '单段核实偏差',
+                        quote_draft: '沈默站在旧码头边',
+                        quote_source: '位于旧码头',
+                        source_ref: 'entities/char_001.md'
+                    }
+                ]
+            },
+            createSpyExec('yield_verdict', {}).exec
+        )) as { accepted: boolean };
+        expect(singleRes.accepted).toBe(true);
+
+        // 3. 6 段草稿传 3 段 LOCAL_PATCH (3/6 = 0.5 > 0.35) 或越界索引必须拒绝
+        const roleSet6 = ctx.narrateTools.buildRoleTools({
+            runId: 'run-fc-6para',
+            bookRoot,
+            yieldTool: 'yield_verdict',
+            draftText: draft6Para
+        });
+        registerCleanup(() => roleSet6.cleanup());
+        const verdict6 = roleSet6.toolMap.get('yield_verdict')!;
+        await expect(
+            verdict6.execute(
+                {
+                    passed: false,
+                    issues: [
+                        {
+                            severity: 'LOCAL_PATCH',
+                            paragraph_indices: [1, 2, 3],
+                            description: '占比超限',
+                            quote_draft: '沈默站在旧码头边',
+                            quote_source: '位于旧码头',
+                            source_ref: 'entities/char_001.md'
+                        }
+                    ]
+                },
+                createSpyExec('yield_verdict', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        await expect(
+            verdict6.execute(
+                {
+                    passed: false,
+                    issues: [
+                        {
+                            severity: 'LOCAL_PATCH',
+                            paragraph_index: 99,
+                            description: '越界索引',
+                            quote_draft: '沈默站在旧码头边',
+                            quote_source: '位于旧码头',
+                            source_ref: 'entities/char_001.md'
+                        }
+                    ]
+                },
+                createSpyExec('yield_verdict', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+    });
+
+    it('yield_state_patch 兼容双轨摘要、Q1 锚点首次拒止次轮过滤放行、FLASHBACK 拦截第 2/4 区与 Q7 禁第 1 区 OMNISCIENT_SECRET', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const store = ctx.narrateStore.openStore(bookRoot);
+        await store.beginDraft(2);
+        await store.commitDraft(2, '# 第二章\n\n沈默拎着煤油灯查验三号闸门，记下编号 K-07。\n');
+
+        // 1. FLASHBACK 拒绝修改第 2/4 区
+        const flashbackSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-flashback-guard',
+            bookRoot,
+            yieldTool: 'yield_state_patch',
+            chapterNumber: 2,
+            timelineMode: 'FLASHBACK',
+            deferCommit: true
+        });
+        registerCleanup(() => flashbackSet.cleanup());
+        await expect(
+            flashbackSet.toolMap.get('yield_state_patch')!.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_001',
+                            acquired_state_ops: [{ op: 'append', entry: { storyDay: 1, text: '禁止改写' } }]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    plot_summary: '插叙回忆'
+                },
+                createSpyExec('yield_state_patch', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 2. 主线：Q7 拦截新建第 1 区 OMNISCIENT_SECRET；Q1 prose_anchors 首次全0命中打回，第2次放行
+        const mainSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-state-q1-q7',
+            bookRoot,
+            yieldTool: 'yield_state_patch',
+            chapterNumber: 2,
+            timelineMode: 'MAINLINE',
+            draftText: '# 第二章\n\n沈默拎着煤油灯查验三号闸门，记下编号 K-07。'
+        });
+        registerCleanup(() => mainSet.cleanup());
+        const yieldPatch = mainSet.toolMap.get('yield_state_patch')!;
+
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_002',
+                            canonical_name: '林舟',
+                            innate_locks_ops: [
+                                { op: 'append', entry: { visibility: 'OMNISCIENT_SECRET', text: '密谍' } }
+                            ]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    plot_summary: '测试 Q7'
+                },
+                createSpyExec('yield_state_patch', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_002',
+                            canonical_name: '林舟',
+                            innate_locks_ops: [
+                                { op: 'append', entry: { visibility: 'PUBLIC', text: '内联 OMNISCIENT_SECRET 潜伏' } }
+                            ]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    plot_summary: '测试 Q7 内联'
+                },
+                createSpyExec('yield_state_patch', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 第 1 次 prose_anchors 全部未命中 -> 抛错打回
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [],
+                    story_day_delta: 1,
+                    plot_summary: '沈默查验三号闸门。',
+                    prose_anchors: ['不存在的铜印']
+                },
+                createSpyExec('yield_state_patch', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+
+        // 第 2 次部分命中 + 双向回填 chapter_summary & 校验 appeared_entity_ids
+        const okSpy = createSpyExec('yield_state_patch', {});
+        const okRes = (await yieldPatch.execute(
+            {
+                entity_patches: [],
+                story_day_delta: 1,
+                plot_summary: '沈默查验三号闸门。',
+                prose_anchors: ['K-07', '不存在的残词'],
+                appeared_entity_ids: ['char_001', 'item_001']
+            },
+            okSpy.exec
+        )) as { accepted: boolean };
+        expect(okRes.accepted).toBe(true);
+        const yieldedState = mainSet.getYieldResult<{
+            output: { plot_summary: string; chapter_summary: string; prose_anchors: string[] };
+        }>();
+        expect(yieldedState?.output.plot_summary).toBe('沈默查验三号闸门。');
+        expect(yieldedState?.output.chapter_summary).toBe('沈默查验三号闸门。');
+        expect(yieldedState?.output.prose_anchors).toEqual(['K-07']);
+    });
+
+    it('yield_dream_commit 保护 current_arc_envelope 与冷宫 Innate Locks、校验声纹门禁与新增伏笔上限并清零字数水位', async () => {
+        const bookRoot = await createInitializedGitBook();
+        await writeFile(join(bookRoot, 'world/current_arc_envelope.md'), '# 当前卷\n正向舞台。\n', 'utf8');
+        await writeFile(
+            join(bookRoot, 'entities/cold_archive/char_cold.md'),
+            '---\nentity_id: char_cold\ncanonical_name: 周大川\n---\n\n## 1. Innate Locks\n- [vis: PUBLIC] 右耳缺角\n',
+            'utf8'
+        );
+        await writeFile(join(bookRoot, 'entities/cold_archive/warped_horizon.md'), '# 已归档 WARPED\n', 'utf8');
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const store = ctx.narrateStore.openStore(bookRoot);
+
+        // 1. 拒绝篡改 world/current_arc_envelope.md 与 world/static_base_and_voice.md
+        const envSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-env',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        registerCleanup(() => envSet.cleanup());
+        await envSet.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/current_arc_envelope.md',
+                mode: 'write',
+                replacement_text: '# 篡改包络\n'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await expect(
+            envSet.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '篡改包络' },
+                createSpyExec('yield_dream_commit', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        envSet.cleanup();
+
+        const voiceBaseSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-static-base',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        registerCleanup(() => voiceBaseSet.cleanup());
+        await voiceBaseSet.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/static_base_and_voice.md',
+                mode: 'write',
+                replacement_text: '# 篡改底层文风前缀\n'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await expect(
+            voiceBaseSet.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '篡改静态前缀' },
+                createSpyExec('yield_dream_commit', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        voiceBaseSet.cleanup();
+
+        // 2. 拒绝篡改冷宫实体的 Innate Locks
+        const coldSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-cold',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        registerCleanup(() => coldSet.cleanup());
+        await coldSet.toolMap.get('book_edit')!.execute(
+            {
+                path: 'entities/cold_archive/char_cold.md',
+                target_text: '- [vis: PUBLIC] 右耳缺角',
+                replacement_text: '- [vis: PUBLIC] 双耳完好'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await expect(
+            coldSet.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '篡改冷宫红线' },
+                createSpyExec('yield_dream_commit', {}).exec
+            )
+        ).rejects.toThrow(InnateLockViolationError);
+        coldSet.cleanup();
+
+        // 3. 拒绝 .ops/voice_samples.yaml 未通过 StaticProseGate 与单次新增 > 2 条伏笔
+        const voiceSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-voice',
+            bookRoot,
+            yieldTool: 'yield_dream_commit',
+            allowedOpsPaths: ['.ops/voice_samples.yaml'],
+            allowedOpsWritePaths: ['.ops/voice_samples.yaml']
+        });
+        registerCleanup(() => voiceSet.cleanup());
+        await voiceSet.toolMap.get('book_edit')!.execute(
+            {
+                path: '.ops/voice_samples.yaml',
+                mode: 'write',
+                replacement_text: 'samples:\n  - id: v1\n    tag: 动作\n    text: 他指节泛白，喉结滚动。\n'
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await expect(
+            voiceSet.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '违规声纹' },
+                createSpyExec('yield_dream_commit', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        voiceSet.cleanup();
+
+        const newThreadSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-new-threads',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        registerCleanup(() => newThreadSet.cleanup());
+        await newThreadSet.toolMap.get('book_edit')!.execute(
+            {
+                path: 'world/open_threads.md',
+                mode: 'write',
+                replacement_text: [
+                    '# 跨卷伏笔台账',
+                    '',
+                    '- [thread_001 | status: ACTIVE] item_001 黄铜钥匙去向',
+                    '- [thread_002 | status: ACTIVE] 新增一',
+                    '- [thread_003 | status: ACTIVE] 新增二',
+                    '- [thread_004 | status: ACTIVE] 新增三'
+                ].join('\n')
+            },
+            createSpyExec('book_edit', {}).exec
+        );
+        await expect(
+            newThreadSet.toolMap.get('yield_dream_commit')!.execute(
+                { summary: '超限新增伏笔' },
+                createSpyExec('yield_dream_commit', {}).exec
+            )
+        ).rejects.toThrow(GateValidationError);
+        newThreadSet.cleanup();
+
+        // 4. 磁盘既有无尾换行 signals.jsonl 下投递 spotlight_triggers 补齐换行且每行可独立 JSON.parse，并清零字数水位
+        await writeFile(
+            join(bookRoot, '.ops/signals.jsonl'),
+            JSON.stringify({ id: 'sig_old_1', type: 'DIRECTION', chapter: 1, reason: '旧信号无尾换行' }),
+            'utf8'
+        );
+        const okSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-dream-watermark-reset',
+            bookRoot,
+            yieldTool: 'yield_dream_commit'
+        });
+        registerCleanup(() => okSet.cleanup());
+        await okSet.toolMap.get('yield_dream_commit')!.execute(
+            {
+                summary: '归零与信号补换行验证',
+                chapter_number: 1,
+                accumulated_words: 9999,
+                spotlight_triggers: [
+                    { entity_id: 'char_001', reason: '前台切镜核对', suggested_mode: 'MAINLINE' }
+                ]
+            },
+            createSpyExec('yield_dream_commit', {}).exec
+        );
+        const wm = await store.readDreamWatermark();
+        expect(wm?.accumulated_words_since_dream).toBe(0);
+        const signalsAfter = await readFile(join(bookRoot, '.ops/signals.jsonl'), 'utf8');
+        expect(signalsAfter.endsWith('\n')).toBe(true);
+        const parsedSignals = signalsAfter
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as { id?: string; type: string });
+        expect(parsedSignals).toHaveLength(2);
+        expect(parsedSignals[1]?.type).toBe('SPOTLIGHT_TRIGGER');
+        expect(parsedSignals[1]?.id).toMatch(/^sig_dream_/);
+    });
 });

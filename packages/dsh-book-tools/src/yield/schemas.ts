@@ -1,7 +1,21 @@
 import { z } from 'zod';
-import { EntryVisibilitySchema, PlannerOutlineSchema } from '@narrateos/dsh-book-store';
+import {
+    assertSafeEntityTagValue,
+    assertSafeLedgerValue,
+    EntryVisibilitySchema,
+    PlannerOutlineSchema,
+    VoiceSampleSourceSchema
+} from '@narrateos/dsh-book-store';
 
 export { PlannerOutlineSchema };
+
+/** 开书声纹样本 Schema */
+export const BootVoiceSampleSchema = z.object({
+    tag: z.string().min(1),
+    sample: z.string().min(1),
+    source: VoiceSampleSourceSchema.optional()
+});
+export type BootVoiceSample = z.infer<typeof BootVoiceSampleSchema>;
 
 /** 开书编译实体档案 Schema */
 export const CompiledEntitySchema = z.object({
@@ -23,6 +37,7 @@ export const CompiledEntitySchema = z.object({
                 storyDay: z.number().int().default(0),
                 visibility: EntryVisibilitySchema.default('PUBLIC'),
                 slotKey: z.string().optional(),
+                owner: z.string().optional(),
                 text: z.string().min(1)
             })
         )
@@ -172,19 +187,55 @@ export const FactCheckOutputSchema = z.object({
 export type FactCheckOutput = z.infer<typeof FactCheckOutputSchema>;
 
 /** Step 6: Extractor 实体条目输入 Schema */
-export const EntityEntryInputSchema = z.object({
-    storyDay: z.number().int().optional(),
-    chapter: z.number().int().nonnegative().optional(),
-    visibility: z.enum(['SELF_ONLY', 'OMNISCIENT_SECRET', 'PUBLIC', 'READER_KNOWN']).optional(),
-    owner: z.string().optional(),
-    status: z.enum(['ACTIVE', 'WARPED']).optional(),
-    slotKey: z.string().optional(),
-    extraTags: z.record(z.string(), z.string()).optional(),
-    isNumericLedger: z.boolean().optional(),
-    ledger: z.record(z.string(), z.string()).optional(),
-    text: z.string(),
-    continuationLines: z.array(z.string()).optional()
-});
+export const EntityEntryInputSchema = z
+    .object({
+        storyDay: z.number().int().optional(),
+        chapter: z.number().int().nonnegative().optional(),
+        visibility: z.enum(['SELF_ONLY', 'OMNISCIENT_SECRET', 'PUBLIC', 'READER_KNOWN']).optional(),
+        owner: z.string().optional(),
+        status: z.enum(['ACTIVE', 'WARPED']).optional(),
+        slotKey: z.string().optional(),
+        extraTags: z.record(z.string(), z.string()).optional(),
+        isNumericLedger: z.boolean().optional(),
+        ledger: z.record(z.string(), z.string()).optional(),
+        text: z.string(),
+        continuationLines: z.array(z.string()).optional()
+    })
+    .superRefine((entry, ctx) => {
+        const checks: Array<{ label: string; value: string; isLedgerValue?: boolean }> = [];
+        if (entry.slotKey !== undefined) {
+            checks.push({ label: 'slotKey', value: entry.slotKey });
+        }
+        if (entry.owner !== undefined) {
+            checks.push({ label: 'owner', value: entry.owner });
+        }
+        if (entry.extraTags !== undefined) {
+            for (const [k, v] of Object.entries(entry.extraTags)) {
+                checks.push({ label: 'extraTag_key', value: k });
+                checks.push({ label: 'extraTag_value', value: v });
+            }
+        }
+        if (entry.ledger !== undefined) {
+            for (const [k, v] of Object.entries(entry.ledger)) {
+                checks.push({ label: 'ledger_key', value: k });
+                checks.push({ label: 'ledger_value', value: v, isLedgerValue: true });
+            }
+        }
+        for (const item of checks) {
+            try {
+                if (item.isLedgerValue) {
+                    assertSafeLedgerValue(item.value);
+                } else {
+                    assertSafeEntityTagValue(item.label, item.value);
+                }
+            } catch (err: unknown) {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: err instanceof Error ? err.message : String(err)
+                });
+            }
+        }
+    });
 
 /** Step 6: 实体增量补丁 Schema */
 export const EntityPatchSchema = z.object({
@@ -229,13 +280,35 @@ export const EntityPatchSchema = z.object({
         .optional()
 });
 
-/** Step 6: Extractor 结构化抽取输出 Schema */
-export const ExtractorOutputSchema = z.object({
+const ExtractorOutputRawSchema = z.object({
     entity_patches: z.array(EntityPatchSchema).default([]),
     story_day_delta: z.number().int().min(0).default(0),
-    chapter_summary: z.string().min(1),
+    plot_summary: z.string().min(1).optional(),
+    chapter_summary: z.string().min(1).optional(),
+    prose_anchors: z.array(z.string().min(1)).max(8).default([]),
+    appeared_entity_ids: z.array(z.string().min(1)).default([]),
     world_summary_markdown: z.string().optional(),
     next_chapter_options: z.array(z.string().min(1)).default([])
+});
+
+/** Step 6: Extractor 结构化抽取输出 Schema（双轨字段 + 向后兼容 chapter_summary 双向回填） */
+export const ExtractorOutputSchema = ExtractorOutputRawSchema.superRefine((data, ctx) => {
+    const plot = data.plot_summary?.trim() ?? '';
+    const chapter = data.chapter_summary?.trim() ?? '';
+    if (plot.length === 0 && chapter.length === 0) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['plot_summary'],
+            message: 'plot_summary 与 chapter_summary 至少需提供一个非空主干剧情摘要'
+        });
+    }
+}).transform((data) => {
+    const summary = (data.plot_summary ?? data.chapter_summary)!.trim();
+    return {
+        ...data,
+        plot_summary: summary,
+        chapter_summary: data.chapter_summary?.trim() || summary
+    };
 });
 export type ExtractorOutput = z.infer<typeof ExtractorOutputSchema>;
 
@@ -287,14 +360,7 @@ export const BootBundleOutputSchema = z.object({
         .min(1)
         .default('# L0 纪元折叠总表\n\n<!-- 每满 10 卷封存一纪元 -->'),
     l1_volumes_markdown: z.string().min(1),
-    voice_samples: z
-        .array(
-            z.object({
-                tag: z.string().min(1),
-                sample: z.string().min(1)
-            })
-        )
-        .default([]),
+    voice_samples: z.array(BootVoiceSampleSchema).default([]),
     open_threads: z
         .array(
             z.object({

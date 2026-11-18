@@ -51,10 +51,15 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
                     additionalProperties: false,
                     properties: {
                         tag: { type: 'string', required: true },
-                        sample: { type: 'string', required: true }
+                        sample: { type: 'string', required: true },
+                        source: {
+                            type: 'string',
+                            enum: ['author_sample', 'boot_seed', 'chapter_harvest']
+                        }
                     }
                 },
-                description: '作者提供样章洗净后的声纹标本（无样章时须为空数组）'
+                description:
+                    '声纹标本（支持 source: "author_sample" | "boot_seed" | "chapter_harvest"，须通过 StaticProseGate；无作者样章时可传 [] 或 3~4 条 15~45 字无角色专名硬动作/对话 boot_seed）'
             },
             open_threads: {
                 type: 'array',

@@ -20,6 +20,8 @@ export interface BookReadToolOptions {
     runId: string;
     fence: PathFence;
     quota: ReadQuotaCounter;
+    /** 可选内存分支覆盖层（如 PARALLEL 分支视角）；优先读本 runId 暂存，其次读该覆盖层 */
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
 }
 
 /** 保序去重路径列表 */
@@ -41,12 +43,25 @@ async function readSingleTarget(
     runId: string,
     target: { normalized: string; absPath: string },
     offset?: number,
-    limit?: number
+    limit?: number,
+    stagingOverlay?: ReadonlyMap<string, string | null>
 ): Promise<BookReadItem> {
     let rawText: string;
     let fromStaging = false;
-    if (store.staging.has(runId)) {
-        fromStaging = store.staging.getPendingWrites(runId).has(target.normalized);
+    const hasRunWrite =
+        store.staging.has(runId) && store.staging.getPendingWrites(runId).has(target.normalized);
+
+    if (hasRunWrite) {
+        fromStaging = true;
+        rawText = await store.staging.read(runId, target.normalized);
+    } else if (stagingOverlay?.has(target.normalized)) {
+        const overlayVal = stagingOverlay.get(target.normalized);
+        if (overlayVal === null || overlayVal === undefined) {
+            throw new Error(`文件在当前分支视图中不存在或不可见: ${target.normalized}`);
+        }
+        fromStaging = true;
+        rawText = overlayVal;
+    } else if (store.staging.has(runId)) {
         rawText = await store.staging.read(runId, target.normalized);
     } else {
         rawText = await readFile(target.absPath, 'utf8');
@@ -78,7 +93,7 @@ async function readSingleTarget(
 
 /** 创建受控作品只读工具 book_read（优先读取当前 runId 的 StagingSession 暂存覆盖层，支持单文件与最多 8 路批量读取） */
 export function createBookReadTool(options: BookReadToolOptions): ToolDefinition {
-    const { store, runId, fence, quota } = options;
+    const { store, runId, fence, quota, stagingOverlay } = options;
 
     return defineTool({
         name: 'book_read',
@@ -187,7 +202,9 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
             const items: BookReadItem[] = [];
             for (const target of verifiedTargets) {
                 exec.signal.throwIfAborted();
-                items.push(await readSingleTarget(store, runId, target, args.offset, args.limit));
+                items.push(
+                    await readSingleTarget(store, runId, target, args.offset, args.limit, stagingOverlay)
+                );
             }
 
             const first = items[0]!;

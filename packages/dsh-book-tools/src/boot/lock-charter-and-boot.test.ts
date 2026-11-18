@@ -62,7 +62,7 @@ function buildMinimalValidBootInput(overrides: Partial<LockCharterAndBootInput> 
             }
         ],
         current_arc_envelope: '寒冬凌晨的北港三号泊位，货柜刚刚完成夜间倒运，沈默沿码头账目与班次追索缺失货物。',
-        static_base_and_voice: '第三人称限知视角，短句克制，重物理器械与票据细节，禁用玄学比喻。',
+        static_base_and_voice: '第三人称限知视角，短句克制，重物理器械与票据细节，以白描与感官写实推进。',
         world_summary: '时值腊月北港封冻前夕，三号仓刚发生一宗账实不符的夜班提货事件。',
         l1_volumes_markdown: '# L1 活跃卷级总表\n\n- vol_01: 腊月封港账 (单卷完结)\n',
         entities: [
@@ -207,9 +207,24 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
 
         expect(res.voiceSampleCount).toBe(1);
         expect(res.filteredVoiceSampleCount).toBe(1);
+        expect(res.switchedBook).toBe(true);
+        expect(ctx.narrateStore.bookRoot).toBe(res.bookRoot);
         const voiceYaml = await readFile(join(res.bookRoot, '.ops/voice_samples.yaml'), 'utf8');
         expect(voiceYaml).toContain('单子上的骑缝章少了一角');
         expect(voiceYaml).not.toContain('深吸一口气');
+
+        // 编程接口在存在在途 runId 时不回滚建库，显式返回 switchedBook=false
+        ctx.narrateStore.beginRun('programmatic-inflight');
+        try {
+            const conflictRes = await ctx.narrateTools.lockCharterAndBoot(
+                buildMinimalValidBootInput({ book_slug: 'prog-conflict-book' })
+            );
+            expect(conflictRes.halted).toBe(true);
+            expect(conflictRes.switchedBook).toBe(false);
+            expect(conflictRes.switchConflictReason).toBeTruthy();
+        } finally {
+            ctx.narrateStore.endRun('programmatic-inflight');
+        }
     });
 
     it('拒绝缺少中文 canonicalName 与 static_base_and_voice 违规，且写入/Git 失败时彻底回滚新建目录', async () => {
@@ -367,19 +382,250 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         expect(firstRes.halted).toBe(true);
         expect(ctx.narrateStore.bookRoot).toBe(firstRes.bookRoot);
 
-        // 2. 存在在途 runId 锁冲突时：switchBook 被拒绝但不影响建库成功与磁盘产物保留
+        // 2. 存在在途 runId 锁冲突时：switchBook 被拒绝但不影响建库成功与磁盘产物保留，且显式回报 switchedBook=false
         ctx.narrateStore.beginRun('in-flight-run');
         try {
             const secondInput = buildMinimalValidBootInput({ book_slug: 'conflict-safe-book' });
             const secondRes = (await bootTool!.execute(secondInput, execCtx)) as {
                 bookRoot: string;
+                bookSlug: string;
+                commitSha: string;
+                entityIds: string[];
+                voiceSampleCount: number;
                 halted: boolean;
+                switchedBook?: boolean;
+                switchConflictReason?: string;
             };
             expect(secondRes.halted).toBe(true);
+            expect(secondRes.switchedBook).toBe(false);
+            expect(secondRes.switchConflictReason).toBeTruthy();
+            const rendered = bootTool!.output!.render!(secondInput, secondRes);
+            const renderedText = rendered.map((p) => ('text' in p ? p.text : '')).join('\n');
+            expect(renderedText).toContain('未自动切书');
             expect(existsSync(join(secondRes.bookRoot, 'world/author_charter.md'))).toBe(true);
             expect(ctx.narrateStore.bookRoot).toBe(firstRes.bookRoot);
         } finally {
             ctx.narrateStore.endRun('in-flight-run');
         }
+    });
+
+    it('生成标准单书 .gitignore、不重复拼接 H1 标题、落盘标准声纹字段 (Q2) 并拦截越界 boot_seed / Q7 / 唯一性 / 标签注入', async () => {
+        const booksRoot = await makeTempBooksRoot();
+
+        // 1. 正常开书：传入带 # 的标题文本与合规 boot_seed 声纹
+        const validSeed = '铁皮门推开半寸，他伸手按住门框，鞋底蹭过湿冷铁锈。';
+        const res = await lockCharterAndBoot(
+            buildMinimalValidBootInput({
+                book_slug: 'clean-boot-standards',
+                current_arc_envelope: '# 自定义当前卷标题\n\n寒冬凌晨的北港三号泊位，货柜刚刚完成夜间倒运。',
+                static_base_and_voice: '# 自定义底层法则\n\n第三人称限知视角，短句克制。',
+                voice_samples: [
+                    { tag: '白描动作', sample: validSeed, source: 'boot_seed' }
+                ]
+            }),
+            { booksRoot }
+        );
+
+        const gitignore = await readFile(join(res.bookRoot, '.gitignore'), 'utf8');
+        expect(gitignore).toContain('.ops/tx.lock');
+        expect(gitignore).toContain('.ops/session_logs/');
+        expect(gitignore).not.toContain('.ops/tx_state.json');
+
+        const arcEnv = await readFile(join(res.bookRoot, 'world/current_arc_envelope.md'), 'utf8');
+        expect(arcEnv.match(/^# /gm)).toHaveLength(1);
+        expect(arcEnv).toContain('# 自定义当前卷标题');
+
+        const staticVoice = await readFile(join(res.bookRoot, 'world/static_base_and_voice.md'), 'utf8');
+        expect(staticVoice.match(/^# /gm)).toHaveLength(1);
+        expect(staticVoice).toContain('# 自定义底层法则');
+
+        const voiceYaml = await readFile(join(res.bookRoot, '.ops/voice_samples.yaml'), 'utf8');
+        expect(voiceYaml).toContain('source: boot_seed');
+        expect(voiceYaml).not.toContain('\n    sample:');
+
+        // 2. 拦截 Q7 第 1 区 OMNISCIENT_SECRET、static_base 超长、否定禁令、重复 thread_id / event_id、非法 owner、分隔符注入及泄露角色名的 boot_seed
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-q7-innate',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [{ visibility: 'OMNISCIENT_SECRET', text: '隐藏身份' }],
+                            acquiredState: [],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-static-len',
+                    static_base_and_voice: '句'.repeat(1501)
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-negative-arc',
+                    current_arc_envelope: '寒冬夜班期间禁止揭露幕后真相。'
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-dup-thread',
+                    open_threads: [
+                        { thread_id: 'th_01', title: '线索一', wakeup_condition: '到达码头' },
+                        { thread_id: 'th_01', title: '线索二', wakeup_condition: '核对账册' }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-dup-event',
+                    future_horizon_events: [
+                        { event_id: 'ev_01', story_day: 2, premise: '涨潮', description: '封港' },
+                        { event_id: 'ev_01', story_day: 3, premise: '退潮', description: '开闸' }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-owner-fk',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'hold', owner: 'char_ghost', text: '保管提货单' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-tag-pipe',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'PUBLIC', slotKey: 'loc|bad', text: '三号仓' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-q7-innate-inline',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [{ visibility: 'PUBLIC', text: '内联 OMNISCIENT_SECRET 潜伏线人' }],
+                            acquiredState: [],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-q7-acquired-noslot',
+                    entities: [
+                        {
+                            entityId: 'char_shen',
+                            canonicalName: '沈默',
+                            innateLocks: [],
+                            acquiredState: [
+                                { storyDay: 0, visibility: 'OMNISCIENT_SECRET', text: '没有槽位键的秘密底牌' }
+                            ],
+                            irreversibleTrajectory: [],
+                            recentBuffer: []
+                        }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
+
+        const okQ7Slot = await lockCharterAndBoot(
+            buildMinimalValidBootInput({
+                book_slug: 'ok-q7-acquired-slot',
+                entities: [
+                    {
+                        entityId: 'char_shen',
+                        canonicalName: '沈默',
+                        innateLocks: [],
+                        acquiredState: [
+                            {
+                                storyDay: 0,
+                                visibility: 'OMNISCIENT_SECRET',
+                                slotKey: 'secret_identity',
+                                text: '暗中携总署密令查账'
+                            }
+                        ],
+                        irreversibleTrajectory: [],
+                        recentBuffer: []
+                    }
+                ]
+            }),
+            { booksRoot }
+        );
+        expect(okQ7Slot.halted).toBe(true);
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'bad-boot-seed-name',
+                    voice_samples: [
+                        { tag: '动作', sample: '沈默伸手推开冰冷铁门，门轴发出闷响声。', source: 'boot_seed' }
+                    ]
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow(BootGateError);
     });
 });

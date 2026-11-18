@@ -78,6 +78,20 @@ export function createYieldPatchedDraftTool(options: YieldPatchedDraftOptions): 
                 }
             }
 
+            if (session.getEditCount() < 1) {
+                throw new GateValidationError(
+                    'yield_patched_draft',
+                    '尚未调用 patch_paragraphs 修改任何段落，禁止零编辑直接提交'
+                );
+            }
+
+            if (patchedProse === session.getInitialProse()) {
+                throw new GateValidationError(
+                    'yield_patched_draft',
+                    '修补后文稿与初始草稿完全一致，请先实际改写目标段落后再提交'
+                );
+            }
+
             const result: YieldPatchedDraftResult = {
                 patchedProse,
                 editCount: session.getEditCount(),

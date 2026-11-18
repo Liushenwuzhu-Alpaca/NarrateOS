@@ -118,8 +118,9 @@ describe('yield_patched_draft 终态门禁工具', () => {
         });
     });
 
-    it('enforceProseGateOnYield=false 时跳过 StaticProseGate 终态复检直接提交', async () => {
+    it('enforceProseGateOnYield=false 时仍校验至少编辑 1 处且正文变动，修改后跳过 StaticProseGate 终态复检直接提交', async () => {
         const session = new InMemoryDraftPatchSession('他眼神中闪过一丝寒意。');
+        const patchTool = createPatchParagraphsTool({ session });
         let yielded: YieldPatchedDraftResult | undefined;
 
         const yieldTool = createYieldPatchedDraftTool({
@@ -131,13 +132,32 @@ describe('yield_patched_draft 终态门禁工具', () => {
             }
         });
 
+        // 零编辑直接提交必须被 ISS-043 拦截
+        const zeroEditSpy = createSpyExec('yield_patched_draft', {});
+        await expect(yieldTool.execute({}, zeroEditSpy.exec)).rejects.toThrow(GateValidationError);
+        expect(zeroEditSpy.concludedCount()).toBe(0);
+
+        // 实际调用 patch_paragraphs 修改后再提交 -> 跳过静态门禁复检并放行
+        await patchTool.execute(
+            {
+                edits: [
+                    {
+                        start_paragraph: 0,
+                        end_paragraph: 0,
+                        replacement_paragraphs: ['他眼神中闪过一丝冷意，抬手合上铁门。']
+                    }
+                ]
+            },
+            createSpyExec('patch_paragraphs', {}).exec
+        );
+
         const spy = createSpyExec('yield_patched_draft', {});
         await yieldTool.execute({}, spy.exec);
 
         expect(spy.concludedCount()).toBe(1);
         expect(yielded).toEqual({
-            patchedProse: '他眼神中闪过一丝寒意。',
-            editCount: 0
+            patchedProse: '他眼神中闪过一丝冷意，抬手合上铁门。',
+            editCount: 1
         });
     });
 });

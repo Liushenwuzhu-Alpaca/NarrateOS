@@ -108,6 +108,7 @@ export function formatPatchViolationsText(
  */
 export class InMemoryDraftPatchSession {
     private paragraphs: string[];
+    private readonly initialProse: string;
     private editCount = 0;
     public readonly proseGateOptions: ProseGateOptions | undefined;
 
@@ -116,7 +117,13 @@ export class InMemoryDraftPatchSession {
             throw new TypeError('InMemoryDraftPatchSession 需要字符串类型的 draftText');
         }
         this.paragraphs = splitParagraphs(draftText);
+        this.initialProse = this.paragraphs.join('\n\n');
         this.proseGateOptions = proseGateOptions;
+    }
+
+    /** 返回初始归一化正文文本 */
+    getInitialProse(): string {
+        return this.initialProse;
     }
 
     /** 返回当前 0-based 段落数组副本 */
@@ -238,6 +245,12 @@ export class InMemoryDraftPatchSession {
                 titlePreserved = true;
                 preservedTitleLine = firstLine;
             }
+        }
+
+        // 校验替换合并后的非一级标题正文段落数 >= 1，拒绝把正文删空导致后续死锁
+        const nonHeadingCount = nextParagraphs.filter((p) => !p.startsWith('# ')).length;
+        if (nonHeadingCount < 1) {
+            throw new Error('段落修补后必须至少保留 1 个非 # 标题正文段落，禁止将正文删空');
         }
 
         const modifiedRanges = sortedAsc.map((edit) => rangeByStart.get(edit.start_paragraph)!);

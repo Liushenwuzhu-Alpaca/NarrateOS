@@ -90,6 +90,12 @@ export interface BuildRoleToolsOptions {
     allowedOpsPaths?: string[] | undefined;
     /** 允许暂存编辑的 .ops/ 具体文件白名单（默认空，全面屏蔽 .ops/） */
     allowedOpsWritePaths?: string[] | undefined;
+    /** 按角色注入的禁读路径清单（如 world/author_charter.md、world/arc_director_plan.md） */
+    blockedReadPaths?: string[] | undefined;
+    /** 限定 manuscripts/** 仅允许读取/检索该集合内的章节文件（用于 PARALLEL 支线隔离） */
+    allowedChapterFiles?: string[] | undefined;
+    /** 可选内存分支覆盖层（优先读取本 runId 暂存，其次读取该覆盖层） */
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
     /** 需要实例化的受控读写工具列表（默认全部 4 个） */
     tools?: ControlledBookToolName[] | undefined;
     /** 需要实例化的终态门禁工具名（可选） */
@@ -206,7 +212,9 @@ export class NarrateToolsService {
             !isPureInMemoryPatch && bookRoot !== undefined
                 ? new PathFence(bookRoot, {
                       allowedOpsPaths: options.allowedOpsPaths,
-                      allowedOpsWritePaths: options.allowedOpsWritePaths
+                      allowedOpsWritePaths: options.allowedOpsWritePaths,
+                      blockedReadPaths: options.blockedReadPaths,
+                      allowedChapterFiles: options.allowedChapterFiles
                   })
                 : undefined;
         const quota = new ReadQuotaCounter({
@@ -226,7 +234,8 @@ export class NarrateToolsService {
                         store: this.narrateStore,
                         runId,
                         fence: fence!,
-                        quota
+                        quota,
+                        stagingOverlay: options.stagingOverlay
                     })
                 );
             } else if (toolName === 'book_grep') {
@@ -235,7 +244,8 @@ export class NarrateToolsService {
                         store: this.narrateStore,
                         runId,
                         fence: fence!,
-                        quota
+                        quota,
+                        stagingOverlay: options.stagingOverlay
                     })
                 );
             } else if (toolName === 'book_glob') {
@@ -244,7 +254,8 @@ export class NarrateToolsService {
                         store: this.narrateStore,
                         runId,
                         fence: fence!,
-                        quota
+                        quota,
+                        stagingOverlay: options.stagingOverlay
                     })
                 );
             } else if (toolName === 'book_edit') {
@@ -275,15 +286,22 @@ export class NarrateToolsService {
                     store: this.narrateStore,
                     bookRoot: bookRoot!,
                     runId,
+                    fence: fence!,
                     targetChapter: options.targetChapter,
                     targetDay: options.targetDay,
                     chapterGoal: options.chapterGoal,
+                    allowedChapterFiles: options.allowedChapterFiles,
+                    stagingOverlay: options.stagingOverlay,
                     onYield: recordYield
                 })
             );
         } else if (options.yieldTool === 'yield_outline') {
             toolList.push(
                 createYieldOutlineTool({
+                    store: this.narrateStore,
+                    bookRoot: bookRoot!,
+                    targetChapter: options.targetChapter ?? options.chapterNumber,
+                    visibleEntities: options.visibleEntities,
                     onYield: recordYield
                 })
             );
@@ -296,6 +314,7 @@ export class NarrateToolsService {
                     fence: fence!,
                     draftText: options.draftText,
                     draftPath: options.draftPath,
+                    stagingOverlay: options.stagingOverlay,
                     onYield: recordYield
                 })
             );
@@ -309,6 +328,8 @@ export class NarrateToolsService {
                     allowInnateMutation: options.allowInnateMutation,
                     deferCommit: options.deferCommit,
                     applyOptions: options.applyOptions,
+                    draftText: options.draftText,
+                    stagingOverlay: options.stagingOverlay,
                     visibleEntities: options.visibleEntities,
                     reachableIds: options.reachableIds,
                     onYield: recordYield
@@ -372,10 +393,14 @@ export class NarrateToolsService {
         if (this.disposed) {
             throw new Error('NarrateToolsService 已卸载，拒绝执行开书编译');
         }
+        const defaultOnBookBooted = createAutoSwitchBookCallback(this.narrateStore);
         return await lockCharterAndBoot(input, {
             booksRoot: overrides?.booksRoot ?? this.booksRoot,
             system: overrides?.system ?? this.narrateStore.system,
-            onBookBooted: overrides?.onBookBooted
+            onBookBooted:
+                overrides && 'onBookBooted' in overrides
+                    ? overrides.onBookBooted
+                    : defaultOnBookBooted
         });
     }
 
@@ -393,6 +418,23 @@ declare module '@deepseek-ai/cordis' {
     interface Context {
         narrateTools: NarrateToolsService;
     }
+}
+
+function createAutoSwitchBookCallback(
+    narrateStore: NarrateStoreService
+): NonNullable<LockCharterAndBootOptions['onBookBooted']> {
+    return async (res) => {
+        try {
+            await narrateStore.switchBook(res.bookRoot);
+            return { switchedBook: true };
+        } catch (err: unknown) {
+            // 若遇在途锁冲突不回滚已落盘建库结果，向调用方显式回报未切书原因
+            return {
+                switchedBook: false,
+                switchConflictReason: err instanceof Error ? err.message : String(err)
+            };
+        }
+    };
 }
 
 /**
@@ -416,13 +458,7 @@ export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
                 createLockCharterAndBootTool({
                     booksRoot: service.booksRoot,
                     system: ctx.narrateStore.system,
-                    onBookBooted: async (res) => {
-                        try {
-                            await ctx.narrateStore.switchBook(res.bookRoot);
-                        } catch {
-                            /* 若遇在途锁冲突不回滚已落盘建库结果 */
-                        }
-                    }
+                    onBookBooted: createAutoSwitchBookCallback(ctx.narrateStore)
                 })
             );
             const disposeGuard = registerMainSessionWriteGuard(

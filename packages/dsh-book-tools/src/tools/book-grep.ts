@@ -3,17 +3,24 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import type { NarrateStoreService } from '@narrateos/dsh-book-store';
+import { BookRetrievalConfigSchema, type NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_RETRIEVAL_CONFIG = BookRetrievalConfigSchema.parse({});
 
 export interface BookGrepToolOptions {
     store: NarrateStoreService;
     runId: string;
     fence: PathFence;
     quota: ReadQuotaCounter;
+    /** 可选内存分支覆盖层（string 覆写/新增，null 删除） */
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
+    /** 默认最大返回匹配条数（缺省读取 BookConfig.retrieval.grep_default_max_matches = 80） */
+    defaultMaxMatches?: number | undefined;
+    /** 单次返回总字符硬上限（缺省读取 BookConfig.retrieval.grep_max_output_chars = 12000） */
+    maxOutputChars?: number | undefined;
 }
 
 interface GrepMatchItem {
@@ -46,7 +53,8 @@ function grepTextInMemory(
     content: string,
     pattern: string,
     fixedStrings: boolean,
-    contextLines: number
+    contextLines: number,
+    maxPerFile: number
 ): GrepMatchItem[] {
     const lines = content.split(/\r?\n/);
     const matcher = compileSearchRegExp(pattern, fixedStrings);
@@ -66,6 +74,9 @@ function grepTextInMemory(
             contextBefore: lines.slice(start, i),
             contextAfter: lines.slice(i + 1, end)
         });
+        if (matches.length >= maxPerFile) {
+            break;
+        }
     }
     return matches;
 }
@@ -74,14 +85,44 @@ function matchesSearchScope(relPath: string, allowedDirs: string[]): boolean {
     return allowedDirs.some((scope) => relPath === scope || relPath.startsWith(`${scope}/`));
 }
 
-/** 创建受控全文检索工具 book_grep（底层调用 rg 且锁死于允许目录内） */
+function estimateMatchChars(match: GrepMatchItem): number {
+    const contextChars =
+        match.contextBefore.reduce((sum, line) => sum + line.length + 1, 0) +
+        match.contextAfter.reduce((sum, line) => sum + line.length + 1, 0);
+    return match.file.length + String(match.line).length + match.text.length + contextChars + 8;
+}
+
+async function resolveGrepLimits(
+    store: NarrateStoreService,
+    bookRoot: string,
+    optionMaxMatches?: number,
+    optionMaxChars?: number
+): Promise<{ defaultMaxMatches: number; maxOutputChars: number }> {
+    let defaultMaxMatches = optionMaxMatches;
+    let maxOutputChars = optionMaxChars;
+    if (defaultMaxMatches === undefined || maxOutputChars === undefined) {
+        try {
+            const config = await store.openStore(bookRoot).readBookConfig();
+            defaultMaxMatches ??=
+                config.retrieval?.grep_default_max_matches ?? DEFAULT_RETRIEVAL_CONFIG.grep_default_max_matches;
+            maxOutputChars ??=
+                config.retrieval?.grep_max_output_chars ?? DEFAULT_RETRIEVAL_CONFIG.grep_max_output_chars;
+        } catch {
+            defaultMaxMatches ??= DEFAULT_RETRIEVAL_CONFIG.grep_default_max_matches;
+            maxOutputChars ??= DEFAULT_RETRIEVAL_CONFIG.grep_max_output_chars;
+        }
+    }
+    return { defaultMaxMatches, maxOutputChars };
+}
+
+/** 创建受控全文检索工具 book_grep（底层调用 rg 且锁死于允许目录内，统一限流截断） */
 export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition {
-    const { store, runId, fence, quota } = options;
+    const { store, runId, fence, quota, stagingOverlay } = options;
 
     return defineTool({
         name: 'book_grep',
         description:
-            '在作品允许目录（world/、lore_library/、index/、entities/、manuscripts/）内执行受控 ripgrep 检索，物理屏蔽 .ops/、.git/ 及跨书路径。',
+            '在作品允许目录（world/、lore_library/、index/、entities/、manuscripts/）内执行受控 ripgrep 检索，物理屏蔽 .ops/、.git/、禁读路径及跨书路径。',
         parameters: {
             pattern: {
                 type: 'string',
@@ -99,6 +140,10 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
             fixed_strings: {
                 type: 'boolean',
                 description: '是否按字面量匹配（默认 false）'
+            },
+            max_matches: {
+                type: 'integer',
+                description: '可选最大返回匹配条数（默认读取 BookConfig.retrieval.grep_default_max_matches = 80）'
             }
         },
         output: {
@@ -121,7 +166,9 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                             }
                         }
                     },
-                    totalMatches: { type: 'integer', required: true }
+                    totalMatches: { type: 'integer', required: true },
+                    truncated: { type: 'boolean', required: true },
+                    hint: { type: 'string' }
                 }
             },
             render(_args, value) {
@@ -131,7 +178,10 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 const formatted = value.matches
                     .map((m) => `${m.file}:${m.line}: ${m.text}`)
                     .join('\n');
-                return [{ type: 'text', text: `共命中 ${value.totalMatches} 处:\n${formatted}` }];
+                const suffix = value.truncated
+                    ? `\n${value.hint ?? '结果已达上限被截断，请通过 path 限定目录或使用更精确的 pattern 缩小检索范围。'}`
+                    : '';
+                return [{ type: 'text', text: `共命中 ${value.totalMatches} 处:\n${formatted}${suffix}` }];
             }
         },
         isConcurrencySafe: () => true,
@@ -145,15 +195,45 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 throw new Error(`book_grep 的 context_lines 必须在 0..10 之间，收到: ${contextLines}`);
             }
             const fixedStrings = args.fixed_strings ?? false;
+            // 入口首行无条件预校验正则表达式合法性，避免无磁盘文件时吞掉 SyntaxError
+            compileSearchRegExp(args.pattern, fixedStrings);
+
+            if (args.max_matches !== undefined && args.max_matches < 1) {
+                throw new Error(`book_grep 的 max_matches 必须 >= 1，收到: ${args.max_matches}`);
+            }
 
             const scope = await fence.assertReadSearchScope(args.path);
             quota.consume('book_grep');
 
+            const limits = await resolveGrepLimits(
+                store,
+                fence.bookRoot,
+                options.defaultMaxMatches,
+                options.maxOutputChars
+            );
+            const maxMatches = args.max_matches ?? limits.defaultMaxMatches;
+            const maxOutputChars = limits.maxOutputChars;
+
             const existingTargets: string[] = [];
             for (const dir of scope.allowedDirs) {
+                if (dir === 'manuscripts' && fence.allowedChapterFileSet !== null) {
+                    for (const allowedCh of fence.allowedChapterFileSet) {
+                        try {
+                            await lstat(join(fence.bookRoot, allowedCh));
+                            if (await fence.isRealPathInsideRoot(allowedCh, 'read')) {
+                                existingTargets.push(allowedCh);
+                            }
+                        } catch (err: unknown) {
+                            if ((err as { code?: string }).code !== 'ENOENT') {
+                                throw err;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 try {
                     await lstat(join(fence.bookRoot, dir));
-                    if (await fence.isRealPathInsideRoot(dir)) {
+                    if (await fence.isRealPathInsideRoot(dir, 'searchScope')) {
                         existingTargets.push(dir);
                     }
                 } catch (err: unknown) {
@@ -168,11 +248,16 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 const rgArgs = [
                     '--json',
                     '--no-follow',
+                    '--max-count',
+                    String(maxMatches + 1),
                     '-C',
                     String(contextLines),
                     '--glob',
                     '!.git/**'
                 ];
+                for (const blockedPath of fence.blockedReadPaths) {
+                    rgArgs.push('--glob', `!${blockedPath}`, '--glob', `!${blockedPath}/**`);
+                }
                 if (fixedStrings) {
                     rgArgs.push('-F');
                 }
@@ -251,19 +336,40 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 }
             }
 
-            // 合并当前 runId 暂存覆盖层，保障 Read-Your-Own-Writes 检索一致性
-            const stagedMap = store.staging.has(runId) ? store.staging.getPendingWrites(runId) : new Map<string, string>();
-            if (existingTargets.length === 0 && stagedMap.size === 0 && !fixedStrings) {
-                // 无可检索目录时仍需校验正则合法性，避免静默吞掉无效参数
-                compileSearchRegExp(args.pattern, false);
+            // 合并分支覆盖层与当前 runId 暂存覆盖层，保障 Read-Your-Own-Writes 与支线视角一致
+            const mergedOverlay = new Map<string, string | null>();
+            if (stagingOverlay) {
+                for (const [relPath, content] of stagingOverlay.entries()) {
+                    mergedOverlay.set(relPath, content);
+                }
             }
-            const filteredDisk = diskMatches.filter((m) => !stagedMap.has(m.file));
+            if (store.staging.has(runId)) {
+                for (const [relPath, content] of store.staging.getPendingWrites(runId).entries()) {
+                    mergedOverlay.set(relPath, content);
+                }
+            }
+
+            const filteredDisk = diskMatches.filter(
+                (m) => !mergedOverlay.has(m.file) && fence.isReadPathAllowed(m.file)
+            );
             const stagedMatches: GrepMatchItem[] = [];
-            for (const [relPath, content] of stagedMap.entries()) {
-                if (!matchesSearchScope(relPath, scope.allowedDirs)) {
+            for (const [relPath, content] of mergedOverlay.entries()) {
+                if (content === null) {
                     continue;
                 }
-                stagedMatches.push(...grepTextInMemory(relPath, content, args.pattern, fixedStrings, contextLines));
+                if (!matchesSearchScope(relPath, scope.allowedDirs) || !fence.isReadPathAllowed(relPath)) {
+                    continue;
+                }
+                stagedMatches.push(
+                    ...grepTextInMemory(
+                        relPath,
+                        content,
+                        args.pattern,
+                        fixedStrings,
+                        contextLines,
+                        maxMatches + 1
+                    )
+                );
             }
 
             const combined = [...filteredDisk, ...stagedMatches].sort((a, b) => {
@@ -271,9 +377,40 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 return cmp !== 0 ? cmp : a.line - b.line;
             });
 
+            let truncated = combined.length > maxMatches;
+            const matchLimited = truncated ? combined.slice(0, maxMatches) : combined;
+
+            const kept: GrepMatchItem[] = [];
+            let usedChars = 0;
+            for (const item of matchLimited) {
+                const cost = estimateMatchChars(item);
+                if (usedChars + cost > maxOutputChars) {
+                    truncated = true;
+                    if (kept.length === 0) {
+                        const available = Math.max(40, maxOutputChars - item.file.length - 24);
+                        kept.push({
+                            file: item.file,
+                            line: item.line,
+                            text: item.text.slice(0, available),
+                            contextBefore: [],
+                            contextAfter: []
+                        });
+                    }
+                    break;
+                }
+                kept.push(item);
+                usedChars += cost;
+            }
+
+            const hint = truncated
+                ? `检索结果已截断（最多返回 ${maxMatches} 条且总字符上限 ${maxOutputChars}），请通过 path 限定子目录、增加 max_matches 或使用更精确的 pattern 缩小检索范围。`
+                : undefined;
+
             return {
-                matches: combined,
-                totalMatches: combined.length
+                matches: kept,
+                totalMatches: kept.length,
+                truncated,
+                ...(hint !== undefined ? { hint } : {})
             };
         }
     });

@@ -291,7 +291,9 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                                     severity: 'PLAN_CONFLICT',
                                     paragraph_index: 0,
                                     description: '时间线与潮汐登记班次存在因果冲突，需重排细纲',
-                                    quote_draft: '沈默翻开厚重的潮汐账册，指腹在十二页停住。'
+                                    quote_draft: '沈默翻开厚重的潮汐账册，指腹在十二页停住。',
+                                    quote_source: '驻留节点：三号码头货栈',
+                                    source_ref: 'entities/char_001.md'
                                 }
                             ]
                         });
@@ -2691,7 +2693,9 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                                     severity: 'LOCAL_PATCH',
                                     paragraph_indices: [1, 3, 5],
                                     description: '泊位编号、提灯手别与船期单日期需按档案修正',
-                                    quote_draft: '沈默站在二号泊位木棚下。'
+                                    quote_draft: '沈默站在二号泊位木棚下。',
+                                    quote_source: '驻留节点：三号码头货栈',
+                                    source_ref: 'entities/char_001.md'
                                 }
                             ]
                         });
