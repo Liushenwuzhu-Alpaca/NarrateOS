@@ -57,7 +57,7 @@ export const DEFAULT_GATE_RULES: Record<GateRuleId, Required<Pick<GateRuleConfig
         scaleByLength: false,
         referenceChars: 3000,
         patterns: [
-            /(指节泛白|喉结(?:上下)?滚动|瞳孔(?:微缩|地震)|睫毛轻颤|指甲陷进掌心|眼眶泛起水汽|青筋暴起|表皮|角质|毛细血管|心率|肾上腺素)/g
+            /(指节.{0,4}泛白|喉结.{0,2}滚动|瞳孔(?:微缩|地震)|睫毛轻颤|指甲陷进掌心|眼眶泛起水汽|青筋暴起|表皮|角质|毛细血管|心率|肾上腺素)/g
         ],
         description: '封杀人体微距套话'
     },
