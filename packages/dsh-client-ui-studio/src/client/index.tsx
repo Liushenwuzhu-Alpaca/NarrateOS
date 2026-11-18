@@ -1,9 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives';
-import { handleTabKeyDown } from './tab-keyboard';
-import { aggregateTelemetryTokens } from './token-telemetry';
 import {
+    advanceVolume,
     bootBook,
     deleteSignal,
     fetchBooks,
@@ -15,9 +14,13 @@ import {
     fetchViewHalt,
     fetchViewHorizon,
     fetchViewSignals,
+    fetchViewSyncConflicts,
     fetchViewTelemetry,
     fetchViewThreads,
+    forkParallelWindow,
     harvestVoice,
+    healConflicts,
+    mergeParallelWindow,
     postSignal,
     requestHalt,
     runDreaming,
@@ -35,45 +38,60 @@ import {
     CenterWorkbench,
     resolveStageId,
     STAGE_REPAIR_META,
-    type CenterWorkbenchProps,
     type CenterWorkbenchDraftHandle,
-    type DirectorSignalKind,
+    type CenterWorkbenchProps,
     type ExternalViewCommand,
     type PendingSignalItem,
     type PipelineStageId,
     type SafeHaltInfo,
+    type SafeHaltIssueItem,
     type StageAttemptSession,
     type StageNodeState,
     type StageNodeStatus,
     type StageSessionSelection,
-    type SubmitSignalPayload
+    type SubmitSignalPayload,
+    type SyncConflictDiagnostic,
+    type VerdictGateViolationItem
 } from './CenterWorkbench';
-import { DraftGuardModal } from './DraftGuardModal';
 import {
-    decideDraftNavigation,
-    resolveBackgroundCommitAction,
+    getStashedDraft,
+    hasAnyUnsavedDraft,
+    putStashedDraft,
+    removeStashedDraft,
     type DraftLocation,
-    type DraftNavigationIntent
+    type DraftStashMap,
+    type StashedDraftEntry
 } from './draft-guard';
 import { LeftBookNav, type MaterializedViewKind } from './LeftBookNav';
 import {
     RightOpsInspector,
+    type FactCheckDetailItem,
     type FactCheckerTelemetry,
     type HaltDiagnosticInfo,
+    type HaltDiagnosticIssueItem,
     type InspectorEntityItem,
     type OpenThreadItem,
     type ProseGateViolationItem,
+    type SpotlightQueueItem,
     type StageArtifactTelemetry,
     type VolumeProgressSnapshot
 } from './RightOpsInspector';
-import { RoleRoutingEditor } from './RoleRoutingEditor';
+import {
+    collectPoolProviders,
+    resolveEffectiveRoleModelLabel,
+    RoleRoutingEditor
+} from './RoleRoutingEditor';
 import {
     StageSessionViewer,
+    type StageViewerAttemptItem,
     type StudioRenderStageConversation,
     type StudioSessionProviderComponent,
     type StudioSessionsService
 } from './StageSessionViewer';
+import { AdvanceVolumeModal, ParallelWindowModal } from './StudioActionModals';
 import { ensureStudioStyles } from './styles';
+import { handleTabKeyDown } from './tab-keyboard';
+import { aggregateTelemetryTokens } from './token-telemetry';
 import type {
     BooksListPayload,
     ChapterDetail,
@@ -82,13 +100,20 @@ import type {
     HaltViewPayload,
     MarkdownViewPayload,
     NarrateStatusPayload,
+    PostSignalRequest,
+    RoleDefinitionItem,
+    RolePoolId,
     SaveModelRoutingRequest,
     SignalsViewPayload,
     SseEventPayload,
     StageRunRecord,
+    StageSessionDetailEvent,
+    StepChapterRequest,
+    SyncConflictsViewPayload,
     TelemetryItem,
     TelemetryViewPayload
 } from './types';
+import { parseHorizonEntries, parseThreadItems } from './workbench-parsers';
 
 export const PANEL_ID = 'narrateos-studio';
 
@@ -100,23 +125,30 @@ interface ToastState {
     kind: 'info' | 'error';
 }
 
-const PIPELINE_STAGE_META: ReadonlyArray<{ id: PipelineStageId; label: string }> = [
-    { id: 'LIBRARIAN', label: 'Librarian' },
-    { id: 'PLANNER', label: 'Planner' },
-    { id: 'WRITER', label: 'Writer' },
-    { id: 'FACT_CHECKER', label: 'Fact Check' },
-    { id: 'EXTRACTOR', label: 'Extractor' },
-    { id: 'DREAMING', label: 'Dreaming' }
+const PIPELINE_STAGE_META: ReadonlyArray<{
+    id: PipelineStageId;
+    roleId: string;
+    defaultPool: RolePoolId;
+    label: string;
+}> = [
+    { id: 'LIBRARIAN', roleId: 'librarian', defaultPool: 'fast_retrieval', label: '1. Librarian' },
+    { id: 'PLANNER', roleId: 'planner', defaultPool: 'strong_creative', label: '2. Planner' },
+    { id: 'WRITER', roleId: 'writer', defaultPool: 'strong_creative', label: '3. Writer' },
+    { id: 'FACT_CHECKER', roleId: 'fact_checker', defaultPool: 'audit', label: '4. Checker' },
+    { id: 'EXTRACTOR', roleId: 'extractor', defaultPool: 'fast_retrieval', label: '5. Extractor' },
+    { id: 'DREAMING', roleId: 'dreamer', defaultPool: 'strong_creative', label: '6. Dreamer' }
 ];
 
 const DEFAULT_STAGE_SUMMARIES: Record<PipelineStageId, string> = {
-    LIBRARIAN: '检索本场焦点实体卡与声纹样本',
-    PLANNER: '生成结构化章节细纲与节拍',
-    WRITER: '净室单轮流式直出正文草稿',
-    FACT_CHECKER: '异构模型核查与双侧原句验真',
-    EXTRACTOR: '提取实体增量并原子提交 Git WAL',
-    DREAMING: '条件睡眠 VACUUM 与跨章连续性自愈'
+    LIBRARIAN: '翻阅前文与设定选页',
+    PLANNER: '规划本章剧情节拍',
+    WRITER: '纯净环境执笔正文',
+    FACT_CHECKER: '独立核对前后设定矛盾',
+    EXTRACTOR: '章末更新人物与伏笔',
+    DREAMING: '跨章阶段整理与归纳'
 };
+
+const MAX_LIVE_EVENTS_PER_SESSION = 500;
 
 function asNumber(value: unknown): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -126,8 +158,11 @@ function asString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function formatChapterFileRef(chapter: number | undefined): string | undefined {
+    if (chapter === undefined || !Number.isFinite(chapter) || chapter <= 0) return undefined;
+    return `ch_${String(chapter).padStart(4, '0')}.md`;
+}
 
-/** 兼容嵌套 metrics 与扁平字段读取文风四联指标 */
 function readTelemetryMetrics(item: TelemetryItem | null | undefined): {
     mattr500: number | null;
     kontoyiannisEntropy: number | null;
@@ -147,25 +182,132 @@ function readTelemetryMetrics(item: TelemetryItem | null | undefined): {
     };
 }
 
-function mapSafeHaltInfo(raw: Record<string, unknown> | null | undefined): SafeHaltInfo | null {
+function parseRawIssues(rawIssues: unknown): {
+    haltIssues: SafeHaltIssueItem[];
+    diagIssues: HaltDiagnosticIssueItem[];
+} {
+    if (!Array.isArray(rawIssues)) {
+        return { haltIssues: [], diagIssues: [] };
+    }
+    const haltIssues: SafeHaltIssueItem[] = [];
+    const diagIssues: HaltDiagnosticIssueItem[] = [];
+    for (const entry of rawIssues) {
+        if (!entry || typeof entry !== 'object') continue;
+        const obj = entry as Record<string, unknown>;
+        const description = asString(obj['description']) ?? asString(obj['detail']) ?? asString(obj['message']);
+        const quoteDraft = asString(obj['quote_draft']) ?? asString(obj['quote']) ?? asString(obj['snippet']);
+        const quoteSource = asString(obj['quote_source']) ?? asString(obj['sourceQuote']);
+        const sourceRef = asString(obj['source_ref']) ?? asString(obj['sourceRef']);
+        const rule = asString(obj['rule']) ?? asString(obj['ruleId']) ?? asString(obj['severity']);
+        const line = asNumber(obj['line']);
+        haltIssues.push({
+            ...(rule !== undefined ? { rule } : {}),
+            ...(line !== undefined ? { line } : {}),
+            ...(quoteDraft !== undefined ? { quote: quoteDraft } : {}),
+            ...(sourceRef !== undefined ? { sourceRef } : {}),
+            ...(quoteSource !== undefined ? { sourceQuote: quoteSource } : {}),
+            ...(description !== undefined ? { detail: description } : {})
+        });
+        diagIssues.push({
+            ...(description !== undefined ? { description } : {}),
+            ...(quoteDraft !== undefined ? { quote_draft: quoteDraft } : {}),
+            ...(quoteSource !== undefined ? { quote_source: quoteSource } : {}),
+            ...(sourceRef !== undefined ? { source_ref: sourceRef } : {}),
+            ...(asString(obj['severity']) !== undefined ? { severity: asString(obj['severity']) } : {}),
+            ...(rule !== undefined ? { rule } : {}),
+            ...(line !== undefined ? { line } : {})
+        });
+    }
+    return { haltIssues, diagIssues };
+}
+
+function parseRawGateViolations(rawList: unknown): VerdictGateViolationItem[] {
+    if (!Array.isArray(rawList)) return [];
+    const items: VerdictGateViolationItem[] = [];
+    for (const entry of rawList) {
+        if (!entry || typeof entry !== 'object') continue;
+        const obj = entry as Record<string, unknown>;
+        const rule = asString(obj['rule']) ?? asString(obj['ruleId']) ?? 'GATE';
+        const detail = asString(obj['detail']) ?? asString(obj['message']) ?? JSON.stringify(obj);
+        const line = asNumber(obj['line']);
+        const snippet = asString(obj['snippet']);
+        items.push({
+            rule,
+            detail,
+            ...(line !== undefined ? { line } : {}),
+            ...(snippet !== undefined ? { snippet } : {}),
+            ...(obj['patched'] !== undefined ? { patched: Boolean(obj['patched']) } : {})
+        });
+    }
+    return items;
+}
+
+/** 兼容 snake_case 与 camelCase 解析 SAFE_HALT 载荷 */
+export function mapSafeHaltInfo(raw: Record<string, unknown> | null | undefined): SafeHaltInfo | null {
     if (!raw) return null;
     const reason =
         asString(raw['reason']) ??
         asString(raw['message']) ??
         asString(raw['error']) ??
         '检测到连续性冲突，系统已安全挂起';
+    const sideAChapter = asNumber(raw['side_a_chapter']) ?? asNumber(raw['chapterA']);
+    const sideBChapter = asNumber(raw['side_b_chapter']) ?? asNumber(raw['chapterB']);
+    const leftRef =
+        asString(raw['leftRef']) ??
+        asString(raw['left_ref']) ??
+        formatChapterFileRef(sideAChapter);
+    const rightRef =
+        asString(raw['rightRef']) ??
+        asString(raw['right_ref']) ??
+        formatChapterFileRef(sideBChapter);
+    const leftLine = asNumber(raw['leftLine']) ?? asNumber(raw['left_line']) ?? asNumber(raw['side_a_line']);
+    const rightLine = asNumber(raw['rightLine']) ?? asNumber(raw['right_line']) ?? asNumber(raw['side_b_line']);
+    const leftExcerpt =
+        asString(raw['leftExcerpt']) ??
+        asString(raw['left_excerpt']) ??
+        asString(raw['quoteA']) ??
+        asString(raw['quote_a']);
+    const rightExcerpt =
+        asString(raw['rightExcerpt']) ??
+        asString(raw['right_excerpt']) ??
+        asString(raw['quoteB']) ??
+        asString(raw['quote_b']);
+    const affectedChapters =
+        asNumber(raw['affectedChapters']) ??
+        asNumber(raw['rollback_chapters']) ??
+        asNumber(raw['affected_chapters']);
+    const affectedWords =
+        asNumber(raw['affectedWords']) ??
+        asNumber(raw['affected_words']) ??
+        asNumber(raw['rollback_words']);
+    const rollbackThreshold =
+        asNumber(raw['rollbackThreshold']) ?? asNumber(raw['rollback_threshold']);
+    const { haltIssues } = parseRawIssues(raw['issues']);
+    const gateViolations = parseRawGateViolations(raw['gateViolations'] ?? raw['gate_violations']);
+
     return {
         reason,
         stage: asString(raw['stage']),
         chapter: asNumber(raw['chapter']) ?? asNumber(raw['chapterNumber']),
-        conflictId: asString(raw['conflictId']),
-        affectedChapters: asNumber(raw['affectedChapters']),
+        conflictId: asString(raw['conflictId']) ?? asString(raw['conflict_id']),
+        affectedChapters,
+        affectedWords,
+        rollbackThreshold,
+        leftRef,
+        rightRef,
+        leftLine,
+        rightLine,
+        leftExcerpt,
+        rightExcerpt,
+        ...(haltIssues.length > 0 ? { issues: haltIssues } : {}),
+        ...(gateViolations.length > 0 ? { gateViolations } : {}),
         timestamp: asString(raw['timestamp']),
         details: asString(raw['details'])
     };
 }
 
-function mapHaltDiagnostic(haltView: HaltViewPayload | null): HaltDiagnosticInfo | null {
+/** 兼容 snake_case 与 camelCase 解析右栏检查器冲突诊断 */
+export function mapHaltDiagnostic(haltView: HaltViewPayload | null): HaltDiagnosticInfo | null {
     if (!haltView) return null;
     const raw = haltView.safeHalt ?? haltView.quarantineReport;
     if (!raw) return null;
@@ -179,26 +321,118 @@ function mapHaltDiagnostic(haltView: HaltViewPayload | null): HaltDiagnosticInfo
         kind,
         reason
     };
-    const leftRef = asString(raw['leftRef']);
-    const rightRef = asString(raw['rightRef']);
-    const leftExcerpt = asString(raw['leftExcerpt']);
-    const rightExcerpt = asString(raw['rightExcerpt']);
-    const affectedChapters = asNumber(raw['affectedChapters']);
-    const rollbackThreshold = asNumber(raw['rollbackThreshold']);
+    const sideAChapter = asNumber(raw['side_a_chapter']) ?? asNumber(raw['chapterA']);
+    const sideBChapter = asNumber(raw['side_b_chapter']) ?? asNumber(raw['chapterB']);
+    const leftRef =
+        asString(raw['leftRef']) ??
+        asString(raw['left_ref']) ??
+        formatChapterFileRef(sideAChapter);
+    const rightRef =
+        asString(raw['rightRef']) ??
+        asString(raw['right_ref']) ??
+        formatChapterFileRef(sideBChapter);
+    const leftLine = asNumber(raw['leftLine']) ?? asNumber(raw['left_line']) ?? asNumber(raw['side_a_line']);
+    const rightLine = asNumber(raw['rightLine']) ?? asNumber(raw['right_line']) ?? asNumber(raw['side_b_line']);
+    const leftExcerpt =
+        asString(raw['leftExcerpt']) ??
+        asString(raw['left_excerpt']) ??
+        asString(raw['quoteA']) ??
+        asString(raw['quote_a']);
+    const rightExcerpt =
+        asString(raw['rightExcerpt']) ??
+        asString(raw['right_excerpt']) ??
+        asString(raw['quoteB']) ??
+        asString(raw['quote_b']);
+    const affectedChapters =
+        asNumber(raw['affectedChapters']) ??
+        asNumber(raw['rollback_chapters']) ??
+        asNumber(raw['affected_chapters']);
+    const affectedWords =
+        asNumber(raw['affectedWords']) ??
+        asNumber(raw['affected_words']) ??
+        asNumber(raw['rollback_words']);
+    const rollbackThreshold =
+        asNumber(raw['rollbackThreshold']) ?? asNumber(raw['rollback_threshold']);
     const timestamp = asString(raw['timestamp']);
+    const { diagIssues } = parseRawIssues(raw['issues']);
+
     if (leftRef !== undefined) result.leftRef = leftRef;
     if (rightRef !== undefined) result.rightRef = rightRef;
+    if (leftLine !== undefined) result.leftLine = leftLine;
+    if (rightLine !== undefined) result.rightLine = rightLine;
     if (leftExcerpt !== undefined) result.leftExcerpt = leftExcerpt;
     if (rightExcerpt !== undefined) result.rightExcerpt = rightExcerpt;
     if (affectedChapters !== undefined) result.affectedChapters = affectedChapters;
+    if (affectedWords !== undefined) result.affectedWords = affectedWords;
     if (rollbackThreshold !== undefined) result.rollbackThreshold = rollbackThreshold;
+    if (diagIssues.length > 0) result.issues = diagIssues;
     if (timestamp !== undefined) result.timestamp = timestamp;
     return result;
 }
 
+function mapSyncConflictDiagnostic(
+    syncView: SyncConflictsViewPayload | null,
+    haltView: HaltViewPayload | null
+): SyncConflictDiagnostic | null {
+    const rawConflict =
+        (syncView?.conflicts && syncView.conflicts.length > 0 ? syncView.conflicts[0] : null) ??
+        haltView?.quarantineReport ??
+        null;
+    if (!rawConflict) return null;
+
+    const sideAChapter = asNumber(rawConflict['side_a_chapter']) ?? asNumber(rawConflict['chapterA']);
+    const sideBChapter = asNumber(rawConflict['side_b_chapter']) ?? asNumber(rawConflict['chapterB']);
+    const description =
+        asString(rawConflict['description']) ??
+        asString(rawConflict['reason']) ??
+        asString(rawConflict['message']) ??
+        '已落盘章节与设定之间存在跨章冲突';
+
+    return {
+        conflictId: asString(rawConflict['conflictId']) ?? asString(rawConflict['conflict_id']),
+        description,
+        leftRef:
+            asString(rawConflict['leftRef']) ??
+            asString(rawConflict['left_ref']) ??
+            asString(rawConflict['source_ref']) ??
+            formatChapterFileRef(sideAChapter),
+        leftLine:
+            asNumber(rawConflict['leftLine']) ??
+            asNumber(rawConflict['left_line']) ??
+            asNumber(rawConflict['side_a_line']),
+        leftExcerpt:
+            asString(rawConflict['leftExcerpt']) ??
+            asString(rawConflict['quoteA']) ??
+            asString(rawConflict['quote_a']) ??
+            asString(rawConflict['quote_source']),
+        rightRef:
+            asString(rawConflict['rightRef']) ??
+            asString(rawConflict['right_ref']) ??
+            formatChapterFileRef(sideBChapter),
+        rightLine:
+            asNumber(rawConflict['rightLine']) ??
+            asNumber(rawConflict['right_line']) ??
+            asNumber(rawConflict['side_b_line']),
+        rightExcerpt:
+            asString(rawConflict['rightExcerpt']) ??
+            asString(rawConflict['quoteB']) ??
+            asString(rawConflict['quote_b']) ??
+            asString(rawConflict['quote_draft']),
+        affectedChapters:
+            asNumber(rawConflict['affectedChapters']) ??
+            asNumber(rawConflict['rollback_chapters']) ??
+            asNumber(rawConflict['affected_chapters']),
+        affectedWords:
+            asNumber(rawConflict['affectedWords']) ??
+            asNumber(rawConflict['affected_words']) ??
+            asNumber(rawConflict['rollback_words']),
+        rollbackThreshold:
+            asNumber(rawConflict['rollbackThreshold']) ?? asNumber(rawConflict['rollback_threshold'])
+    };
+}
+
 function mapPendingSignals(signalsView: SignalsViewPayload | null): PendingSignalItem[] {
     if (!signalsView) return [];
-    // 队列只展示未消费切片;已消费历史行不得混入(撤回按内容匹配,与全量下标无关)
     const items =
         signalsView.pending ??
         signalsView.signals.slice(Math.max(0, signalsView.signals.length - signalsView.pendingCount));
@@ -212,63 +446,90 @@ function mapPendingSignals(signalsView: SignalsViewPayload | null): PendingSigna
     }));
 }
 
-function buildSignalPayload(kind: DirectorSignalKind, content: string, chapter: number): {
-    type: string;
-    content: string;
-    chapter: number;
-    reason: string;
-    suggested_mode?: string;
-    created_at: string;
-} {
-    const trimmed = content.trim();
-    const isRetcon = kind === 'Retcon';
-    const payload: {
-        type: string;
-        content: string;
-        chapter: number;
-        reason: string;
-        suggested_mode?: string;
-        created_at: string;
-    } = {
-        type: isRetcon ? 'RETCON' : 'SPOTLIGHT_TRIGGER',
-        content: trimmed,
-        chapter: Math.max(0, chapter),
-        reason: `[${kind}] ${trimmed}`,
-        created_at: new Date().toISOString()
-    };
-    if (kind === 'PARALLEL') {
-        payload.suggested_mode = 'PARALLEL';
-    } else if (kind === '下章剧情' || kind === '导演指令') {
-        payload.suggested_mode = 'MAINLINE';
+function buildSignalPayload(payload: SubmitSignalPayload, chapter: number): PostSignalRequest {
+    const trimmed = payload.content.trim();
+    const nowIso = new Date().toISOString();
+    const safeChapter = Math.max(0, chapter);
+
+    if (payload.kind === 'RETCON' || payload.kind === 'Retcon') {
+        return {
+            type: 'RETCON',
+            content: trimmed,
+            reason: trimmed,
+            chapter: safeChapter,
+            created_at: nowIso
+        };
     }
-    return payload;
+
+    if (payload.kind === 'SPOTLIGHT_TRIGGER') {
+        return {
+            type: 'SPOTLIGHT_TRIGGER',
+            content: trimmed,
+            reason: trimmed,
+            chapter: safeChapter,
+            ...(payload.entityId ? { entity_id: payload.entityId } : {}),
+            created_at: nowIso
+        };
+    }
+
+    if (payload.kind === 'FLASHBACK') {
+        return {
+            type: 'DIRECTOR_NOTE',
+            content: trimmed,
+            reason: trimmed,
+            chapter: safeChapter,
+            suggested_mode: 'FLASHBACK',
+            ...(payload.targetDay !== undefined ? { target_day: payload.targetDay } : {}),
+            created_at: nowIso
+        };
+    }
+
+    if (payload.kind === 'PARALLEL') {
+        return {
+            type: 'DIRECTOR_NOTE',
+            content: trimmed,
+            reason: trimmed,
+            chapter: safeChapter,
+            suggested_mode: 'PARALLEL',
+            created_at: nowIso
+        };
+    }
+
+    return {
+        type: 'DIRECTOR_NOTE',
+        content: trimmed,
+        reason: trimmed,
+        chapter: safeChapter,
+        suggested_mode: 'MAINLINE',
+        created_at: nowIso
+    };
 }
 
 function deriveStageArtifact(latestSseStage: string | null): StageArtifactTelemetry {
     if (!latestSseStage) {
         return {
             selectedStageIndex: 0,
-            stageName: '待命 (IDLE)',
+            stageName: '待命',
             stageStatus: '就绪',
-            stageSummary: '等待单步推进或 YOLO 连跑指令'
+            stageSummary: '等待推进下一章或连续生成指令'
         };
     }
     if (latestSseStage === 'COMMITTED') {
         return {
             selectedStageIndex: 4,
-            stageName: 'Extractor',
-            stageStatus: '已提交',
-            stageSummary: '本章正文与状态补丁已双提交至 Git WAL'
+            stageName: '5. Extractor',
+            stageStatus: '已完成',
+            stageSummary: '本章正文与人物台账已双提交入库'
         };
     }
     if (latestSseStage === 'PROSE_GATE' || latestSseStage === 'LOCAL_PATCH') {
         const isPatch = latestSseStage === 'LOCAL_PATCH';
         return {
             selectedStageIndex: 2,
-            stageName: 'Writer · 静态门禁',
-            stageStatus: isPatch ? '门禁 Patch' : '门禁扫描',
+            stageName: '3. Writer · 静态门禁',
+            stageStatus: isPatch ? '门禁润色' : '门禁扫描',
             stageSummary: isPatch
-                ? '静态门禁拦截，局部 Patch 自愈中（明细见右栏门禁组）'
+                ? '静态门禁拦截，局部润色自愈中'
                 : '0-LLM 确定性文风门禁校验中'
         };
     }
@@ -368,7 +629,6 @@ function upsertStageSession(
         return prev;
     }
 
-    // 新 sessionId 开启新尝试时，将同阶段之前仍标记为 running 的历史尝试收敛为 completed
     const finalizedPrev = prev.map((item) =>
         isRunningSessionStatus(item.status) ? { ...item, status: 'completed' } : item
     );
@@ -446,11 +706,23 @@ function deriveHistoricalStageOverrides(
     return mapped;
 }
 
-/**
- * NarrateOS Studio 根组件可选宿主集成属性：
- * 在完整 DSH Web 中由 SlotRegistry 注入 SessionProvider 与 renderSlot，
- * 在单元测试或独立预览中缺省时自动降级为只读元数据面板。
- */
+function formatAttemptLabel(attempt: StageAttemptSession): string {
+    const upper = attempt.stage.trim().toUpperCase();
+    if (upper === 'LOCAL_PATCH' || attempt.role?.toLowerCase() === 'patch') {
+        return `局部润色 (Patch${attempt.attempt ? ` #${attempt.attempt}` : ''})`;
+    }
+    if (upper === 'REWRITE') {
+        return `整章重写${attempt.attempt ? ` #${attempt.attempt}` : ''}`;
+    }
+    if (upper === 'REPLAN') {
+        return `重排细纲${attempt.attempt ? ` #${attempt.attempt}` : ''}`;
+    }
+    if (upper === 'WRITER') {
+        return '初稿执笔 (Writer)';
+    }
+    return `${attempt.stage}${attempt.attempt ? ` #${attempt.attempt}` : ''}`;
+}
+
 export interface NarrateStudioRootProps {
     sessionsService?: StudioSessionsService | undefined;
     SessionProvider?: StudioSessionProviderComponent | undefined;
@@ -458,10 +730,7 @@ export interface NarrateStudioRootProps {
 }
 
 /**
- * NarrateOS Operator Studio 前端根组件：
- * - 幂等注入样式表
- * - 初始化拉取作品列表、全局状态、章节列表、当前章详情与 6 类物化视图
- * - 订阅 /api/narrate/events SSE 实时流并驱动三栏联动刷新
+ * NarrateOS Operator Studio 前端根组件
  */
 export function NarrateStudioRoot({
     sessionsService,
@@ -483,6 +752,7 @@ export function NarrateStudioRoot({
     const [telemetryView, setTelemetryView] = useState<TelemetryViewPayload | null>(null);
     const [signalsView, setSignalsView] = useState<SignalsViewPayload | null>(null);
     const [haltView, setHaltView] = useState<HaltViewPayload | null>(null);
+    const [syncConflictsView, setSyncConflictsView] = useState<SyncConflictsViewPayload | null>(null);
 
     const [latestSseStage, setLatestSseStage] = useState<string | null>(null);
     const [haltWaiting, setHaltWaiting] = useState(false);
@@ -507,6 +777,7 @@ export function NarrateStudioRoot({
     const [liveRunChapter, setLiveRunChapter] = useState<number | null>(null);
     const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId | null>(null);
     const [selectedStageSession, setSelectedStageSession] = useState<StageSessionSelection | null>(null);
+    const [liveSessionEvents, setLiveSessionEvents] = useState<Record<string, StageSessionDetailEvent[]>>({});
     const [liveTelemetry, setLiveTelemetry] = useState<TelemetryItem | null>(null);
     const [gateViolations, setGateViolations] = useState<ProseGateViolationItem[]>([]);
     const [factChecker, setFactChecker] = useState<FactCheckerTelemetry>({
@@ -515,21 +786,31 @@ export function NarrateStudioRoot({
         filteredOutCount: 0,
         blockedCount: 0
     });
+    const [revealNonce, setRevealNonce] = useState(0);
 
     const [loading, setLoading] = useState<boolean>(true);
-    const [harvestingVoice, setHarvestingVoice] = useState<boolean>(false);
     const [bootModalOpen, setBootModalOpen] = useState<boolean>(false);
+    const [volumeModalOpen, setVolumeModalOpen] = useState<boolean>(false);
+    const [volumeSubmitting, setVolumeSubmitting] = useState<boolean>(false);
+    const [volumeError, setVolumeError] = useState<string | null>(null);
+    const [parallelModalOpen, setParallelModalOpen] = useState<boolean>(false);
+    const [parallelSubmitting, setParallelSubmitting] = useState<boolean>(false);
+    const [parallelError, setParallelError] = useState<string | null>(null);
+    const [activeParallelWindowId, setActiveParallelWindowId] = useState<string>('');
+    const [activeParallelBranchId, setActiveParallelBranchId] = useState<string>('');
+
     const [activeViewKind, setActiveViewKind] = useState<MaterializedViewKind | null>(null);
     const [externalViewCommand, setExternalViewCommand] = useState<ExternalViewCommand | undefined>(undefined);
     const [toasts, setToasts] = useState<ToastState[]>([]);
 
+    // 容器感知三栏布局断点（ResizeObserver 监听 .ns-studio-shell 实测宽度）
     const [containerWidth, setContainerWidth] = useState<number>(() =>
-        typeof window !== 'undefined' ? window.innerWidth : 1280
+        typeof window !== 'undefined' ? window.innerWidth || 1280 : 1280
     );
     const [rightOpen, setRightOpen] = useState<boolean>(() =>
-        typeof window !== 'undefined' ? window.innerWidth >= 720 : true
+        typeof window !== 'undefined' ? (window.innerWidth || 1280) >= 820 : true
     );
-    const [rightTab, setRightTab] = useState<'toc' | 'insp' | 'session' | 'tools'>('toc');
+    const [rightTab, setRightTab] = useState<'trace' | 'status' | 'routing'>('trace');
 
     const shellRef = useRef<HTMLDivElement | null>(null);
     const prevWidthRef = useRef<number>(containerWidth);
@@ -537,7 +818,6 @@ export function NarrateStudioRoot({
     const selectedChapterRef = useRef<number | null>(null);
     selectedChapterRef.current = selectedChapter;
 
-    // 宿主 Toast 原语自管生命周期(onDone 卸载),这里只维护消息队列;错误延长驻留
     const toastSeqRef = useRef(0);
     const showToast = useCallback((message: string, kind: 'info' | 'error' = 'info') => {
         toastSeqRef.current += 1;
@@ -553,50 +833,61 @@ export function NarrateStudioRoot({
         const el = shellRef.current;
         if (!el || typeof window === 'undefined') return;
 
+        const measureFallbackWidth = (): number =>
+            el.clientWidth > 0 ? el.clientWidth : window.innerWidth || 1280;
+
         const updateWidth = (width: number) => {
             if (width <= 0) return;
             setContainerWidth(width);
-            if (prevWidthRef.current >= 720 && width < 720) {
+            if (prevWidthRef.current >= 820 && width < 820) {
                 setRightOpen(false);
             }
             prevWidthRef.current = width;
         };
 
-        updateWidth(el.clientWidth || window.innerWidth);
+        updateWidth(measureFallbackWidth());
 
         if (typeof ResizeObserver !== 'undefined') {
             const observer = new ResizeObserver((entries) => {
                 const entry = entries[0];
                 if (entry) {
-                    updateWidth(entry.contentRect.width);
+                    const nextW =
+                        entry.contentRect.width > 0
+                            ? entry.contentRect.width
+                            : measureFallbackWidth();
+                    updateWidth(nextW);
                 }
             });
             observer.observe(el);
             return () => observer.disconnect();
         }
 
-        const onResize = () => updateWidth(el.clientWidth || window.innerWidth);
+        const onResize = () => updateWidth(measureFallbackWidth());
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
     }, []);
 
-    // 作品切换、保存交接会使旧读取失效；切换请求在途期间不读取全局当前作品。
     const workspaceEpochRef = useRef(0);
     const switchingBookRef = useRef(false);
     const refreshRequestRef = useRef(0);
     const viewsRequestRef = useRef(0);
     const statusRequestRef = useRef(0);
     const saveInFlightRef = useRef(false);
-    const isCurrentWorkspace = useCallback((epoch: number) =>
-        epoch === workspaceEpochRef.current && !switchingBookRef.current, []);
+    const isCurrentWorkspace = useCallback(
+        (epoch: number) => epoch === workspaceEpochRef.current && !switchingBookRef.current,
+        []
+    );
 
     const loadStatus = useCallback(async () => {
         if (switchingBookRef.current) return;
         const epoch = workspaceEpochRef.current;
         const seq = ++statusRequestRef.current;
         const next = await fetchStatus();
-        if (isCurrentWorkspace(epoch) && seq === statusRequestRef.current &&
-            (!currentBookRootRef.current || next.bookRoot === currentBookRootRef.current)) {
+        if (
+            isCurrentWorkspace(epoch) &&
+            seq === statusRequestRef.current &&
+            (!currentBookRootRef.current || next.bookRoot === currentBookRootRef.current)
+        ) {
             setStatus(next);
         }
     }, [isCurrentWorkspace]);
@@ -605,13 +896,14 @@ export function NarrateStudioRoot({
         if (switchingBookRef.current) return;
         const epoch = workspaceEpochRef.current;
         const seq = ++viewsRequestRef.current;
-        const [entities, horizon, threads, telemetry, signals, halt] = await Promise.all([
+        const [entities, horizon, threads, telemetry, signals, halt, syncConflicts] = await Promise.all([
             fetchViewEntities().catch(() => null),
             fetchViewHorizon().catch(() => null),
             fetchViewThreads().catch(() => null),
             fetchViewTelemetry().catch(() => null),
             fetchViewSignals().catch(() => null),
-            fetchViewHalt().catch(() => null)
+            fetchViewHalt().catch(() => null),
+            fetchViewSyncConflicts().catch(() => null)
         ]);
         if (!isCurrentWorkspace(epoch) || seq !== viewsRequestRef.current) return;
         if (entities) setEntitiesView(entities);
@@ -620,96 +912,93 @@ export function NarrateStudioRoot({
         if (telemetry) setTelemetryView(telemetry);
         if (signals) setSignalsView(signals);
         if (halt) setHaltView(halt);
+        if (syncConflicts) setSyncConflictsView(syncConflicts);
     }, [isCurrentWorkspace]);
 
     const [chapterLoading, setChapterLoading] = useState<boolean>(false);
-    // 章节详情请求序号：乱序返回时只采纳最后一次请求，失败/空详情不清空既有详情与草稿
     const chapterRequestSeqRef = useRef(0);
     const runsRequestSeqRef = useRef(0);
-    // 当前作品身份 ref：详情采纳前核对，防止切作品后旧书响应串章
     const currentBookRootRef = useRef<string>('');
-    const loadRunsForChapter = useCallback(async (chapterNumber: number | null) => {
-        if (switchingBookRef.current) return;
-        if (chapterNumber === null || !Number.isFinite(chapterNumber) || chapterNumber <= 0) {
-            setHistoricalRuns([]);
-            return;
-        }
-        const seq = ++runsRequestSeqRef.current;
-        const epoch = workspaceEpochRef.current;
-        const bookRoot = currentBookRootRef.current;
-        try {
-            const payload = await fetchRunRecords(chapterNumber);
-            if (!isCurrentWorkspace(epoch) || seq !== runsRequestSeqRef.current) return;
-            if (bookRoot && currentBookRootRef.current && bookRoot !== currentBookRootRef.current) return;
-            setHistoricalRuns(payload.runs);
-        } catch {
-            // 尚未启用 /api/narrate/runs 的旧后端静默降级为空列表，不阻塞正文阅读
-            if (isCurrentWorkspace(epoch) && seq === runsRequestSeqRef.current) {
-                setHistoricalRuns([]);
-            }
-        }
-    }, [isCurrentWorkspace]);
+    const chapterDetailRef = useRef<ChapterDetail | null>(null);
+    chapterDetailRef.current = chapterDetail;
 
-    const loadChapterByNumber = useCallback(async (chapterNumber: number) => {
-        if (switchingBookRef.current || !Number.isFinite(chapterNumber) || chapterNumber <= 0) {
-            return;
-        }
-        const seq = ++chapterRequestSeqRef.current;
-        const epoch = workspaceEpochRef.current;
-        setChapterLoading(true);
-        try {
-            const detail = await fetchChapter(chapterNumber);
-            if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
-            // 请求在途期间用户可能已开始改稿：采纳前再核对最新脏态，不同章/不同作品不得覆盖
-            const dirtyNow = draftLocationRef.current;
-            if (
-                dirtyNow &&
-                (dirtyNow.chapterNumber !== detail.chapterNumber ||
-                    dirtyNow.bookRoot !== currentBookRootRef.current)
-            ) {
+    const loadRunsForChapter = useCallback(
+        async (chapterNumber: number | null) => {
+            if (switchingBookRef.current) return;
+            if (chapterNumber === null || !Number.isFinite(chapterNumber) || chapterNumber <= 0) {
+                setHistoricalRuns([]);
                 return;
             }
-            setSelectedChapter(detail.chapterNumber);
-            setChapterDetail(detail);
-            setInspectedStageId((prev) =>
-                selectedChapterRef.current !== null && selectedChapterRef.current !== detail.chapterNumber
-                    ? null
-                    : prev
-            );
-            void loadRunsForChapter(detail.chapterNumber);
-        } catch (err) {
-            if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
-            showToast(err instanceof Error ? err.message : String(err), 'error');
-        } finally {
-            if (isCurrentWorkspace(epoch) && seq === chapterRequestSeqRef.current) {
-                setChapterLoading(false);
+            const seq = ++runsRequestSeqRef.current;
+            const epoch = workspaceEpochRef.current;
+            const bookRoot = currentBookRootRef.current;
+            try {
+                const payload = await fetchRunRecords(chapterNumber);
+                if (!isCurrentWorkspace(epoch) || seq !== runsRequestSeqRef.current) return;
+                if (bookRoot && currentBookRootRef.current && bookRoot !== currentBookRootRef.current) return;
+                setHistoricalRuns(payload.runs);
+            } catch {
+                if (isCurrentWorkspace(epoch) && seq === runsRequestSeqRef.current) {
+                    setHistoricalRuns([]);
+                }
             }
-        }
-    }, [isCurrentWorkspace, loadRunsForChapter, showToast]);
+        },
+        [isCurrentWorkspace]
+    );
 
-    // 运行态忙判定提前派生：守卫保存与刷新回调都依赖它
     const activeTask = status?.runtime.activeTask ?? 'IDLE';
     const isBusy = activeTask !== 'IDLE' || Boolean(status?.yolo.running);
 
-    // 未保存草稿位置（由中栏编辑器上报）；ref 供事件回调与守卫读取最新值
+    // 非阻断式草稿守卫与内存暂存表（DraftStashMap）
     const [draftLocation, setDraftLocation] = useState<DraftLocation | null>(null);
     const draftLocationRef = useRef<DraftLocation | null>(null);
+    const [draftStash, setDraftStash] = useState<DraftStashMap>({});
+    const draftStashRef = useRef<DraftStashMap>({});
+
     const handleDraftDirtyChange = useCallback((dirty: DraftLocation | null) => {
-        // 同步写 ref：同一 tick 内的导航守卫/详情采纳立刻可见，不等下一次 render
         draftLocationRef.current = dirty;
         setDraftLocation(dirty);
     }, []);
-    // 中栏草稿控制句柄：守卫保存成功/放弃修改后强制结束编辑态
+
     const draftControlRef = useRef<CenterWorkbenchDraftHandle | null>(null);
     const handleDraftControlReady = useCallback((handle: CenterWorkbenchDraftHandle | null) => {
         draftControlRef.current = handle;
     }, []);
 
-    // 浏览器关闭/刷新时脏草稿保护（不要求跨重启恢复）
+    const stashCurrentDraftIfDirty = useCallback(
+        (toastMessage?: string): boolean => {
+            const draft = draftLocationRef.current;
+            if (!draft || !draft.bookRoot || draft.chapterNumber <= 0) {
+                return false;
+            }
+            const entry: StashedDraftEntry = {
+                bookRoot: draft.bookRoot,
+                chapterNumber: draft.chapterNumber,
+                content: draft.content,
+                baseSha256: chapterDetailRef.current?.sha256,
+                updatedAt: Date.now()
+            };
+            const nextStash = putStashedDraft(draftStashRef.current, entry);
+            draftStashRef.current = nextStash;
+            setDraftStash(nextStash);
+            draftLocationRef.current = null;
+            setDraftLocation(null);
+            draftControlRef.current?.resetDraft();
+            if (toastMessage) {
+                showToast(toastMessage);
+            }
+            return true;
+        },
+        [showToast]
+    );
+
+    // 浏览器关闭/刷新前统一用 hasAnyUnsavedDraft 保护全部在编/暂存草稿
     useEffect(() => {
         if (typeof window === 'undefined') return;
         const onBeforeUnload = (ev: BeforeUnloadEvent) => {
-            if (!draftLocationRef.current) return;
+            if (!hasAnyUnsavedDraft(draftStashRef.current, draftLocationRef.current !== null)) {
+                return;
+            }
             ev.preventDefault();
             ev.returnValue = '';
         };
@@ -717,110 +1006,157 @@ export function NarrateStudioRoot({
         return () => window.removeEventListener('beforeunload', onBeforeUnload);
     }, []);
 
-    const refreshAll = useCallback(async (preferredChapter?: number | null) => {
-        if (switchingBookRef.current) return;
-        const epoch = workspaceEpochRef.current;
-        const seq = ++refreshRequestRef.current;
-        const statusSeq = ++statusRequestRef.current;
-        const chapterSeq = chapterRequestSeqRef.current;
-        setLoading(true);
-        try {
-            let booksRes = await fetchBooks();
-            if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
-
-            if (!booksRes.currentBookRoot && booksRes.books.length > 0 && !currentBookRootRef.current) {
-                const defaultBook = booksRes.books[0];
-                if (defaultBook) {
-                    await selectBook({ bookRoot: defaultBook.bookRoot });
-                    if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
-                    booksRes = await fetchBooks();
-                    if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
-                }
-            }
-
-            setBooksState(booksRes);
-            const activeRoot = booksRes.currentBookRoot;
-            if (!activeRoot) {
-                currentBookRootRef.current = '';
-                setStatus(null);
-                setChapters([]);
-                setSelectedChapter(null);
-                setChapterDetail(null);
-                setHistoricalRuns([]);
-                setEntitiesView(null);
-                setHorizonView(null);
-                setThreadsView(null);
-                setTelemetryView(null);
-                setSignalsView(null);
-                setHaltView(null);
+    const loadChapterByNumber = useCallback(
+        async (chapterNumber: number) => {
+            if (switchingBookRef.current || !Number.isFinite(chapterNumber) || chapterNumber <= 0) {
                 return;
             }
-
-            const [statusRes, chaptersRes] = await Promise.all([
-                fetchStatus(),
-                fetchChapters(),
-                loadViews()
-            ]);
-            if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
-            if (activeRoot !== statusRes.bookRoot ||
-                (currentBookRootRef.current && activeRoot !== currentBookRootRef.current)) return;
-
-            currentBookRootRef.current = activeRoot;
-            if (statusSeq === statusRequestRef.current) setStatus(statusRes);
-            setChapters(chaptersRes.chapters);
-            setLatestSseStage(statusRes.yolo.currentStage ?? null);
-
-            // 编辑中的脏草稿优先：任何后台刷新不得换章或替换详情
-            const draft = draftLocationRef.current;
-            if (draft && draft.bookRoot === booksRes.currentBookRoot) {
-                setSelectedChapter(draft.chapterNumber);
-                return;
-            }
-            // 用户在刷新期间主动选章或完成保存后，后台刷新不得覆盖其选择。
-            if (chapterSeq !== chapterRequestSeqRef.current) return;
-
-            const fallbackChapter =
-                chaptersRes.chapters.length > 0
-                    ? chaptersRes.chapters[chaptersRes.chapters.length - 1]!.chapterNumber
-                    : null;
-            const candidate =
-                preferredChapter ??
-                statusRes.activeChapter ??
-                (statusRes.latestChapter > 0 ? statusRes.latestChapter : fallbackChapter);
-
-            if (candidate !== null && candidate > 0) {
-                await loadChapterByNumber(candidate);
-            } else {
-                setSelectedChapter(null);
-                setChapterDetail(null);
-                setHistoricalRuns([]);
-            }
-
-            if (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) {
-                const activeTargetChapter = (statusRes.latestChapter ?? 0) + 1;
-                const activeRunsRes = await fetchRunRecords(activeTargetChapter).catch(() => null);
+            const seq = ++chapterRequestSeqRef.current;
+            const epoch = workspaceEpochRef.current;
+            setChapterLoading(true);
+            try {
+                const detail = await fetchChapter(chapterNumber);
+                if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
+                const dirtyNow = draftLocationRef.current;
                 if (
-                    activeRunsRes &&
-                    activeRunsRes.runs.length > 0 &&
-                    isCurrentWorkspace(epoch) &&
-                    seq === refreshRequestRef.current
+                    dirtyNow &&
+                    (dirtyNow.chapterNumber !== detail.chapterNumber ||
+                        dirtyNow.bookRoot !== currentBookRootRef.current)
                 ) {
-                    setLiveRunChapter(activeTargetChapter);
-                    applyStageOverrides((prev) =>
-                        Object.keys(prev).length > 0
-                            ? prev
-                            : deriveHistoricalStageOverrides(activeRunsRes.runs)
-                    );
+                    return;
+                }
+                setSelectedChapter(detail.chapterNumber);
+                setChapterDetail(detail);
+                setInspectedStageId((prev) =>
+                    selectedChapterRef.current !== null && selectedChapterRef.current !== detail.chapterNumber
+                        ? null
+                        : prev
+                );
+                void loadRunsForChapter(detail.chapterNumber);
+            } catch (err) {
+                if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
+                showToast(err instanceof Error ? err.message : String(err), 'error');
+            } finally {
+                if (isCurrentWorkspace(epoch) && seq === chapterRequestSeqRef.current) {
+                    setChapterLoading(false);
                 }
             }
-        } catch (err) {
-            if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
-                showToast(err instanceof Error ? err.message : String(err), 'error');
+        },
+        [isCurrentWorkspace, loadRunsForChapter, showToast]
+    );
+
+    const refreshAll = useCallback(
+        async (preferredChapter?: number | null) => {
+            if (switchingBookRef.current) return;
+            const epoch = workspaceEpochRef.current;
+            const seq = ++refreshRequestRef.current;
+            const statusSeq = ++statusRequestRef.current;
+            const chapterSeq = chapterRequestSeqRef.current;
+            setLoading(true);
+            try {
+                let booksRes = await fetchBooks();
+                if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+
+                if (!booksRes.currentBookRoot && booksRes.books.length > 0 && !currentBookRootRef.current) {
+                    const defaultBook = booksRes.books[0];
+                    if (defaultBook) {
+                        await selectBook({ bookRoot: defaultBook.bookRoot });
+                        if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                        booksRes = await fetchBooks();
+                        if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                    }
+                }
+
+                setBooksState(booksRes);
+                const activeRoot = booksRes.currentBookRoot;
+                if (!activeRoot) {
+                    currentBookRootRef.current = '';
+                    setStatus(null);
+                    setChapters([]);
+                    setSelectedChapter(null);
+                    setChapterDetail(null);
+                    setHistoricalRuns([]);
+                    setEntitiesView(null);
+                    setHorizonView(null);
+                    setThreadsView(null);
+                    setTelemetryView(null);
+                    setSignalsView(null);
+                    setHaltView(null);
+                    setSyncConflictsView(null);
+                    return;
+                }
+
+                const [statusRes, chaptersRes] = await Promise.all([
+                    fetchStatus(),
+                    fetchChapters(),
+                    loadViews()
+                ]);
+                if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                if (
+                    activeRoot !== statusRes.bookRoot ||
+                    (currentBookRootRef.current && activeRoot !== currentBookRootRef.current)
+                ) {
+                    return;
+                }
+
+                currentBookRootRef.current = activeRoot;
+                if (statusSeq === statusRequestRef.current) setStatus(statusRes);
+                setChapters(chaptersRes.chapters);
+                setLatestSseStage(statusRes.yolo.currentStage ?? null);
+                // 每次全量刷新清除瞬态 liveTelemetry 覆盖层，确保展现持久化遥测或最新值
+                setLiveTelemetry(null);
+
+                const draft = draftLocationRef.current;
+                if (draft && draft.bookRoot === booksRes.currentBookRoot) {
+                    setSelectedChapter(draft.chapterNumber);
+                    return;
+                }
+                if (chapterSeq !== chapterRequestSeqRef.current) return;
+
+                const fallbackChapter =
+                    chaptersRes.chapters.length > 0
+                        ? chaptersRes.chapters[chaptersRes.chapters.length - 1]!.chapterNumber
+                        : null;
+                const candidate =
+                    preferredChapter ??
+                    statusRes.activeChapter ??
+                    (statusRes.latestChapter > 0 ? statusRes.latestChapter : fallbackChapter);
+
+                if (candidate !== null && candidate > 0) {
+                    await loadChapterByNumber(candidate);
+                } else {
+                    setSelectedChapter(null);
+                    setChapterDetail(null);
+                    setHistoricalRuns([]);
+                }
+
+                if (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) {
+                    const activeTargetChapter = (statusRes.latestChapter ?? 0) + 1;
+                    const activeRunsRes = await fetchRunRecords(activeTargetChapter).catch(() => null);
+                    if (
+                        activeRunsRes &&
+                        activeRunsRes.runs.length > 0 &&
+                        isCurrentWorkspace(epoch) &&
+                        seq === refreshRequestRef.current
+                    ) {
+                        setLiveRunChapter(activeTargetChapter);
+                        applyStageOverrides((prev) =>
+                            Object.keys(prev).length > 0
+                                ? prev
+                                : deriveHistoricalStageOverrides(activeRunsRes.runs)
+                        );
+                    }
+                }
+            } catch (err) {
+                if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
+                    showToast(err instanceof Error ? err.message : String(err), 'error');
+                }
+            } finally {
+                if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
-        } finally {
-            if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
-        }
-    }, [isCurrentWorkspace, loadChapterByNumber, loadViews, showToast]);
+        },
+        [applyStageOverrides, isCurrentWorkspace, loadChapterByNumber, loadViews, showToast]
+    );
 
     useEffect(() => {
         void refreshAll();
@@ -835,7 +1171,7 @@ export function NarrateStudioRoot({
     const loadRunsRef = useRef(loadRunsForChapter);
     loadRunsRef.current = loadRunsForChapter;
 
-    // 订阅 SSE 实时事件流
+    // 订阅全量 25 类 SSE 事件
     useEffect(() => {
         const handleSseEvent = (payload: SseEventPayload) => {
             const { event, data } = payload;
@@ -843,26 +1179,53 @@ export function NarrateStudioRoot({
             if (event === 'book_switched') {
                 if (switchingBookRef.current) return;
                 const bookRoot = asString(data['bookRoot']);
-                // HTTP 切书已确认后，同次 SSE 可能迟到；重复通知不能使本书在途保存失效。
                 if (!bookRoot || bookRoot === currentBookRootRef.current) return;
+                // 外部切书：自动暂存旧书未保存草稿，并立即清空旧书正文杜绝串书残留
+                stashCurrentDraftIfDirty('已自动暂存原作品未保存草稿并切换至新作品');
                 workspaceEpochRef.current += 1;
                 chapterRequestSeqRef.current += 1;
                 runsRequestSeqRef.current += 1;
                 currentBookRootRef.current = bookRoot;
+                setChapterDetail(null);
+                setSelectedChapter(null);
                 setHaltWaiting(false);
                 applyStageOverrides({});
                 setInspectedStageId(null);
                 setHistoricalRuns([]);
                 setLiveRunChapter(null);
                 setSelectedStageSession(null);
+                setLiveSessionEvents({});
                 setLiveTelemetry(null);
                 setTelemetryView(null);
                 setGateViolations([]);
+                setSyncConflictsView(null);
                 showToast('已切换当前作品仓库');
                 void refreshAllRef.current(null);
                 return;
             }
             if (switchingBookRef.current) return;
+
+            if (event === 'stage:event') {
+                const sessionId = asString(data['sessionId']);
+                const kind = asString(data['kind']) ?? 'text';
+                if (!sessionId) return;
+                const nextEv: StageSessionDetailEvent = {
+                    kind,
+                    ...(asString(data['text']) !== undefined ? { text: asString(data['text']) } : {}),
+                    ...(asString(data['toolName']) !== undefined ? { toolName: asString(data['toolName']) } : {}),
+                    ...(asString(data['callId']) !== undefined ? { callId: asString(data['callId']) } : {}),
+                    ...(asString(data['status']) !== undefined ? { status: asString(data['status']) } : {})
+                };
+                setLiveSessionEvents((prev) => {
+                    const existing = prev[sessionId] ?? [];
+                    const appended =
+                        existing.length >= MAX_LIVE_EVENTS_PER_SESSION
+                            ? [...existing.slice(-(MAX_LIVE_EVENTS_PER_SESSION - 1)), nextEv]
+                            : [...existing, nextEv];
+                    return { ...prev, [sessionId]: appended };
+                });
+                return;
+            }
 
             if (event === 'stage' || event === 'chapter:phase' || event === 'stage:session') {
                 const stageName = asString(data['stage']) ?? asString(data['phase']);
@@ -872,6 +1235,9 @@ export function NarrateStudioRoot({
                     setHaltWaiting(false);
                     applyStageOverrides({});
                     setInspectedStageId(null);
+                    setLiveTelemetry(null);
+                    setGateViolations([]);
+                    setLiveSessionEvents({});
                     setLiveRunChapter(asNumber(data['chapterNumber']) ?? asNumber(data['chapter']) ?? null);
                     setLatestSseStage('LIBRARIAN');
                     setStatus((prev) =>
@@ -961,7 +1327,11 @@ export function NarrateStudioRoot({
                             const id = STAGE_SEQUENCE[i]!;
                             if (id === resolvedStage || id === 'DREAMING') continue;
                             const existing = next[id];
-                            if (i < resolvedIdx && existing && (existing.status === 'active' || existing.status === 'healing')) {
+                            if (
+                                i < resolvedIdx &&
+                                existing &&
+                                (existing.status === 'active' || existing.status === 'healing')
+                            ) {
                                 const updatedSessions = updateStageSessionsToTerminal(
                                     existing.sessions,
                                     'completed'
@@ -1070,19 +1440,20 @@ export function NarrateStudioRoot({
                             ? { ...prev, status: 'done' }
                             : prev
                     );
+                    setRevealNonce((n) => n + 1);
                     showToast(
                         committedCh
-                            ? `Ch.${String(committedCh).padStart(4, '0')} 已提交至 Git WAL`
-                            : '章节已提交至 Git WAL'
+                            ? `第 ${committedCh} 章已定稿并提交入库`
+                            : '章节已定稿并提交入库'
                     );
-                    // 后台提交不抢编辑章：有脏草稿只刷新数据；无脏草稿保持自动跟随
-                    const commitAction = resolveBackgroundCommitAction(
-                        committedCh ?? null,
-                        selectedChapterRef.current,
-                        draftLocationRef.current !== null
-                    );
+                    const hasDirty = draftLocationRef.current !== null;
+                    const followCommitted =
+                        !hasDirty &&
+                        committedCh !== undefined &&
+                        committedCh > 0 &&
+                        committedCh !== selectedChapterRef.current;
                     void refreshAllRef.current(
-                        commitAction === 'follow' ? committedCh : selectedChapterRef.current
+                        followCommitted ? committedCh : selectedChapterRef.current
                     );
                     void loadRunsRef.current(committedCh ?? selectedChapterRef.current);
                 }
@@ -1094,15 +1465,17 @@ export function NarrateStudioRoot({
                     chapter: asNumber(data['chapter']),
                     clicheDensityPer1k: asNumber(data['clicheDensityPer1k']),
                     mattr500: asNumber(data['mattr500']),
-                    sentenceLengthCv: asNumber(data['sentenceLengthCv'])
+                    sentenceLengthCv: asNumber(data['sentenceLengthCv']),
+                    kontoyiannisEntropy:
+                        asNumber(data['kontoyiannisEntropy']) ?? asNumber(data['kontoyiannisHk'])
                 };
                 setLiveTelemetry((prev) => ({ ...prev, ...item }));
                 if (Array.isArray(data['violations'])) {
                     const mapped: ProseGateViolationItem[] = data['violations']
                         .filter((v): v is Record<string, unknown> => Boolean(v && typeof v === 'object'))
                         .map((v) => ({
-                            rule: asString(v['rule']) ?? 'GATE',
-                            detail: asString(v['detail']) ?? JSON.stringify(v),
+                            rule: asString(v['rule']) ?? asString(v['ruleId']) ?? 'GATE',
+                            detail: asString(v['detail']) ?? asString(v['message']) ?? JSON.stringify(v),
                             patched: Boolean(v['patched'])
                         }));
                     setGateViolations(mapped);
@@ -1114,18 +1487,34 @@ export function NarrateStudioRoot({
                 const replanCount = asNumber(data['replanCount']) ?? 0;
                 const rewriteCount = asNumber(data['rewriteCount']) ?? 0;
                 const patchRounds = asNumber(data['patchRounds']) ?? 0;
+                const filteredOutCount = asNumber(data['filteredOutCount']) ?? 0;
+                const rawIssues = Array.isArray(data['issues']) ? data['issues'] : [];
+                const recentFindings: FactCheckDetailItem[] = rawIssues
+                    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+                    .map((item) => {
+                        const sourceRef = asString(item['source_ref']);
+                        const reason = asString(item['quote_source']);
+                        return {
+                            claim: asString(item['description']) ?? asString(item['quote_draft']) ?? '核查项',
+                            ...(sourceRef !== undefined ? { sourceRef } : {}),
+                            verified: false as const,
+                            ...(reason !== undefined ? { reason } : {})
+                        };
+                    });
                 setFactChecker((prev) => ({
-                    ...prev,
                     totalChecked: prev.totalChecked + 1,
                     verifiedPassCount:
                         replanCount === 0 && rewriteCount === 0
                             ? prev.verifiedPassCount + 1
                             : prev.verifiedPassCount,
-                    blockedCount: prev.blockedCount ? prev.blockedCount + replanCount + rewriteCount : replanCount + rewriteCount
+                    filteredOutCount: prev.filteredOutCount + filteredOutCount,
+                    blockedCount: (prev.blockedCount ?? 0) + replanCount + rewriteCount,
+                    ...(recentFindings.length > 0 ? { recentFindings } : {})
                 }));
                 applyStageOverrides((prev) => ({
                     ...prev,
                     FACT_CHECKER: {
+                        ...prev.FACT_CHECKER,
                         status: replanCount > 0 || rewriteCount > 0 ? 'healing' : 'done',
                         summary: `replan=${replanCount}, rewrite=${rewriteCount}, patch=${patchRounds}`
                     }
@@ -1136,21 +1525,70 @@ export function NarrateStudioRoot({
             if (event === 'telemetry') {
                 const nextItem = data as TelemetryItem;
                 setLiveTelemetry((prev) => ({ ...prev, ...nextItem }));
-                setTelemetryView((prev) =>
-                    prev ? { ...prev, entries: [...prev.entries, nextItem] } : { kind: 'telemetry', entries: [nextItem] }
-                );
                 return;
             }
 
             if (event === 'signal:received') {
                 void loadViewsRef.current();
                 void loadStatus().catch(() => undefined);
-                showToast('导演信号已入队');
+                showToast('导演便签已入队');
                 return;
             }
 
             if (event === 'signal:withdrawn') {
                 void loadViewsRef.current();
+                void loadStatus().catch(() => undefined);
+                return;
+            }
+
+            if (event === 'volume:advanced') {
+                const completedBook = Boolean(data['completedBook']);
+                const sealedVolume = asNumber(data['sealedVolume']);
+                showToast(
+                    completedBook
+                        ? '全书已完结封笔'
+                        : sealedVolume !== undefined
+                          ? `第 ${sealedVolume} 卷已封存，已开启新卷`
+                          : '换卷封存完成'
+                );
+                void refreshAllRef.current(selectedChapterRef.current);
+                return;
+            }
+
+            if (event === 'task:idle') {
+                setHaltWaiting(false);
+                setStatus((prev) =>
+                    prev
+                        ? {
+                              ...prev,
+                              runtime: { ...prev.runtime, activeTask: 'IDLE' }
+                          }
+                        : prev
+                );
+                void loadStatus().catch(() => undefined);
+                return;
+            }
+
+            if (event === 'heal:started') {
+                const count = asNumber(data['conflictCount']) ?? 0;
+                showToast(`已启动跨章连续性自愈 (${count} 处冲突)`);
+                setStatus((prev) =>
+                    prev
+                        ? { ...prev, runtime: { ...prev.runtime, activeTask: 'SYNCING' } }
+                        : prev
+                );
+                return;
+            }
+
+            if (event === 'heal:completed') {
+                const quarantined = Boolean(data['quarantined']);
+                setRevealNonce((n) => n + 1);
+                showToast(
+                    quarantined
+                        ? '部分冲突已进入人工裁决隔离区'
+                        : '跨章冲突自愈完成'
+                );
+                void refreshAllRef.current(selectedChapterRef.current);
                 return;
             }
 
@@ -1163,9 +1601,10 @@ export function NarrateStudioRoot({
 
             if (event === 'sync:completed' || event === 'chapter_synced') {
                 const ch = asNumber(data['chapterNumber']);
+                setRevealNonce((n) => n + 1);
                 showToast(
                     ch
-                        ? `Ch.${String(ch).padStart(4, '0')} 手改同步完成`
+                        ? `第 ${ch} 章手改同步完成`
                         : '全书手改差异同步完成'
                 );
                 void refreshAllRef.current(selectedChapterRef.current);
@@ -1207,18 +1646,25 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'dream:completed') {
-                applyStageOverrides((prev) =>
-                    prev.DREAMING
-                        ? {
-                              ...prev,
-                              DREAMING: { ...prev.DREAMING, status: 'done' }
-                          }
-                        : prev
-                );
+                applyStageOverrides((prev) => {
+                    if (!prev.DREAMING) return prev;
+                    const settledSessions = updateStageSessionsToTerminal(
+                        prev.DREAMING.sessions,
+                        'completed'
+                    );
+                    return {
+                        ...prev,
+                        DREAMING: {
+                            ...prev.DREAMING,
+                            status: 'done',
+                            ...(settledSessions ? { sessions: settledSessions } : {})
+                        }
+                    };
+                });
                 setSelectedStageSession((prev) =>
                     prev && prev.stageId === 'DREAMING' ? { ...prev, status: 'done' } : prev
                 );
-                showToast('Dreaming 睡眠 VACUUM 与连续性整理完成');
+                showToast('跨章设定与伏笔整理完成');
                 void loadStatus().catch(() => undefined);
                 void loadViewsRef.current();
                 void loadRunsRef.current(selectedChapterRef.current);
@@ -1235,33 +1681,31 @@ export function NarrateStudioRoot({
 
             if (event === 'halt:waiting') {
                 setHaltWaiting(true);
-                setStatus((prev) => prev
-                    ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } }
-                    : prev);
+                setStatus((prev) =>
+                    prev ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } } : prev
+                );
                 return;
             }
 
             if (event === 'halt:completed') {
                 setHaltWaiting(false);
-                // 完成事件之后宿主会关闭 SSE，不能依赖随后 HTTP 读取来结束等待。
-                setStatus((prev) => prev ? {
-                    ...prev,
-                    runtime: { ...prev.runtime, activeTask: 'IDLE', haltRequested: true },
-                    yolo: { ...prev.yolo, running: false, stopRequested: true, currentStage: null }
-                } : prev);
+                setStatus((prev) =>
+                    prev
+                        ? {
+                              ...prev,
+                              runtime: { ...prev.runtime, activeTask: 'IDLE', haltRequested: true },
+                              yolo: { ...prev.yolo, running: false, stopRequested: true, currentStage: null }
+                          }
+                        : prev
+                );
                 return;
             }
 
             if (event === 'yolo:stop_requested') {
                 setStatus((prev) =>
-                    prev
-                        ? {
-                              ...prev,
-                              yolo: { ...prev.yolo, stopRequested: true }
-                          }
-                        : prev
+                    prev ? { ...prev, yolo: { ...prev.yolo, stopRequested: true } } : prev
                 );
-                showToast('已请求在本章安全点后停止 YOLO 连跑');
+                showToast('已请求在本章写完后平稳暂停');
                 return;
             }
 
@@ -1278,7 +1722,7 @@ export function NarrateStudioRoot({
                         : prev
                 );
                 showToast(
-                    errText ? `YOLO 已停止 (${reason}): ${errText}` : `YOLO 已在安全点停止 (${reason})`,
+                    errText ? `连写已停止 (${reason}): ${errText}` : `连写已在安全点停止 (${reason})`,
                     reason === 'SAFE_HALT' || reason === 'ERROR' ? 'error' : 'info'
                 );
                 void refreshAllRef.current(selectedChapterRef.current);
@@ -1301,7 +1745,7 @@ export function NarrateStudioRoot({
                           }
                         : prev
                 );
-                showToast(`YOLO 连跑已完成（共推进 ${completed} 章）`);
+                showToast(`连写已完成（共推进 ${completed} 章）`);
                 void refreshAllRef.current(selectedChapterRef.current);
             }
         };
@@ -1310,9 +1754,8 @@ export function NarrateStudioRoot({
         return () => {
             unsubscribe();
         };
-    }, [loadStatus, showToast]);
+    }, [applyStageOverrides, loadStatus, showToast, stashCurrentDraftIfDirty]);
 
-    // 交互操作回调：主动导航先经脏草稿守卫，确认后才执行
     const executeSelectBook = useCallback(
         async (bookRoot: string) => {
             if (switchingBookRef.current || saveInFlightRef.current) return;
@@ -1329,6 +1772,7 @@ export function NarrateStudioRoot({
             setInspectedStageId(null);
             setLiveRunChapter(null);
             setSelectedStageSession(null);
+            setLiveSessionEvents({});
             try {
                 await selectBook({ bookRoot });
                 currentBookRootRef.current = bookRoot;
@@ -1339,6 +1783,7 @@ export function NarrateStudioRoot({
                 setTelemetryView(null);
                 setSignalsView(null);
                 setHaltView(null);
+                setSyncConflictsView(null);
                 showToast('正在切换作品目录…');
             } catch (err) {
                 showToast(err instanceof Error ? err.message : String(err), 'error');
@@ -1348,11 +1793,39 @@ export function NarrateStudioRoot({
                 await refreshAll(null);
             }
         },
-        [refreshAll, showToast]
+        [applyStageOverrides, refreshAll, showToast]
     );
 
-    const executeSelectChapter = useCallback(
+    const handleSelectBook = useCallback(
+        (bookRoot: string) => {
+            if (saveInFlightRef.current || switchingBookRef.current) {
+                showToast('正在保存或切换作品，请等待操作完成后再切换');
+                return;
+            }
+            if (draftLocationRef.current && draftLocationRef.current.bookRoot !== bookRoot) {
+                stashCurrentDraftIfDirty('已自动暂存当前作品未保存草稿，切回可继续改');
+            }
+            viewCommandNonceRef.current += 1;
+            setActiveViewKind(null);
+            setExternalViewCommand({
+                viewTab: 'prose',
+                nonce: viewCommandNonceRef.current
+            });
+            void executeSelectBook(bookRoot);
+        },
+        [executeSelectBook, showToast, stashCurrentDraftIfDirty]
+    );
+
+    const handleSelectChapter = useCallback(
         (chapterNumber: number) => {
+            if (saveInFlightRef.current || switchingBookRef.current) {
+                showToast('正在保存或切换作品，请等待操作完成后再切章');
+                return;
+            }
+            if (draftLocationRef.current && draftLocationRef.current.chapterNumber !== chapterNumber) {
+                stashCurrentDraftIfDirty('已自动暂存上一章未保存手改草稿');
+            }
+            setActiveViewKind(null);
             viewCommandNonceRef.current += 1;
             setExternalViewCommand({
                 viewTab: 'prose',
@@ -1360,60 +1833,16 @@ export function NarrateStudioRoot({
             });
             void loadChapterByNumber(chapterNumber);
         },
-        [loadChapterByNumber]
-    );
-
-    const executeNavigationIntent = useCallback(
-        (intent: DraftNavigationIntent) => {
-            if (intent.kind === 'chapter') {
-                executeSelectChapter(intent.chapterNumber);
-            } else if (intent.kind === 'book') {
-                void executeSelectBook(intent.bookRoot);
-            } else {
-                setBootModalOpen(true);
-            }
-        },
-        [executeSelectBook, executeSelectChapter]
-    );
-
-    // 待确认导航（宿主 Modal：保存并继续 / 放弃修改 / 取消）
-    const [pendingNavigation, setPendingNavigation] = useState<DraftNavigationIntent | null>(null);
-    const [guardSaving, setGuardSaving] = useState(false);
-    const [guardError, setGuardError] = useState<string | null>(null);
-
-    const requestNavigation = useCallback(
-        (intent: DraftNavigationIntent) => {
-            if (saveInFlightRef.current || switchingBookRef.current) {
-                showToast('正在保存或切换作品，请等待操作完成后再导航');
-                return;
-            }
-            if (decideDraftNavigation(draftLocationRef.current, intent) === 'confirm') {
-                setGuardError(null);
-                setPendingNavigation(intent);
-                return;
-            }
-            executeNavigationIntent(intent);
-        },
-        [executeNavigationIntent, showToast]
-    );
-
-    const handleSelectBook = useCallback(
-        (bookRoot: string) => {
-            requestNavigation({ kind: 'book', bookRoot });
-        },
-        [requestNavigation]
-    );
-
-    const handleSelectChapter = useCallback(
-        (chapterNumber: number) => {
-            requestNavigation({ kind: 'chapter', chapterNumber });
-        },
-        [requestNavigation]
+        [loadChapterByNumber, showToast, stashCurrentDraftIfDirty]
     );
 
     const handleOpenNewBook = useCallback(() => {
-        requestNavigation({ kind: 'new-book' });
-    }, [requestNavigation]);
+        if (saveInFlightRef.current || switchingBookRef.current) {
+            showToast('正在保存或切换作品，请稍候');
+            return;
+        }
+        setBootModalOpen(true);
+    }, [showToast]);
 
     const handleOpenView = useCallback(
         (kind: MaterializedViewKind) => {
@@ -1429,12 +1858,14 @@ export function NarrateStudioRoot({
         [loadViews]
     );
 
-    const handleStepOne = useCallback(async () => {
-        const res = await stepChapter({
-            chapterGoal: '按既定主线与人物弧光自然推进下一章'
-        });
-        await refreshAll(res.chapterNumber);
-    }, [refreshAll]);
+    const handleStepOne = useCallback(
+        async (options?: StepChapterRequest) => {
+            const res = await stepChapter(options ?? {});
+            setRevealNonce((n) => n + 1);
+            await refreshAll(res.chapterNumber);
+        },
+        [refreshAll]
+    );
 
     const handleStartYolo = useCallback(
         async (targetChapters: number) => {
@@ -1449,8 +1880,26 @@ export function NarrateStudioRoot({
         await loadStatus();
     }, [loadStatus]);
 
+    const handleRequestHalt = useCallback(
+        async (options?: { force?: boolean }) => {
+            try {
+                await requestHalt(options);
+                showToast(
+                    options?.force
+                        ? '已发送立即中断指令，正在清理未完成草稿'
+                        : '已发送安全停机请求，将在安全检查点挂起'
+                );
+                await loadStatus();
+            } catch (err) {
+                showToast(err instanceof Error ? err.message : String(err), 'error');
+            }
+        },
+        [loadStatus, showToast]
+    );
+
     const handleSync = useCallback(async () => {
         await syncManuscripts();
+        setRevealNonce((n) => n + 1);
         await refreshAll(selectedChapterRef.current);
     }, [refreshAll]);
 
@@ -1459,35 +1908,48 @@ export function NarrateStudioRoot({
         await Promise.all([loadStatus(), loadViews()]);
     }, [loadStatus, loadViews]);
 
-    const handleHarvestVoice = useCallback(async () => {
-        if (harvestingVoice || switchingBookRef.current) return;
-        const epoch = workspaceEpochRef.current;
-        const bookRoot = currentBookRootRef.current;
-        const targetChapter =
-            selectedChapterRef.current !== null && selectedChapterRef.current > 0
-                ? selectedChapterRef.current
-                : undefined;
-        setHarvestingVoice(true);
-        try {
-            const res = await harvestVoice(targetChapter);
-            if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
-                return;
+    const handleHealConflicts = useCallback(async () => {
+        const res = await healConflicts({});
+        setRevealNonce((n) => n + 1);
+        showToast(
+            res.quarantined
+                ? '部分冲突已保留在人工裁决隔离区'
+                : '跨章冲突已自动修补并更新台账'
+        );
+        await refreshAll(selectedChapterRef.current);
+    }, [refreshAll, showToast]);
+
+    const handleHarvestVoice = useCallback(
+        async (targetChapterArg?: number) => {
+            if (switchingBookRef.current) return;
+            const epoch = workspaceEpochRef.current;
+            const bookRoot = currentBookRootRef.current;
+            const targetChapter =
+                targetChapterArg !== undefined && targetChapterArg > 0
+                    ? targetChapterArg
+                    : selectedChapterRef.current !== null && selectedChapterRef.current > 0
+                      ? selectedChapterRef.current
+                      : undefined;
+            try {
+                const res = await harvestVoice(targetChapter);
+                if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
+                    return;
+                }
+                if (res.skipped) {
+                    showToast('当前作品已有声纹标本，已跳过本次采集');
+                } else {
+                    showToast(`声纹采集完成：新增 ${res.harvestedCount} 条样本`);
+                }
+                await Promise.allSettled([loadStatus(), loadViews()]);
+            } catch (err) {
+                if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
+                    return;
+                }
+                showToast(err instanceof Error ? err.message : String(err), 'error');
             }
-            if (res.skipped) {
-                showToast('当前作品已有声纹标本，已跳过本次采集');
-            } else {
-                showToast(`声纹采集完成：新增 ${res.harvestedCount} 条样本`);
-            }
-            await Promise.allSettled([loadStatus(), loadViews()]);
-        } catch (err) {
-            if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
-                return;
-            }
-            showToast(err instanceof Error ? err.message : String(err), 'error');
-        } finally {
-            setHarvestingVoice(false);
-        }
-    }, [harvestingVoice, isCurrentWorkspace, loadStatus, loadViews, showToast]);
+        },
+        [isCurrentWorkspace, loadStatus, loadViews, showToast]
+    );
 
     const handleSaveModelRouting = useCallback(
         async (payload: SaveModelRoutingRequest) => {
@@ -1503,20 +1965,14 @@ export function NarrateStudioRoot({
                     prev
                         ? {
                               ...prev,
-                              ...(res.modelRouting !== undefined
-                                  ? { modelRouting: res.modelRouting }
-                                  : {}),
-                              ...(res.roleRouting !== undefined
-                                  ? { roleRouting: res.roleRouting }
-                                  : {}),
-                              ...(res.roleDefinitions !== undefined
-                                  ? { roleDefinitions: res.roleDefinitions }
-                                  : {})
+                              ...(res.modelRouting !== undefined ? { modelRouting: res.modelRouting } : {}),
+                              ...(res.roleRouting !== undefined ? { roleRouting: res.roleRouting } : {}),
+                              ...(res.roleDefinitions !== undefined ? { roleDefinitions: res.roleDefinitions } : {})
                           }
                         : prev
                 );
                 await loadStatus().catch(() => undefined);
-                showToast('工种模型配置已保存');
+                showToast('工种模型分配已保存');
             } catch (err) {
                 showToast(err instanceof Error ? err.message : String(err), 'error');
                 throw err;
@@ -1525,17 +1981,6 @@ export function NarrateStudioRoot({
         [isCurrentWorkspace, loadStatus, showToast]
     );
 
-    const handleRequestHalt = useCallback(async () => {
-        try {
-            await requestHalt();
-            showToast('已发送安全停机请求，将在安全检查点挂起');
-            await loadStatus();
-        } catch (err) {
-            showToast(err instanceof Error ? err.message : String(err), 'error');
-        }
-    }, [loadStatus, showToast]);
-
-    // 两个保存入口共用：已提交正文先交给渲染数据源，后续读取失败不改写保存结果。
     const handleSaveChapter = useCallback(
         async (chapterNumber: number, content: string) => {
             if (saveInFlightRef.current || switchingBookRef.current) {
@@ -1547,15 +1992,20 @@ export function NarrateStudioRoot({
             try {
                 await saveChapter({ chapterNumber, content });
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
-                // PUT 之前启动的详情和整批刷新均不能再发布旧正文或旧状态。
+                // 保存成功后清除该章内存暂存草稿
+                const nextStash = removeStashedDraft(draftStashRef.current, bookRoot, chapterNumber);
+                draftStashRef.current = nextStash;
+                setDraftStash(nextStash);
+
                 workspaceEpochRef.current += 1;
                 chapterRequestSeqRef.current += 1;
                 setChapterLoading(false);
                 setChapterDetail((prev) =>
                     currentBookRootRef.current === bookRoot && prev?.chapterNumber === chapterNumber
-                        ? { ...prev, content }
+                        ? { ...prev, content, dirty: false }
                         : prev
                 );
+                setRevealNonce((n) => n + 1);
                 void Promise.allSettled([
                     refreshAll(chapterNumber),
                     loadChapterByNumber(chapterNumber)
@@ -1567,85 +2017,45 @@ export function NarrateStudioRoot({
         [isCurrentWorkspace, loadChapterByNumber, refreshAll]
     );
 
-    // 确认弹窗「保存并继续」：busy 或保存失败时留在原地，草稿不丢、不导航
-    const handleGuardSaveAndContinue = useCallback(async () => {
-        if (saveInFlightRef.current || switchingBookRef.current) return;
-        const intent = pendingNavigation;
-        const draft = draftLocationRef.current;
-        if (!intent || !draft) {
-            setPendingNavigation(null);
-            return;
-        }
-        if (isBusy) {
-            setGuardError('引擎正在执行任务，暂时无法保存；请待任务结束后重试或放弃修改');
-            return;
-        }
-        setGuardSaving(true);
-        setGuardError(null);
-        try {
-            await handleSaveChapter(draft.chapterNumber, draft.content);
-        } catch (err) {
-            setGuardError(err instanceof Error ? err.message : String(err));
-            setGuardSaving(false);
-            return;
-        }
-        // PUT 已成功即放行导航；保存后的状态刷新失败不阻塞导航
-        setGuardSaving(false);
-        setPendingNavigation(null);
-        setDraftLocation(null);
-        draftLocationRef.current = null;
-        draftControlRef.current?.resetDraft(draft.content);
-        executeNavigationIntent(intent);
-    }, [executeNavigationIntent, handleSaveChapter, isBusy, pendingNavigation]);
-
-    // 确认弹窗「放弃修改」：立即结束编辑态并清脏标记，再执行导航
-    const handleGuardDiscardAndContinue = useCallback(() => {
-        if (saveInFlightRef.current || switchingBookRef.current) return;
-        const intent = pendingNavigation;
-        setPendingNavigation(null);
-        setGuardError(null);
-        draftControlRef.current?.resetDraft();
-        draftLocationRef.current = null;
-        setDraftLocation(null);
-        if (intent) {
-            executeNavigationIntent(intent);
-        }
-    }, [executeNavigationIntent, pendingNavigation]);
-
     const handleSubmitSignal = useCallback(
         async (payload: SubmitSignalPayload) => {
             const currentCh = status?.worldState.current_chapter ?? status?.latestChapter ?? 0;
-            const req = buildSignalPayload(payload.kind, payload.content, currentCh);
+            const req = buildSignalPayload(payload, currentCh);
             await postSignal(req);
-            await Promise.all([
-                loadViews(),
-                loadStatus()
-            ]);
+            await Promise.all([loadViews(), loadStatus()]);
             if (payload.runAfter) {
-                await handleStepOne();
+                if (payload.kind === 'FLASHBACK') {
+                    await handleStepOne({
+                        timelineMode: 'FLASHBACK',
+                        ...(payload.targetDay !== undefined ? { targetDay: payload.targetDay } : {})
+                    });
+                } else {
+                    await handleStepOne();
+                }
             }
         },
         [handleStepOne, loadStatus, loadViews, status]
     );
 
-    // 撤回纸条:后端按内容匹配真删,失败时保留队列并就地报错
-    const handleDismissSignal = useCallback(async (idx: number) => {
-        const item = mapPendingSignals(signalsView)[idx];
-        const reason = item?.reason ?? item?.raw;
-        if (!item?.created_at || !reason) {
-            showToast('该纸条缺少撤回所需的元数据', 'error');
-            return;
-        }
-        try {
-            await deleteSignal({ created_at: item.created_at, reason });
-            await loadViews();
-            showToast('纸条已撤回');
-        } catch (err) {
-            showToast(err instanceof Error ? err.message : '撤回纸条失败', 'error');
-        }
-    }, [loadViews, signalsView, showToast]);
+    const handleDismissSignal = useCallback(
+        async (idx: number) => {
+            const item = mapPendingSignals(signalsView)[idx];
+            const reason = item?.reason ?? item?.raw;
+            if (!item?.created_at || !reason) {
+                showToast('该便签缺少撤回所需的元数据', 'error');
+                return;
+            }
+            try {
+                await deleteSignal({ created_at: item.created_at, reason });
+                await loadViews();
+                showToast('已撤回便签');
+            } catch (err) {
+                showToast(err instanceof Error ? err.message : '撤回便签失败', 'error');
+            }
+        },
+        [loadViews, signalsView, showToast]
+    );
 
-    // 派生右侧与中间栏视图模型
     const activeBookSummary = useMemo(
         () => booksState.books.find((b) => b.bookRoot === (status?.bookRoot ?? booksState.currentBookRoot)),
         [booksState.books, booksState.currentBookRoot, status?.bookRoot]
@@ -1679,43 +2089,36 @@ export function NarrateStudioRoot({
     }, [entitiesView]);
 
     const inspectorOpenThreads = useMemo<OpenThreadItem[]>(() => {
-        const md = threadsView?.content ?? '';
-        if (!md.trim()) return [];
-        const items: OpenThreadItem[] = [];
-        for (const rawLine of md.split('\n')) {
-            const line = rawLine.trim();
-            if (!line || line.startsWith('# ')) continue;
-            const bulletMatch = line.match(/^(?:[-*]|\d+\.)\s+(.+)$/);
-            const headingMatch = line.match(/^##+\s+(.+)$/);
-            const text = bulletMatch?.[1] ?? headingMatch?.[1];
-            if (!text) continue;
-            const chMatch = text.match(/(?:Ch\.?|第)\s*(\d+)\s*章?/i);
+        const items = parseThreadItems(threadsView?.content).filter((t) => !t.resolved);
+        return items.map((t) => {
+            const chMatch = t.text.match(/(?:Ch\.?|第)\s*(\d+)\s*章?/i);
             const chapter = chMatch?.[1] ? Number(chMatch[1]) : undefined;
-            items.push({
-                title: text.trim(),
+            return {
+                title: t.text,
                 ...(chapter !== undefined && Number.isFinite(chapter) ? { chapter } : {})
-            });
-        }
-        return items;
+            };
+        });
     }, [threadsView]);
 
     const inspectorVolumeProgress = useMemo<VolumeProgressSnapshot | null>(() => {
         if (!status && !horizonView?.content) return null;
-        const statusExt = status as (NarrateStatusPayload & { volumeProgress?: VolumeProgressSnapshot }) | null;
-        const rawVol = statusExt?.volumeProgress;
+        const rawVol = status?.volumeProgress;
         const horizonExcerpt = horizonView?.content?.trim()
             ? horizonView.content.trim().slice(0, 240)
             : null;
-        // 只透传真实的当前卷数据；缺完成数/目标时不得用全书章号伪装卷进度
         return {
             ...(rawVol?.volumeLabel ? { volumeLabel: rawVol.volumeLabel } : {}),
             ...(rawVol?.volumeTitle ? { volumeTitle: rawVol.volumeTitle } : {}),
-            ...(rawVol?.completedChapters !== undefined
+            ...(typeof rawVol?.completedChapters === 'number'
                 ? { completedChapters: rawVol.completedChapters }
                 : {}),
-            ...(rawVol?.totalChapters !== undefined ? { totalChapters: rawVol.totalChapters } : {}),
+            ...(typeof rawVol?.totalChapters === 'number'
+                ? { totalChapters: rawVol.totalChapters }
+                : {}),
             futureHorizon: rawVol?.futureHorizon ?? horizonExcerpt,
-            ...(rawVol?.milestoneLock !== undefined ? { milestoneLock: rawVol.milestoneLock } : {})
+            ...(rawVol?.milestoneLock !== undefined && rawVol?.milestoneLock !== null
+                ? { milestoneLock: rawVol.milestoneLock }
+                : {})
         };
     }, [status, horizonView]);
 
@@ -1725,6 +2128,10 @@ export function NarrateStudioRoot({
     );
 
     const safeHaltInfo = useMemo(() => mapSafeHaltInfo(haltView?.safeHalt), [haltView]);
+    const syncConflictInfo = useMemo(
+        () => mapSyncConflictDiagnostic(syncConflictsView, haltView),
+        [haltView, syncConflictsView]
+    );
     const haltDiagnostic = useMemo(() => mapHaltDiagnostic(haltView), [haltView]);
     const pendingSignals = useMemo(() => mapPendingSignals(signalsView), [signalsView]);
 
@@ -1768,6 +2175,70 @@ export function NarrateStudioRoot({
         return merged;
     }, [chapters, historicalStageOverrides, liveRunChapter, selectedChapter, stageOverrides]);
 
+    const modelPools = useMemo(() => {
+        const routing = status?.modelRouting ?? {};
+        return {
+            strongModel: routing['strong_creative'] ?? routing['strong'] ?? '--',
+            fastModel: routing['fast_retrieval'] ?? routing['fast'] ?? '--',
+            auditModel: routing['audit'] ?? '--'
+        };
+    }, [status?.modelRouting]);
+
+    const effectivePoolRoutes = useMemo<Record<RolePoolId, string>>(
+        () => ({
+            strong_creative: status?.modelRouting?.['strong_creative'] || modelPools.strongModel || '--',
+            fast_retrieval: status?.modelRouting?.['fast_retrieval'] || modelPools.fastModel || '--',
+            audit: status?.modelRouting?.['audit'] || modelPools.auditModel || '--'
+        }),
+        [modelPools, status?.modelRouting]
+    );
+
+    const poolProviders = useMemo(
+        () => collectPoolProviders(effectivePoolRoutes, status?.roleDefinitions ?? [], status?.roleRouting),
+        [effectivePoolRoutes, status?.roleDefinitions, status?.roleRouting]
+    );
+
+    const selectedStageEffectiveModel = useMemo(() => {
+        if (!selectedStageSession) return undefined;
+        const stageId = resolveStageId(selectedStageSession.stageId) ?? 'WRITER';
+        const meta = PIPELINE_STAGE_META.find((m) => m.id === stageId);
+        if (!meta) return undefined;
+        const matchedDef: RoleDefinitionItem =
+            (status?.roleDefinitions ?? []).find(
+                (d) => d.id.trim().toLowerCase().replace('-', '_') === meta.roleId
+            ) ?? {
+                id: meta.roleId,
+                defaultPool: meta.defaultPool,
+                effectiveProvider: '',
+                effectiveModel: '--'
+            };
+        const ov =
+            status?.roleRouting?.[matchedDef.id] ??
+            status?.roleRouting?.[meta.roleId] ??
+            (meta.roleId === 'fact_checker' ? status?.roleRouting?.['fact-checker'] : undefined);
+        return resolveEffectiveRoleModelLabel(
+            matchedDef,
+            undefined,
+            ov,
+            effectivePoolRoutes,
+            poolProviders
+        );
+    }, [effectivePoolRoutes, poolProviders, selectedStageSession, status?.roleDefinitions, status?.roleRouting]);
+
+    const selectedStageAttempts = useMemo<StageViewerAttemptItem[]>(() => {
+        if (!selectedStageSession) return [];
+        const stageId = resolveStageId(selectedStageSession.stageId);
+        if (!stageId) return [];
+        const list = effectiveStages[stageId]?.sessions ?? [];
+        return list.map((item) => ({
+            sessionId: item.sessionId,
+            label: formatAttemptLabel(item),
+            status: item.status,
+            ...(item.attempt !== undefined ? { attempt: item.attempt } : {}),
+            ...(item.triggerReason !== undefined ? { triggerReason: item.triggerReason } : {})
+        }));
+    }, [effectiveStages, selectedStageSession]);
+
     const stageArtifact = useMemo<StageArtifactTelemetry>(() => {
         const sseResolved = latestSseStage
             ? latestSseStage === 'COMMITTED'
@@ -1775,6 +2246,33 @@ export function NarrateStudioRoot({
                 : resolveStageId(latestSseStage)
             : null;
         const targetStageId = inspectedStageId ?? sseResolved;
+        const assembly = status?.writerAssemblyReport;
+        const estimated =
+            assembly?.estimatedTokens && typeof assembly.estimatedTokens === 'object'
+                ? assembly.estimatedTokens
+                : undefined;
+        const assemblyFields: Partial<StageArtifactTelemetry> = {
+            ...(estimated?.staticPrefixTokens !== undefined
+                ? { staticPrefixTokens: estimated.staticPrefixTokens }
+                : {}),
+            ...(estimated?.dynamicTailTokens !== undefined
+                ? { dynamicTailTokens: estimated.dynamicTailTokens }
+                : {}),
+            ...(assembly?.budget !== undefined && assembly.budget !== null
+                ? { budgetLimitTokens: assembly.budget }
+                : {}),
+            ...(assembly?.evictionLevel !== undefined
+                ? { degradationLevel: assembly.evictionLevel }
+                : {}),
+            ...(assembly?.selectedVoiceSample?.text
+                ? {
+                      voiceLruSummary: `${assembly.selectedVoiceSample.tag ?? '声纹'} · ${assembly.selectedVoiceSample.text.slice(0, 40)}`
+                  }
+                : {}),
+            ...(assembly?.strippedSecretCount !== undefined
+                ? { strippedItemsSummary: `已隔离 ${assembly.strippedSecretCount} 项秘密与废案` }
+                : {})
+        };
 
         if (targetStageId) {
             const nodeState = effectiveStages[targetStageId];
@@ -1787,15 +2285,13 @@ export function NarrateStudioRoot({
                           selectedStageIndex: idx >= 0 ? idx : 0,
                           stageName: meta?.label ?? targetStageId,
                           stageStatus: nodeState?.badge ?? nodeState?.status ?? '就绪',
-                          stageSummary:
-                              nodeState?.summary ?? DEFAULT_STAGE_SUMMARIES[targetStageId]
+                          stageSummary: nodeState?.summary ?? DEFAULT_STAGE_SUMMARIES[targetStageId]
                       };
             return {
                 ...base,
+                ...assemblyFields,
                 ...(nodeState?.sessionId ? { sessionId: nodeState.sessionId } : {}),
-                ...(nodeState?.sessions && nodeState.sessions.length > 0
-                    ? { sessions: nodeState.sessions }
-                    : {})
+                ...(nodeState?.sessions && nodeState.sessions.length > 0 ? { sessions: nodeState.sessions } : {})
             };
         }
 
@@ -1805,10 +2301,49 @@ export function NarrateStudioRoot({
             allSessions.length > 0 ? allSessions[allSessions.length - 1]!.sessionId : null;
         return {
             ...base,
+            ...assemblyFields,
             ...(latestSession ? { sessionId: latestSession } : {}),
             ...(allSessions.length > 0 ? { sessions: allSessions } : {})
         };
-    }, [effectiveStages, inspectedStageId, latestSseStage]);
+    }, [effectiveStages, inspectedStageId, latestSseStage, status?.writerAssemblyReport]);
+
+    const effectiveFactChecker = useMemo<FactCheckerTelemetry>(() => {
+        const last = status?.lastCheckerResult;
+        if (!last) return factChecker;
+        const statusFindings: FactCheckDetailItem[] = (last.issues ?? []).map((issue) => ({
+            claim: issue.description ?? issue.quote_draft ?? '核查项',
+            ...(issue.source_ref !== undefined ? { sourceRef: issue.source_ref } : {}),
+            verified: false,
+            ...(issue.quote_source !== undefined ? { reason: issue.quote_source } : {})
+        }));
+        return {
+            totalChecked: Math.max(factChecker.totalChecked, 1),
+            verifiedPassCount: Math.max(factChecker.verifiedPassCount, last.passed ? 1 : 0),
+            filteredOutCount: Math.max(factChecker.filteredOutCount, last.filteredOutCount ?? 0),
+            blockedCount: Math.max(factChecker.blockedCount ?? 0, last.replanCount + last.rewriteCount),
+            ...(statusFindings.length > 0
+                ? { recentFindings: statusFindings }
+                : factChecker.recentFindings
+                  ? { recentFindings: factChecker.recentFindings }
+                  : {})
+        };
+    }, [factChecker, status?.lastCheckerResult]);
+
+    const effectiveSpotlightQueue = useMemo<SpotlightQueueItem[] | null>(() => {
+        if (!status || status.spotlightQueue === undefined) return null;
+        return status.spotlightQueue.map((item, idx) => {
+            const raw = item as Record<string, unknown>;
+            const entityId = asString(item.entity_id) ?? asString(raw['entityId']) ?? `entity-${idx}`;
+            const label = asString(raw['label']) ?? asString(item.reason) ?? entityId;
+            const pct = asNumber(raw['progressPct']) ?? 100;
+            return {
+                entityId,
+                label,
+                progressPct: pct,
+                triggered: Boolean(raw['triggered'])
+            };
+        });
+    }, [status]);
 
     const handleSelectStageSession = useCallback((selection: StageSessionSelection) => {
         const resolved = resolveStageId(selection.stageId);
@@ -1816,7 +2351,7 @@ export function NarrateStudioRoot({
             setInspectedStageId(resolved);
         }
         setSelectedStageSession(selection);
-        setRightTab('session');
+        setRightTab('trace');
         setRightOpen(true);
     }, []);
 
@@ -1825,9 +2360,7 @@ export function NarrateStudioRoot({
             let matchedId: PipelineStageId | undefined;
             let matchedAttempt: StageAttemptSession | undefined;
             for (const id of STAGE_SEQUENCE) {
-                const found = effectiveStages[id]?.sessions?.find(
-                    (item) => item.sessionId === sessionId
-                );
+                const found = effectiveStages[id]?.sessions?.find((item) => item.sessionId === sessionId);
                 if (found) {
                     matchedId = id;
                     matchedAttempt = found;
@@ -1835,9 +2368,7 @@ export function NarrateStudioRoot({
                 }
             }
             if (!matchedId) {
-                matchedId = STAGE_SEQUENCE.find(
-                    (id) => effectiveStages[id]?.sessionId === sessionId
-                );
+                matchedId = STAGE_SEQUENCE.find((id) => effectiveStages[id]?.sessionId === sessionId);
             }
             const meta = matchedId
                 ? PIPELINE_STAGE_META.find((item) => item.id === matchedId)
@@ -1846,7 +2377,7 @@ export function NarrateStudioRoot({
             const parentSessionId = matchedAttempt?.parentSessionId ?? nodeState?.parentSessionId;
             const mode = matchedAttempt?.mode ?? nodeState?.mode;
             const runId = matchedAttempt?.runId ?? nodeState?.runId;
-            const status = matchedAttempt
+            const nodeStatus = matchedAttempt
                 ? mapRunStatusToStageStatus(matchedAttempt.status)
                 : (nodeState?.status ?? 'done');
             handleSelectStageSession({
@@ -1856,32 +2387,21 @@ export function NarrateStudioRoot({
                 ...(parentSessionId !== undefined ? { parentSessionId } : {}),
                 ...(mode !== undefined ? { mode } : {}),
                 ...(runId !== undefined ? { runId } : {}),
-                status
+                status: nodeStatus
             });
         },
         [effectiveStages, handleSelectStageSession, stageArtifact.stageName]
     );
 
-    const warpedHorizonCount = useMemo(() => {
-        const md = horizonView?.content ?? '';
-        const matches = md.match(/WARPED/gi);
-        return matches ? matches.length : 0;
-    }, [horizonView]);
+    const parsedHorizonCounts = useMemo(
+        () => parseHorizonEntries(horizonView?.content),
+        [horizonView?.content]
+    );
 
-    const openThreadsCount = useMemo(() => {
-        const md = threadsView?.content ?? '';
-        const matches = md.match(/^[-*]\s+|^\d+\.\s+|^##\s+/gm);
-        return matches ? matches.length : 0;
-    }, [threadsView]);
-
-    const modelPools = useMemo(() => {
-        const routing = status?.modelRouting ?? {};
-        return {
-            strongModel: routing['strong_creative'] ?? routing['strong'] ?? 'strong',
-            fastModel: routing['fast_retrieval'] ?? routing['fast'] ?? 'fast',
-            auditModel: routing['audit'] ?? 'audit'
-        };
-    }, [status?.modelRouting]);
+    const openThreadsCount = useMemo(
+        () => parseThreadItems(threadsView?.content).filter((t) => !t.resolved).length,
+        [threadsView?.content]
+    );
 
     const centerChapterDetail: CenterWorkbenchProps['chapterDetail'] = useMemo(() => {
         if (!chapterDetail) return null;
@@ -1894,25 +2414,85 @@ export function NarrateStudioRoot({
             sha256: chapterDetail.sha256,
             diffFromHead: chapterDetail.diffFromHead,
             outlineText: chapterDetail.outlineText,
-            outlineStatus: chapterDetail.outlineStatus
+            outlineStatus: chapterDetail.outlineStatus,
+            volumeLabel: status?.volumeProgress?.volumeLabel,
+            featCommitSha: status?.featCommitSha ?? status?.recentCommits?.featCommitSha ?? undefined,
+            stateCommitSha: status?.stateCommitSha ?? status?.recentCommits?.stateCommitSha ?? undefined
         };
-    }, [chapterDetail, chapters]);
+    }, [chapterDetail, chapters, status?.featCommitSha, status?.recentCommits, status?.stateCommitSha, status?.volumeProgress?.volumeLabel]);
 
-    const isNarrow = containerWidth < 720;
+    const currentBookRoot = status?.bookRoot ?? booksState.currentBookRoot ?? '';
+    const currentStashedDraft = useMemo(() => {
+        if (!currentBookRoot || selectedChapter === null || selectedChapter <= 0) return null;
+        return getStashedDraft(draftStash, currentBookRoot, selectedChapter);
+    }, [currentBookRoot, draftStash, selectedChapter]);
+
+    const effectiveGateViolations = useMemo(() => {
+        if (gateViolations.length > 0) return gateViolations;
+        return safeHaltInfo?.gateViolations ?? [];
+    }, [gateViolations, safeHaltInfo?.gateViolations]);
+
+    const isWide = containerWidth >= 1200;
+    const isCompact = containerWidth < 820;
+    const layoutClass = isWide
+        ? 'ns-layout-wide'
+        : isCompact
+          ? 'ns-layout-compact'
+          : 'ns-layout-medium';
     const shellStyle = {
-        '--ns-right-w': rightOpen && !isNarrow ? (containerWidth < 1040 ? '296px' : '332px') : '0px'
+        '--ns-right-w': rightOpen && !isCompact ? '340px' : '0px'
     } as React.CSSProperties;
+
+    const navChapters = useMemo(
+        () =>
+            chapters.map((ch) => ({
+                ...ch,
+                volumeLabel: status?.volumeProgress?.volumeLabel,
+                conflict:
+                    Boolean(safeHaltInfo?.chapter === ch.chapterNumber) ||
+                    Boolean(syncConflictInfo?.rightRef?.includes(String(ch.chapterNumber)))
+            })),
+        [chapters, safeHaltInfo?.chapter, status?.volumeProgress?.volumeLabel, syncConflictInfo?.rightRef]
+    );
+
+    const activeStageAttemptCount = selectedStageSession ? 1 : 0;
 
     return (
         <div
             ref={shellRef}
-            className={`ns-studio-shell ${rightOpen ? 'ns-right-open' : 'ns-right-closed'} ${isNarrow ? 'ns-narrow' : ''}`}
+            className={`ns-studio-shell ${layoutClass} ${rightOpen ? 'ns-right-open' : 'ns-right-closed'}`}
             style={shellStyle}
         >
+            {isWide ? (
+                <LeftBookNav
+                    currentBookRoot={currentBookRoot}
+                    currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
+                    currentSlug={status?.bookSlug ?? activeBookSummary?.slug ?? ''}
+                    chapterCount={status?.chapterCount ?? chapters.length}
+                    storyDay={status?.worldState.story_day ?? 1}
+                    walPhase={status?.walPhase ?? 'IDLE'}
+                    books={booksState.books}
+                    chapters={navChapters}
+                    selectedChapter={selectedChapter}
+                    entityCount={entitiesView?.entities.length ?? status?.entityCount ?? 0}
+                    coldArchiveCount={entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0}
+                    warpedHorizonCount={parsedHorizonCounts.warped.length}
+                    pendingHorizonCount={parsedHorizonCounts.pending.length}
+                    openThreadsCount={openThreadsCount}
+                    activeViewKind={activeViewKind}
+                    loading={loading}
+                    currentVolumeLabel={status?.volumeProgress?.volumeLabel}
+                    onSelectBook={handleSelectBook}
+                    onNewBook={handleOpenNewBook}
+                    onSelectChapter={handleSelectChapter}
+                    onOpenView={handleOpenView}
+                />
+            ) : null}
+
             <CenterWorkbench
                 bookTitle={status?.title ?? activeBookSummary?.title}
                 bookSlug={status?.bookSlug ?? activeBookSummary?.slug}
-                currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot ?? undefined}
+                currentBookRoot={currentBookRoot}
                 books={booksState.books}
                 currentChapter={status?.worldState.current_chapter ?? status?.latestChapter ?? 0}
                 selectedChapter={selectedChapter ?? undefined}
@@ -1928,6 +2508,8 @@ export function NarrateStudioRoot({
                 stages={effectiveStages}
                 latestSseStage={latestSseStage}
                 safeHalt={safeHaltInfo}
+                syncConflict={syncConflictInfo}
+                gateViolations={effectiveGateViolations}
                 pendingSignals={pendingSignals}
                 pendingSignalsCount={pendingSignals.length}
                 materializedViews={{
@@ -1938,14 +2520,44 @@ export function NarrateStudioRoot({
                 }}
                 dirtyChaptersCount={dirtyChaptersCount}
                 externalViewCommand={externalViewCommand}
+                showCompactNav={!isWide}
                 rightOpen={rightOpen}
-                hasSafeHalt={Boolean(safeHaltInfo)}
+                hasSafeHalt={Boolean(safeHaltInfo || syncConflictInfo)}
+                currentVolumeLabel={status?.volumeProgress?.volumeLabel}
+                storyDay={status?.worldState.story_day ?? 1}
+                parallelWindowId={activeParallelWindowId || undefined}
+                roleDefinitions={status?.roleDefinitions}
+                roleRouting={status?.roleRouting}
+                modelRouting={status?.modelRouting}
+                poolRoutes={effectivePoolRoutes}
+                nextChapterOptions={status?.nextChapterOptions}
+                revealNonce={revealNonce}
+                stashedDraft={currentStashedDraft}
+                onRestoreStashedDraft={(entry) => {
+                    const nextStash = removeStashedDraft(
+                        draftStashRef.current,
+                        entry.bookRoot,
+                        entry.chapterNumber
+                    );
+                    draftStashRef.current = nextStash;
+                    setDraftStash(nextStash);
+                }}
+                onDiscardStashedDraft={(bookRoot, chapterNumber) => {
+                    const nextStash = removeStashedDraft(
+                        draftStashRef.current,
+                        bookRoot,
+                        chapterNumber
+                    );
+                    draftStashRef.current = nextStash;
+                    setDraftStash(nextStash);
+                    showToast('已丢弃暂存手改，恢复定稿原文');
+                }}
                 onSelectBook={handleSelectBook}
                 onNewBook={handleOpenNewBook}
                 onToggleRight={() => setRightOpen((prev) => !prev)}
-                onOpenInspector={() => {
-                    setRightOpen(true);
-                    setRightTab('insp');
+                onOpenCodex={(kind) => {
+                    setActiveViewKind(kind);
+                    void loadViews();
                 }}
                 onDismissSignal={(idx) => {
                     void handleDismissSignal(idx);
@@ -1954,8 +2566,19 @@ export function NarrateStudioRoot({
                 onStepOne={handleStepOne}
                 onStartYolo={handleStartYolo}
                 onStopYolo={handleStopYolo}
+                onRequestHalt={handleRequestHalt}
                 onSync={handleSync}
                 onDream={handleDream}
+                onHarvestVoice={handleHarvestVoice}
+                onHealConflicts={handleHealConflicts}
+                onOpenAdvanceVolumeModal={() => {
+                    setVolumeError(null);
+                    setVolumeModalOpen(true);
+                }}
+                onOpenParallelModal={() => {
+                    setParallelError(null);
+                    setParallelModalOpen(true);
+                }}
                 onSaveChapter={handleSaveChapter}
                 onSubmitSignal={handleSubmitSignal}
                 onRefreshViews={loadViews}
@@ -1970,7 +2593,7 @@ export function NarrateStudioRoot({
                 onSelectStageSession={handleSelectStageSession}
             />
 
-            {isNarrow && rightOpen ? (
+            {isCompact && rightOpen ? (
                 <div
                     className="ns-drawer-backdrop"
                     aria-hidden="true"
@@ -1978,346 +2601,304 @@ export function NarrateStudioRoot({
                 />
             ) : null}
 
-            {/* 右侧四页签辅助栏：目录 | 检查器 | 会话 | 工具 */}
-            <aside className="ns-right" aria-label="右侧辅助栏">
-                <div className="ns-r-head">
-                    <div className="ns-r-tabs" role="tablist" aria-label="作品辅助视图" onKeyDown={handleTabKeyDown}>
-                        <button
-                            type="button"
-                            role="tab"
-                            id="ns-right-tab-toc"
-                            aria-controls="ns-right-panel"
-                            tabIndex={rightTab === 'toc' ? 0 : -1}
-                            aria-selected={rightTab === 'toc'}
-                            className={`ns-r-tab ${rightTab === 'toc' ? 'on' : ''}`}
-                            onClick={() => setRightTab('toc')}
+            {rightOpen ? (
+                <aside
+                    className={`ns-right-pane${isCompact ? ' ns-right-drawer' : ''}`}
+                    aria-label="右侧状态与配置栏"
+                >
+                    <div className="ns-right-top">
+                        <div
+                            className="ns-right-tabs-group"
+                            role="tablist"
+                            aria-label="作品辅助视图"
+                            onKeyDown={handleTabKeyDown}
                         >
-                            目录
-                        </button>
-                        <button
-                            type="button"
-                            role="tab"
-                            id="ns-right-tab-insp"
-                            aria-controls="ns-right-panel"
-                            tabIndex={rightTab === 'insp' ? 0 : -1}
-                            aria-selected={rightTab === 'insp'}
-                            className={`ns-r-tab ${rightTab === 'insp' ? 'on' : ''}`}
-                            onClick={() => setRightTab('insp')}
-                        >
-                            检查器
-                            {safeHaltInfo ? <span className="ns-r-dot" aria-hidden="true" /> : null}
-                        </button>
-                        <button
-                            type="button"
-                            role="tab"
-                            id="ns-right-tab-session"
-                            aria-controls="ns-right-panel"
-                            tabIndex={rightTab === 'session' ? 0 : -1}
-                            aria-selected={rightTab === 'session'}
-                            className={`ns-r-tab ${rightTab === 'session' ? 'on' : ''}`}
-                            onClick={() => setRightTab('session')}
-                        >
-                            会话
-                            {selectedStageSession?.status === 'active' ? (
-                                <span className="ns-r-dot" aria-hidden="true" />
-                            ) : null}
-                        </button>
-                        <button
-                            type="button"
-                            role="tab"
-                            id="ns-right-tab-tools"
-                            aria-controls="ns-right-panel"
-                            tabIndex={rightTab === 'tools' ? 0 : -1}
-                            aria-selected={rightTab === 'tools'}
-                            className={`ns-r-tab ${rightTab === 'tools' ? 'on' : ''}`}
-                            onClick={() => setRightTab('tools')}
-                        >
-                            工具
-                        </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                id="ns-right-tab-trace"
+                                aria-controls="ns-right-panel"
+                                tabIndex={rightTab === 'trace' ? 0 : -1}
+                                aria-selected={rightTab === 'trace'}
+                                className={`ns-right-tab${rightTab === 'trace' ? ' ns-active' : ''}`}
+                                onClick={() => setRightTab('trace')}
+                            >
+                                思考过程
+                                {activeStageAttemptCount > 0 && selectedStageSession?.status === 'active' ? (
+                                    <span className="ns-right-tab-dot ns-dot-live" aria-hidden="true" />
+                                ) : null}
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                id="ns-right-tab-status"
+                                aria-controls="ns-right-panel"
+                                tabIndex={rightTab === 'status' ? 0 : -1}
+                                aria-selected={rightTab === 'status'}
+                                className={`ns-right-tab${rightTab === 'status' ? ' ns-active' : ''}`}
+                                onClick={() => setRightTab('status')}
+                            >
+                                运行状态
+                                {safeHaltInfo || syncConflictInfo ? (
+                                    <span className="ns-right-tab-dot" aria-hidden="true" />
+                                ) : null}
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                id="ns-right-tab-routing"
+                                aria-controls="ns-right-panel"
+                                tabIndex={rightTab === 'routing' ? 0 : -1}
+                                aria-selected={rightTab === 'routing'}
+                                className={`ns-right-tab${rightTab === 'routing' ? ' ns-active' : ''}`}
+                                onClick={() => setRightTab('routing')}
+                            >
+                                模型分配
+                            </button>
+                        </div>
+                        {isCompact ? (
+                            <button
+                                type="button"
+                                className="ns-btn ns-btn-icon-only"
+                                onClick={() => setRightOpen(false)}
+                                aria-label="关闭右侧面板"
+                            >
+                                ×
+                            </button>
+                        ) : null}
                     </div>
-                    <button
-                        type="button"
-                        className="ns-icon-btn"
-                        onClick={() => setRightOpen(false)}
-                        title="收起右侧辅助栏"
-                        aria-label="收起右侧辅助栏"
+
+                    <div
+                        className="ns-right-scroll"
+                        id="ns-right-panel"
+                        role="tabpanel"
+                        aria-labelledby={`ns-right-tab-${rightTab}`}
+                        tabIndex={0}
                     >
-                        ×
-                    </button>
-                </div>
+                        {rightTab === 'trace' ? (
+                            <StageSessionViewer
+                                selection={selectedStageSession}
+                                sessionsService={sessionsService}
+                                SessionProvider={SessionProvider}
+                                renderStageConversation={renderStageConversation}
+                                effectiveModelLabel={selectedStageEffectiveModel}
+                                attemptSessions={selectedStageAttempts}
+                                onSelectAttemptSession={handleInspectStageSessionById}
+                                liveEvents={
+                                    selectedStageSession
+                                        ? liveSessionEvents[selectedStageSession.sessionId]
+                                        : undefined
+                                }
+                                onClose={() => setRightTab('status')}
+                            />
+                        ) : null}
 
-                <div className="ns-r-body" id="ns-right-panel" role="tabpanel" aria-labelledby={`ns-right-tab-${rightTab}`} tabIndex={0}>
-                    {rightTab === 'toc' ? (
-                        <LeftBookNav
-                            embedded
-                            currentBookRoot={status?.bookRoot ?? booksState.currentBookRoot ?? ''}
-                            currentTitle={status?.title ?? activeBookSummary?.title ?? ''}
-                            currentSlug={status?.bookSlug ?? activeBookSummary?.slug ?? ''}
-                            chapterCount={status?.chapterCount ?? chapters.length}
-                            storyDay={status?.worldState.story_day ?? 0}
-                            walPhase={status?.walPhase ?? 'IDLE'}
-                            books={booksState.books}
-                            chapters={chapters}
-                            selectedChapter={selectedChapter}
-                            entityCount={entitiesView?.entities.length ?? status?.entityCount ?? 0}
-                            coldArchiveCount={entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0}
-                            warpedHorizonCount={warpedHorizonCount}
-                            openThreadsCount={openThreadsCount}
-                            activeViewKind={activeViewKind}
-                            loading={loading}
-                            onSelectBook={handleSelectBook}
-                            onNewBook={handleOpenNewBook}
-                            onSelectChapter={(ch) => {
-                                handleSelectChapter(ch);
-                                if (isNarrow) setRightOpen(false);
-                            }}
-                            onOpenView={(kind) => {
-                                handleOpenView(kind);
-                                if (isNarrow) setRightOpen(false);
-                            }}
-                        />
-                    ) : null}
-
-                    {rightTab === 'insp' ? (
-                        <RightOpsInspector
-                            walLock={{
-                                walPhase: status?.walPhase ?? 'IDLE',
-                                timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
-                                txLockStatus: activeTask !== 'IDLE' ? 'locked' : 'free',
-                                txLockHolder: activeTask !== 'IDLE' ? activeTask : null,
-                                lastCommittedChapter: status?.lastCommittedChapter ?? 0,
-                                activeChapter: status?.activeChapter ?? null
-                            }}
-                            modelPool={{
-                                fastModel: modelPools.fastModel,
-                                strongModel: modelPools.strongModel,
-                                auditModel: modelPools.auditModel,
-                                inputTokens: aggregateTokens.inputTokens,
-                                cacheReadTokens: aggregateTokens.cacheReadTokens,
-                                cacheWriteTokens: aggregateTokens.cacheWriteTokens,
-                                outputTokens: aggregateTokens.outputTokens
-                            }}
-                            stageArtifact={stageArtifact}
-                            proseGate={{
-                                mattr500: latestMetrics.mattr500,
-                                kontoyiannisEntropy: latestMetrics.kontoyiannisEntropy,
-                                sentenceLengthCv: latestMetrics.sentenceLengthCv,
-                                clicheDensityPer1k: latestMetrics.clicheDensityPer1k,
-                                recentViolations: gateViolations
-                            }}
-                            factChecker={factChecker}
-                            dreaming={{
-                                dirtyEntityCount: null,
-                                dirtyThreshold: null,
-                                coldArchiveCount: entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
-                                spotlightQueue: null
-                            }}
-                            haltDiagnostic={haltDiagnostic}
-                            modelRouting={status?.modelRouting ?? null}
-                            entities={inspectorEntities}
-                            openThreads={inspectorOpenThreads}
-                            volumeProgress={inspectorVolumeProgress}
-                            busy={isBusy}
-                            onSelectEntity={() => {
-                                handleOpenView('entities');
-                                if (isNarrow) setRightOpen(false);
-                            }}
-                            onSelectChapter={(ch) => {
-                                handleSelectChapter(ch);
-                                if (isNarrow) setRightOpen(false);
-                            }}
-                            onTriggerDreaming={() => {
-                                void handleDream().catch((err) => {
-                                    showToast(err instanceof Error ? err.message : String(err), 'error');
-                                });
-                            }}
-                            onInspectHalt={() => {
-                                const epoch = workspaceEpochRef.current;
-                                void fetchViewHalt().then((nextHalt) => {
-                                    if (!isCurrentWorkspace(epoch)) return;
-                                    setHaltView(nextHalt);
-                                    const diag = mapHaltDiagnostic(nextHalt);
-                                    if (diag) {
-                                        showToast(`${diag.kind}: ${diag.reason}`, 'error');
-                                    }
-                                });
-                            }}
-                            onInspectStageSession={handleInspectStageSessionById}
-                        />
-                    ) : null}
-
-                    {rightTab === 'session' ? (
-                        <StageSessionViewer
-                            selection={selectedStageSession}
-                            sessionsService={sessionsService}
-                            SessionProvider={SessionProvider}
-                            renderStageConversation={renderStageConversation}
-                            onClose={() => setRightTab('insp')}
-                        />
-                    ) : null}
-
-                    {rightTab === 'tools' ? (
-                        <div className="ns-tool-cards" aria-label="运维工具与模型池">
-                            <button
-                                type="button"
-                                className="ns-tool-card"
-                                disabled={isBusy}
-                                onClick={() => {
-                                    void handleSync()
-                                        .then(() => showToast('已完成手改差异扫描与状态 Sync'))
-                                        .catch((err) =>
-                                            showToast(err instanceof Error ? err.message : String(err), 'error')
-                                        );
+                        {rightTab === 'status' ? (
+                            <RightOpsInspector
+                                walLock={{
+                                    walPhase: status?.walPhase ?? 'IDLE',
+                                    timelineMode: String(status?.worldState.timeline_mode ?? 'MAINLINE'),
+                                    txLockStatus:
+                                        status?.txLockHeld !== undefined
+                                            ? status.txLockHeld
+                                                ? 'locked'
+                                                : 'free'
+                                            : activeTask !== 'IDLE'
+                                              ? 'locked'
+                                              : 'free',
+                                    txLockHolder:
+                                        status?.txLockHeld || activeTask !== 'IDLE'
+                                            ? activeTask
+                                            : null,
+                                    lastCommittedChapter: status?.lastCommittedChapter ?? 0,
+                                    activeChapter: status?.activeChapter ?? null,
+                                    featCommitSha:
+                                        status?.featCommitSha ??
+                                        status?.recentCommits?.featCommitSha ??
+                                        centerChapterDetail?.featCommitSha ??
+                                        null,
+                                    stateCommitSha:
+                                        status?.stateCommitSha ??
+                                        status?.recentCommits?.stateCommitSha ??
+                                        centerChapterDetail?.stateCommitSha ??
+                                        null
                                 }}
-                            >
-                                <span className="ns-tool-icon" aria-hidden="true">↻</span>
-                                <span>
-                                    <b>
-                                        手动 Sync
-                                        {dirtyChaptersCount > 0 ? ` (${dirtyChaptersCount} 处待同步)` : ''}
-                                    </b>
-                                    <small>扫描 SHA-256 与 Git Diff，增量刷新物化视图</small>
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                className="ns-tool-card"
-                                disabled={isBusy}
-                                onClick={() => {
-                                    void handleDream()
-                                        .then(() => showToast('已完成睡眠 VACUUM 与连续性整理'))
-                                        .catch((err) =>
-                                            showToast(err instanceof Error ? err.message : String(err), 'error')
-                                        );
+                                modelPool={{
+                                    fastModel: modelPools.fastModel,
+                                    strongModel: modelPools.strongModel,
+                                    auditModel: modelPools.auditModel,
+                                    inputTokens: aggregateTokens.inputTokens,
+                                    cacheReadTokens: aggregateTokens.cacheReadTokens,
+                                    cacheWriteTokens: aggregateTokens.cacheWriteTokens,
+                                    outputTokens: aggregateTokens.outputTokens
                                 }}
-                            >
-                                <span className="ns-tool-icon" aria-hidden="true">☾</span>
-                                <span>
-                                    <b>手动 Dreaming</b>
-                                    <small>触发离线 VACUUM 与跨章自愈整理</small>
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                className="ns-tool-card"
-                                disabled={isBusy || harvestingVoice}
-                                onClick={() => {
-                                    void handleHarvestVoice();
+                                stageArtifact={stageArtifact}
+                                proseGate={{
+                                    mattr500: latestMetrics.mattr500,
+                                    kontoyiannisEntropy: latestMetrics.kontoyiannisEntropy,
+                                    sentenceLengthCv: latestMetrics.sentenceLengthCv,
+                                    clicheDensityPer1k: latestMetrics.clicheDensityPer1k,
+                                    recentViolations: gateViolations
                                 }}
-                            >
-                                <span className="ns-tool-icon" aria-hidden="true">♪</span>
-                                <span>
-                                    <b>{harvestingVoice ? '正在采集声纹…' : '声纹采集 (Voice Harvest)'}</b>
-                                    <small>
-                                        {selectedChapter
-                                            ? `从 Ch.${String(selectedChapter).padStart(4, '0')} 提取人物对话声纹标本`
-                                            : '从当前最新章节提取人物对话声纹标本'}
-                                    </small>
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                className="ns-tool-card ns-tool-card-danger"
-                                onClick={() => {
-                                    void handleRequestHalt();
+                                factChecker={effectiveFactChecker}
+                                dreaming={{
+                                    dirtyEntityCount: status?.dirtyEntityCount ?? null,
+                                    dirtyThreshold: status?.dirtyEntityThreshold ?? null,
+                                    coldArchiveCount:
+                                        entitiesView?.coldArchiveCount ?? status?.coldArchiveCount ?? 0,
+                                    spotlightQueue: effectiveSpotlightQueue,
+                                    accumulatedWords:
+                                        status?.dreamWatermark?.accumulated_words_since_dream
                                 }}
-                            >
-                                <span className="ns-tool-icon" aria-hidden="true">■</span>
-                                <span>
-                                    <b>安全停机 (Safe-Point Halt)</b>
-                                    <small>请求在当前原子事务检查点安全挂起</small>
-                                </span>
-                            </button>
+                                dreamWatermark={status?.dreamWatermark ?? null}
+                                selectedVoiceSample={
+                                    status?.writerAssemblyReport?.selectedVoiceSample ?? null
+                                }
+                                strippedSecretCount={
+                                    status?.writerAssemblyReport?.strippedSecretCount
+                                }
+                                haltDiagnostic={haltDiagnostic}
+                                modelRouting={status?.modelRouting ?? null}
+                                entities={inspectorEntities}
+                                openThreads={inspectorOpenThreads}
+                                volumeProgress={inspectorVolumeProgress}
+                                busy={isBusy}
+                                onSelectEntity={() => {
+                                    handleOpenView('entities');
+                                    if (isCompact) setRightOpen(false);
+                                }}
+                                onSelectChapter={(ch) => {
+                                    handleSelectChapter(ch);
+                                    if (isCompact) setRightOpen(false);
+                                }}
+                                onTriggerDreaming={() => {
+                                    void handleDream().catch((err) => {
+                                        showToast(err instanceof Error ? err.message : String(err), 'error');
+                                    });
+                                }}
+                                onInspectHalt={() => {
+                                    const epoch = workspaceEpochRef.current;
+                                    void fetchViewHalt().then((nextHalt) => {
+                                        if (!isCurrentWorkspace(epoch)) return;
+                                        setHaltView(nextHalt);
+                                        const diag = mapHaltDiagnostic(nextHalt);
+                                        if (diag) {
+                                            showToast(`${diag.kind}: ${diag.reason}`, 'error');
+                                        }
+                                    });
+                                }}
+                                onInspectStageSession={handleInspectStageSessionById}
+                            />
+                        ) : null}
 
-                            <section className="ns-pool-card" aria-label="当前三池模型路由">
-                                <div className="ns-pool-card-title">当前三池模型路由</div>
-                                <div className="ns-pool-item">
-                                    <div>
-                                        <b>强创作池</b>
-                                        <small>Planner · Writer</small>
-                                    </div>
-                                    <span className="ns-mono">{modelPools.strongModel}</span>
-                                </div>
-                                <div className="ns-pool-item">
-                                    <div>
-                                        <b>检索快池</b>
-                                        <small>Librarian · Extractor</small>
-                                    </div>
-                                    <span className="ns-mono">{modelPools.fastModel}</span>
-                                </div>
-                                <div className="ns-pool-item">
-                                    <div>
-                                        <b>异构核查池</b>
-                                        <small>Fact Checker</small>
-                                    </div>
-                                    <span className="ns-mono">{modelPools.auditModel}</span>
-                                </div>
-                            </section>
-
+                        {rightTab === 'routing' ? (
                             <RoleRoutingEditor
                                 resetKey={status?.bookRoot ?? null}
-                                poolRoutes={{
-                                    strong_creative:
-                                        status?.modelRouting?.['strong_creative'] ||
-                                        modelPools.strongModel ||
-                                        '--',
-                                    fast_retrieval:
-                                        status?.modelRouting?.['fast_retrieval'] ||
-                                        modelPools.fastModel ||
-                                        '--',
-                                    audit:
-                                        status?.modelRouting?.['audit'] ||
-                                        modelPools.auditModel ||
-                                        '--'
-                                }}
+                                poolRoutes={effectivePoolRoutes}
+                                modelRouting={status?.modelRouting ?? null}
                                 roleRouting={status?.roleRouting ?? null}
                                 roleDefinitions={status?.roleDefinitions ?? null}
                                 availableModels={status?.availableModels ?? null}
                                 busy={isBusy}
                                 onSaveModelRouting={handleSaveModelRouting}
                             />
-                        </div>
-                    ) : null}
-                </div>
-            </aside>
+                        ) : null}
+                    </div>
+                </aside>
+            ) : null}
 
             <BootBookModal
                 open={bootModalOpen}
                 onClose={() => setBootModalOpen(false)}
                 onSubmitBoot={(payload) => bootBook(payload)}
                 onBootSuccess={(data) => {
+                    stashCurrentDraftIfDirty();
                     workspaceEpochRef.current += 1;
                     chapterRequestSeqRef.current += 1;
                     currentBookRootRef.current = data.bookRoot;
                     setChapterDetail(null);
+                    setSelectedChapter(null);
                     showToast(`新书编译完成：${data.bookRoot}`);
                     void refreshAll(null);
                 }}
             />
 
-            {/* 未保存草稿导航确认（目录/上下章/检查器跳章/切作品/开新书共用） */}
-            <DraftGuardModal
-                open={pendingNavigation !== null}
-                intent={pendingNavigation}
-                draftChapter={draftLocation?.chapterNumber ?? null}
-                bookTitle={status?.title ?? activeBookSummary?.title}
-                saving={guardSaving}
-                error={guardError}
-                onSave={() => {
-                    void handleGuardSaveAndContinue();
-                }}
-                onDiscard={handleGuardDiscardAndContinue}
-                onCancel={() => {
-                    if (saveInFlightRef.current) return;
-                    setPendingNavigation(null);
-                    setGuardError(null);
+            <AdvanceVolumeModal
+                open={volumeModalOpen}
+                currentVolumeLabel={status?.volumeProgress?.volumeLabel}
+                entities={inspectorEntities.map((ent) => ({
+                    id: ent.id,
+                    name: ent.name,
+                    ...(ent.role ? { role: ent.role } : {})
+                }))}
+                submitting={volumeSubmitting}
+                errorMessage={volumeError}
+                onClose={() => setVolumeModalOpen(false)}
+                onConfirm={async (payload) => {
+                    setVolumeSubmitting(true);
+                    setVolumeError(null);
+                    try {
+                        const res = await advanceVolume(payload);
+                        setVolumeModalOpen(false);
+                        showToast(
+                            res.completedBook
+                                ? '全书已完结封笔'
+                                : `第 ${res.sealedVolume} 卷已封存，已开启第 ${res.nextVolume} 卷`
+                        );
+                        await refreshAll(selectedChapterRef.current);
+                    } catch (err) {
+                        setVolumeError(err instanceof Error ? err.message : String(err));
+                    } finally {
+                        setVolumeSubmitting(false);
+                    }
                 }}
             />
 
-            {/* 宿主 Toast 原语:body portal,自动跟随宿主主题与层级 */}
+            <ParallelWindowModal
+                open={parallelModalOpen}
+                parallelActive={
+                    String(status?.worldState.timeline_mode ?? '') === 'PARALLEL' ||
+                    Boolean(activeParallelWindowId)
+                }
+                activeWindowId={activeParallelWindowId}
+                activeBranchId={activeParallelBranchId}
+                submitting={parallelSubmitting}
+                errorMessage={parallelError}
+                onClose={() => setParallelModalOpen(false)}
+                onFork={async (payload) => {
+                    setParallelSubmitting(true);
+                    setParallelError(null);
+                    try {
+                        await forkParallelWindow({ windowId: payload.windowId });
+                        setActiveParallelWindowId(payload.windowId);
+                        setActiveParallelBranchId(payload.branchId ?? '');
+                        setParallelModalOpen(false);
+                        showToast(`已开启多线并行窗口：${payload.windowId}`);
+                        await refreshAll(selectedChapterRef.current);
+                    } catch (err) {
+                        setParallelError(err instanceof Error ? err.message : String(err));
+                    } finally {
+                        setParallelSubmitting(false);
+                    }
+                }}
+                onMerge={async (payload) => {
+                    setParallelSubmitting(true);
+                    setParallelError(null);
+                    try {
+                        await mergeParallelWindow({ windowId: payload.windowId });
+                        setActiveParallelWindowId('');
+                        setActiveParallelBranchId('');
+                        setParallelModalOpen(false);
+                        showToast(`并行窗口 ${payload.windowId} 已合流回主线`);
+                        await refreshAll(selectedChapterRef.current);
+                    } catch (err) {
+                        setParallelError(err instanceof Error ? err.message : String(err));
+                    } finally {
+                        setParallelSubmitting(false);
+                    }
+                }}
+            />
+
             {toasts.map((item) => (
                 <Toast
                     key={item.id}
@@ -2354,7 +2935,6 @@ function NarrateStudioSidebarIcon(): React.ReactElement {
 
 export const STAGE_CONVERSATION_SLOT = 'narrateos.stage.conversation';
 
-/** 保持引用稳定的本地视图模式 Context，避免切换 Conversation/Trajectory 时重建 Factory 槽位 */
 const StageViewModeContext = createContext<string>('chat');
 
 function StageConversationView(props: {
@@ -2383,14 +2963,16 @@ function StageConversationUnavailable(props: {
     );
 }
 
-type StageSessionHook = <T>(selector: (snapshot: {
-    blank?: boolean;
-    awaitingFirstTurn?: boolean;
-    running?: boolean;
-    promptAttempted?: boolean;
-    openState?: string;
-    subagent?: { address: { mode: string }; parentAvailable?: boolean } | null;
-}) => T) => T;
+type StageSessionHook = <T>(
+    selector: (snapshot: {
+        blank?: boolean;
+        awaitingFirstTurn?: boolean;
+        running?: boolean;
+        promptAttempted?: boolean;
+        openState?: string;
+        subagent?: { address: { mode: string }; parentAvailable?: boolean } | null;
+    }) => T
+) => T;
 
 type StageConversationHook = <T>(
     selector: (snapshot: { activeTargets?: { size?: number } }) => T
@@ -2509,7 +3091,6 @@ function readContextService(ctx: unknown, serviceName: string): unknown {
     if (!ctx || typeof ctx !== 'object') return undefined;
     const record = ctx as Record<string, unknown>;
     const getter = record['get'];
-    // Cordis Context 为严格代理：直接访问未注入的属性会抛错，须优先走 ctx.get() 并全程 try/catch
     if (typeof getter === 'function') {
         try {
             return (getter as (name: string) => unknown).call(ctx, serviceName);
@@ -2551,21 +3132,23 @@ interface NarrateStudioSlotProps {
 }
 
 /**
- * Cordis 客户端插件入口：向 @deepseek-ai/dsh@0.2.2-rc.1 双半侧槽位注册主舞台与侧栏导航。
- * 仅当 uiSession 与 uiConversation 同时可用时才声明 scope: 'session' 子槽位，避免极简宿主抛出 SlotAssemblyError。
+ * Cordis 客户端插件入口：向 @deepseek-ai/dsh 双半侧槽位注册主舞台与侧栏导航。
+ * 保存并卸载清理全部动态注入句柄（包含 ['sessions'] 与 ['uiSession', 'uiConversation']）。
  */
 export function apply(ctx: Context): void {
     const slots = ctx.slots as
         | {
               inject?: (slotName: string, factory: unknown) => unknown;
-              register?: (meta: Record<string, unknown>, component: React.FC<Record<string, unknown>>) => unknown;
+              register?: (
+                  meta: Record<string, unknown>,
+                  component: React.FC<Record<string, unknown>>
+              ) => unknown;
           }
         | undefined;
     if (!slots || typeof slots.inject !== 'function') {
         return;
     }
 
-    // 安全获取可选 sessions 服务，不将其放入静态 inject 以避免阻塞极简宿主或单元测试
     let currentSessionsService = readSessionsService(ctx);
     const sessionSubscribers = new Set<() => void>();
     const notifySessionSubscribers = (): void => {
@@ -2608,28 +3191,6 @@ export function apply(ctx: Context): void {
             setup();
         }
     };
-
-    if (typeof dynamicInject === 'function') {
-        try {
-            dynamicInject.call(ctx, ['sessions'], (scope: Context) => {
-                registerScopeEffect(
-                    scope,
-                    () => {
-                        currentSessionsService =
-                            readSessionsService(scope) ?? readSessionsService(ctx);
-                        notifySessionSubscribers();
-                        return () => {
-                            currentSessionsService = readSessionsService(ctx);
-                            notifySessionSubscribers();
-                        };
-                    },
-                    'narrateos-studio:optional-sessions'
-                );
-            });
-        } catch {
-            // 宿主未提供可选 sessions 服务时保持静默降级
-        }
-    }
 
     const NarrateStudioPanel: React.FC<NarrateStudioSlotProps> = ({
         SessionProvider,
@@ -2743,6 +3304,37 @@ export function apply(ctx: Context): void {
             currentSessionUi = withSessionUi;
             activeMainDisposer = registerMainSlots(withSessionUi);
         };
+
+        if (typeof dynamicInject === 'function') {
+            try {
+                const sessionsInjectHandle = dynamicInject.call(
+                    ctx,
+                    ['sessions'],
+                    (scope: Context) => {
+                        registerScopeEffect(
+                            scope,
+                            () => {
+                                currentSessionsService =
+                                    readSessionsService(scope) ?? readSessionsService(ctx);
+                                notifySessionSubscribers();
+                                return () => {
+                                    currentSessionsService = readSessionsService(ctx);
+                                    notifySessionSubscribers();
+                                };
+                            },
+                            'narrateos-studio:optional-sessions'
+                        );
+                    }
+                );
+                if (sessionsInjectHandle) {
+                    disposers.push(() => {
+                        disposeDynamicResult(sessionsInjectHandle);
+                    });
+                }
+            } catch {
+                // 宿主未提供可选 sessions 服务时保持静默降级
+            }
+        }
 
         const disposeSidebar = injectSlot(
             'sidebar.panellist',

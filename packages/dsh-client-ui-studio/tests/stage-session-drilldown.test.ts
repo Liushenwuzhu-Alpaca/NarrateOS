@@ -52,6 +52,7 @@ vi.mock('../src/client/api.js', async (importOriginal) => {
         fetchViewTelemetry: vi.fn(),
         fetchViewSignals: vi.fn(),
         fetchViewHalt: vi.fn(),
+        fetchViewSyncConflicts: vi.fn(),
         stepChapter: vi.fn(),
         syncManuscripts: vi.fn(),
         runDreaming: vi.fn(),
@@ -225,6 +226,14 @@ beforeEach(() => {
         safeHalt: null,
         quarantineReport: null
     });
+    vi.mocked(api.fetchViewSyncConflicts).mockResolvedValue({
+        kind: 'sync_conflicts',
+        syncConflicts: null,
+        conflicts: [],
+        dirtyChapters: [],
+        stateDiffAdvisories: [],
+        updatedAt: null
+    });
     vi.mocked(api.subscribeNarrateEvents).mockImplementation((listener) => {
         onEvent = listener;
         return () => {
@@ -265,7 +274,7 @@ async function click(element: HTMLElement): Promise<void> {
 }
 
 async function openStageStrip(container: HTMLElement): Promise<void> {
-    const toggle = container.querySelector<HTMLButtonElement>('button.ns-thread-btn');
+    const toggle = container.querySelector<HTMLButtonElement>('button.ns-pipeline-toggle-btn');
     if (!toggle) throw new Error('未找到 6 阶段流水线胶囊按钮');
     if (toggle.getAttribute('aria-expanded') !== 'true') {
         await click(toggle);
@@ -274,18 +283,17 @@ async function openStageStrip(container: HTMLElement): Promise<void> {
 
 function stageNode(container: HTMLElement, stageId: string): HTMLButtonElement {
     const btn = container.querySelector<HTMLButtonElement>(
-        `button.ns-stage-node[data-stage-id="${stageId}"]`
+        `button.ns-pipe-card[data-stage-id="${stageId}"]`
     );
     if (!btn) throw new Error(`未找到阶段节点 ${stageId}`);
     return btn;
 }
 
 function chapterButton(container: HTMLElement, chapter: number): HTMLButtonElement {
-    const code = `Ch.${String(chapter).padStart(4, '0')}`;
     const btn = Array.from(container.querySelectorAll<HTMLButtonElement>('button.ns-ch-btn')).find(
-        (item) => item.querySelector('.ns-ch-code')?.textContent?.trim() === code
+        (item) => item.querySelector('.ns-ch-no')?.textContent?.trim() === `第 ${chapter} 章`
     );
-    if (!btn) throw new Error(`未找到章节目录项 ${code}`);
+    if (!btn) throw new Error(`未找到章节目录项 第 ${chapter} 章`);
     return btn;
 }
 
@@ -366,12 +374,12 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
 
         const libNode = stageNode(container, 'LIBRARIAN');
         expect(libNode.dataset.sessionId).toBe('sess-live-lib-99');
-        expect(libNode.textContent).toContain('实时会话');
+        expect(libNode.classList.contains('ns-running-live')).toBe(true);
 
-        // 点击运行中节点 -> 右侧自动打开「会话」页签并 retain(sessionId)
+        // 点击运行中节点 -> 右侧自动打开「思考过程」页签并 retain(sessionId)
         await click(libNode);
 
-        const sessionTab = container.querySelector<HTMLButtonElement>('#ns-right-tab-session');
+        const sessionTab = container.querySelector<HTMLButtonElement>('#ns-right-tab-trace');
         expect(sessionTab?.getAttribute('aria-selected')).toBe('true');
         expect(mockSessions.retain).toHaveBeenCalledTimes(1);
         expect(mockSessions.retain).toHaveBeenCalledWith(
@@ -429,7 +437,6 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(stageNode(container, 'LIBRARIAN').dataset.sessionId).toBe('sess-ch1-lib');
         expect(stageNode(container, 'PLANNER').dataset.sessionId).toBe('sess-ch1-plan');
         expect(stageNode(container, 'EXTRACTOR').dataset.sessionId).toBe('sess-ch1-ext');
-        expect(stageNode(container, 'PLANNER').textContent).toContain('轨迹');
 
         // 切换至第 2 章 -> 回填第 2 章的运行记录
         await click(chapterButton(container, 2));
@@ -438,15 +445,9 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(stageNode(container, 'FACT_CHECKER').dataset.sessionId).toBe('sess-ch2-fc');
         expect(stageNode(container, 'LIBRARIAN').dataset.sessionId).toBe('');
 
-        // 切换至第 2 章（历史记录不含 Writer sessionId）-> 点击 Writer 节点展示未绑定会话提示
+        // 切换至第 2 章（历史记录不含 Writer sessionId）-> 点击 Writer 节点展示净室隔离说明
         await click(stageNode(container, 'WRITER'));
-        expect(container.querySelector('.ns-inspector-cleanroom-note')?.textContent).toContain(
-            '未绑定原生会话'
-        );
-        // 未打开会话页签
-        expect(
-            container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')
-        ).not.toBe('true');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('ctx.agents.create');
 
         // 实时/带 sessionId 的 Writer 节点可直接复用原生 StageSessionViewer 查看
         await emit({
@@ -463,7 +464,7 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(writerNode.dataset.sessionId).toBe('sess-live-writer-3');
         await click(writerNode);
         expect(
-            container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')
+            container.querySelector('#ns-right-tab-trace')?.getAttribute('aria-selected')
         ).toBe('true');
         expect(
             container.querySelector('[data-session-fallback="true"]')?.textContent
@@ -471,7 +472,7 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
 
         // 点击第 2 章历史 Planner 节点（无宿主 sessions 服务）-> 打开降级元数据面板，展示 sessionId 与状态
         await click(stageNode(container, 'PLANNER'));
-        expect(container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')).toBe(
+        expect(container.querySelector('#ns-right-tab-trace')?.getAttribute('aria-selected')).toBe(
             'true'
         );
         const fallback = container.querySelector('[data-session-fallback="true"]');
@@ -535,8 +536,11 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(partialRegistered.find((e) => e.name === 'main')?.meta['children']).toBeUndefined();
         expect(partialRegistered.some((e) => e.name === STAGE_CONVERSATION_SLOT)).toBe(false);
 
-        // 3. 当 uiSession 与 uiConversation 同时就绪后，动态重注册 main 并挂载 narrateos.stage.conversation
+        // 3. 当 uiSession 与 uiConversation 同时就绪后，动态重注册 main 并挂载 narrateos.stage.conversation，且卸载释放 sessions 动态注入句柄
         const activeEntries = new Map<string, Record<string, unknown>>();
+        const sessionsInjectDispose = vi.fn();
+        const sessionUiInjectDispose = vi.fn();
+        let capturedEffectCleanup: (() => void) | undefined;
         const fullCtx = {
             uiSession: {},
             uiConversation: {},
@@ -546,11 +550,18 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
                 if (key === 'sessions') return fullCtx.sessions;
                 return undefined;
             }),
+            effect: vi.fn((cb: () => void | (() => void)) => {
+                const cleanup = cb();
+                if (typeof cleanup === 'function') {
+                    capturedEffectCleanup = cleanup;
+                }
+                return cleanup;
+            }),
             inject: vi.fn((deps: string[], cb: (scope: unknown) => void | (() => void)) => {
                 if (deps.every((dep) => fullCtx.get(dep) !== undefined)) {
                     cb(fullCtx);
                 }
-                return () => {};
+                return deps.includes('sessions') ? sessionsInjectDispose : sessionUiInjectDispose;
             }),
             slots: {
                 inject: vi.fn((slotName: string, factory: () => unknown) => {
@@ -577,6 +588,10 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
             }
         });
         expect(activeEntries.has(STAGE_CONVERSATION_SLOT)).toBe(true);
+        expect(capturedEffectCleanup).toBeTypeOf('function');
+        capturedEffectCleanup?.();
+        expect(sessionsInjectDispose).toHaveBeenCalledTimes(1);
+        expect(sessionUiInjectDispose).toHaveBeenCalledTimes(1);
     });
 
     it('StageConversationSlotPanel 在缺少 useConversation 或未加载 Factory 时安全降级而不抛出 TypeError', async () => {
@@ -912,9 +927,9 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(stageNode(container, 'PLANNER').dataset.sessionId).toBe('sess-ch1-replan-2');
         expect(stageNode(container, 'WRITER').dataset.sessionId).toBe('sess-ch1-rewrite-3');
 
-        // 点击 WRITER 节点后切到检查器页签，可见 WRITER 的全部 3 次尝试轨迹
+        // 点击 WRITER 节点后切到运行状态页签，可见 WRITER 的全部 3 次尝试轨迹
         await click(stageNode(container, 'WRITER'));
-        const inspTab = container.querySelector<HTMLButtonElement>('#ns-right-tab-insp')!;
+        const inspTab = container.querySelector<HTMLButtonElement>('#ns-right-tab-status')!;
         await click(inspTab);
 
         const attemptList = container.querySelector('[aria-label="关联会话轨迹列表"]');
@@ -933,7 +948,7 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
 
         // 点击历史 LOCAL_PATCH 尝试 -> 打开该次 session 的 StageSessionViewer
         await click(attemptButtons[1]!);
-        expect(container.querySelector('#ns-right-tab-session')?.getAttribute('aria-selected')).toBe(
+        expect(container.querySelector('#ns-right-tab-trace')?.getAttribute('aria-selected')).toBe(
             'true'
         );
         expect(
@@ -1174,8 +1189,8 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
                 status: 'running'
             }
         });
-        expect(stageNode(container, 'WRITER').classList.contains('ns-stage-healing')).toBe(true);
-        expect(stageNode(container, 'WRITER').textContent).toContain('门禁 Patch');
+        expect(stageNode(container, 'WRITER').classList.contains('ns-running-live')).toBe(true);
+        expect(stageNode(container, 'WRITER').textContent).toContain('润色中');
 
         // 点击打开 sess-p1 详情面板（此时处于 healing/running 状态）
         vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
@@ -1189,7 +1204,7 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
             await Promise.resolve();
         });
 
-        // PROSE_GATE 紧随 LOCAL_PATCH 后仍无终态结果 -> 保持 healing 与门禁 Patch 徽标
+        // PROSE_GATE 紧随 LOCAL_PATCH 后仍无终态结果 -> 保持润色运行态
         await emit({
             event: 'stage',
             data: {
@@ -1198,8 +1213,8 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
                 message: '运行 0 Token 静态文风门禁'
             }
         });
-        expect(stageNode(container, 'WRITER').classList.contains('ns-stage-healing')).toBe(true);
-        expect(stageNode(container, 'WRITER').textContent).toContain('门禁 Patch');
+        expect(stageNode(container, 'WRITER').classList.contains('ns-running-live')).toBe(true);
+        expect(stageNode(container, 'WRITER').textContent).toContain('润色中');
 
         // LOCAL_PATCH 终态 completed 到达 -> 状态更新为 done（不再被 isHealing 覆盖），且触发 StageSessionViewer 重新拉取完整持久化详情
         vi.mocked(api.fetchRunDetail).mockResolvedValueOnce({
@@ -1244,7 +1259,8 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
             await Promise.resolve();
         });
 
-        expect(stageNode(container, 'WRITER').classList.contains('ns-stage-done')).toBe(true);
+        expect(stageNode(container, 'WRITER').classList.contains('ns-running-live')).toBe(false);
+        expect(stageNode(container, 'WRITER').textContent).toContain('已完成');
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('openai:gpt-5.4');
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('128 chars');
