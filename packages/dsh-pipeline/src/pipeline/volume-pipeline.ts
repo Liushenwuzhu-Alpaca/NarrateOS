@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import {
     generateStructuredJson,
     parseEntityMarkdown,
-    stripWriterRestrictedDirectives,
+    sanitizeLoreForWriter,
     withTraceRun,
     type BookStore,
     type LlmPort,
@@ -23,7 +23,12 @@ import { normalizeOpsStyleAmendments, readOptionalText } from './helpers.js';
 const DEFAULT_STATIC_BASE_MAX_CHARS = 1500;
 const DEFAULT_SAGA_FOLD_VOLUME_INTERVAL = 10;
 const CHAR_ENTITY_FILE_RE = /^(char_[a-zA-Z0-9_]+)\.md$/;
-const SECRET_VIS_LINE_RE = /\b(?:OMNISCIENT_SECRET|SELF_ONLY)\b/i;
+const NEGATIVE_PROHIBITION_RE =
+    /(?:禁止|严禁|禁用|不要|不得|切忌|绝不|决不|不能|不可|切勿|莫要)/;
+const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+)$/;
+const LIST_ITEM_START_RE = /^\s*(?:[-*+]|\d+\.)\s/;
+const TOP_LEVEL_LIST_ITEM_RE = /^(?:[-*+]|\d+\.)\s/;
+const LIST_CONTINUATION_RE = /^(?:\s+\S|>)/;
 
 export interface VolumePipelineDeps {
     store: BookStore;
@@ -81,17 +86,99 @@ function countActiveThreads(markdown: string): number {
     return count;
 }
 
-/** 对写手可见的正向卷纲做兜底净室清洗，剥离 Stage Ceiling / WARPED / 机密可见性标签 */
+/** 块级剥离包含否定禁令词的标题节、完整列表项（含缩进与 > 续行）及自然段 */
+function stripNegativeProhibitionBlocks(raw: string): string {
+    const lines = raw.split(/\r?\n/);
+    const kept: string[] = [];
+    let skipSectionLevel: number | null = null;
+    let i = 0;
+
+    while (i < lines.length) {
+        const line = lines[i]!;
+        const trimmed = line.trim();
+        const headingMatch = MARKDOWN_HEADING_RE.exec(trimmed);
+
+        if (skipSectionLevel !== null) {
+            if (headingMatch?.[1]) {
+                const level = headingMatch[1].length;
+                if (level <= skipSectionLevel) {
+                    skipSectionLevel = null;
+                } else {
+                    i += 1;
+                    continue;
+                }
+            } else {
+                i += 1;
+                continue;
+            }
+        }
+
+        if (headingMatch?.[1]) {
+            if (NEGATIVE_PROHIBITION_RE.test(line)) {
+                skipSectionLevel = headingMatch[1].length;
+                i += 1;
+                continue;
+            }
+            kept.push(line);
+            i += 1;
+            continue;
+        }
+
+        if (trimmed.length === 0) {
+            kept.push(line);
+            i += 1;
+            continue;
+        }
+
+        if (LIST_ITEM_START_RE.test(line)) {
+            let j = i + 1;
+            while (j < lines.length) {
+                const next = lines[j]!;
+                const nextTrimmed = next.trim();
+                if (nextTrimmed.length === 0) break;
+                if (MARKDOWN_HEADING_RE.test(nextTrimmed)) break;
+                if (TOP_LEVEL_LIST_ITEM_RE.test(next)) break;
+                if (LIST_CONTINUATION_RE.test(next)) {
+                    j += 1;
+                    continue;
+                }
+                break;
+            }
+            const block = lines.slice(i, j);
+            if (!block.some((b) => NEGATIVE_PROHIBITION_RE.test(b))) {
+                kept.push(...block);
+            }
+            i = j;
+            continue;
+        }
+
+        let j = i + 1;
+        while (j < lines.length) {
+            const next = lines[j]!;
+            const nextTrimmed = next.trim();
+            if (nextTrimmed.length === 0) break;
+            if (MARKDOWN_HEADING_RE.test(nextTrimmed)) break;
+            if (LIST_ITEM_START_RE.test(next)) break;
+            j += 1;
+        }
+        const block = lines.slice(i, j);
+        if (!block.some((b) => NEGATIVE_PROHIBITION_RE.test(b))) {
+            kept.push(...block);
+        }
+        i = j;
+    }
+
+    return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 对写手可见的正向卷纲做块级净室清洗：整块剥离 WARPED / Stage Ceiling / 机密标签及否定禁令 */
 function sanitizeArcEnvelopeForCleanroom(rawEnvelope: string, nextVolume: number): string {
-    const stripped = stripWriterRestrictedDirectives(rawEnvelope) ?? '';
-    const cleanedLines = stripped
-        .split(/\r?\n/)
-        .filter((line) => !SECRET_VIS_LINE_RE.test(line));
-    const joined = cleanedLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-    if (joined.length === 0) {
+    const loreCleaned = sanitizeLoreForWriter(rawEnvelope);
+    const clean = stripNegativeProhibitionBlocks(loreCleaned);
+    if (clean.length === 0) {
         return `# 第 ${nextVolume} 卷正向舞台\n`;
     }
-    return `${joined}\n`;
+    return `${clean}\n`;
 }
 
 /** 从 L1_volumes.md 提取指定卷区间汇总并折叠追加至 index/L0_sagas.md */
@@ -176,6 +263,7 @@ export class VolumePipeline {
     ): Promise<AdvanceVolumeResult> {
         return await withTraceRun(this.store.bookRoot, 'advance-volume', {}, () =>
             this.store.withTxLock(async () => {
+                await this.store.assertDreamingPhaseSafe();
                 const completeBook = Boolean(options.completeBook);
                 const config = await this.store.readBookConfig();
                 const retryOptions: StructuredRetryOptions = this.retryOptions ?? {

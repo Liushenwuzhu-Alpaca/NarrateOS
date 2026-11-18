@@ -672,7 +672,7 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
         ]);
         expect(tagCommit.trim()).toBe(volRes.commitSha);
 
-        // 3. 写手可见包络与导演计划物理拆离，且兜底剥离禁区/机密
+        // 3. 写手可见包络与导演计划物理拆离，且整块兜底剥离禁区/多行机密/独立禁令句
         const envelopeOnDisk = await readFile(join(bookRoot, 'world/current_arc_envelope.md'), 'utf8');
         expect(envelopeOnDisk).toContain('远洋航道全面戒严');
         expect(envelopeOnDisk).not.toContain('Stage Ceiling');
@@ -773,5 +773,374 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
             'novel-completed^{commit}'
         ]);
         expect(completedTagCommit.trim()).toBe(res.commitSha);
+    });
+
+    it('SyncPipeline 同时修改最新章 ch_0002 并顺次新增 ch_0003 时全量提交手稿、按序演进实体状态且仅产生 1 笔 Git 提交', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'sync-head-plus-next', {
+            storyDay: 2,
+            currentChapter: 2,
+            extraChapters: {
+                'ch_0001.md': '# 第一章 码头\n\n沈默检查旧灯。\n',
+                'ch_0002.md': '# 第二章 泊位\n\n沈默巡视二号泊位。\n'
+            }
+        });
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+
+        const { stdout: countBefore } = await execFileAsync('git', [
+            '-C',
+            bookRoot,
+            'rev-list',
+            '--count',
+            'HEAD'
+        ]);
+
+        // 同时手改第 2 章（最新章）并顺次新建第 3 章（UNTRACKED）
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0002.md'),
+            '# 第二章 泊位\n\n沈默从暗格取出铜钥匙，进驻二号泊位值班室。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0003.md'),
+            '# 第三章 暗仓\n\n沈默持铜钥匙开启三号暗仓。\n',
+            'utf8'
+        );
+
+        let extractorCallIdx = 0;
+        let ch3SawCh2State = false;
+        const { llm } = createMockLlmPort((req) => {
+            if (req.traceStage === 'sync.classify') {
+                return JSON.stringify({
+                    is_prose_polish_only: false,
+                    reason: '新增驻留二号泊位值班室与取出铜钥匙',
+                    affected_entity_ids: ['char_001']
+                });
+            }
+            if (req.traceStage === 'sync.extractor') {
+                extractorCallIdx += 1;
+                if (extractorCallIdx === 1) {
+                    return JSON.stringify({
+                        entity_patches: [
+                            {
+                                entity_id: 'char_001',
+                                last_seen_ch: 2,
+                                acquired_state_ops: [
+                                    {
+                                        op: 'upsert_slot',
+                                        slot_key: 'location',
+                                        entry: {
+                                            storyDay: 3,
+                                            chapter: 2,
+                                            visibility: 'PUBLIC',
+                                            text: '驻留节点：二号泊位值班室'
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        story_day_delta: 1,
+                        plot_summary: '沈默进驻二号泊位值班室。',
+                        prose_anchors: ['二号泊位值班室'],
+                        appeared_entity_ids: ['char_001'],
+                        next_chapter_options: ['开启暗仓']
+                    });
+                }
+                ch3SawCh2State = req.dynamicTail.includes('二号泊位值班室');
+                return JSON.stringify({
+                    entity_patches: [
+                        {
+                            entity_id: 'char_001',
+                            last_seen_ch: 3,
+                            acquired_state_ops: [
+                                {
+                                    op: 'upsert_slot',
+                                    slot_key: 'location',
+                                    entry: {
+                                        storyDay: 4,
+                                        chapter: 3,
+                                        visibility: 'PUBLIC',
+                                        text: '驻留节点：三号暗仓'
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    story_day_delta: 1,
+                    plot_summary: '沈默进入三号暗仓。',
+                    prose_anchors: ['三号暗仓'],
+                    appeared_entity_ids: ['char_001'],
+                    next_chapter_options: ['清点箱笼']
+                });
+            }
+            return '{}';
+        });
+
+        const sync = new SyncPipeline({ store, llm, system });
+        const res = await sync.syncManuscripts();
+
+        expect(res.status).toBe('STATE_SYNCED');
+        expect(ch3SawCh2State).toBe(true);
+
+        // 仅产生 1 笔 Git 提交，且 ch_0002 与 ch_0003 均已干净提交
+        const { stdout: countAfter } = await execFileAsync('git', [
+            '-C',
+            bookRoot,
+            'rev-list',
+            '--count',
+            'HEAD'
+        ]);
+        expect(Number(countAfter.trim()) - Number(countBefore.trim())).toBe(1);
+        expect(await store.detectDirtyChapters()).toEqual([]);
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+
+        const wsAfter = await store.readWorldState();
+        expect(wsAfter.frontmatter.current_chapter).toBe(3);
+        expect(wsAfter.frontmatter.story_day).toBe(4);
+        expect(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8')).toContain('三号暗仓');
+
+        // 再次验证：当最新章为纯润色且同时顺次新增下一章时，ch_0003 润色稿也不漏出提交列表
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0003.md'),
+            '# 第三章 暗仓\n\n幽暗灯影下，沈默持铜钥匙开启三号暗仓。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0004.md'),
+            '# 第四章 账箱\n\n沈默打开铁皮账箱。\n',
+            'utf8'
+        );
+        const { llm: llmPolishPlusNew } = createMockLlmPort((req) => {
+            if (req.traceStage === 'sync.classify') {
+                return JSON.stringify({
+                    is_prose_polish_only: true,
+                    reason: '仅增加环境光影修饰',
+                    affected_entity_ids: []
+                });
+            }
+            if (req.traceStage === 'sync.extractor') {
+                return JSON.stringify({
+                    entity_patches: [],
+                    story_day_delta: 0,
+                    plot_summary: '沈默打开铁皮账箱。',
+                    prose_anchors: ['铁皮账箱'],
+                    appeared_entity_ids: ['char_001'],
+                    next_chapter_options: ['继续核对']
+                });
+            }
+            return '{}';
+        });
+        const sync2 = new SyncPipeline({ store, llm: llmPolishPlusNew, system });
+        const res2 = await sync2.syncManuscripts();
+        expect(res2.status).toBe('STATE_SYNCED');
+        expect(await store.detectDirtyChapters()).toEqual([]);
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+    });
+
+    it('SyncPipeline 在外键校验失败抛错时保持 0 Git 提交、0 L2 脏写且 tx_state 相位不被污染', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'sync-fk-atomic-abort', {
+            storyDay: 2,
+            currentChapter: 2,
+            extraChapters: {
+                'ch_0001.md': '# 第一章 码头\n\n沈默查账。\n',
+                'ch_0002.md': '# 第二章 夜雨\n\n沈默回房。\n'
+            }
+        });
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+        const { stdout: headBefore } = await execFileAsync('git', ['-C', bookRoot, 'rev-parse', 'HEAD']);
+        const l2Before = await readFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), 'utf8');
+        const txBefore = await store.readTxState();
+
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0002.md'),
+            '# 第二章 夜雨\n\n沈默收到不明密信。\n',
+            'utf8'
+        );
+
+        const { llm } = createMockLlmPort((req) => {
+            if (req.traceStage === 'sync.classify') {
+                return JSON.stringify({
+                    is_prose_polish_only: false,
+                    reason: '新增关键密信外键',
+                    affected_entity_ids: ['char_001']
+                });
+            }
+            if (req.traceStage === 'sync.extractor') {
+                return JSON.stringify({
+                    entity_patches: [
+                        {
+                            entity_id: 'char_001',
+                            acquired_state_ops: [
+                                {
+                                    op: 'upsert_slot',
+                                    slot_key: 'clue',
+                                    entry: {
+                                        storyDay: 2,
+                                        chapter: 2,
+                                        visibility: 'PUBLIC',
+                                        text: '持有不存在道具 item_ghost_999'
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    plot_summary: '沈默收到密信。',
+                    prose_anchors: ['不明密信'],
+                    appeared_entity_ids: ['char_001'],
+                    next_chapter_options: ['拆信']
+                });
+            }
+            return '{}';
+        });
+
+        const sync = new SyncPipeline({ store, llm, system });
+        await expect(sync.syncManuscripts()).rejects.toThrow(/外键可达性校验失败/);
+
+        const { stdout: headAfter } = await execFileAsync('git', ['-C', bookRoot, 'rev-parse', 'HEAD']);
+        expect(headAfter.trim()).toBe(headBefore.trim());
+        expect(await readFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), 'utf8')).toBe(l2Before);
+        const txAfter = await store.readTxState();
+        expect(txAfter.phase).toBe(txBefore.phase);
+        await expect(stat(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+    });
+
+    it('SyncPipeline 下游冲突扫描可召回已归入 entities/cold_archive/ 的历史角色', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'sync-cold-archive-recall', {
+            storyDay: 5,
+            currentChapter: 2,
+            extraChapters: {
+                'ch_0001.md': '# 第一章 码头\n\n周铁匠在铁铺打制船锚。\n',
+                'ch_0002.md': '# 第二章 港口\n\n沈默看见周铁匠右手握着断柄铁锤。\n'
+            }
+        });
+        await writeFile(
+            join(bookRoot, 'entities/cold_archive/char_zhou.md'),
+            [
+                '---',
+                'entity_id: char_zhou',
+                'canonical_name: 周铁匠',
+                'unique_aliases: ["老周"]',
+                'contextual_titles: []',
+                'historical_anchors: []',
+                'last_seen_ch: 1',
+                '---',
+                '',
+                '## 1. Innate Locks (先天/底层永久红线 · since_day: -inf · 插叙永不屏蔽)',
+                '- [vis: PUBLIC] 右肩有旧伤',
+                '',
+                '## 2. Acquired State & Numeric Ledger (跨章后天状态与数值账本 · 行级更新)',
+                '',
+                '## 3. Irreversible Trajectory (不可逆极性变迁史 · 纪元内禁删)',
+                '',
+                '## 4. Recent Sliding Buffer & Voice (近期跨章缓冲与专属声纹)'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+        await execFileAsync('git', ['-C', bookRoot, 'add', '.']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'chore: add cold archived char_zhou']);
+
+        // 手改第 1 章：周铁匠十年前右臂已齐肩截肢（但第 1 章正文仅写"周铁匠"，未写 char_001 沈默）
+        await writeFile(
+            join(bookRoot, 'manuscripts/ch_0001.md'),
+            '# 第一章 码头\n\n周铁匠早已失去整条右臂，只能靠左手打铁。\n',
+            'utf8'
+        );
+
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+        const { llm } = createMockLlmPort((req) => {
+            if (req.traceStage === 'sync.history_extractor') {
+                return JSON.stringify({
+                    entity_patches: [],
+                    story_day_delta: 0,
+                    plot_summary: '周铁匠失去右臂左手打铁。',
+                    prose_anchors: ['失去整条右臂'],
+                    appeared_entity_ids: ['char_zhou'],
+                    next_chapter_options: []
+                });
+            }
+            if (req.traceStage === 'sync.audit') {
+                expect(req.dynamicTail).toContain('ch_0002');
+                return JSON.stringify({
+                    conflicts: [
+                        {
+                            dirty_chapter: 1,
+                            dirty_quote: '周铁匠早已失去整条右臂',
+                            chapter_number: 2,
+                            line_number: 3,
+                            quote: '沈默看见周铁匠右手握着断柄铁锤',
+                            description: '第 1 章已无右臂，第 2 章右手握铁锤冲突'
+                        }
+                    ]
+                });
+            }
+            return '{}';
+        });
+
+        const sync = new SyncPipeline({ store, llm, system });
+        const res = await sync.syncManuscripts();
+        expect(res.status).toBe('DOWNSTREAM_CONFLICTS_FOUND');
+        expect(res.downstreamConflicts).toHaveLength(1);
+        expect(res.downstreamConflicts[0]?.chapterNumber).toBe(2);
+    });
+
+    it('VolumePipeline 拒绝在 DRAFTING / FEAT_COMMITTED 半章相位换卷，且整块剥离多行机密续行与独立否定禁令句', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'vol-phase-and-block-strip', {
+            storyDay: 4,
+            currentChapter: 2
+        });
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+
+        // 1. DRAFTING 相位拒绝换卷
+        await store.beginDraft(3);
+        const { llm } = createMockLlmPort((req) => {
+            if (req.traceStage === 'volume.seal') {
+                return JSON.stringify({ volume_summary: '第 1 卷收束。', story_day_span: 'day 0 ~ 4' });
+            }
+            if (req.traceStage === 'volume.envelope') {
+                return JSON.stringify({
+                    current_arc_envelope: [
+                        '# 第 2 卷正向舞台',
+                        '',
+                        '港务大厅重新开放夜间竞标，各船行围绕新航线正面博弈。',
+                        '',
+                        '- [vis: OMNISCIENT_SECRET] 隐藏幕后真相首行：',
+                        '  SECRET_INDENTED_CONT: 副署长十年前伪造了沉船保单。',
+                        '> SECRET_QUOTE_CONT: 船长至今不知真凶正是副署长。',
+                        '',
+                        '- 严禁在本卷中段提前让主角查出保单原件。',
+                        '  PROHIBITION_INDENTED_CONT: 必须压到终局卷才允许翻盘。',
+                        '',
+                        '独立段落包含不得向主角透露幕后交易的禁令提示。',
+                        '',
+                        '- 保留的安全正向场景：码头钟楼正午鸣笛。'
+                    ].join('\n'),
+                    arc_director_plan: '# 第 2 卷导演计划\n\nStage Ceiling: 保持悬念。',
+                    future_horizon: '# 第 2 卷惯性\n\n- [event:evt_bid | day:5 | status:ACTIVE] 竞标会开幕'
+                });
+            }
+            return '{}';
+        });
+
+        const pipeline = new VolumePipeline({ store, llm, system });
+        await expect(pipeline.advanceVolume()).rejects.toThrow(/DRAFTING/);
+
+        // 2. 恢复至 STATE_COMMITTED 后验证块级剥离完整移除多行机密续行与独立禁令句
+        await store.recoverWal();
+        const res = await pipeline.advanceVolume();
+        expect(res.nextVolume).toBe(2);
+
+        const envelope = await readFile(join(bookRoot, 'world/current_arc_envelope.md'), 'utf8');
+        expect(envelope).toContain('港务大厅重新开放夜间竞标');
+        expect(envelope).toContain('码头钟楼正午鸣笛');
+        expect(envelope).not.toContain('OMNISCIENT_SECRET');
+        expect(envelope).not.toContain('SECRET_INDENTED_CONT');
+        expect(envelope).not.toContain('SECRET_QUOTE_CONT');
+        expect(envelope).not.toContain('PROHIBITION_INDENTED_CONT');
+        expect(envelope).not.toContain('严禁');
+        expect(envelope).not.toContain('不得');
     });
 });

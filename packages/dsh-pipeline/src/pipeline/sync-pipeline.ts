@@ -1,9 +1,13 @@
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+    ENTITY_ID_RE,
+    ForeignKeyError,
     generateStructuredJson,
     IndexRecall,
+    mergeEntityProfilePatch,
     normalizeForQuoteMatch,
+    parseEntityMarkdown,
     parseL2CardSections,
     serializeEntityMarkdown,
     TxStateSchema,
@@ -42,11 +46,11 @@ import {
     CHAPTER_FILE_RE,
     createEmptyUsage,
     formatChapterKey,
-    readOptionalText,
-    sha256Hex
+    readOptionalText
 } from './helpers.js';
 
 const VOLUME_CARD_FILE_RE = /^vol_(\d+)_cards\.md$/;
+const SAGA_SHARD_RE = /_saga_\d+$/;
 const DEFAULT_CONFLICT_SCAN_BATCH_CHARS = 24_000;
 const DEFAULT_EXTRACTOR_FULL_ENTITY_THRESHOLD = 15;
 
@@ -66,24 +70,6 @@ interface HistoricalDirtyItem {
     currentText: string;
     headText: string | null;
     extracted: ExtractorOutput;
-}
-
-interface HeadSyncCommitPayload {
-    chapterNumber: number;
-    currentText: string;
-    preservedContext: NonNullable<TxState['chapter_context']>;
-    timelineMode: TimelineMode;
-    patches: EntityPatch[];
-    worldStateUpdate:
-        | {
-              current_chapter: number;
-              story_day: number;
-              pov_character: string;
-              timeline_mode: TimelineMode;
-              summaryMarkdown?: string | undefined;
-          }
-        | undefined;
-    nextChapterOptions: string[];
 }
 
 interface DownstreamChapterData {
@@ -250,8 +236,8 @@ function extractDiffKeywords(diffText: string): string[] {
  * 手稿真源增量同步 (Sync) 管线：
  * - 预检跳号 UNTRACKED 手稿与活跃 PARALLEL 窗口；
  * - Step 1：升序处理历史脏章 (dirtyCh < last_committed_ch)，精准定位所属卷刷新双轨 L2 卡与哈希，严禁触发实体第 2/4 区覆写；
- * - Step 2：处理最新章或顺次新章，纯修辞润色仅刷哈希，事实变更保留原 chapter_context 经 Extractor 更新视图；
- * - Step 3：单次 recordPendingWrites + commitPaths 原子提交；
+ * - Step 2：升序处理最新章或顺次新章，纯修辞润色仅刷哈希，事实变更保留原 chapter_context 经 Extractor 在内存演进校验；
+ * - Step 3：全量预校验通过后，单次 recordPendingWrites + 单次 commitPaths 原子提交全部变更；
  * - Step 4：历史脏章两级分批只读下游冲突扫描 + 双侧 verifyDualQuotes 验真并落盘 .ops/sync_conflicts.json。
  */
 export class SyncPipeline {
@@ -403,8 +389,26 @@ export class SyncPipeline {
             historicalItems.push({ dirty, diffText, currentText, headText, extracted });
         }
 
-        // Step 2：再处理最新章 (dirtyCh === last_committed_ch) 或顺次新章 (last_committed_ch + 1)
-        let headCommitPayload: HeadSyncCommitPayload | null = null;
+        // Step 2：再按升序处理最新章 (dirtyCh === last_committed_ch) 与顺次新章 (last_committed_ch + 1)
+        // 在内存中演进实体快照、world_state 与约束预校验，校验全数通过前零磁盘写入
+        const workingSnapshot: BookSnapshot = {
+            ...snapshot,
+            worldState: {
+                frontmatter: { ...snapshot.worldState.frontmatter },
+                summaryMarkdown: snapshot.worldState.summaryMarkdown
+            },
+            entities: { ...snapshot.entities },
+            coldArchiveIds: [...snapshot.coldArchiveIds]
+        };
+        const stagedEntities = new Map<string, EntityProfile>();
+        const wokenColdArchiveIds = new Set<string>();
+        const pendingNewEntityIds = new Set<string>();
+        let hasFactualHeadOrNext = false;
+        let lastFactualChapterNumber: number | null = null;
+        let lastPreservedContext: TxState['chapter_context'] | undefined =
+            snapshot.txState.chapter_context;
+        let latestWorldStateUpdated = false;
+        let latestNextChapterOptions: { source_chapter: number; options: string[] } | null = null;
         let prosePolishOnlySingle = false;
 
         for (const dirty of headOrNextList) {
@@ -437,22 +441,22 @@ export class SyncPipeline {
             }
 
             const preservedContext: NonNullable<TxState['chapter_context']> =
-                dirty.chapterNumber === lastCommitted && snapshot.txState.chapter_context
-                    ? snapshot.txState.chapter_context
+                dirty.chapterNumber === lastCommitted && workingSnapshot.txState.chapter_context
+                    ? workingSnapshot.txState.chapter_context
                     : {
-                          timelineMode: snapshot.worldState.frontmatter.timeline_mode,
-                          targetDay: snapshot.worldState.frontmatter.story_day,
-                          povCharIds: [snapshot.worldState.frontmatter.pov_character]
+                          timelineMode: workingSnapshot.worldState.frontmatter.timeline_mode,
+                          targetDay: workingSnapshot.worldState.frontmatter.story_day,
+                          povCharIds: [workingSnapshot.worldState.frontmatter.pov_character]
                       };
             const effectiveTimelineMode = preservedContext.timelineMode;
             const effectiveTargetDay = preservedContext.targetDay;
             const effectivePovCharIds =
                 preservedContext.povCharIds.length > 0
                     ? preservedContext.povCharIds
-                    : [snapshot.worldState.frontmatter.pov_character];
+                    : [workingSnapshot.worldState.frontmatter.pov_character];
 
             const extractedRes = await this.runExtractorForChapter({
-                snapshot,
+                snapshot: workingSnapshot,
                 chapterNumber: dirty.chapterNumber,
                 timelineMode: effectiveTimelineMode,
                 targetDay: effectiveTargetDay,
@@ -467,17 +471,21 @@ export class SyncPipeline {
 
             const extracted = extractedRes.output;
             const sanitizedPatches = sanitizeExtractorPatches(
-                snapshot,
+                workingSnapshot,
                 extracted.entity_patches as EntityPatch[]
             );
 
-            if (effectiveTimelineMode === 'FLASHBACK') {
-                if (extracted.story_day_delta > 0) {
-                    throw new ValidationError(
-                        `FLASHBACK 模式下最新章 ${dirty.chapterKey} 严禁推进主线 story_day`
-                    );
+            if (effectiveTimelineMode === 'FLASHBACK' && extracted.story_day_delta > 0) {
+                throw new ValidationError(
+                    `FLASHBACK 模式下最新章 ${dirty.chapterKey} 严禁推进主线 story_day`
+                );
+            }
+
+            for (const patch of sanitizedPatches) {
+                if (!ENTITY_ID_RE.test(patch.entity_id)) {
+                    throw new ValidationError(`非法的 entity_id 格式: ${patch.entity_id}`);
                 }
-                for (const patch of sanitizedPatches) {
+                if (effectiveTimelineMode === 'FLASHBACK') {
                     if (
                         (patch.acquired_state_ops && patch.acquired_state_ops.length > 0) ||
                         (patch.buffer_ops && patch.buffer_ops.length > 0)
@@ -487,6 +495,44 @@ export class SyncPipeline {
                         );
                     }
                 }
+
+                let existing: EntityProfile | null =
+                    stagedEntities.get(patch.entity_id) ??
+                    workingSnapshot.entities[patch.entity_id] ??
+                    null;
+
+                if (!existing) {
+                    const diskEntityPath = join(
+                        this.store.bookRoot,
+                        'entities',
+                        `${patch.entity_id}.md`
+                    );
+                    const diskRaw = await readOptionalText(diskEntityPath);
+                    if (diskRaw !== null) {
+                        existing = parseEntityMarkdown(diskRaw);
+                    } else if (!SAGA_SHARD_RE.test(patch.entity_id)) {
+                        const coldProfile = await this.store.readColdArchivedEntity(patch.entity_id);
+                        if (coldProfile) {
+                            if (effectiveTimelineMode !== 'MAINLINE') {
+                                throw new ValidationError(
+                                    `${effectiveTimelineMode} 模式下禁止将冷宫实体 ${patch.entity_id} 迁回主线 entities/`
+                                );
+                            }
+                            existing = coldProfile;
+                            wokenColdArchiveIds.add(patch.entity_id);
+                            workingSnapshot.coldArchiveIds = workingSnapshot.coldArchiveIds.filter(
+                                (id) => id !== patch.entity_id
+                            );
+                        }
+                    }
+                    if (!existing) {
+                        pendingNewEntityIds.add(patch.entity_id);
+                    }
+                }
+
+                const merged = mergeEntityProfilePatch(existing, patch, false);
+                stagedEntities.set(patch.entity_id, merged);
+                workingSnapshot.entities[patch.entity_id] = merged;
             }
 
             const targetVol = this.resolveVolumeForChapter(dirty.chapterNumber, volumeContext);
@@ -498,8 +544,8 @@ export class SyncPipeline {
                     : effectiveTargetDay;
             const validAnchors = filterValidProseAnchors(extracted.prose_anchors, currentText);
             const knownIds = new Set<string>([
-                ...Object.keys(snapshot.entities),
-                ...snapshot.coldArchiveIds,
+                ...Object.keys(workingSnapshot.entities),
+                ...workingSnapshot.coldArchiveIds,
                 ...sanitizedPatches.map((p) => p.entity_id)
             ]);
             const appearedIds = [
@@ -525,133 +571,137 @@ export class SyncPipeline {
             );
             pendingChapterHashes[dirty.chapterKey] = dirty.actualHash;
 
-            const worldStateUpdate =
-                effectiveTimelineMode === 'MAINLINE'
-                    ? {
-                          current_chapter: Math.max(
-                              snapshot.worldState.frontmatter.current_chapter,
-                              dirty.chapterNumber
-                          ),
-                          story_day: nextStoryDay,
-                          pov_character:
-                              effectivePovCharIds[0] ?? snapshot.worldState.frontmatter.pov_character,
-                          timeline_mode: effectiveTimelineMode,
-                          ...(extracted.world_summary_markdown !== undefined
-                              ? { summaryMarkdown: extracted.world_summary_markdown }
-                              : {})
-                      }
-                    : undefined;
+            if (effectiveTimelineMode === 'MAINLINE') {
+                workingSnapshot.worldState = {
+                    frontmatter: {
+                        ...workingSnapshot.worldState.frontmatter,
+                        current_chapter: Math.max(
+                            workingSnapshot.worldState.frontmatter.current_chapter,
+                            dirty.chapterNumber
+                        ),
+                        story_day: nextStoryDay,
+                        pov_character:
+                            effectivePovCharIds[0] ??
+                            workingSnapshot.worldState.frontmatter.pov_character,
+                        timeline_mode: effectiveTimelineMode
+                    },
+                    summaryMarkdown:
+                        extracted.world_summary_markdown ??
+                        workingSnapshot.worldState.summaryMarkdown
+                };
+                latestWorldStateUpdated = true;
+            }
 
-            headCommitPayload = {
-                chapterNumber: dirty.chapterNumber,
-                currentText,
-                preservedContext,
-                timelineMode: effectiveTimelineMode,
-                patches: sanitizedPatches,
-                worldStateUpdate,
-                nextChapterOptions: extracted.next_chapter_options
+            hasFactualHeadOrNext = true;
+            lastFactualChapterNumber = dirty.chapterNumber;
+            lastPreservedContext = preservedContext;
+            latestNextChapterOptions = {
+                source_chapter: dirty.chapterNumber,
+                options: extracted.next_chapter_options
             };
         }
 
-        // Step 3：单次原子落盘 (recordPendingWrites + commitPaths)
-        let updatedEntities: string[] = [];
-        if (headCommitPayload !== null) {
-            await this.store.commitDraft(
-                headCommitPayload.chapterNumber,
-                headCommitPayload.currentText,
-                headCommitPayload.preservedContext
+        // 1ms 跨实体外键可达性内存全量预校验（不通过前零磁盘写、零 Git 提交）
+        if (stagedEntities.size > 0) {
+            const reachableKeys = await this.buildReachableKeySet(
+                pendingNewEntityIds,
+                dirtyChapters.map((d) => d.chapterKey)
             );
-
-            const step1DirtyPaths = historicalItems.map((item) => item.dirty.relativePath);
-            const cardPaths = [...stagedCards.keys()];
-            const extraPaths = [
-                ...new Set([...step1DirtyPaths, ...cardPaths, '.ops/next_chapter_options.json'])
-            ];
-
-            await this.store.recordPendingWrites(extraPaths);
-            for (const [relPath, content] of stagedCards.entries()) {
-                await mkdir(join(this.store.bookRoot, 'index/L2_cards'), { recursive: true });
-                await writeFile(join(this.store.bookRoot, relPath), content, 'utf8');
+            for (const [entityId, profile] of stagedEntities.entries()) {
+                this.assertForeignKeysReachable(
+                    entityId,
+                    serializeEntityMarkdown(profile),
+                    reachableKeys
+                );
             }
-            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-            await writeFile(
-                join(this.store.bookRoot, '.ops/next_chapter_options.json'),
-                `${JSON.stringify(
-                    {
-                        source_chapter: headCommitPayload.chapterNumber,
-                        options: headCommitPayload.nextChapterOptions
-                    },
-                    null,
-                    4
-                )}\n`,
-                'utf8'
-            );
+        }
 
-            if (Object.keys(pendingChapterHashes).length > 0) {
-                const currentTx = await this.store.readTxState();
-                const mergedTx = TxStateSchema.parse({
-                    ...currentTx,
-                    chapter_hashes: {
-                        ...currentTx.chapter_hashes,
-                        ...pendingChapterHashes
-                    },
-                    updated_at: new Date().toISOString()
-                });
+        // Step 3：单次 recordPendingWrites + 单次 commitPaths 原子提交全部变更
+        const dirtyPaths = dirtyChapters.map((d) => d.relativePath);
+        const cardPaths = [...stagedCards.keys()];
+        const entityPaths = [...stagedEntities.keys()].map((id) => `entities/${id}.md`);
+        const coldArchivePaths = [...wokenColdArchiveIds].map(
+            (id) => `entities/cold_archive/${id}.md`
+        );
+        const worldStatePaths = latestWorldStateUpdated ? ['world/world_state.md'] : [];
+        const nextOptionPaths =
+            latestNextChapterOptions !== null ? ['.ops/next_chapter_options.json'] : [];
+
+        const allManagedPaths = [
+            ...new Set([
+                ...dirtyPaths,
+                ...cardPaths,
+                ...entityPaths,
+                ...coldArchivePaths,
+                ...worldStatePaths,
+                ...nextOptionPaths
+            ])
+        ];
+
+        await this.store.recordPendingWrites(allManagedPaths);
+
+        if (stagedEntities.size > 0) {
+            await mkdir(join(this.store.bookRoot, 'entities'), { recursive: true });
+            for (const [entityId, profile] of stagedEntities.entries()) {
                 await writeFile(
-                    join(this.store.bookRoot, '.ops/tx_state.json'),
-                    `${JSON.stringify(mergedTx, null, 4)}\n`,
+                    join(this.store.bookRoot, `entities/${entityId}.md`),
+                    serializeEntityMarkdown(profile),
                     'utf8'
                 );
             }
-
-            const patchRes = await this.store.applyStatePatch(
-                headCommitPayload.chapterNumber,
-                headCommitPayload.patches,
-                {
-                    timelineMode: headCommitPayload.timelineMode,
-                    worldStateUpdate: headCommitPayload.worldStateUpdate,
-                    extraCommitPaths: extraPaths
-                }
-            );
-            updatedEntities = patchRes.updatedEntities;
-        } else {
-            const dirtyPaths = dirtyChapters.map((d) => d.relativePath);
-            const cardPaths = [...stagedCards.keys()];
-            const commitTargets = [...new Set([...dirtyPaths, ...cardPaths])];
-
-            await this.store.recordPendingWrites(commitTargets);
-            for (const [relPath, content] of stagedCards.entries()) {
-                await mkdir(join(this.store.bookRoot, 'index/L2_cards'), { recursive: true });
-                await writeFile(join(this.store.bookRoot, relPath), content, 'utf8');
-            }
-
-            const currentTx = await this.store.readTxState();
-            const maxDirtyChapter = Math.max(...dirtyChapters.map((d) => d.chapterNumber));
-            const nextTx = TxStateSchema.parse({
-                ...currentTx,
-                last_committed_ch: Math.max(currentTx.last_committed_ch, maxDirtyChapter),
-                chapter_hashes: {
-                    ...currentTx.chapter_hashes,
-                    ...pendingChapterHashes
-                },
-                updated_at: new Date().toISOString()
-            });
+        }
+        for (const wokenId of wokenColdArchiveIds) {
+            await unlink(join(this.store.bookRoot, `entities/cold_archive/${wokenId}.md`));
+        }
+        if (latestWorldStateUpdated) {
+            await this.store.writeWorldState(workingSnapshot.worldState);
+        }
+        for (const [relPath, content] of stagedCards.entries()) {
+            await mkdir(join(this.store.bookRoot, 'index/L2_cards'), { recursive: true });
+            await writeFile(join(this.store.bookRoot, relPath), content, 'utf8');
+        }
+        if (latestNextChapterOptions !== null) {
+            await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
             await writeFile(
-                join(this.store.bookRoot, '.ops/tx_state.json'),
-                `${JSON.stringify(nextTx, null, 4)}\n`,
+                join(this.store.bookRoot, '.ops/next_chapter_options.json'),
+                `${JSON.stringify(latestNextChapterOptions, null, 4)}\n`,
                 'utf8'
             );
-
-            const commitMsg = prosePolishOnlySingle
-                ? `chore(sync): polish ${dirtyChapters[0]!.chapterKey} prose without state change`
-                : `chore(sync): refresh ${dirtyChapters.map((d) => d.chapterKey).join(', ')} views`;
-            await this.system.commitPaths(
-                this.store.bookRoot,
-                [...commitTargets, '.ops/tx_state.json'],
-                commitMsg
-            );
-            await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
         }
+
+        const currentTx = await this.store.readTxState();
+        const maxDirtyChapter = Math.max(...dirtyChapters.map((d) => d.chapterNumber));
+        const nextTx = TxStateSchema.parse({
+            ...currentTx,
+            phase: hasFactualHeadOrNext ? 'STATE_COMMITTED' : currentTx.phase,
+            active_chapter: hasFactualHeadOrNext ? lastFactualChapterNumber : currentTx.active_chapter,
+            last_committed_ch: Math.max(currentTx.last_committed_ch, maxDirtyChapter),
+            chapter_context: lastPreservedContext,
+            chapter_hashes: {
+                ...currentTx.chapter_hashes,
+                ...pendingChapterHashes
+            },
+            updated_at: new Date().toISOString()
+        });
+        await writeFile(
+            join(this.store.bookRoot, '.ops/tx_state.json'),
+            `${JSON.stringify(nextTx, null, 4)}\n`,
+            'utf8'
+        );
+
+        const commitMsg = prosePolishOnlySingle
+            ? `chore(sync): polish ${dirtyChapters[0]!.chapterKey} prose without state change`
+            : hasFactualHeadOrNext
+              ? `state(sync): sync ${dirtyChapters.map((d) => d.chapterKey).join(', ')} views`
+              : `chore(sync): refresh ${dirtyChapters.map((d) => d.chapterKey).join(', ')} views`;
+        await this.system.commitPaths(
+            this.store.bookRoot,
+            [...allManagedPaths, '.ops/tx_state.json'],
+            commitMsg
+        );
+        await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
+
+        const updatedEntities = [...stagedEntities.keys()];
 
         if (prosePolishOnlySingle) {
             return {
@@ -675,7 +725,7 @@ export class SyncPipeline {
 
         // Step 4：历史脏章触发的两级分批只读下游冲突扫描 + 双侧 verifyDualQuotes 验真
         const { conflicts, scanUsage } = await this.scanDownstreamConflicts({
-            snapshot,
+            snapshot: workingSnapshot,
             historicalItems,
             stagedCards,
             retryOptions,
@@ -709,6 +759,53 @@ export class SyncPipeline {
             ...(stateDiffAdvisories.length > 0 ? { stateDiffAdvisories } : {}),
             totalUsage
         };
+    }
+
+    private async buildReachableKeySet(
+        pendingNewEntityIds: Set<string>,
+        extraChapterKeys: string[]
+    ): Promise<Set<string>> {
+        const keys = new Set<string>([...pendingNewEntityIds, ...extraChapterKeys]);
+        const collectMdIds = async (dirPath: string) => {
+            try {
+                const files = await readdir(dirPath);
+                for (const file of files) {
+                    if (!file.endsWith('.md')) continue;
+                    const base = file.slice(0, -3);
+                    keys.add(base);
+                    const sagaMatch = /^((?:char|item)_[a-zA-Z0-9_]+?)_saga_\d+$/.exec(base);
+                    if (sagaMatch?.[1]) {
+                        keys.add(sagaMatch[1]);
+                    }
+                }
+            } catch (err: unknown) {
+                if ((err as { code?: string }).code !== 'ENOENT') throw err;
+            }
+        };
+
+        await Promise.all([
+            collectMdIds(join(this.store.bookRoot, 'entities')),
+            collectMdIds(join(this.store.bookRoot, 'entities/cold_archive')),
+            collectMdIds(join(this.store.bookRoot, 'manuscripts'))
+        ]);
+        return keys;
+    }
+
+    private assertForeignKeysReachable(
+        sourceEntityId: string,
+        content: string,
+        reachableKeys: Set<string>
+    ): void {
+        const missing = new Set<string>();
+        for (const match of content.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
+            const refId = match[1];
+            if (refId && !reachableKeys.has(refId)) {
+                missing.add(refId);
+            }
+        }
+        if (missing.size > 0) {
+            throw new ForeignKeyError([...missing], sourceEntityId);
+        }
     }
 
     private async assertNoOpenParallelConflict(dirtyChapters: DirtyChapter[]): Promise<void> {
@@ -912,6 +1009,7 @@ export class SyncPipeline {
                 timelineMode,
                 deferCommit: true,
                 draftText: currentText,
+                visibleEntities: snapshot.entities,
                 taskPrompt: `${dynamicPrompt}\n\n请调用 \`yield_state_patch\` 提交抽取结果。`,
                 signal
             });
@@ -975,7 +1073,7 @@ export class SyncPipeline {
             return { conflicts: [], scanUsage };
         }
 
-        // 1. 提取历史脏章 HEAD vs 当前文本涉事实体与锚点关键词，经 IndexRecall 筛选相关下游章节
+        // 1. 提取历史脏章 HEAD vs 当前文本涉事实体（含冷宫历史实体）与锚点关键词，经 IndexRecall 筛选相关下游章节
         const allCorpus = historicalItems
             .map((item) => [item.diffText, item.headText ?? '', item.currentText].join('\n'))
             .join('\n');
@@ -989,9 +1087,18 @@ export class SyncPipeline {
             }
         }
 
+        const coldEntities =
+            snapshot.coldArchiveIds.length > 0
+                ? await this.store.readColdArchivedEntities(snapshot.coldArchiveIds)
+                : {};
+        const combinedEntities: Record<string, EntityProfile> = {
+            ...coldEntities,
+            ...snapshot.entities
+        };
+
         const matchedEntities: EntityProfile[] = [];
         const matchedEntityIds = new Set<string>();
-        for (const [id, profile] of Object.entries(snapshot.entities)) {
+        for (const [id, profile] of Object.entries(combinedEntities)) {
             const names = [
                 id,
                 profile.metadata.canonical_name,
