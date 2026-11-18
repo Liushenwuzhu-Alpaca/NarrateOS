@@ -1,0 +1,363 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-18T16:30:00Z",
+  "title": "Design System: NarrateOS Operator Studio",
+  "extensions": {
+    "colorMeta": {
+      "cobalt-action": {
+        "role": "primary",
+        "displayName": "Cobalt Dispatch",
+        "canonical": "oklch(62% 0.17 262)",
+        "tonalRamp": [
+          "oklch(22% 0.06 262)",
+          "oklch(32% 0.10 262)",
+          "oklch(44% 0.14 262)",
+          "oklch(54% 0.16 262)",
+          "oklch(62% 0.17 262)",
+          "oklch(74% 0.13 262)",
+          "oklch(86% 0.07 262)",
+          "oklch(95% 0.02 262)"
+        ]
+      },
+      "cobalt-fill": {
+        "role": "primary",
+        "displayName": "Cobalt Solid Fill",
+        "canonical": "oklch(51% 0.16 262)",
+        "tonalRamp": [
+          "oklch(20% 0.06 262)",
+          "oklch(30% 0.10 262)",
+          "oklch(41% 0.14 262)",
+          "oklch(51% 0.16 262)",
+          "oklch(60% 0.16 262)",
+          "oklch(72% 0.12 262)",
+          "oklch(85% 0.06 262)",
+          "oklch(94% 0.02 262)"
+        ]
+      },
+      "cobalt-fill-hover": {
+        "role": "primary",
+        "displayName": "Cobalt Fill Hover",
+        "canonical": "oklch(56% 0.16 262)",
+        "tonalRamp": [
+          "oklch(22% 0.06 262)",
+          "oklch(33% 0.10 262)",
+          "oklch(45% 0.14 262)",
+          "oklch(56% 0.16 262)",
+          "oklch(65% 0.15 262)",
+          "oklch(76% 0.11 262)",
+          "oklch(87% 0.06 262)",
+          "oklch(95% 0.02 262)"
+        ]
+      },
+      "cobalt-ink": {
+        "role": "primary",
+        "displayName": "Cobalt Readable Ink",
+        "canonical": "oklch(78% 0.11 262)",
+        "tonalRamp": [
+          "oklch(24% 0.05 262)",
+          "oklch(36% 0.09 262)",
+          "oklch(48% 0.12 262)",
+          "oklch(62% 0.13 262)",
+          "oklch(78% 0.11 262)",
+          "oklch(85% 0.08 262)",
+          "oklch(91% 0.04 262)",
+          "oklch(96% 0.015 262)"
+        ]
+      },
+      "cinnabar-seal": {
+        "role": "secondary",
+        "displayName": "Cinnabar Galley Seal",
+        "canonical": "oklch(63% 0.17 34)",
+        "tonalRamp": [
+          "oklch(22% 0.06 34)",
+          "oklch(33% 0.10 34)",
+          "oklch(45% 0.14 34)",
+          "oklch(55% 0.16 34)",
+          "oklch(63% 0.17 34)",
+          "oklch(75% 0.12 34)",
+          "oklch(86% 0.06 34)",
+          "oklch(95% 0.02 34)"
+        ]
+      },
+      "jade-done": {
+        "role": "tertiary",
+        "displayName": "Jade Settled",
+        "canonical": "oklch(74% 0.16 152)",
+        "tonalRamp": [
+          "oklch(22% 0.05 152)",
+          "oklch(34% 0.09 152)",
+          "oklch(48% 0.13 152)",
+          "oklch(62% 0.15 152)",
+          "oklch(74% 0.16 152)",
+          "oklch(83% 0.11 152)",
+          "oklch(90% 0.06 152)",
+          "oklch(96% 0.02 152)"
+        ]
+      },
+      "amber-gloss": {
+        "role": "tertiary",
+        "displayName": "Amber Editorial Gloss",
+        "canonical": "oklch(77% 0.15 76)",
+        "tonalRamp": [
+          "oklch(24% 0.05 76)",
+          "oklch(36% 0.09 76)",
+          "oklch(50% 0.13 76)",
+          "oklch(64% 0.15 76)",
+          "oklch(77% 0.15 76)",
+          "oklch(85% 0.11 76)",
+          "oklch(91% 0.06 76)",
+          "oklch(96% 0.02 76)"
+        ]
+      },
+      "coral-halt": {
+        "role": "tertiary",
+        "displayName": "Coral Safe-Halt",
+        "canonical": "oklch(66% 0.17 24)",
+        "tonalRamp": [
+          "oklch(22% 0.06 24)",
+          "oklch(34% 0.10 24)",
+          "oklch(46% 0.14 24)",
+          "oklch(56% 0.16 24)",
+          "oklch(66% 0.17 24)",
+          "oklch(77% 0.12 24)",
+          "oklch(87% 0.06 24)",
+          "oklch(95% 0.02 24)"
+        ]
+      },
+      "ink-sheet": {
+        "role": "neutral",
+        "displayName": "Dark Charcoal Galley Sheet",
+        "canonical": "oklch(24.5% 0.008 270)",
+        "tonalRamp": [
+          "oklch(15% 0.005 270)",
+          "oklch(18.5% 0.006 270)",
+          "oklch(21% 0.007 270)",
+          "oklch(24.5% 0.008 270)",
+          "oklch(28.5% 0.009 270)",
+          "oklch(45% 0.008 270)",
+          "oklch(72% 0.006 85)",
+          "oklch(96% 0.006 85)"
+        ]
+      },
+      "paper-sheet": {
+        "role": "neutral",
+        "displayName": "Warm Cotton Rag Sheet",
+        "canonical": "oklch(98.5% 0.007 88)",
+        "tonalRamp": [
+          "oklch(22% 0.01 80)",
+          "oklch(36% 0.012 80)",
+          "oklch(52% 0.012 82)",
+          "oklch(68% 0.012 84)",
+          "oklch(84% 0.012 86)",
+          "oklch(93% 0.01 87)",
+          "oklch(96.5% 0.009 88)",
+          "oklch(98.5% 0.007 88)"
+        ]
+      },
+      "ink-prose": {
+        "role": "neutral",
+        "displayName": "Warm Ivory Prose Ink",
+        "canonical": "oklch(91.5% 0.012 86)",
+        "tonalRamp": [
+          "oklch(22% 0.008 80)",
+          "oklch(35% 0.01 82)",
+          "oklch(48% 0.01 84)",
+          "oklch(62% 0.011 85)",
+          "oklch(76% 0.012 86)",
+          "oklch(85% 0.012 86)",
+          "oklch(91.5% 0.012 86)",
+          "oklch(96% 0.008 86)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Galley Folio Display Numeral",
+        "purpose": "68px ExtraLight tabular chapter numeral in the editorial masthead."
+      },
+      "headline": {
+        "displayName": "Chapter Serif Headline",
+        "purpose": "Primary chapter titles inside the manuscript sheet."
+      },
+      "subheadline": {
+        "displayName": "Codex Surface Subheadline",
+        "purpose": "20px book-wide codex header title."
+      },
+      "title": {
+        "displayName": "Workbench Section Title",
+        "purpose": "Book switcher, inspector section headers, and seal glyph."
+      },
+      "prose": {
+        "displayName": "Long-Form Novel Prose",
+        "purpose": "17px CJK serif reading body at 1.98 line-height and 2em indent."
+      },
+      "body": {
+        "displayName": "Studio Control Body",
+        "purpose": "13px sans-serif text across TOC lists, notes, and codex rows."
+      },
+      "label": {
+        "displayName": "Compact Action & Tab Label",
+        "purpose": "12px medium weight labels for buttons, segmented tabs, and pills."
+      },
+      "mono": {
+        "displayName": "Telemetry & Routing Mono",
+        "purpose": "11.5px tabular monospace for provider:model IDs, Git SHAs, and margin folios."
+      }
+    },
+    "shadows": [
+      {
+        "name": "sheet-rest",
+        "value": "0 6px 24px rgba(0, 0, 0, 0.12)",
+        "purpose": "Subtle lift separating the 672px editorial sheet from the stage canvas."
+      },
+      {
+        "name": "director-dock",
+        "value": "0 10px 30px rgba(0, 0, 0, 0.34)",
+        "purpose": "Foreground dock elevation for the bottom frameless director note bar."
+      },
+      {
+        "name": "float-popover",
+        "value": "0 16px 40px rgba(0, 0, 0, 0.44), 0 2px 8px rgba(0, 0, 0, 0.24)",
+        "purpose": "Popover menus for book switching, YOLO modes, and compact TOC navigation."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-galley-out",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Confident deceleration for Cinnabar seal stamping, ink reveal, and View Transitions."
+      },
+      {
+        "name": "ease-studio-layout",
+        "value": "cubic-bezier(0.2, 0.7, 0.2, 1)",
+        "purpose": "Smooth three-column drawer collapse and 3x2 pipeline drawer expansion."
+      },
+      {
+        "name": "duration-feedback",
+        "value": "140ms",
+        "purpose": "Immediate hover, press, and popover micro-feedback."
+      },
+      {
+        "name": "duration-seal",
+        "value": "360ms",
+        "purpose": "Focal Cinnabar commit seal impression upon chapter completion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "drawer-right",
+        "value": "820px"
+      },
+      {
+        "name": "three-column",
+        "value": "1200px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Split Action Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Single solid CTA for stepping one chapter or launching YOLO modes.",
+      "html": "<div class=\"ds-split\"><button class=\"ds-btn-primary\" type=\"button\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 16 16\" fill=\"currentColor\"><path d=\"M4.5 3.2l8.3 4.8-8.3 4.8V3.2z\"/></svg>写下一章</button><button class=\"ds-btn-primary ds-btn-caret\" type=\"button\">YOLO <svg width=\"12\" height=\"12\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"><path d=\"M4.5 6.2L8 9.8l3.5-3.6\"/></svg></button></div>",
+      "css": ".ds-split { display: inline-flex; align-items: center; } .ds-btn-primary { height: 30px; padding: 0 12px; border: 0; border-radius: 7px 0 0 7px; background: #3762cc; color: #ffffff; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; transition: background 0.14s ease; } .ds-btn-caret { border-radius: 0 7px 7px 0; border-left: 1px solid rgba(255,255,255,0.22); padding: 0 9px; } .ds-btn-primary:hover { background: #436fd9; } .ds-btn-primary:focus-visible { outline: 2px solid #4c7cf0; outline-offset: 2px; }"
+    },
+    {
+      "name": "Outline Secondary Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Low-emphasis secondary action button inside conflict cards and toolbars.",
+      "html": "<button class=\"ds-btn-outline\" type=\"button\">我自己动手改稿</button>",
+      "css": ".ds-btn-outline { height: 30px; padding: 0 11px; border-radius: 7px; border: 1px solid rgba(255,255,255,0.125); background: #1f2024; color: #f3f2ee; font-size: 12px; font-weight: 500; cursor: pointer; transition: background 0.14s ease, border-color 0.14s ease; } .ds-btn-outline:hover { background: #26282d; border-color: rgba(255,255,255,0.22); } .ds-btn-outline:focus-visible { outline: 2px solid #4c7cf0; outline-offset: 2px; }"
+    },
+    {
+      "name": "Agent Pipeline Step Card",
+      "kind": "card",
+      "refersTo": "pipeline-card",
+      "description": "3x2 matrix cell displaying real-time agent status lamp, live activity, and resolved model.",
+      "html": "<button class=\"ds-pipe-card\" type=\"button\"><div class=\"ds-pipe-top\"><span class=\"ds-pipe-name\"><i class=\"ds-lamp\"></i>3. Writer</span><span class=\"ds-pipe-state\">生成中</span></div><div class=\"ds-pipe-model\">deepseek:deepseek-reasoner</div></button>",
+      "css": ".ds-pipe-card { width: 210px; padding: 9px 11px; border-radius: 9px; border: 1px solid rgba(76,124,240,0.38); background: rgba(76,124,240,0.12); color: #f3f2ee; text-align: left; display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition: background 0.14s ease, border-color 0.14s ease; } .ds-pipe-card:hover { background: rgba(76,124,240,0.18); } .ds-pipe-card:focus-visible { outline: 2px solid #4c7cf0; outline-offset: 2px; } .ds-pipe-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; } .ds-pipe-name { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; } .ds-lamp { width: 10px; height: 10px; border-radius: 50%; background: #4c7cf0; box-shadow: 0 0 0 3px rgba(76,124,240,0.22); } .ds-pipe-state { font-size: 11px; color: #96b6ff; } .ds-pipe-model { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #96b6ff; }"
+    },
+    {
+      "name": "Frameless Director Note Dock",
+      "kind": "input",
+      "refersTo": "director-note-dock",
+      "description": "672px bottom dock for queuing safe-point director signals without chat loop overhead.",
+      "html": "<div class=\"ds-note-dock\"><button class=\"ds-kind-pill\" type=\"button\">剧情微调 ▾</button><input class=\"ds-note-inp\" type=\"text\" placeholder=\"给下一章递张导演便签（写完自动生效）\" /><button class=\"ds-send-btn\" type=\"button\" aria-label=\"存入并开写\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"><path d=\"M8 12.8V3.5M4.2 7.2L8 3.4l3.8 3.8\"/></svg></button></div>",
+      "css": ".ds-note-dock { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; background: #1f2024; border: 1px solid rgba(255,255,255,0.125); border-radius: 11px; box-shadow: 0 10px 30px rgba(0,0,0,0.34); transition: border-color 0.15s ease; } .ds-note-dock:focus-within { border-color: rgba(76,124,240,0.45); } .ds-kind-pill { height: 26px; padding: 0 9px; border: 0; border-radius: 6px; background: rgba(255,255,255,0.06); color: #c8c6bf; font-size: 12px; font-weight: 500; cursor: pointer; } .ds-kind-pill:hover { color: #f3f2ee; background: rgba(255,255,255,0.1); } .ds-note-inp { flex: 1; border: 0; background: transparent; color: #f3f2ee; caret-color: #4c7cf0; font-size: 13px; outline: none; } .ds-note-inp::placeholder { color: #98968f; } .ds-send-btn { width: 28px; height: 28px; border: 0; border-radius: 7px; background: #3762cc; color: #fff; display: grid; place-items: center; cursor: pointer; } .ds-send-btn:hover { background: #436fd9; }"
+    },
+    {
+      "name": "Editorial Manuscript Masthead",
+      "kind": "custom",
+      "refersTo": "manuscript-sheet",
+      "description": "672px literary sheet header pairing a 68px ExtraLight folio numeral with serif title.",
+      "html": "<div class=\"ds-sheet\"><div class=\"ds-masthead\"><div class=\"ds-num\">02</div><div><h2 class=\"ds-title\">夜账缺页</h2><div class=\"ds-meta\">第一卷 · 寒潮封港 · 故事第 4 天 · 2,940 字</div></div></div><p class=\"ds-prose\">海风把三号栈桥铁缆上的水汽吹进领口时，陈砚收回摸过封条的手。</p></div>",
+      "css": ".ds-sheet { background: #1f2024; color: #e6e2d8; border: 1px solid rgba(255,255,255,0.068); border-radius: 12px; padding: 28px 34px; box-shadow: 0 6px 24px rgba(0,0,0,0.12); } .ds-masthead { display: grid; grid-template-columns: auto 1fr; column-gap: 20px; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.068); } .ds-num { font-size: 56px; font-weight: 200; line-height: 0.86; letter-spacing: -0.04em; color: #575853; padding-right: 18px; border-right: 1px solid rgba(255,255,255,0.125); font-variant-numeric: tabular-nums; } .ds-title { margin: 0 0 6px; font-family: 'Source Han Serif SC', Georgia, serif; font-size: 22px; font-weight: 600; color: #f3f2ee; } .ds-meta { font-size: 12px; color: #98968f; } .ds-prose { margin: 0; font-family: 'Source Han Serif SC', Georgia, serif; font-size: 16.5px; line-height: 1.95; text-indent: 2em; }"
+    },
+    {
+      "name": "Cinnabar Commit Seal",
+      "kind": "custom",
+      "refersTo": "seal-stamp",
+      "description": "Rotated -4deg Cinnabar colophon seal stamped with the real Git commit SHA upon finalization.",
+      "html": "<div class=\"ds-endmark\"><div class=\"ds-seal\">定稿</div><span class=\"ds-sha\">commit 81c4a9 · 双门禁核验通过</span></div>",
+      "css": ".ds-endmark { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px; } .ds-seal { width: 48px; height: 48px; border-radius: 7px; border: 1.5px solid #df6447; background: rgba(223,100,71,0.11); color: #df6447; font-family: 'Source Han Serif SC', Georgia, serif; font-weight: 700; font-size: 14px; letter-spacing: 0.08em; display: grid; place-items: center; transform: rotate(-4deg); transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1); } .ds-seal:hover { transform: rotate(0deg) scale(1.04); } .ds-sha { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #98968f; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "东方清样校勘室 (The Literary Galley Desk)",
+    "overview": "NarrateOS Operator Studio 同时服务高频后台管线操控（`Operate`）与数小时沉浸式长篇小说审阅（`Read`）。设计系统遵循 **85% 隐形工具骨架 + 15% 文学清样签名触点** 的克制配比：顶栏、章节目录、检查器与两层模型路由严格承袭 `@deepseek-ai/dsh` 宿主的冷静家族秩序，做到零装饰干扰；视觉张力集中投放在中央 `672px` 独立书稿舞台与 `3x2` 工序灯阵之上，让每一次章节落盘都具备文学清样盖印封存的呼吸感与确信感。\n\n界面彻底摒弃传统后台「外框套卡片再套小方框」的机械表格感，改由深墨/暖纸微色阶层叠与极淡 `1px` 分割线组织空间。工程术语（如 `WAL`、`WARPED`、`MATTR-500`）在界面层全部转译为作者直白中文，同时保留干练的英文工种名（`1. Librarian` 至 `6. Dreamer`）与真实模型标识（`provider:model`）。明确排斥的视觉反模式包括：赛博霓虹发光、单侧 `3px` 粗彩条（`side-tab`）、标题上方生硬的小号眉题（eyebrow kicker）、多层嵌套描边卡片，以及无状态因果意义的纯炫技循环动画。",
+    "keyCharacteristics": [
+      "**双模式同台分工**：周边 `Operate` 控制面保持高扫描效率与低存在感，中央 `Read` 书稿纸面拥有衬线排版、宽裕页边距与清样仪式感。",
+      "**去框化色阶分层**：以五级微温差中性表面替代密集矩形线框，全屏仅保留「`写下一章`」唯一高饱和实心主行动点。",
+      "**清样校勘品牌签名**：大号超细章节序号刊头（`02 | 标题`）、悬停浮现页边段号（`P01`）、刊头润色校勘签与章末微倾 `-4deg` 宣纸印泥质感「`定稿`」朱印。",
+      "**因果可追溯实时流**：`3x2` 工序与模型矩阵承载呼吸态进度体感，点击任意工种卡片通过原生共享元素过渡直达右栏实时思考链。"
+    ],
+    "rules": [
+      {
+        "name": "The Single Solid CTA Rule",
+        "body": "同一视口内仅允许「`写下一章`」（或冲突裁决卡的首选修复动作）使用实心 `cobalt-fill` 填充；其余次要操作一律退回微底色或描边态，确保视线在 0.5 秒内锁定主推进入口。",
+        "section": "colors"
+      },
+      {
+        "name": "The Seal-Is-Not-Danger Rule",
+        "body": "朱砂色 `cinnabar-seal` 永远代表「文学清样核验封存」的正向仪式感，任何错误、阻断或破坏性操作必须使用语义红 `coral-halt` 并搭配明确文字标签。",
+        "section": "colors"
+      },
+      {
+        "name": "The Dual-Cue Status Rule",
+        "body": "6 步工序灯与章节状态绝不仅仅依赖红绿颜色区分：必须同步提供光晕形态（常亮实心圆、呼吸脉冲环、警示描边）与直白中文状态词（「已完成 / 生成中 / 有冲突 / 待命」）。",
+        "section": "colors"
+      },
+      {
+        "name": "The Serif Boundary Rule",
+        "body": "衬线体仅出现在书稿纸面内部（章节标题、正文段落与朱砂「定稿」印文）；顶栏、侧栏、按钮与抽屉一律使用无衬线体，严守工具区与作品区的心理边界。",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Telemetry Rule",
+        "body": "所有章节号、字数、故事日、Token 预算与百分比必须启用 `font-variant-numeric: tabular-nums`，保证连写跳数时界面零横向抖动。",
+        "section": "typography"
+      },
+      {
+        "name": "The De-Boxed Inspector Rule",
+        "body": "侧栏与运行状态面板内部禁止卡片套卡片或四面描边盒子；分组之间仅通过 `14px` 垂直留白与单条 `1px` `hairline-subtle` 极淡横线分隔。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** 保持「单章手稿页签（`本章正文 | 本章细纲 | 改动对比`）」与左栏底部跨章「全书设定集」彻底物理分离，绝不混排在同一组 Tab 中。",
+      "**Do** 让中央工具栏、`3x2` 工序矩阵、冲突裁决卡、书稿纸面与底部导演便签舱严格遵守 `672px` 版心光学同宽对齐。",
+      "**Do** 基于 `.ns-studio-shell` 自身 `ResizeObserver` 实测容器宽度触发 `1200px`（收左栏）与 `820px`（右栏转抽屉）断点，无缝兼容 DSH 宿主侧栏伸缩与明暗主题切换。",
+      "**Do** 根据真实后端物理状态分流冲突裁决卡操作（已落盘跨章冲突提供自动修补与直接改稿；未落盘新章拦截提供带便签重写与走向调整，绝不渲染会报 `404` 的假改稿按钮）。",
+      "**Do** 为所有 `View Transitions`、`scroll()` 进度条与 `WAAPI` 墨迹显影提供 `@supports` 渐进增强兜底及 `@media (prefers-reduced-motion: reduce)` 降级路径。"
+    ],
+    "donts": [
+      "**Don't** 在卡片、提示条或列表项单侧使用超过 `1px` 的彩色粗边条（严禁 `border-left: 3px solid ...` 等 `side-tab` AI 模板痕迹）。",
+      "**Don't** 在章节主标题或卡片主标题正上方堆叠小号大写眉题（eyebrow / kicker label）；元数据一律置于主标题下方或同行右侧。",
+      "**Don't** 在界面文案中裸露 `WAL`、`WARPED`、`Kontoyiannis H_K`、`MATTR-500`、`force: false` 等底层工程黑话，也不要捏造后端未持久化的句级润色偏移高亮。",
+      "**Don't** 用打断式弹窗阻断切书或外部 `book_switched` 事件；未保存手改草稿一律按 `bookRoot + chapterNumber` 自动暂存并在切回时温和恢复。",
+      "**Don't** 用 Emoji 或字符符号充当界面图标；所有操作图标统一采用 `1.5px` 描边的内联矢量 SVG。"
+    ]
+  }
+}
