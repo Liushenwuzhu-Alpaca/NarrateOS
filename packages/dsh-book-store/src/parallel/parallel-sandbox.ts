@@ -1,27 +1,24 @@
 import { withTraceRun } from '../trace/trace.js';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { SystemPort } from '../ports/system.js';
 import {
     BookStore,
     BookSnapshot,
-    DEFAULT_SECTION_HEADINGS,
-    EntityEntry,
+    ENTITY_ID_RE,
     EntityEntryInput,
-    EntityMetadataSchema,
     EntityPatch,
     EntityProfile,
     ForeignKeyError,
-    InnateLockViolationError,
     TimelineMode,
-    inferSlotKey,
+    mergeEntityProfilePatch,
     parseEntityMarkdown,
     serializeEntityMarkdown
 } from '../store/index.js';
 
 const DEFAULT_PARALLEL_MAX_CHAPTERS = 5;
+const DEFAULT_PARALLEL_DAY_SPAN = 0;
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]+$/;
-const ENTITY_ID_RE = /^(?:char|item)_[a-zA-Z0-9_]+$/;
 const ITEM_ID_REF_RE = /\b(item_[a-zA-Z0-9_]+)\b/g;
 
 /** 并行支线冲突详情 */
@@ -71,6 +68,16 @@ export interface ParallelWindowMetadata {
     mergedAt?: string | undefined;
 }
 
+/** 分支单章 L2 章卡增量 */
+export interface ParallelL2CardEntry {
+    volumeNumber: number;
+    chapterNumber: number;
+    storyDay: number;
+    plotSummary: string;
+    proseAnchors?: string[] | undefined;
+    appearanceEntityIds: string[];
+}
+
 /** 单条支线暂存增量 (.ops/parallel_deltas/{windowId}/{branchId}.json) */
 export interface ParallelBranchDelta {
     windowId: string;
@@ -81,6 +88,7 @@ export interface ParallelBranchDelta {
     patches: EntityPatch[];
     stagedAt: string;
     chapterNumbers?: number[];
+    l2Cards?: ParallelL2CardEntry[] | undefined;
 }
 
 export interface ForkParallelWindowOptions {
@@ -97,6 +105,7 @@ export interface StageParallelDeltaInput {
     daySpan?: number | undefined;
     patches: EntityPatch[];
     chapterNumbers?: number[];
+    l2Cards?: ParallelL2CardEntry[] | undefined;
 }
 
 export interface MergeParallelWindowOptions {
@@ -111,6 +120,7 @@ export interface MergeParallelWindowResult {
     baseTag: string;
     mergedBranches: string[];
     updatedEntities: string[];
+    updatedL2CardPaths?: string[] | undefined;
     previousStoryDay: number;
     newStoryDay: number;
     totalChaptersUsed: number;
@@ -123,199 +133,55 @@ function assertSafeId(value: string, label: string): void {
     }
 }
 
-function toEntityEntry(input: EntityEntryInput): EntityEntry {
-    const entry: EntityEntry = {
-        text: input.text,
-        continuationLines: input.continuationLines ? [...input.continuationLines] : []
-    };
-    if (input.storyDay !== undefined) entry.storyDay = input.storyDay;
-    if (input.chapter !== undefined) entry.chapter = input.chapter;
-    if (input.visibility !== undefined) entry.visibility = input.visibility;
-    if (input.owner !== undefined) entry.owner = input.owner;
-    if (input.status !== undefined) entry.status = input.status;
-    if (input.slotKey !== undefined) entry.slotKey = input.slotKey;
-    if (input.extraTags !== undefined) entry.extraTags = { ...input.extraTags };
-    if (input.isNumericLedger !== undefined) entry.isNumericLedger = input.isNumericLedger;
-    if (input.ledger !== undefined) entry.ledger = { ...input.ledger };
-    return entry;
-}
-
-function mergeUniqueStrings(existing: string[], additions?: string[]): string[] {
-    if (!additions || additions.length === 0) return existing;
-    const seen = new Set(existing);
-    const result = [...existing];
-    for (const item of additions) {
-        if (!seen.has(item)) {
-            seen.add(item);
-            result.push(item);
-        }
-    }
-    return result;
-}
-
 function applySingleEntityPatch(
     existing: EntityProfile | null,
     patch: EntityPatch,
     allowInnateMutation: boolean
 ): EntityProfile {
-    if (!ENTITY_ID_RE.test(patch.entity_id)) {
-        throw new Error(`非法的 entity_id 格式: ${patch.entity_id}`);
-    }
-    if (existing) {
-        if (patch.canonical_name !== undefined && patch.canonical_name !== existing.metadata.canonical_name) {
-            if (!allowInnateMutation) {
-                throw new InnateLockViolationError(
-                    patch.entity_id,
-                    `禁止在未授权情况下篡改实体 canonical_name (${existing.metadata.canonical_name} -> ${patch.canonical_name})`
-                );
-            }
-        }
-        if (patch.innate_locks_ops && patch.innate_locks_ops.length > 0 && !allowInnateMutation) {
-            throw new InnateLockViolationError(
-                patch.entity_id,
-                `禁止在未授权情况下修改实体 ${patch.entity_id} 的 1. Innate Locks`
-            );
-        }
-    }
+    return mergeEntityProfilePatch(existing, patch, allowInnateMutation);
+}
 
-    const profile: EntityProfile = existing
-        ? {
-              metadata: { ...existing.metadata },
-              sectionHeadings: { ...existing.sectionHeadings },
-              innateLocks: existing.innateLocks.map((e) => ({ ...e, continuationLines: [...e.continuationLines] })),
-              acquiredState: existing.acquiredState.map((e) => ({
-                  ...e,
-                  continuationLines: [...e.continuationLines],
-                  ...(e.ledger ? { ledger: { ...e.ledger } } : {})
-              })),
-              irreversibleTrajectory: existing.irreversibleTrajectory.map((e) => ({
-                  ...e,
-                  continuationLines: [...e.continuationLines]
-              })),
-              recentBuffer: existing.recentBuffer.map((e) => ({
-                  ...e,
-                  continuationLines: [...e.continuationLines]
-              }))
-          }
-        : {
-              metadata: {
-                  entity_id: patch.entity_id,
-                  canonical_name: patch.canonical_name ?? patch.entity_id,
-                  unique_aliases: [],
-                  contextual_titles: [],
-                  historical_anchors: [],
-                  last_seen_ch: patch.last_seen_ch ?? 0
-              },
-              sectionHeadings: { ...DEFAULT_SECTION_HEADINGS },
-              innateLocks: [],
-              acquiredState: [],
-              irreversibleTrajectory: [],
-              recentBuffer: []
-          };
-
-    if (patch.canonical_name !== undefined && (allowInnateMutation || !existing)) {
-        profile.metadata.canonical_name = patch.canonical_name;
+function upsertParallelL2CardContent(rawCardContent: string | null, entry: ParallelL2CardEntry): string {
+    const baseContent =
+        rawCardContent && rawCardContent.trim().length > 0
+            ? rawCardContent.replace(/\r\n/g, '\n')
+            : `# 第 ${entry.volumeNumber} 卷双轨章卡\n\n`;
+    const chKey = `ch_${String(entry.chapterNumber).padStart(4, '0')}`;
+    const lines = [
+        `## ${chKey} (day:${entry.storyDay})`,
+        `- 主干剧情：${entry.plotSummary.trim()}`
+    ];
+    if (entry.proseAnchors && entry.proseAnchors.length > 0) {
+        lines.push(`- 异象锚点：${entry.proseAnchors.join('、')}`);
     }
-    if (patch.last_seen_ch !== undefined) {
-        profile.metadata.last_seen_ch = Math.max(profile.metadata.last_seen_ch, patch.last_seen_ch);
-    }
-    profile.metadata.unique_aliases = mergeUniqueStrings(profile.metadata.unique_aliases, patch.add_unique_aliases);
-    profile.metadata.contextual_titles = mergeUniqueStrings(
-        profile.metadata.contextual_titles,
-        patch.add_contextual_titles
+    lines.push(`- 出场实体：${[...new Set(entry.appearanceEntityIds)].join(', ')}`);
+    const entryBlock = lines.join('\n');
+    const sectionRe = new RegExp(
+        `^##\\s+${chKey}\\b[^\\n]*\\n[\\s\\S]*?(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
+        'm'
     );
-    profile.metadata.historical_anchors = mergeUniqueStrings(
-        profile.metadata.historical_anchors,
-        patch.add_historical_anchors
-    );
-
-    if (patch.innate_locks_ops) {
-        for (const op of patch.innate_locks_ops) {
-            if (op.op === 'append') {
-                profile.innateLocks.push(toEntityEntry(op.entry));
-            } else if (op.op === 'remove_slot') {
-                profile.innateLocks = profile.innateLocks.filter((e) => inferSlotKey(e) !== op.slot_key);
-            }
-        }
+    if (sectionRe.test(baseContent)) {
+        const replaced = baseContent.replace(sectionRe, `${entryBlock}\n\n`);
+        return `${replaced.trimEnd()}\n`;
     }
+    return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
+}
 
-    if (patch.acquired_state_ops) {
-        for (const op of patch.acquired_state_ops) {
-            if (op.op === 'upsert_slot') {
-                const nextEntry = toEntityEntry(op.entry);
-                const idx = profile.acquiredState.findIndex((e) => inferSlotKey(e) === op.slot_key);
-                if (idx >= 0) {
-                    profile.acquiredState[idx] = nextEntry;
-                } else {
-                    profile.acquiredState.push(nextEntry);
-                }
-            } else if (op.op === 'remove_slot') {
-                profile.acquiredState = profile.acquiredState.filter((e) => inferSlotKey(e) !== op.slot_key);
-            } else if (op.op === 'upsert_ledger') {
-                const ledgerIdx = profile.acquiredState.findIndex((e) => e.isNumericLedger);
-                if (ledgerIdx >= 0) {
-                    const existingLedger = profile.acquiredState[ledgerIdx]!;
-                    const mergedLedger: Record<string, string> = { ...(existingLedger.ledger ?? {}) };
-                    for (const [k, v] of Object.entries(op.entries)) {
-                        mergedLedger[k] = String(v);
-                    }
-                    existingLedger.ledger = mergedLedger;
-                } else {
-                    const newLedger: Record<string, string> = {};
-                    for (const [k, v] of Object.entries(op.entries)) {
-                        newLedger[k] = String(v);
-                    }
-                    profile.acquiredState.push({
-                        isNumericLedger: true,
-                        ledger: newLedger,
-                        text: '',
-                        continuationLines: []
-                    });
-                }
-            } else if (op.op === 'append') {
-                profile.acquiredState.push(toEntityEntry(op.entry));
-            }
-        }
+function mergeParallelL2Cards(
+    existing: ParallelL2CardEntry[] | undefined,
+    additions: ParallelL2CardEntry[] | undefined
+): ParallelL2CardEntry[] | undefined {
+    const byChapter = new Map<number, ParallelL2CardEntry>();
+    for (const card of existing ?? []) {
+        byChapter.set(card.chapterNumber, card);
     }
-
-    if (patch.trajectory_ops) {
-        for (const op of patch.trajectory_ops) {
-            if (op.op === 'append') {
-                profile.irreversibleTrajectory.push(toEntityEntry(op.entry));
-            }
-        }
+    for (const card of additions ?? []) {
+        byChapter.set(card.chapterNumber, card);
     }
-
-    if (patch.buffer_ops) {
-        for (const op of patch.buffer_ops) {
-            if (op.op === 'upsert_slot') {
-                const nextEntry = toEntityEntry(op.entry);
-                const idx = profile.recentBuffer.findIndex((e) => inferSlotKey(e) === op.slot_key);
-                if (idx >= 0) {
-                    profile.recentBuffer[idx] = nextEntry;
-                } else {
-                    profile.recentBuffer.push(nextEntry);
-                }
-            } else if (op.op === 'append') {
-                profile.recentBuffer.push(toEntityEntry(op.entry));
-            } else if (op.op === 'trim_buffer') {
-                const timedIndices: number[] = [];
-                profile.recentBuffer.forEach((entry, idx) => {
-                    if (entry.storyDay !== undefined || entry.chapter !== undefined) {
-                        timedIndices.push(idx);
-                    }
-                });
-                if (timedIndices.length > op.max_entries) {
-                    const dropCount = timedIndices.length - op.max_entries;
-                    const dropSet = new Set(timedIndices.slice(0, dropCount));
-                    profile.recentBuffer = profile.recentBuffer.filter((_, idx) => !dropSet.has(idx));
-                }
-            }
-        }
+    if (byChapter.size === 0) {
+        return undefined;
     }
-
-    profile.metadata = EntityMetadataSchema.parse(profile.metadata);
-    return profile;
+    return [...byChapter.values()].sort((a, b) => a.chapterNumber - b.chapterNumber);
 }
 
 /** 构造用于比较支线槽位变更是否等价的规范化签名 */
@@ -374,33 +240,67 @@ function buildItemMutationSummary(patch: EntityPatch): string {
     return parts.join('; ') || '修改唯一道具状态';
 }
 
-/** 提取角色补丁中声明获取/持有的唯一道具 ID */
-function extractClaimedItemIds(patch: EntityPatch): Array<{ itemId: string; slotKey?: string | undefined; summary: string }> {
-    const claims: Array<{ itemId: string; slotKey?: string | undefined; summary: string }> = [];
-    if (!patch.acquired_state_ops) return claims;
+function collectItemClaimsFromEntry(
+    entityId: string,
+    entry: EntityEntryInput,
+    explicitSlotKey: string | undefined,
+    claims: Array<{ itemId: string; slotKey?: string | undefined; summary: string }>
+): void {
+    const slotKey = explicitSlotKey ?? entry.slotKey;
+    const matchedItems = new Set<string>();
 
-    for (const op of patch.acquired_state_ops) {
-        if (op.op !== 'upsert_slot' && op.op !== 'append') continue;
-        const slotKey = op.op === 'upsert_slot' ? op.slot_key : op.entry.slotKey;
-        const matchedItems = new Set<string>();
-
-        if (slotKey) {
-            for (const m of slotKey.matchAll(ITEM_ID_REF_RE)) {
-                if (m[1]) matchedItems.add(m[1]);
-            }
-        }
-        for (const m of op.entry.text.matchAll(ITEM_ID_REF_RE)) {
+    const scanText = (raw: string | undefined) => {
+        if (!raw) return;
+        for (const m of raw.matchAll(ITEM_ID_REF_RE)) {
             if (m[1]) matchedItems.add(m[1]);
         }
+    };
 
-        for (const itemId of matchedItems) {
-            claims.push({
-                itemId,
-                slotKey,
-                summary: `${patch.entity_id} 声明状态 [${op.entry.text}]`
-            });
-        }
+    scanText(slotKey);
+    scanText(entry.owner);
+    scanText(entry.text);
+    for (const line of entry.continuationLines ?? []) {
+        scanText(line);
     }
+
+    for (const itemId of matchedItems) {
+        claims.push({
+            itemId,
+            slotKey,
+            summary: `${entityId} 声明状态 [${entry.text}]`
+        });
+    }
+}
+
+/** 提取角色补丁中声明获取/持有/损毁的唯一道具 ID（覆盖第 2/3/4 全区） */
+function extractClaimedItemIds(patch: EntityPatch): Array<{ itemId: string; slotKey?: string | undefined; summary: string }> {
+    const claims: Array<{ itemId: string; slotKey?: string | undefined; summary: string }> = [];
+
+    for (const op of patch.acquired_state_ops ?? []) {
+        if (op.op !== 'upsert_slot' && op.op !== 'append') continue;
+        collectItemClaimsFromEntry(
+            patch.entity_id,
+            op.entry,
+            op.op === 'upsert_slot' ? op.slot_key : op.entry.slotKey,
+            claims
+        );
+    }
+
+    for (const op of patch.trajectory_ops ?? []) {
+        if (op.op !== 'append') continue;
+        collectItemClaimsFromEntry(patch.entity_id, op.entry, op.entry.slotKey, claims);
+    }
+
+    for (const op of patch.buffer_ops ?? []) {
+        if (op.op !== 'upsert_slot' && op.op !== 'append') continue;
+        collectItemClaimsFromEntry(
+            patch.entity_id,
+            op.entry,
+            op.op === 'upsert_slot' ? op.slot_key : op.entry.slotKey,
+            claims
+        );
+    }
+
     return claims;
 }
 
@@ -495,6 +395,7 @@ export class ParallelSandbox {
                 await this.system.commitPaths(this.store.bookRoot, forkPaths, `parallel(${options.windowId}): persist window`);
             } catch (error) {
                 await this.system.restorePaths(this.store.bookRoot, forkPaths);
+                await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
                 throw error;
             }
             await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
@@ -507,6 +408,15 @@ export class ParallelSandbox {
         assertSafeId(windowId, 'windowId');
         const raw = await readFile(this.windowMetaPath(windowId), 'utf8');
         return JSON.parse(raw) as ParallelWindowMetadata;
+    }
+
+    /** 读取指定支线暂存的 L2 章卡增量列表（仅限本支线可见） */
+    async getBranchL2Cards(windowId: string, branchId: string): Promise<ParallelL2CardEntry[]> {
+        assertSafeId(windowId, 'windowId');
+        assertSafeId(branchId, 'branchId');
+        const deltas = await this.readBranchDeltas(windowId);
+        const target = deltas.find((d) => d.branchId === branchId);
+        return [...(target?.l2Cards ?? [])].sort((a, b) => a.chapterNumber - b.chapterNumber);
     }
 
     /** 分叉基线加本支线增量，其他支线实体与章节不进入生成上下文。 */
@@ -522,33 +432,67 @@ export class ParallelSandbox {
         }
         const delta = (await this.readBranchDeltas(windowId)).find((item) => item.branchId === branchId);
         for (const patch of delta?.patches ?? []) {
-            entities[patch.entity_id] = applySingleEntityPatch(entities[patch.entity_id] ?? null, patch, false);
+            const baseProfile =
+                entities[patch.entity_id] ??
+                (await this.loadBaseProfile(metadata.baseTag, patch.entity_id));
+            entities[patch.entity_id] = applySingleEntityPatch(baseProfile, patch, false);
         }
         const chapterFiles = snapshot.chapterFiles.filter((file) => {
             const chapter = Number(file.slice(3, -3));
             return chapter <= metadata.baseChapter || delta?.chapterNumbers?.includes(chapter);
         });
-        return { ...snapshot, entities, chapterFiles, worldState: {
-            ...snapshot.worldState,
-            summaryMarkdown: `${snapshot.worldState.summaryMarkdown}\n\n全局环境广播：${JSON.stringify(metadata.globalBroadcast)}`,
-            frontmatter: { ...snapshot.worldState.frontmatter, story_day: metadata.baseDay + (delta?.daySpan ?? 0) }
-        } };
+        const coldArchiveIds = snapshot.coldArchiveIds.filter((id) => !(id in entities));
+        return {
+            ...snapshot,
+            entities,
+            coldArchiveIds,
+            chapterFiles,
+            worldState: {
+                ...snapshot.worldState,
+                summaryMarkdown: `${snapshot.worldState.summaryMarkdown}\n\n全局环境广播：${JSON.stringify(metadata.globalBroadcast)}`,
+                frontmatter: { ...snapshot.worldState.frontmatter, story_day: metadata.baseDay + (delta?.daySpan ?? 0) }
+            }
+        };
     }
 
-    async appendChapter(input: StageParallelDeltaInput & { chapterNumber: number }): Promise<ParallelBranchDelta> {
+    async appendChapter(
+        input: StageParallelDeltaInput & { chapterNumber: number; l2Card?: ParallelL2CardEntry | undefined }
+    ): Promise<ParallelBranchDelta> {
         return await this.store.runWithTxLock(async () => {
             assertSafeId(input.windowId, 'windowId');
             assertSafeId(input.branchId, 'branchId');
+            if (!Number.isInteger(input.chapterNumber) || input.chapterNumber <= 0) {
+                throw new Error(`非法的并行章号: ${String(input.chapterNumber)}`);
+            }
+            const windowMeta = await this.getWindow(input.windowId);
+            if (input.chapterNumber <= windowMeta.baseChapter) {
+                throw new Error(
+                    `并行章号必须严格大于分叉基线章号 (${windowMeta.baseChapter})，收到 ${input.chapterNumber}`
+                );
+            }
             const deltas = await this.readBranchDeltas(input.windowId);
             if (deltas.some((item) => item.chapterNumbers?.includes(input.chapterNumber))) {
                 throw new Error('并行章节已存在，拒绝跨支线覆盖或重复暂存');
             }
             const previous = deltas.find((item) => item.branchId === input.branchId);
-            return await this.stageDelta({ ...input,
+            const prevLastChapter = previous?.chapterNumbers?.at(-1);
+            if (prevLastChapter !== undefined && input.chapterNumber <= prevLastChapter) {
+                throw new Error(
+                    `支线 ${input.branchId} 章号必须严格递增（上一章为 ${prevLastChapter}，收到 ${input.chapterNumber}）`
+                );
+            }
+            const incomingL2Cards = [
+                ...(input.l2Cards ?? []),
+                ...(input.l2Card ? [input.l2Card] : [])
+            ];
+            const mergedL2Cards = mergeParallelL2Cards(previous?.l2Cards, incomingL2Cards);
+            return await this.stageDeltaLocked({
+                ...input,
                 patches: [...(previous?.patches ?? []), ...input.patches],
                 chaptersUsed: (previous?.chaptersUsed ?? 0) + 1,
                 chapterNumbers: [...(previous?.chapterNumbers ?? []), input.chapterNumber],
-                daySpan: (previous?.daySpan ?? 0) + (input.daySpan ?? 0)
+                daySpan: (previous?.daySpan ?? 0) + (input.daySpan ?? DEFAULT_PARALLEL_DAY_SPAN),
+                ...(mergedL2Cards ? { l2Cards: mergedL2Cards } : {})
             });
         });
     }
@@ -569,12 +513,64 @@ export class ParallelSandbox {
         }
 
         const chaptersUsed = input.chaptersUsed ?? 1;
-        const daySpan = input.daySpan ?? 1;
+        const daySpan = input.daySpan ?? DEFAULT_PARALLEL_DAY_SPAN;
         if (chaptersUsed < 0 || daySpan < 0) {
             throw new Error('chaptersUsed 与 daySpan 不能为负数');
         }
 
         const existingDeltas = await this.readBranchDeltas(input.windowId);
+        const otherBranchChapters = new Set<number>();
+        for (const d of existingDeltas) {
+            if (d.branchId === input.branchId) continue;
+            for (const ch of d.chapterNumbers ?? []) {
+                otherBranchChapters.add(ch);
+            }
+            for (const card of d.l2Cards ?? []) {
+                otherBranchChapters.add(card.chapterNumber);
+            }
+        }
+
+        if (input.chapterNumbers !== undefined) {
+            let prevCh = windowMeta.baseChapter;
+            for (const ch of input.chapterNumbers) {
+                if (!Number.isInteger(ch) || ch <= 0) {
+                    throw new Error(`非法的并行章号: ${String(ch)}`);
+                }
+                if (ch <= windowMeta.baseChapter) {
+                    throw new Error(
+                        `并行章号必须严格大于分叉基线章号 (${windowMeta.baseChapter})，收到 ${ch}`
+                    );
+                }
+                if (ch <= prevCh) {
+                    throw new Error(
+                        `支线 ${input.branchId} 章号列表必须严格递增: ${input.chapterNumbers.join(', ')}`
+                    );
+                }
+                if (otherBranchChapters.has(ch)) {
+                    throw new Error(`并行章节已存在，拒绝跨支线覆盖或重复暂存: ${ch}`);
+                }
+                prevCh = ch;
+            }
+        }
+
+        if (input.l2Cards !== undefined) {
+            const seenL2Chapters = new Set<number>();
+            for (const card of input.l2Cards) {
+                if (!Number.isInteger(card.volumeNumber) || card.volumeNumber <= 0) {
+                    throw new Error(`非法的 L2 章卡卷号: ${String(card.volumeNumber)}`);
+                }
+                if (!Number.isInteger(card.chapterNumber) || card.chapterNumber <= windowMeta.baseChapter) {
+                    throw new Error(
+                        `L2 章卡章号必须严格大于分叉基线章号 (${windowMeta.baseChapter})，收到 ${card.chapterNumber}`
+                    );
+                }
+                if (seenL2Chapters.has(card.chapterNumber) || otherBranchChapters.has(card.chapterNumber)) {
+                    throw new Error(`L2 章卡章号冲突: ${card.chapterNumber}`);
+                }
+                seenL2Chapters.add(card.chapterNumber);
+            }
+        }
+
         const totalChapters =
             existingDeltas
                 .filter((d) => d.branchId !== input.branchId)
@@ -593,6 +589,11 @@ export class ParallelSandbox {
             this.assertForeignKeysReachable(patch.entity_id, serializeEntityMarkdown(profile), reachable);
         }
 
+        const normalizedL2Cards =
+            input.l2Cards && input.l2Cards.length > 0
+                ? [...input.l2Cards].sort((a, b) => a.chapterNumber - b.chapterNumber)
+                : undefined;
+
         const delta: ParallelBranchDelta = {
             windowId: input.windowId,
             branchId: input.branchId,
@@ -602,13 +603,14 @@ export class ParallelSandbox {
             patches: input.patches,
             stagedAt: new Date().toISOString(),
             ...(input.chapterNumbers ? { chapterNumbers: input.chapterNumbers } : {}),
+            ...(normalizedL2Cards ? { l2Cards: normalizedL2Cards } : {})
         };
 
         await writeFile(this.branchDeltaPath(input.windowId, input.branchId), JSON.stringify(delta, null, 2), 'utf8');
         return delta;
     }
 
-    /** 汇合执行 3-Way Merge（拦截唯一道具双线冲突与互斥槽位冲突，无冲突则统一推进 story_day） */
+    /** 汇合执行 3-Way Merge（拦截唯一道具双线冲突与互斥槽位冲突，无冲突则统一推进 story_day 并合入 L2 章卡） */
     async mergeWindow(options: MergeParallelWindowOptions): Promise<MergeParallelWindowResult> {
         assertSafeId(options.windowId, 'windowId');
 
@@ -633,17 +635,23 @@ export class ParallelSandbox {
             // 第一阶段：3-Way Merge 硬冲突检测（唯一道具双线夺取 / 同实体互斥槽位冲突）
             this.detectConflicts(deltas);
 
-            // 第二阶段：从分叉基线 baseTag 读取实体快照并合成 3-Way Merge 结果
+            // 第二阶段：从分叉基线 baseTag 读取实体快照（含冷宫回查）并合成 3-Way Merge 结果
             const allowInnate = options.allowInnateMutation === true;
             const mergedProfiles = new Map<string, EntityProfile>();
             const pendingNewEntityIds = new Set<string>();
+            const wokenColdArchiveIds = new Set<string>();
 
             for (const delta of deltas) {
                 for (const patch of delta.patches) {
                     let baseProfile = mergedProfiles.get(patch.entity_id) ?? null;
-                    if (!baseProfile) {
-                        baseProfile = await this.loadBaseProfile(windowMeta.baseTag, patch.entity_id);
-                        if (!baseProfile) {
+                    if (!baseProfile && !pendingNewEntityIds.has(patch.entity_id)) {
+                        const loaded = await this.loadBaseProfileWithOrigin(windowMeta.baseTag, patch.entity_id);
+                        if (loaded) {
+                            baseProfile = loaded.profile;
+                            if (loaded.fromColdArchive) {
+                                wokenColdArchiveIds.add(patch.entity_id);
+                            }
+                        } else {
                             pendingNewEntityIds.add(patch.entity_id);
                         }
                     }
@@ -659,12 +667,33 @@ export class ParallelSandbox {
                 this.assertForeignKeysReachable(entityId, serialized, reachableKeys);
             }
 
-            // 第四阶段：全部无冲突且校验通过后，落盘实体、统一推进主时钟 story_day 并提交 Git
+            // 准备分支 L2 章卡合并映射
+            const l2CardsByPath = new Map<string, ParallelL2CardEntry[]>();
+            const seenL2Chapters = new Set<number>();
+            for (const delta of deltas) {
+                for (const card of delta.l2Cards ?? []) {
+                    if (seenL2Chapters.has(card.chapterNumber)) {
+                        throw new Error(`PARALLEL 合并时发现重复的 L2 章卡章号: ${card.chapterNumber}`);
+                    }
+                    seenL2Chapters.add(card.chapterNumber);
+                    const cardRelPath = `index/L2_cards/vol_${String(card.volumeNumber).padStart(2, '0')}_cards.md`;
+                    const list = l2CardsByPath.get(cardRelPath) ?? [];
+                    list.push(card);
+                    l2CardsByPath.set(cardRelPath, list);
+                }
+            }
+            const l2CardRelPaths = [...l2CardsByPath.keys()].sort();
+
+            // 第四阶段：全部无冲突且校验通过后，落盘实体（含冷宫旧档迁回删除）、合入 L2 章卡、推进主时钟并提交 Git
             const tx = await this.store.readTxState();
             if (tx.phase === 'DRAFTING' || tx.phase === 'FEAT_COMMITTED') throw new Error('合并前必须完成章节恢复');
+            const wokenColdRelPaths = [...wokenColdArchiveIds].map((id) => `entities/cold_archive/${id}.md`);
             await this.store.recordPendingWrites([
                 ...[...mergedProfiles.keys()].map((id) => `entities/${id}.md`),
-                'world/world_state.md', `.ops/parallel_deltas/${options.windowId}/window.json`
+                ...wokenColdRelPaths,
+                ...l2CardRelPaths,
+                'world/world_state.md',
+                `.ops/parallel_deltas/${options.windowId}/window.json`
             ]);
             const commitPaths: string[] = [];
             const updatedEntities: string[] = [];
@@ -673,6 +702,37 @@ export class ParallelSandbox {
                 await writeFile(join(this.store.bookRoot, relPath), serializeEntityMarkdown(profile), 'utf8');
                 commitPaths.push(relPath);
                 updatedEntities.push(entityId);
+            }
+            for (const wokenId of wokenColdArchiveIds) {
+                const coldRelPath = `entities/cold_archive/${wokenId}.md`;
+                try {
+                    await unlink(join(this.store.bookRoot, coldRelPath));
+                    commitPaths.push(coldRelPath);
+                } catch (err: unknown) {
+                    if ((err as { code?: string }).code !== 'ENOENT') throw err;
+                }
+            }
+
+            for (const cardRelPath of l2CardRelPaths) {
+                const entries = [...(l2CardsByPath.get(cardRelPath) ?? [])].sort(
+                    (a, b) => a.chapterNumber - b.chapterNumber
+                );
+                const cardAbsPath = join(this.store.bookRoot, cardRelPath);
+                await mkdir(dirname(cardAbsPath), { recursive: true });
+                let existingCard: string | null = null;
+                try {
+                    existingCard = await readFile(cardAbsPath, 'utf8');
+                } catch (err: unknown) {
+                    if ((err as { code?: string }).code !== 'ENOENT') throw err;
+                }
+                let nextCard = existingCard;
+                for (const entry of entries) {
+                    nextCard = upsertParallelL2CardContent(nextCard, entry);
+                }
+                if (nextCard !== null) {
+                    await writeFile(cardAbsPath, nextCard, 'utf8');
+                    commitPaths.push(cardRelPath);
+                }
             }
 
             const maxBranchDaySpan = deltas.reduce((max, d) => Math.max(max, d.daySpan), 0);
@@ -707,6 +767,7 @@ export class ParallelSandbox {
                 );
             } catch (error) {
                 await this.system.restorePaths(this.store.bookRoot, commitPaths);
+                await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
                 throw error;
             }
             await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
@@ -716,6 +777,7 @@ export class ParallelSandbox {
                 baseTag: windowMeta.baseTag,
                 mergedBranches: deltas.map((d) => d.branchId),
                 updatedEntities,
+                ...(l2CardRelPaths.length > 0 ? { updatedL2CardPaths: l2CardRelPaths } : {}),
                 previousStoryDay,
                 newStoryDay,
                 totalChaptersUsed,
@@ -919,10 +981,23 @@ export class ParallelSandbox {
     }
 
     private async loadBaseProfile(baseTag: string, entityId: string): Promise<EntityProfile | null> {
+        const loaded = await this.loadBaseProfileWithOrigin(baseTag, entityId);
+        return loaded?.profile ?? null;
+    }
+
+    private async loadBaseProfileWithOrigin(
+        baseTag: string,
+        entityId: string
+    ): Promise<{ profile: EntityProfile; fromColdArchive: boolean } | null> {
         const relPath = `entities/${entityId}.md`;
         const atTag = await this.system.readFileAtRef(this.store.bookRoot, baseTag, relPath);
         if (atTag !== null) {
-            return parseEntityMarkdown(atTag);
+            return { profile: parseEntityMarkdown(atTag), fromColdArchive: false };
+        }
+        const coldRelPath = `entities/cold_archive/${entityId}.md`;
+        const coldAtTag = await this.system.readFileAtRef(this.store.bookRoot, baseTag, coldRelPath);
+        if (coldAtTag !== null) {
+            return { profile: parseEntityMarkdown(coldAtTag), fromColdArchive: true };
         }
         return null;
     }

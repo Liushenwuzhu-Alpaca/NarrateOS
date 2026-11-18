@@ -53,6 +53,77 @@ export type RoleModelOverride = z.infer<typeof RoleModelOverrideSchema>;
 export const RoleRoutingSchema = z.record(z.string(), RoleModelOverrideSchema);
 export type RoleRouting = z.infer<typeof RoleRoutingSchema>;
 
+/** 开篇声纹与首章校准可配变量 */
+export const BookOpeningConfigSchema = z.object({
+    voice_seed_mode: z.enum(['hybrid_rolling', 'boot_only', 'harvest_ch1', 'manual_only']).default('hybrid_rolling'),
+    target_voice_pool_size: z.number().int().positive().default(4),
+    voice_rolling_warmup_chapters: z.number().int().nonnegative().default(3),
+    pause_after_chapter_1: z.boolean().default(false),
+    first_chapter_max_beats: z.number().int().positive().default(1)
+});
+
+/** 检索与索引可配变量 */
+export const BookRetrievalConfigSchema = z.object({
+    max_slices_per_entity: z.number().int().positive().default(3),
+    max_slices_per_chapter_pack: z.number().int().positive().default(12),
+    required_slices_per_entity: z.number().int().nonnegative().default(1),
+    slice_context_paragraphs: z.number().int().nonnegative().default(1),
+    slice_max_chars: z.number().int().positive().default(500),
+    grep_default_max_matches: z.number().int().positive().default(80),
+    grep_max_output_chars: z.number().int().positive().default(12000),
+    l2_freeze_block_chapters: z.number().int().positive().default(20),
+    l2_full_unfrozen_threshold: z.number().int().positive().default(40),
+    extractor_full_entity_threshold: z.number().int().positive().default(15),
+    extractor_recent_l2_window: z.number().int().nonnegative().default(2),
+    librarian_entity_summary_chars: z.number().int().positive().default(60)
+});
+
+/** 上下文装配件可配变量 */
+export const BookContextAssemblyConfigSchema = z.object({
+    fallback_tail_chars: z.number().int().positive().default(600),
+    wakeup_gap_chapters: z.number().int().nonnegative().default(30),
+    static_base_max_chars: z.number().int().positive().default(1500)
+});
+
+/** 审校与局部修补内环可配变量 */
+export const BookRepairLoopConfigSchema = z.object({
+    gate_max_patch_paragraphs: z.number().int().nonnegative().default(15),
+    gate_max_patch_ratio: z.number().min(0).max(1).default(0.6),
+    gate_max_patch_rounds: z.number().int().nonnegative().default(2),
+    fact_max_patch_paragraphs: z.number().int().nonnegative().default(6),
+    fact_max_patch_ratio: z.number().min(0).max(1).default(0.35),
+    fact_max_patch_rounds: z.number().int().nonnegative().default(2),
+    max_rewrites_per_outline: z.number().int().nonnegative().default(1),
+    max_total_rewrites_per_chapter: z.number().int().nonnegative().default(2),
+    max_replans_per_chapter: z.number().int().nonnegative().default(1)
+});
+
+/** 周期 Dreaming 与长期演进可配变量 */
+export const BookDreamingConfigSchema = z.object({
+    word_threshold: z.number().int().positive().default(15000),
+    buffer_limit: z.number().int().positive().default(6),
+    max_active_open_threads: z.number().int().positive().default(15),
+    max_new_threads_per_dream: z.number().int().nonnegative().default(2),
+    warped_archive_after_days: z.number().int().nonnegative().default(3),
+    promote_anchor_min_chapters: z.number().int().positive().default(2),
+    saga_fold_volume_interval: z.number().int().positive().default(10)
+});
+
+/** 运维锁与同步自愈可配变量 */
+export const BookOpsAndSyncConfigSchema = z.object({
+    tx_lock_stale_ms: z.number().int().positive().default(30000),
+    signal_lookback_chapters: z.number().int().nonnegative().default(1),
+    conflict_scan_batch_chars: z.number().int().positive().default(24000),
+    heal_git_log_max_count: z.number().int().positive().default(2000)
+});
+
+const DEFAULT_BOOK_OPENING_CONFIG = BookOpeningConfigSchema.parse({});
+const DEFAULT_BOOK_RETRIEVAL_CONFIG = BookRetrievalConfigSchema.parse({});
+const DEFAULT_BOOK_CONTEXT_ASSEMBLY_CONFIG = BookContextAssemblyConfigSchema.parse({});
+const DEFAULT_BOOK_REPAIR_LOOP_CONFIG = BookRepairLoopConfigSchema.parse({});
+const DEFAULT_BOOK_DREAMING_CONFIG = BookDreamingConfigSchema.parse({});
+const DEFAULT_BOOK_OPS_AND_SYNC_CONFIG = BookOpsAndSyncConfigSchema.parse({});
+
 /** 作品可配变量 Schema (world/book_config.yaml) */
 export const BookConfigSchema = z.object({
     book_slug: z.string().min(1),
@@ -84,11 +155,29 @@ export const BookConfigSchema = z.object({
             enable_cross_chapter_simile: true,
             cross_chapter_simile_window: 5
         }),
+    opening: BookOpeningConfigSchema.default(DEFAULT_BOOK_OPENING_CONFIG),
+    retrieval: BookRetrievalConfigSchema.default(DEFAULT_BOOK_RETRIEVAL_CONFIG),
+    context_assembly: BookContextAssemblyConfigSchema.default(DEFAULT_BOOK_CONTEXT_ASSEMBLY_CONFIG),
+    repair_loop: BookRepairLoopConfigSchema.default(DEFAULT_BOOK_REPAIR_LOOP_CONFIG),
+    dreaming: BookDreamingConfigSchema.default(DEFAULT_BOOK_DREAMING_CONFIG),
+    ops_and_sync: BookOpsAndSyncConfigSchema.default(DEFAULT_BOOK_OPS_AND_SYNC_CONFIG),
     model_routing: z.record(z.string(), z.string()).optional(),
     role_routing: RoleRoutingSchema.optional()
 });
 
-export type BookConfig = z.infer<typeof BookConfigSchema>;
+export type BookConfigResolved = z.infer<typeof BookConfigSchema>;
+
+type OptionalExtensionBookConfigKeys =
+    | 'opening'
+    | 'retrieval'
+    | 'context_assembly'
+    | 'repair_loop'
+    | 'dreaming'
+    | 'ops_and_sync';
+
+/** 向后兼容的 BookConfig 类型（新扩展分组在旧字面量构造处可省略，经 BookConfigSchema.parse 后全部补齐默认值） */
+export type BookConfig = Omit<BookConfigResolved, OptionalExtensionBookConfigKeys> &
+    Partial<Pick<BookConfigResolved, OptionalExtensionBookConfigKeys>>;
 
 /** 工种与 Dreaming 运行会话索引记录 (.ops/runs.jsonl) */
 export const RunRecordSchema = z.object({
@@ -100,7 +189,11 @@ export const RunRecordSchema = z.object({
     status: z.string().min(1),
     startedAt: z.string().min(1),
     finishedAt: z.string().min(1).optional(),
-    error: z.string().optional()
+    error: z.string().optional(),
+    attempt: z.number().int().nonnegative().optional(),
+    triggerReason: z.string().min(1).optional(),
+    parentSessionId: z.string().min(1).optional(),
+    mode: z.string().min(1).optional()
 });
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
@@ -149,7 +242,13 @@ export type EntryStatus = z.infer<typeof EntryStatusSchema>;
 /** 四段式实体头部元数据 Schema */
 export const EntityMetadataSchema = z.object({
     entity_id: z.string().regex(/^(char|item)_[a-zA-Z0-9_]+$/),
-    canonical_name: z.string().min(1),
+    canonical_name: z
+        .string()
+        .min(1)
+        .refine(
+            (name) => name.trim().length > 0 && /[\u4e00-\u9fff]/.test(name),
+            { message: 'canonical_name 必须非空且包含至少一个中文字符' }
+        ),
     unique_aliases: z.array(z.string()).default([]),
     contextual_titles: z.array(z.string()).default([]),
     historical_anchors: z.array(z.string()).default([]),
@@ -164,6 +263,7 @@ export interface EntityEntry {
     storyDay?: number | undefined;
     chapter?: number | undefined;
     visibility?: EntryVisibility | undefined;
+    rawInvalidVisibility?: string | undefined;
     owner?: string | undefined;
     status?: EntryStatus | undefined;
     slotKey?: string | undefined;

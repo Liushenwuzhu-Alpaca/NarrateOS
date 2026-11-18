@@ -1,26 +1,17 @@
-import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, posix, relative, resolve } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import { dirname, isAbsolute, posix, relative, resolve } from 'node:path';
 
 interface StagingSessionState {
     bookRoot: string;
     overlay: Map<string, string>;
 }
 
-/** 引擎内部元数据与事务路径：严禁暂存区读/写/编辑 */
-const BLOCKED_OPS_PATHS = [
-    '.ops/runs.jsonl',
-    '.ops/tx.lock',
-    '.ops/tx_state.json',
-    '.ops/pending_writes.json',
-    '.ops/recovery',
-    '.ops/traces',
-    '.ops/parallel_deltas',
-    '.ops/dream_watermark.json',
-    '.ops/safe_halt.json'
-] as const;
+/** .ops/ 只读最小白名单：仅开放遥测文件供只读诊断 */
+const READONLY_OPS_WHITELIST = new Set<string>(['.ops/telemetry.jsonl']);
 
-/** 只读遥测路径：允许读取供诊断，严禁通过暂存区写入/编辑 */
-const READONLY_OPS_PATHS = ['.ops/telemetry.jsonl'] as const;
+/** .ops/ 读写最小白名单：仅开放声纹池与运维信号队列 */
+const READWRITE_OPS_WHITELIST = new Set<string>(['.ops/voice_samples.yaml', '.ops/signals.jsonl']);
 
 function matchesPathOrSubpath(normalizedPath: string, prefix: string): boolean {
     return normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
@@ -30,21 +21,154 @@ function assertAllowedRelativePath(normalized: string, rawRelPath: string, forWr
     if (matchesPathOrSubpath(normalized, '.git')) {
         throw new Error(`禁止访问 .git 目录: ${rawRelPath}`);
     }
-    for (const blocked of BLOCKED_OPS_PATHS) {
-        if (matchesPathOrSubpath(normalized, blocked)) {
-            throw new Error(`禁止通过暂存区访问引擎内部路径 (${blocked}): ${rawRelPath}`);
+    if (matchesPathOrSubpath(normalized, '.ops')) {
+        if (READWRITE_OPS_WHITELIST.has(normalized)) {
+            return;
         }
+        if (READONLY_OPS_WHITELIST.has(normalized)) {
+            if (forWrite) {
+                throw new Error(`禁止通过暂存区修改只读遥测路径 (${normalized}): ${rawRelPath}`);
+            }
+            return;
+        }
+        throw new Error(`禁止通过暂存区访问未授权的 .ops/ 路径 (${normalized}): ${rawRelPath}`);
     }
-    if (forWrite) {
-        for (const readonlyPath of READONLY_OPS_PATHS) {
-            if (matchesPathOrSubpath(normalized, readonlyPath)) {
-                throw new Error(`禁止通过暂存区修改只读遥测路径 (${readonlyPath}): ${rawRelPath}`);
+    if (forWrite && matchesPathOrSubpath(normalized, 'manuscripts')) {
+        throw new Error(`禁止通过暂存区修改正稿目录 manuscripts/: ${rawRelPath}`);
+    }
+}
+
+function assertNormalizedRealTargetInsideRoot(
+    realRoot: string,
+    realTarget: string,
+    rawRelPath: string,
+    forWrite: boolean
+): string {
+    const realRel = relative(realRoot, realTarget);
+    if (realRel === '' || realRel.startsWith('..') || isAbsolute(realRel)) {
+        throw new Error(`符号链接路径越界 bookRoot: ${rawRelPath}`);
+    }
+    const normalizedRealRel = posix.normalize(realRel.replace(/\\/g, '/'));
+    assertAllowedRelativePath(normalizedRealRel, rawRelPath, forWrite);
+    return realTarget;
+}
+
+async function resolveTargetRealPathAsync(absPath: string, rawRelPath: string): Promise<string> {
+    try {
+        const st = await lstat(absPath);
+        if (st.isSymbolicLink()) {
+            try {
+                return await realpath(absPath);
+            } catch {
+                throw new Error(`符号链接目标不存在或无法解析: ${rawRelPath}`);
             }
         }
-        if (matchesPathOrSubpath(normalized, 'manuscripts')) {
-            throw new Error(`禁止通过暂存区修改正稿目录 manuscripts/: ${rawRelPath}`);
+        return await realpath(absPath);
+    } catch (err: unknown) {
+        if ((err as { code?: string }).code !== 'ENOENT') {
+            throw err;
         }
     }
+
+    const suffixSegments: string[] = [];
+    let probe = absPath;
+    while (true) {
+        suffixSegments.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]/, ''));
+        const parent = dirname(probe);
+        if (parent === probe) {
+            throw new Error(`无法定位路径的已存在父目录: ${rawRelPath}`);
+        }
+        probe = parent;
+        try {
+            const st = await lstat(probe);
+            let realAncestor: string;
+            try {
+                realAncestor = await realpath(probe);
+            } catch {
+                throw new Error(
+                    st.isSymbolicLink()
+                        ? `父目录符号链接目标不存在或无法解析: ${rawRelPath}`
+                        : `无法解析父目录真实路径: ${rawRelPath}`
+                );
+            }
+            return resolve(realAncestor, ...suffixSegments);
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
+            }
+        }
+    }
+}
+
+function resolveTargetRealPathSync(absPath: string, rawRelPath: string): string {
+    try {
+        const st = lstatSync(absPath);
+        if (st.isSymbolicLink()) {
+            try {
+                return realpathSync(absPath);
+            } catch {
+                throw new Error(`符号链接目标不存在或无法解析: ${rawRelPath}`);
+            }
+        }
+        return realpathSync(absPath);
+    } catch (err: unknown) {
+        if ((err as { code?: string }).code !== 'ENOENT') {
+            throw err;
+        }
+    }
+
+    const suffixSegments: string[] = [];
+    let probe = absPath;
+    while (true) {
+        suffixSegments.unshift(probe.slice(dirname(probe).length).replace(/^[\\/]/, ''));
+        const parent = dirname(probe);
+        if (parent === probe) {
+            throw new Error(`无法定位路径的已存在父目录: ${rawRelPath}`);
+        }
+        probe = parent;
+        try {
+            const st = lstatSync(probe);
+            let realAncestor: string;
+            try {
+                realAncestor = realpathSync(probe);
+            } catch {
+                throw new Error(
+                    st.isSymbolicLink()
+                        ? `父目录符号链接目标不存在或无法解析: ${rawRelPath}`
+                        : `无法解析父目录真实路径: ${rawRelPath}`
+                );
+            }
+            return resolve(realAncestor, ...suffixSegments);
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code !== 'ENOENT') {
+                throw err;
+            }
+        }
+    }
+}
+
+async function assertRealPathAllowed(
+    bookRoot: string,
+    absPath: string,
+    rawRelPath: string,
+    forWrite: boolean
+): Promise<string> {
+    const [realRoot, realTarget] = await Promise.all([
+        realpath(bookRoot),
+        resolveTargetRealPathAsync(absPath, rawRelPath)
+    ]);
+    return assertNormalizedRealTargetInsideRoot(realRoot, realTarget, rawRelPath, forWrite);
+}
+
+function assertRealPathAllowedSync(
+    bookRoot: string,
+    absPath: string,
+    rawRelPath: string,
+    forWrite: boolean
+): string {
+    const realRoot = realpathSync(bookRoot);
+    const realTarget = resolveTargetRealPathSync(absPath, rawRelPath);
+    return assertNormalizedRealTargetInsideRoot(realRoot, realTarget, rawRelPath, forWrite);
 }
 
 /** 校验并归一化暂存区相对路径，禁止路径穿越、.git、引擎内部 .ops/ 路径及（写操作时）manuscripts/ 与只读遥测 */
@@ -128,21 +252,12 @@ export class StagingSessionManager {
     async read(runId: string, relPath: string): Promise<string> {
         const session = this.requireSession(runId);
         const { normalized, absPath } = normalizeAndValidateRelPath(session.bookRoot, relPath, false);
+        const realTarget = await assertRealPathAllowed(session.bookRoot, absPath, relPath, false);
 
         const staged = session.overlay.get(normalized);
         if (staged !== undefined) {
             return staged;
         }
-
-        const [realRoot, realTarget] = await Promise.all([
-            realpath(session.bookRoot),
-            realpath(absPath)
-        ]);
-        const realRel = relative(realRoot, realTarget);
-        if (realRel === '' || realRel.startsWith('..') || isAbsolute(realRel)) {
-            throw new Error(`符号链接路径越界 bookRoot: ${relPath}`);
-        }
-        assertAllowedRelativePath(posix.normalize(realRel.replace(/\\/g, '/')), relPath, false);
 
         return await readFile(realTarget, 'utf8');
     }
@@ -158,10 +273,11 @@ export class StagingSessionManager {
         replacementText: string
     ): Promise<string> {
         const session = this.requireSession(runId);
-        const { normalized } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
+        const { normalized, absPath } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
         if (targetText.length === 0) {
             throw new Error('StagingSessionManager.edit 的 targetText 不能为空');
         }
+        await assertRealPathAllowed(session.bookRoot, absPath, relPath, true);
 
         const current = await this.read(runId, normalized);
         const firstIdx = current.indexOf(targetText);
@@ -184,7 +300,8 @@ export class StagingSessionManager {
      */
     stageWrite(runId: string, relPath: string, content: string): void {
         const session = this.requireSession(runId);
-        const { normalized } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
+        const { normalized, absPath } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
+        assertRealPathAllowedSync(session.bookRoot, absPath, relPath, true);
         session.overlay.set(normalized, content);
     }
 

@@ -584,4 +584,270 @@ describe('ParallelSandbox (PARALLEL 分叉暂存与 3-Way Merge)', () => {
         const worldState = await store.readWorldState();
         expect(worldState.frontmatter.story_day).toBe(1);
     });
+
+    it('校验 appendChapter/stageDelta 章号 > baseChapter 与严格递增、统一 daySpan 缺省为 0、回滚清理 pending_writes.json（ISS-049）', async () => {
+        const { bookRoot, system, store, sandbox } = await createParallelTestRepo(5);
+
+        // forkWindow 提交失败回滚后不得残留 pending_writes.json
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('模拟 fork 提交失败'));
+        await expect(sandbox.forkWindow({ windowId: 'w_fork_fail' })).rejects.toThrow('模拟 fork 提交失败');
+        await expect(access(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+
+        const meta = await sandbox.forkWindow({ windowId: 'w_order' });
+        expect(meta.baseChapter).toBe(1);
+
+        // appendChapter 拒绝 <= baseChapter (1)
+        await expect(
+            sandbox.appendChapter({
+                windowId: 'w_order',
+                branchId: 'branch_a',
+                chapterNumber: 1,
+                patches: []
+            })
+        ).rejects.toThrow('严格大于分叉基线章号');
+
+        // stageDelta 拒绝 <= baseChapter、非严格递增与跨支线重复章号
+        await expect(
+            sandbox.stageDelta({
+                windowId: 'w_order',
+                branchId: 'branch_bad',
+                chapterNumbers: [3, 2],
+                patches: []
+            })
+        ).rejects.toThrow('严格递增');
+
+        // 统一 daySpan 缺省为 0
+        const ch2Delta = await sandbox.appendChapter({
+            windowId: 'w_order',
+            branchId: 'branch_a',
+            chapterNumber: 2,
+            patches: []
+        });
+        expect(ch2Delta.daySpan).toBe(0);
+
+        const directDelta = await sandbox.stageDelta({
+            windowId: 'w_order',
+            branchId: 'branch_b',
+            chapterNumbers: [3],
+            patches: []
+        });
+        expect(directDelta.daySpan).toBe(0);
+
+        // 同支线非递增章号被拒绝
+        await expect(
+            sandbox.appendChapter({
+                windowId: 'w_order',
+                branchId: 'branch_a',
+                chapterNumber: 2,
+                patches: []
+            })
+        ).rejects.toThrow('已存在');
+
+        await sandbox.appendChapter({
+            windowId: 'w_order',
+            branchId: 'branch_a',
+            chapterNumber: 4,
+            patches: []
+        });
+        await expect(
+            sandbox.appendChapter({
+                windowId: 'w_order',
+                branchId: 'branch_a',
+                chapterNumber: 3,
+                patches: []
+            })
+        ).rejects.toThrow('已存在');
+        await expect(
+            sandbox.appendChapter({
+                windowId: 'w_order',
+                branchId: 'branch_a',
+                chapterNumber: 4,
+                patches: []
+            })
+        ).rejects.toThrow('已存在');
+
+        // mergeWindow 提交失败回滚后不得残留 pending_writes.json
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('模拟 merge 提交失败'));
+        await expect(sandbox.mergeWindow({ windowId: 'w_order' })).rejects.toThrow('模拟 merge 提交失败');
+        await expect(access(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+
+        const mergeOk = await sandbox.mergeWindow({ windowId: 'w_order' });
+        expect(mergeOk.newStoryDay).toBe(1);
+        await expect(access(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+        const headWorld = await system.readFileAtRef(bookRoot, 'HEAD', 'world/world_state.md');
+        expect(headWorld).toBe(await readFile(join(bookRoot, 'world/world_state.md'), 'utf8'));
+        await store.recoverWal();
+    });
+
+    it('extractClaimedItemIds 覆盖第 3/4 区拦截唯一道具冲突（ISS-049）', async () => {
+        const { sandbox } = await createParallelTestRepo(4);
+        await sandbox.forkWindow({ windowId: 'w_item_sec34' });
+
+        await sandbox.stageDelta({
+            windowId: 'w_item_sec34',
+            branchId: 'branch_a',
+            chaptersUsed: 1,
+            daySpan: 1,
+            patches: [
+                {
+                    entity_id: 'char_001',
+                    trajectory_ops: [
+                        {
+                            op: 'append',
+                            entry: {
+                                storyDay: 2,
+                                chapter: 2,
+                                text: '在旧校舍毁掉 item_jade_seal'
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        await sandbox.stageDelta({
+            windowId: 'w_item_sec34',
+            branchId: 'branch_b',
+            chaptersUsed: 1,
+            daySpan: 1,
+            patches: [
+                {
+                    entity_id: 'char_002',
+                    buffer_ops: [
+                        {
+                            op: 'append',
+                            entry: {
+                                storyDay: 2,
+                                chapter: 3,
+                                text: '随身带着 item_jade_seal 前往礼堂'
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        await expect(sandbox.mergeWindow({ windowId: 'w_item_sec34' })).rejects.toThrow(ParallelConflictError);
+    });
+
+    it('并行支线支持 upsert_slot/upsert_ledger 修复、冷宫回查唤醒与分支 L2 章卡增量暂存合并（ISS-005, 006, 024, 046）', async () => {
+        const { bookRoot, system, store, sandbox } = await createParallelTestRepo(4);
+
+        const coldChar = [
+            '---',
+            'entity_id: char_099',
+            'canonical_name: 旧任部长',
+            'unique_aliases: []',
+            'contextual_titles: []',
+            'historical_anchors: []',
+            'last_seen_ch: 0',
+            '---',
+            '',
+            '## 1. Innate Locks',
+            '- [vis: PUBLIC] 已毕业离校',
+            '',
+            '## 2. Acquired State',
+            '',
+            '## 3. Irreversible Trajectory',
+            '',
+            '## 4. Recent Sliding Buffer & Voice',
+            ''
+        ].join('\n');
+        await writeFile(join(bookRoot, 'entities/cold_archive/char_099.md'), coldChar, 'utf8');
+        await system.commitPaths(bookRoot, ['entities/cold_archive/char_099.md'], 'chore: add cold archive entity');
+
+        await sandbox.forkWindow({ windowId: 'w_l2_cold' });
+
+        // 支线 A：连续无冒号文本 upsert_slot、upsert_ledger，并暂存第 2 章 L2 卡
+        await sandbox.appendChapter({
+            windowId: 'w_l2_cold',
+            branchId: 'branch_a',
+            chapterNumber: 2,
+            daySpan: 1,
+            patches: [
+                {
+                    entity_id: 'char_001',
+                    acquired_state_ops: [
+                        {
+                            op: 'upsert_slot',
+                            slot_key: 'location',
+                            entry: { storyDay: 2, chapter: 2, text: '转移至二楼楼梯口' }
+                        },
+                        {
+                            op: 'upsert_ledger',
+                            entries: { 社团剩余经费: 950 }
+                        }
+                    ]
+                }
+            ],
+            l2Card: {
+                volumeNumber: 1,
+                chapterNumber: 2,
+                storyDay: 2,
+                plotSummary: '陆沉在二楼发现旧档案袋。',
+                proseAnchors: ['牛皮纸袋', '半截粉笔'],
+                appearanceEntityIds: ['char_001']
+            }
+        });
+
+        // 支线 B：唤醒冷宫 char_099 并暂存第 3 章 L2 卡（支线间 L2 隔离）
+        await sandbox.appendChapter({
+            windowId: 'w_l2_cold',
+            branchId: 'branch_b',
+            chapterNumber: 3,
+            daySpan: 1,
+            patches: [
+                {
+                    entity_id: 'char_099',
+                    last_seen_ch: 3,
+                    acquired_state_ops: [
+                        {
+                            op: 'upsert_slot',
+                            slot_key: 'location',
+                            entry: { storyDay: 2, chapter: 3, text: '重返校门口咖啡馆' }
+                        }
+                    ]
+                }
+            ],
+            l2Card: {
+                volumeNumber: 1,
+                chapterNumber: 3,
+                storyDay: 2,
+                plotSummary: '旧任部长现身咖啡馆。',
+                appearanceEntityIds: ['char_099']
+            }
+        });
+
+        expect((await sandbox.getBranchL2Cards('w_l2_cold', 'branch_a')).map((c) => c.chapterNumber)).toEqual([2]);
+        expect((await sandbox.getBranchL2Cards('w_l2_cold', 'branch_b')).map((c) => c.chapterNumber)).toEqual([3]);
+
+        // loadBranchSnapshot 对冷宫角色也必须保留原有 Innate Locks
+        const baseSnap = await store.loadSnapshot();
+        const branchBSnap = await sandbox.loadBranchSnapshot(baseSnap, 'w_l2_cold', 'branch_b');
+        expect(branchBSnap.entities['char_099']?.innateLocks[0]?.text).toBe('已毕业离校');
+        expect(branchBSnap.coldArchiveIds).not.toContain('char_099');
+
+        const mergeRes = await sandbox.mergeWindow({ windowId: 'w_l2_cold' });
+        expect(mergeRes.updatedL2CardPaths).toEqual(['index/L2_cards/vol_01_cards.md']);
+        await expect(access(join(bookRoot, '.ops/pending_writes.json'))).rejects.toThrow();
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', 'index/L2_cards/vol_01_cards.md')).not.toBeNull();
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', 'entities/cold_archive/char_099.md')).toBeNull();
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', 'entities/char_099.md')).not.toBeNull();
+
+        const char001 = parseEntityMarkdown(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8'));
+        const locs = char001.acquiredState.filter((e) => e.slotKey === 'location');
+        expect(locs).toHaveLength(1);
+        expect(locs[0]?.text).toBe('转移至二楼楼梯口');
+        expect(char001.acquiredState.find((e) => e.isNumericLedger)?.text).toContain('社团剩余经费: 950');
+
+        await expect(access(join(bookRoot, 'entities/cold_archive/char_099.md'))).rejects.toThrow();
+        const woken099 = parseEntityMarkdown(await readFile(join(bookRoot, 'entities/char_099.md'), 'utf8'));
+        expect(woken099.innateLocks[0]?.text).toBe('已毕业离校');
+
+        const l2CardMd = await readFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), 'utf8');
+        expect(l2CardMd).toContain('## ch_0002 (day:2)');
+        expect(l2CardMd).toContain('- 异象锚点：牛皮纸袋、半截粉笔');
+        expect(l2CardMd).toContain('## ch_0003 (day:2)');
+        expect(l2CardMd).toContain('旧任部长现身咖啡馆');
+    });
 });

@@ -177,4 +177,77 @@ describe('StagingSessionManager', () => {
 
         staging.discard('run-symlink');
     });
+
+    it('最小 .ops/ 白名单拦截全部未授权目录（chapter_outlines/session_logs/llm_calls/manual_edits）', async () => {
+        const bookRoot = await createBookDir();
+        await mkdir(join(bookRoot, '.ops/chapter_outlines'), { recursive: true });
+        await mkdir(join(bookRoot, '.ops/session_logs'), { recursive: true });
+        await mkdir(join(bookRoot, '.ops/manual_edits'), { recursive: true });
+        await writeFile(join(bookRoot, '.ops/chapter_outlines/ch_0001.json'), '{"director_rationale":"secret"}\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/session_logs/s1.json'), '{"requestInput":"secret"}\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/llm_calls.jsonl'), '{"tokens":100}\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/manual_edits/ch_0001.diff'), 'diff\n', 'utf8');
+        await writeFile(join(bookRoot, '.ops/signals_cursor.json'), '{"consumedLines":0}\n', 'utf8');
+
+        const staging = new StagingSessionManager();
+        staging.begin('run-ops-whitelist', bookRoot);
+
+        const unauthorizedPaths = [
+            '.ops/chapter_outlines/ch_0001.json',
+            '.ops/session_logs/s1.json',
+            '.ops/llm_calls.jsonl',
+            '.ops/manual_edits/ch_0001.diff',
+            '.ops/signals_cursor.json',
+            '.ops/custom_unknown.txt'
+        ];
+        for (const target of unauthorizedPaths) {
+            await expect(staging.read('run-ops-whitelist', target)).rejects.toThrow();
+            expect(() => staging.stageWrite('run-ops-whitelist', target, 'x')).toThrow();
+            await expect(staging.edit('run-ops-whitelist', target, 'a', 'b')).rejects.toThrow();
+        }
+
+        staging.discard('run-ops-whitelist');
+    });
+
+    it.skipIf(process.platform === 'win32')('read/edit/stageWrite 解析 realpath（含目录软链与悬空软链）并按读写权限二次校验（ISS-001）', async () => {
+        const bookRoot = await createBookDir();
+        await mkdir(join(bookRoot, '.ops/session_logs'), { recursive: true });
+        await writeFile(join(bookRoot, '.ops/session_logs/x.json'), '{"secret":true}\n', 'utf8');
+
+        await symlink(join(bookRoot, 'manuscripts/ch_0001.md'), join(bookRoot, 'world/link.md'));
+        await symlink(join(bookRoot, '.ops/session_logs/x.json'), join(bookRoot, 'world/ops_link.json'));
+        await symlink(join(bookRoot, '.ops/telemetry.jsonl'), join(bookRoot, 'world/tel_link.jsonl'));
+        await symlink(join(bookRoot, 'manuscripts'), join(bookRoot, 'world/manuscripts_dir_link'));
+        await symlink(join(bookRoot, '../nonexistent_outside.txt'), join(bookRoot, 'world/dangling.md'));
+
+        const staging = new StagingSessionManager();
+        staging.begin('run-symlink-rw', bookRoot);
+
+        // 指向 manuscripts/ 的文件软链允许只读，但 edit 与 stageWrite 必须拦截
+        expect(await staging.read('run-symlink-rw', 'world/link.md')).toContain('第一章正文真源');
+        await expect(staging.edit('run-symlink-rw', 'world/link.md', '真源', '篡改')).rejects.toThrow('manuscripts/');
+        expect(() => staging.stageWrite('run-symlink-rw', 'world/link.md', '篡改')).toThrow('manuscripts/');
+
+        // 指向未授权 .ops/session_logs 的软链在读写两栖全部拦截
+        await expect(staging.read('run-symlink-rw', 'world/ops_link.json')).rejects.toThrow();
+        await expect(staging.edit('run-symlink-rw', 'world/ops_link.json', 'secret', 'x')).rejects.toThrow();
+        expect(() => staging.stageWrite('run-symlink-rw', 'world/ops_link.json', 'x')).toThrow();
+
+        // 指向只读 .ops/telemetry.jsonl 的软链仅允许 read，禁止 edit/stageWrite
+        expect(await staging.read('run-symlink-rw', 'world/tel_link.jsonl')).toContain('entropy');
+        await expect(staging.edit('run-symlink-rw', 'world/tel_link.jsonl', '0.8', '0.9')).rejects.toThrow();
+        expect(() => staging.stageWrite('run-symlink-rw', 'world/tel_link.jsonl', 'tamper')).toThrow();
+
+        // 指向 manuscripts/ 目录的软链下写入新文件也必须通过最近存在父目录 realpath 拦截
+        expect(() =>
+            staging.stageWrite('run-symlink-rw', 'world/manuscripts_dir_link/ch_0099.md', '私自写章')
+        ).toThrow('manuscripts/');
+
+        // 悬空软链必须全面拒绝
+        await expect(staging.read('run-symlink-rw', 'world/dangling.md')).rejects.toThrow();
+        await expect(staging.edit('run-symlink-rw', 'world/dangling.md', 'a', 'b')).rejects.toThrow();
+        expect(() => staging.stageWrite('run-symlink-rw', 'world/dangling.md', 'x')).toThrow();
+
+        staging.discard('run-symlink-rw');
+    });
 });
