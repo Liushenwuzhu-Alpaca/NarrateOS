@@ -41,11 +41,21 @@ export const Config: z<NarrateStoreConfig> = z
     })
     .default({});
 
+/** 切书事件载荷 */
+export interface BookSwitchedEvent {
+    previousBookRoot: string | null;
+    nextBookRoot: string;
+    store: BookStore;
+}
+
+/** 切书事件监听器 */
+export type BookSwitchedListener = (event: BookSwitchedEvent) => void | Promise<void>;
+
 /**
  * Cordis 作品存储服务（ctx.narrateStore）
  * - 管理当前激活作品目录 bookRoot、作品库根目录 booksRoot 与多书安全切换（在途运行或持锁时返回 409）；
  * - 追踪活跃 runId 生命周期并在结束时自动回收暂存覆盖层；
- * - 持有按 runId 隔离的 StagingSessionManager。
+ * - 持有按 runId 隔离的 StagingSessionManager 与按 bookRoot 隔离的事务锁获取互斥队列。
  */
 export class NarrateStoreService {
     public readonly staging = new StagingSessionManager();
@@ -54,6 +64,8 @@ export class NarrateStoreService {
     private currentBookRoot: string | null;
     private readonly currentBooksRoot: string | null;
     private readonly activeRuns = new Set<string>();
+    private readonly lockAcquireQueues = new Map<string, Promise<void>>();
+    private readonly bookSwitchedListeners = new Set<BookSwitchedListener>();
     private switchChain: Promise<void> = Promise.resolve();
     private disposed = false;
 
@@ -117,13 +129,43 @@ export class NarrateStoreService {
         return [...this.activeRuns];
     }
 
+    /** 订阅切书成功事件，返回取消订阅函数 */
+    onBookSwitched(listener: BookSwitchedListener): () => void {
+        if (this.disposed) {
+            return () => undefined;
+        }
+        this.bookSwitchedListeners.add(listener);
+        return () => {
+            this.bookSwitchedListeners.delete(listener);
+        };
+    }
+
+    private runLockAcquireSerialized<T>(resolvedRoot: string, fn: () => Promise<T>): Promise<T> {
+        const prev = this.lockAcquireQueues.get(resolvedRoot) ?? Promise.resolve();
+        const task = prev.then(fn, fn);
+        const settled = task.then(
+            () => undefined,
+            () => undefined
+        );
+        this.lockAcquireQueues.set(resolvedRoot, settled);
+        void settled.finally(() => {
+            if (this.lockAcquireQueues.get(resolvedRoot) === settled) {
+                this.lockAcquireQueues.delete(resolvedRoot);
+            }
+        });
+        return task;
+    }
+
     /** 为指定路径（或当前激活 bookRoot）构造 BookStore 实例 */
     openStore(root?: string): BookStore {
         const target = root ?? this.currentBookRoot;
         if (!target || target.trim().length === 0) {
             throw new Error('未设置当前作品目录 (bookRoot)');
         }
-        return new BookStore(resolve(target), this.system);
+        const resolvedRoot = resolve(target);
+        return new BookStore(resolvedRoot, this.system, (fn) =>
+            this.runLockAcquireSerialized(resolvedRoot, fn)
+        );
     }
 
     /**
@@ -158,8 +200,19 @@ export class NarrateStoreService {
             // 等待磁盘锁检查期间可能并发开启了 runId 或卸载了服务，提交切换前必须再次同步校验
             this.assertCanSwitchTo(resolvedNext);
 
+            const previousBookRoot = this.currentBookRoot;
             this.currentBookRoot = resolvedNext;
-            return new BookStore(resolvedNext, this.system);
+            const store = this.openStore(resolvedNext);
+
+            const event: BookSwitchedEvent = {
+                previousBookRoot,
+                nextBookRoot: resolvedNext,
+                store
+            };
+            for (const listener of [...this.bookSwitchedListeners]) {
+                await listener(event);
+            }
+            return store;
         });
 
         this.switchChain = task.then(
@@ -184,6 +237,8 @@ export class NarrateStoreService {
     dispose(): void {
         this.disposed = true;
         this.activeRuns.clear();
+        this.bookSwitchedListeners.clear();
+        this.lockAcquireQueues.clear();
         this.staging.discardAll();
     }
 
@@ -210,8 +265,15 @@ export class NarrateStoreService {
             return isProcessAlive(parsed.data.pid);
         }
 
-        const lockStat = await stat(lockPath);
-        return Date.now() - lockStat.mtimeMs < LOCK_STALE_MS;
+        try {
+            const lockStat = await stat(lockPath);
+            return Date.now() - lockStat.mtimeMs < LOCK_STALE_MS;
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code === 'ENOENT') {
+                return false;
+            }
+            throw err;
+        }
     }
 }
 

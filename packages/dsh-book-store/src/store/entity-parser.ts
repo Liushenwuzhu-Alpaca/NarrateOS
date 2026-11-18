@@ -7,6 +7,53 @@ import {
     EntryVisibility
 } from './schemas.js';
 
+const FORBIDDEN_TAG_CHARS_RE = /[|\[\]\r\n]/;
+const FORBIDDEN_LEDGER_VALUE_RE = /[|\r\n]/;
+
+/** 校验实体元标签键值不得包含分隔符 '|'、'['、']' 或换行符 */
+export function assertSafeEntityTagValue(label: string, value: string): void {
+    if (FORBIDDEN_TAG_CHARS_RE.test(value)) {
+        throw new Error(`实体标签 ${label} 禁止包含 '|', '[', ']' 或换行符: ${value}`);
+    }
+}
+
+/** 校验数值账本值不得包含管道符或换行符 */
+export function assertSafeLedgerValue(value: string): void {
+    if (FORBIDDEN_LEDGER_VALUE_RE.test(value)) {
+        throw new Error(`实体数值账本值禁止包含 '|' 或换行符: ${value}`);
+    }
+}
+
+/** 校验单条实体记录的 slotKey、owner、rawInvalidVisibility、extraTags 与数值账本键值安全性 */
+export function assertEntryTagsSafe(
+    entry: Pick<
+        EntityEntry,
+        'slotKey' | 'owner' | 'ledger' | 'isNumericLedger' | 'rawInvalidVisibility' | 'extraTags'
+    >
+): void {
+    if (entry.slotKey !== undefined) {
+        assertSafeEntityTagValue('slotKey', entry.slotKey);
+    }
+    if (entry.owner !== undefined) {
+        assertSafeEntityTagValue('owner', entry.owner);
+    }
+    if (entry.rawInvalidVisibility !== undefined) {
+        assertSafeEntityTagValue('visibility', entry.rawInvalidVisibility);
+    }
+    if (entry.extraTags !== undefined) {
+        for (const [k, v] of Object.entries(entry.extraTags)) {
+            assertSafeEntityTagValue('extraTag_key', k);
+            assertSafeEntityTagValue('extraTag_value', v);
+        }
+    }
+    if (entry.ledger !== undefined) {
+        for (const [k, v] of Object.entries(entry.ledger)) {
+            assertSafeEntityTagValue('ledger_key', k);
+            assertSafeLedgerValue(String(v));
+        }
+    }
+}
+
 export const DEFAULT_SECTION_HEADINGS = {
     innateLocks: '## 1. Innate Locks (先天/底层永久红线 · since_day: -inf · 插叙永不屏蔽)',
     acquiredState: '## 2. Acquired State & Numeric Ledger (跨章后天状态与数值账本 · 行级补丁更新)',
@@ -56,6 +103,8 @@ function parseEntryLine(lineContent: string): EntityEntry {
                     const key = part.slice(0, idx).trim();
                     const val = part.slice(idx + 1).trim();
                     if (key) {
+                        assertSafeEntityTagValue('ledger_key', key);
+                        assertSafeLedgerValue(val);
                         ledger[key] = val;
                     }
                 }
@@ -107,16 +156,30 @@ function parseEntryLine(lineContent: string): EntityEntry {
                 entry.chapter = num;
             }
         } else if (key === 'vis' || key === 'visibility') {
-            if (val === 'SELF_ONLY' || val === 'OMNISCIENT_SECRET' || val === 'PUBLIC' || val === 'READER_KNOWN') {
-                entry.visibility = val as EntryVisibility;
+            const normalizedVis = val.toUpperCase();
+            if (
+                normalizedVis === 'SELF_ONLY' ||
+                normalizedVis === 'OMNISCIENT_SECRET' ||
+                normalizedVis === 'PUBLIC' ||
+                normalizedVis === 'READER_KNOWN'
+            ) {
+                entry.visibility = normalizedVis as EntryVisibility;
+            } else if (val.length > 0) {
+                entry.rawInvalidVisibility = val;
+                extraTags[key] = val;
             }
         } else if (key === 'owner') {
+            assertSafeEntityTagValue('owner', val);
             entry.owner = val;
         } else if (key === 'status') {
-            if (val === 'ACTIVE' || val === 'WARPED') {
-                entry.status = val as EntryStatus;
+            const normalizedStatus = val.toUpperCase();
+            if (normalizedStatus === 'ACTIVE' || normalizedStatus === 'WARPED') {
+                entry.status = normalizedStatus as EntryStatus;
+            } else if (val.length > 0) {
+                extraTags[key] = val;
             }
         } else if (key === 'slot') {
+            assertSafeEntityTagValue('slotKey', val);
             entry.slotKey = val;
         } else {
             extraTags[key] = val;
@@ -132,6 +195,8 @@ function parseEntryLine(lineContent: string): EntityEntry {
 
 /** 序列化单个条目为 Markdown 列表项 */
 function serializeEntry(entry: EntityEntry): string[] {
+    assertEntryTagsSafe(entry);
+
     if (entry.isNumericLedger) {
         const pairs = Object.entries(entry.ledger ?? {}).map(([k, v]) => `${k}: ${v}`);
         const line = pairs.length > 0
@@ -149,6 +214,12 @@ function serializeEntry(entry: EntityEntry): string[] {
     }
     if (entry.visibility !== undefined) {
         tags.push(`vis: ${entry.visibility}`);
+    } else if (
+        entry.rawInvalidVisibility !== undefined &&
+        !entry.extraTags?.['vis'] &&
+        !entry.extraTags?.['visibility']
+    ) {
+        tags.push(`vis: ${entry.rawInvalidVisibility}`);
     }
     if (entry.owner !== undefined) {
         tags.push(`owner: ${entry.owner}`);
@@ -173,10 +244,13 @@ function serializeEntry(entry: EntityEntry): string[] {
 type SectionKey = 'innateLocks' | 'acquiredState' | 'irreversibleTrajectory' | 'recentBuffer';
 
 function detectSectionKey(line: string): SectionKey | null {
-    if (/^##\s+1\./.test(line) || line.includes('Innate Locks')) return 'innateLocks';
-    if (/^##\s+2\./.test(line) || line.includes('Acquired State')) return 'acquiredState';
-    if (/^##\s+3\./.test(line) || line.includes('Irreversible Trajectory')) return 'irreversibleTrajectory';
-    if (/^##\s+4\./.test(line) || line.includes('Recent Sliding Buffer')) return 'recentBuffer';
+    const trimmed = line.trim();
+    if (!/^#{2,3}\s+/.test(trimmed)) return null;
+    const headingBody = trimmed.replace(/^#{2,3}\s+/, '');
+    if (/^1\./.test(headingBody) || headingBody.includes('Innate Locks')) return 'innateLocks';
+    if (/^2\./.test(headingBody) || headingBody.includes('Acquired State')) return 'acquiredState';
+    if (/^3\./.test(headingBody) || headingBody.includes('Irreversible Trajectory')) return 'irreversibleTrajectory';
+    if (/^4\./.test(headingBody) || headingBody.includes('Recent Sliding Buffer')) return 'recentBuffer';
     return null;
 }
 
@@ -209,12 +283,14 @@ export function parseEntityMarkdown(markdown: string): EntityProfile {
 
         if (!currentSection) continue;
 
-        if (line.startsWith('- ')) {
+        if (line.startsWith('- ') || line.startsWith('* ')) {
             const entry = parseEntryLine(line.slice(2));
             profile[currentSection].push(entry);
             lastEntry = entry;
-        } else if (lastEntry && line.trim().length > 0 && /^\s+/.test(line)) {
+        } else if (lastEntry && line.trim().length > 0 && (/^\s+/.test(line) || /^>\s*/.test(line))) {
             lastEntry.continuationLines.push(line);
+        } else if (line.trim().length > 0) {
+            throw new Error(`实体档案 ${metadata.entity_id} 第 ${currentSection} 区存在无法识别的非列表内容行: ${line}`);
         }
     }
 

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, link, mkdir, open, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -8,30 +8,27 @@ import { SystemPort } from '../ports/system.js';
 import type { VoiceSamplePool } from '../prefix/types.js';
 import { loadVoiceSamples, saveVoiceSamples } from '../prefix/voice-sampler.js';
 import {
-    DEFAULT_SECTION_HEADINGS,
-    inferSlotKey,
     parseEntityMarkdown,
     serializeEntityMarkdown,
     splitFrontmatter
 } from './entity-parser.js';
+import { ENTITY_ID_RE, mergeEntityProfilePatch } from './entity-patch.js';
 import {
     BookConfig,
+    BookConfigResolved,
     BookConfigSchema,
     BookSnapshot,
     ChapterOutlineSnapshot,
     DirtyChapter,
     DreamWatermark,
     DreamWatermarkSchema,
-    EntityEntry,
-    EntityEntryInput,
-    EntityMetadataSchema,
     EntityPatch,
     EntityProfile,
     ForeignKeyError,
-    InnateLockViolationError,
     PlannerOutlineSchema,
     RunRecord,
     RunRecordSchema,
+    TimelineMode,
     TxLockConflictError,
     TxLockPayloadSchema,
     TxState,
@@ -45,7 +42,7 @@ import {
 
 const DEFAULT_LOCK_STALE_MS = 30_000;
 const CHAPTER_FILE_RE = /^ch_(\d{4})\.md$/;
-const ENTITY_ID_RE = /^(?:char|item)_[a-zA-Z0-9_]+$/;
+const SAGA_SHARD_RE = /_saga_\d+$/;
 const BEGIN_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
 const COMMIT_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'DRAFTING', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
 const PendingWritesSchema = z.object({
@@ -55,12 +52,15 @@ const PendingWritesSchema = z.object({
         !isAbsolute(path) && !path.split(/[\\/]/).some((part) => part === '..' || part === '.git')))
 });
 
+export type LockAcquireSerializer = <T>(fn: () => Promise<T>) => Promise<T>;
+
 export interface TxLockOptions {
     staleMs?: number | undefined;
 }
 
 export interface ApplyStatePatchOptions {
     allowInnateMutation?: boolean | undefined;
+    timelineMode?: TimelineMode | undefined;
     worldStateUpdate?: (Partial<WorldStateFrontmatter> & { summaryMarkdown?: string | undefined }) | undefined;
     extraCommitPaths?: string[] | undefined;
 }
@@ -93,44 +93,28 @@ function isProcessAlive(pid: number): boolean {
     }
 }
 
-function toEntityEntry(input: EntityEntryInput): EntityEntry {
-    const entry: EntityEntry = {
-        text: input.text,
-        continuationLines: input.continuationLines ? [...input.continuationLines] : []
-    };
-    if (input.storyDay !== undefined) entry.storyDay = input.storyDay;
-    if (input.chapter !== undefined) entry.chapter = input.chapter;
-    if (input.visibility !== undefined) entry.visibility = input.visibility;
-    if (input.owner !== undefined) entry.owner = input.owner;
-    if (input.status !== undefined) entry.status = input.status;
-    if (input.slotKey !== undefined) entry.slotKey = input.slotKey;
-    if (input.extraTags !== undefined) entry.extraTags = { ...input.extraTags };
-    if (input.isNumericLedger !== undefined) entry.isNumericLedger = input.isNumericLedger;
-    if (input.ledger !== undefined) entry.ledger = { ...input.ledger };
-    return entry;
-}
-
-function mergeUniqueStrings(existing: string[], additions?: string[]): string[] {
-    if (!additions || additions.length === 0) return existing;
-    const seen = new Set(existing);
-    const result = [...existing];
-    for (const item of additions) {
-        if (!seen.has(item)) {
-            seen.add(item);
-            result.push(item);
-        }
-    }
-    return result;
-}
-
 /** 作品纯文本数据库存储与原子事务层 */
 export class BookStore {
     private readonly lockContext = new AsyncLocalStorage<boolean>();
+    private acquireQueue: Promise<void> = Promise.resolve();
 
     constructor(
         public readonly bookRoot: string,
-        private readonly system: SystemPort
+        private readonly system: SystemPort,
+        private readonly runAcquireSerialized?: LockAcquireSerializer
     ) {}
+
+    private serializeLockAcquire<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.runAcquireSerialized) {
+            return this.runAcquireSerialized(fn);
+        }
+        const task = this.acquireQueue.then(fn, fn);
+        this.acquireQueue = task.then(
+            () => undefined,
+            () => undefined
+        );
+        return task;
+    }
 
     private get opsDir(): string {
         return join(this.bookRoot, '.ops');
@@ -178,35 +162,37 @@ export class BookStore {
             acquiredAt: new Date().toISOString()
         });
 
-        let acquired = false;
-        for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-                const handle = await open(this.txLockPath, 'wx');
+        await this.serializeLockAcquire(async () => {
+            let acquired = false;
+            for (let attempt = 0; attempt < 2; attempt++) {
                 try {
-                    await handle.writeFile(payload, 'utf8');
-                } finally {
-                    await handle.close();
-                }
-                acquired = true;
-                break;
-            } catch (err: unknown) {
-                const code = (err as { code?: string }).code;
-                if (code !== 'EEXIST') {
-                    throw err;
-                }
+                    const handle = await open(this.txLockPath, 'wx');
+                    try {
+                        await handle.writeFile(payload, 'utf8');
+                    } finally {
+                        await handle.close();
+                    }
+                    acquired = true;
+                    break;
+                } catch (err: unknown) {
+                    const code = (err as { code?: string }).code;
+                    if (code !== 'EEXIST') {
+                        throw err;
+                    }
 
-                // 首次遇到已存在锁时检查是否过期或死进程残留
-                if (attempt === 0 && (await this.tryCleanupStaleLock(staleMs))) {
-                    continue;
-                }
+                    // 首次遇到已存在锁时检查是否过期或死进程残留
+                    if (attempt === 0 && (await this.tryCleanupStaleLock(staleMs))) {
+                        continue;
+                    }
 
-                throw new TxLockConflictError(`作品仓库事务锁被占用: ${this.txLockPath}`);
+                    throw new TxLockConflictError(`作品仓库事务锁被占用: ${this.txLockPath}`);
+                }
             }
-        }
 
-        if (!acquired) {
-            throw new TxLockConflictError(`无法获取作品仓库事务锁: ${this.txLockPath}`);
-        }
+            if (!acquired) {
+                throw new TxLockConflictError(`无法获取作品仓库事务锁: ${this.txLockPath}`);
+            }
+        });
 
         try {
             return await this.lockContext.run(true, fn);
@@ -232,36 +218,66 @@ export class BookStore {
         return await this.withTxLock(fn);
     }
 
-    private async tryCleanupStaleLock(staleMs: number): Promise<boolean> {
+    private isLockPayloadStale(raw: string, mtimeMs: number, staleMs: number): boolean {
+        let payload: unknown = null;
         try {
+            payload = JSON.parse(raw);
+        } catch {
+            payload = null;
+        }
+        const parsed = TxLockPayloadSchema.safeParse(payload);
+        if (parsed.success) {
+            return !isProcessAlive(parsed.data.pid);
+        }
+        return Date.now() - mtimeMs >= staleMs;
+    }
+
+    private async tryCleanupStaleLock(staleMs: number): Promise<boolean> {
+        let staleTempPath: string | null = null;
+        try {
+            const lockStatBefore = await stat(this.txLockPath);
             const raw = await readFile(this.txLockPath, 'utf8');
-            let payload: unknown = null;
-            try {
-                payload = JSON.parse(raw);
-            } catch {
-                payload = null;
+            if (!this.isLockPayloadStale(raw, lockStatBefore.mtimeMs, staleMs)) {
+                return false;
             }
-            const parsed = TxLockPayloadSchema.safeParse(payload);
-            if (parsed.success) {
-                const alive = isProcessAlive(parsed.data.pid);
-                if (alive) {
-                    return false;
-                }
-            } else {
-                const fileStat = await stat(this.txLockPath);
-                if (Date.now() - fileStat.mtimeMs < staleMs) {
-                    return false;
-                }
+
+            // 原子重命名后再校验 inode 与内容一致，防止竞态误删并发方刚创建的新锁
+            staleTempPath = join(this.opsDir, `tx.lock.stale.${randomUUID()}`);
+            await rename(this.txLockPath, staleTempPath);
+
+            const [movedStat, movedRaw] = await Promise.all([
+                stat(staleTempPath),
+                readFile(staleTempPath, 'utf8')
+            ]);
+            if (movedStat.ino === lockStatBefore.ino && movedRaw === raw) {
+                await unlink(staleTempPath);
+                return true;
             }
-            await unlink(this.txLockPath);
+
+            if (!this.isLockPayloadStale(movedRaw, movedStat.mtimeMs, staleMs)) {
+                // 使用 POSIX link(2) 原子恢复，目标已存在新锁时严格抛 EEXIST，绝不覆盖活跃锁
+                try {
+                    await link(staleTempPath, this.txLockPath);
+                } catch {
+                    // 目标已出现新锁时不覆盖
+                } finally {
+                    await unlink(staleTempPath).catch(() => undefined);
+                }
+                return false;
+            }
+
+            await unlink(staleTempPath);
             return true;
         } catch {
+            if (staleTempPath) {
+                await unlink(staleTempPath).catch(() => undefined);
+            }
             return false;
         }
     }
 
     /** 读取并校验 world/book_config.yaml */
-    async readBookConfig(): Promise<BookConfig> {
+    async readBookConfig(): Promise<BookConfigResolved> {
         const raw = await readFile(this.configPath, 'utf8');
         const parsed = parseYaml(raw) as unknown;
         return BookConfigSchema.parse(parsed);
@@ -537,10 +553,13 @@ export class BookStore {
         try {
             const coldFiles = await readdir(this.coldArchiveDir);
             for (const file of coldFiles) {
-                if (file.endsWith('.md')) {
-                    coldArchiveIds.push(file.slice(0, -3));
+                if (!file.endsWith('.md')) continue;
+                const base = file.slice(0, -3);
+                if (ENTITY_ID_RE.test(base) && !SAGA_SHARD_RE.test(base)) {
+                    coldArchiveIds.push(base);
                 }
             }
+            coldArchiveIds.sort();
         } catch (err: unknown) {
             if ((err as { code?: string }).code !== 'ENOENT') throw err;
         }
@@ -553,6 +572,35 @@ export class BookStore {
             coldArchiveIds,
             chapterFiles
         };
+    }
+
+    /** 读取单个冷宫归档实体档案（entities/cold_archive/{entityId}.md），不存在时返回 null */
+    async readColdArchivedEntity(entityId: string): Promise<EntityProfile | null> {
+        if (!ENTITY_ID_RE.test(entityId) || SAGA_SHARD_RE.test(entityId)) {
+            throw new Error(`非法的冷宫实体 ID: ${entityId}`);
+        }
+        const coldPath = join(this.coldArchiveDir, `${entityId}.md`);
+        try {
+            const raw = await readFile(coldPath, 'utf8');
+            return parseEntityMarkdown(raw);
+        } catch (err: unknown) {
+            if ((err as { code?: string }).code === 'ENOENT') {
+                return null;
+            }
+            throw err;
+        }
+    }
+
+    /** 批量读取指定冷宫归档实体档案（跳过不存在项） */
+    async readColdArchivedEntities(entityIds: string[]): Promise<Record<string, EntityProfile>> {
+        const result: Record<string, EntityProfile> = {};
+        for (const entityId of new Set(entityIds)) {
+            const profile = await this.readColdArchivedEntity(entityId);
+            if (profile) {
+                result[entityId] = profile;
+            }
+        }
+        return result;
     }
 
     async recordPendingWrites(paths: string[]): Promise<void> {
@@ -699,13 +747,27 @@ export class BookStore {
             await mkdir(this.entitiesDir, { recursive: true });
 
             const allowInnate = options?.allowInnateMutation === true;
+            const effectiveTimelineMode: TimelineMode =
+                options?.timelineMode ?? currentTx.chapter_context?.timelineMode ?? 'MAINLINE';
             const stagedProfiles = new Map<string, EntityProfile>();
             const pendingNewEntityIds = new Set<string>();
+            const wokenColdArchiveIds = new Set<string>();
 
-            // 第一阶段：在内存中校验 entity_id、加载并合并所有补丁，拦截固有属性篡改与路径穿越
+            // 第一阶段：在内存中校验时间线写保护、entity_id、加载（含冷宫回查）并合并所有补丁
             for (const patch of patches) {
                 if (!ENTITY_ID_RE.test(patch.entity_id)) {
                     throw new Error(`非法的 entity_id 格式: ${patch.entity_id}`);
+                }
+
+                if (effectiveTimelineMode === 'FLASHBACK') {
+                    if (
+                        (patch.acquired_state_ops && patch.acquired_state_ops.length > 0) ||
+                        (patch.buffer_ops && patch.buffer_ops.length > 0)
+                    ) {
+                        throw new Error(
+                            `FLASHBACK 模式下严禁修改实体 ${patch.entity_id} 的 2. Acquired State 或 4. Recent Buffer`
+                        );
+                    }
                 }
 
                 const entityPath = join(this.entitiesDir, `${patch.entity_id}.md`);
@@ -717,7 +779,21 @@ export class BookStore {
                         existing = parseEntityMarkdown(raw);
                     } catch (err: unknown) {
                         if ((err as { code?: string }).code !== 'ENOENT') throw err;
-                        pendingNewEntityIds.add(patch.entity_id);
+
+                        const coldProfile = SAGA_SHARD_RE.test(patch.entity_id)
+                            ? null
+                            : await this.readColdArchivedEntity(patch.entity_id);
+                        if (coldProfile) {
+                            if (effectiveTimelineMode !== 'MAINLINE') {
+                                throw new Error(
+                                    `${effectiveTimelineMode} 模式下禁止将冷宫实体 ${patch.entity_id} 迁回主线 entities/`
+                                );
+                            }
+                            existing = coldProfile;
+                            wokenColdArchiveIds.add(patch.entity_id);
+                        } else {
+                            pendingNewEntityIds.add(patch.entity_id);
+                        }
                     }
                 }
 
@@ -732,9 +808,11 @@ export class BookStore {
                 this.assertForeignKeysReachable(entityId, serialized, reachableKeys);
             }
 
-            // 第三阶段：全部校验通过后落盘并提交 Git
+            // 第三阶段：全部校验通过后落盘（含冷宫唤醒写回与旧档删除双路径）并提交 Git
+            const coldArchiveRelPaths = [...wokenColdArchiveIds].map((id) => `entities/cold_archive/${id}.md`);
             await this.recordPendingWrites([
                 ...[...stagedProfiles.keys()].map((id) => `entities/${id}.md`),
+                ...coldArchiveRelPaths,
                 ...(options?.worldStateUpdate ? ['world/world_state.md'] : []),
                 ...(options?.extraCommitPaths ?? [])
             ]);
@@ -745,6 +823,11 @@ export class BookStore {
                 await writeFile(join(this.bookRoot, relPath), serializeEntityMarkdown(profile), 'utf8');
                 commitPaths.push(relPath);
                 updatedEntities.push(entityId);
+            }
+            for (const wokenId of wokenColdArchiveIds) {
+                const coldRelPath = `entities/cold_archive/${wokenId}.md`;
+                await unlink(join(this.bookRoot, coldRelPath));
+                commitPaths.push(coldRelPath);
             }
 
             if (options?.worldStateUpdate) {
@@ -932,164 +1015,7 @@ export class BookStore {
         patch: EntityPatch,
         allowInnateMutation: boolean
     ): EntityProfile {
-        if (!ENTITY_ID_RE.test(patch.entity_id)) {
-            throw new Error(`非法的 entity_id 格式: ${patch.entity_id}`);
-        }
-        if (existing) {
-            if (patch.canonical_name !== undefined && patch.canonical_name !== existing.metadata.canonical_name) {
-                if (!allowInnateMutation) {
-                    throw new InnateLockViolationError(
-                        patch.entity_id,
-                        `禁止在未授权情况下篡改实体 canonical_name (${existing.metadata.canonical_name} -> ${patch.canonical_name})`
-                    );
-                }
-            }
-            if (patch.innate_locks_ops && patch.innate_locks_ops.length > 0 && !allowInnateMutation) {
-                throw new InnateLockViolationError(
-                    patch.entity_id,
-                    `禁止在未授权情况下修改实体 ${patch.entity_id} 的 1. Innate Locks`
-                );
-            }
-        }
-
-        const profile: EntityProfile = existing
-            ? {
-                  metadata: { ...existing.metadata },
-                  sectionHeadings: { ...existing.sectionHeadings },
-                  innateLocks: existing.innateLocks.map((e) => ({ ...e, continuationLines: [...e.continuationLines] })),
-                  acquiredState: existing.acquiredState.map((e) => ({
-                      ...e,
-                      continuationLines: [...e.continuationLines],
-                      ...(e.ledger ? { ledger: { ...e.ledger } } : {})
-                  })),
-                  irreversibleTrajectory: existing.irreversibleTrajectory.map((e) => ({
-                      ...e,
-                      continuationLines: [...e.continuationLines]
-                  })),
-                  recentBuffer: existing.recentBuffer.map((e) => ({
-                      ...e,
-                      continuationLines: [...e.continuationLines]
-                  }))
-              }
-            : {
-                  metadata: {
-                      entity_id: patch.entity_id,
-                      canonical_name: patch.canonical_name ?? patch.entity_id,
-                      unique_aliases: [],
-                      contextual_titles: [],
-                      historical_anchors: [],
-                      last_seen_ch: patch.last_seen_ch ?? 0
-                  },
-                  sectionHeadings: { ...DEFAULT_SECTION_HEADINGS },
-                  innateLocks: [],
-                  acquiredState: [],
-                  irreversibleTrajectory: [],
-                  recentBuffer: []
-              };
-
-        if (patch.canonical_name !== undefined && (allowInnateMutation || !existing)) {
-            profile.metadata.canonical_name = patch.canonical_name;
-        }
-        if (patch.last_seen_ch !== undefined) {
-            profile.metadata.last_seen_ch = Math.max(profile.metadata.last_seen_ch, patch.last_seen_ch);
-        }
-        profile.metadata.unique_aliases = mergeUniqueStrings(profile.metadata.unique_aliases, patch.add_unique_aliases);
-        profile.metadata.contextual_titles = mergeUniqueStrings(
-            profile.metadata.contextual_titles,
-            patch.add_contextual_titles
-        );
-        profile.metadata.historical_anchors = mergeUniqueStrings(
-            profile.metadata.historical_anchors,
-            patch.add_historical_anchors
-        );
-
-        if (patch.innate_locks_ops) {
-            for (const op of patch.innate_locks_ops) {
-                if (op.op === 'append') {
-                    profile.innateLocks.push(toEntityEntry(op.entry));
-                } else if (op.op === 'remove_slot') {
-                    profile.innateLocks = profile.innateLocks.filter((e) => inferSlotKey(e) !== op.slot_key);
-                }
-            }
-        }
-
-        if (patch.acquired_state_ops) {
-            for (const op of patch.acquired_state_ops) {
-                if (op.op === 'upsert_slot') {
-                    const nextEntry = toEntityEntry(op.entry);
-                    const idx = profile.acquiredState.findIndex((e) => inferSlotKey(e) === op.slot_key);
-                    if (idx >= 0) {
-                        profile.acquiredState[idx] = nextEntry;
-                    } else {
-                        profile.acquiredState.push(nextEntry);
-                    }
-                } else if (op.op === 'remove_slot') {
-                    profile.acquiredState = profile.acquiredState.filter((e) => inferSlotKey(e) !== op.slot_key);
-                } else if (op.op === 'upsert_ledger') {
-                    const ledgerIdx = profile.acquiredState.findIndex((e) => e.isNumericLedger);
-                    if (ledgerIdx >= 0) {
-                        const existingLedger = profile.acquiredState[ledgerIdx]!;
-                        const mergedLedger: Record<string, string> = { ...(existingLedger.ledger ?? {}) };
-                        for (const [k, v] of Object.entries(op.entries)) {
-                            mergedLedger[k] = String(v);
-                        }
-                        existingLedger.ledger = mergedLedger;
-                    } else {
-                        const newLedger: Record<string, string> = {};
-                        for (const [k, v] of Object.entries(op.entries)) {
-                            newLedger[k] = String(v);
-                        }
-                        profile.acquiredState.push({
-                            isNumericLedger: true,
-                            ledger: newLedger,
-                            text: '',
-                            continuationLines: []
-                        });
-                    }
-                } else if (op.op === 'append') {
-                    profile.acquiredState.push(toEntityEntry(op.entry));
-                }
-            }
-        }
-
-        if (patch.trajectory_ops) {
-            for (const op of patch.trajectory_ops) {
-                if (op.op === 'append') {
-                    profile.irreversibleTrajectory.push(toEntityEntry(op.entry));
-                }
-            }
-        }
-
-        if (patch.buffer_ops) {
-            for (const op of patch.buffer_ops) {
-                if (op.op === 'upsert_slot') {
-                    const nextEntry = toEntityEntry(op.entry);
-                    const idx = profile.recentBuffer.findIndex((e) => inferSlotKey(e) === op.slot_key);
-                    if (idx >= 0) {
-                        profile.recentBuffer[idx] = nextEntry;
-                    } else {
-                        profile.recentBuffer.push(nextEntry);
-                    }
-                } else if (op.op === 'append') {
-                    profile.recentBuffer.push(toEntityEntry(op.entry));
-                } else if (op.op === 'trim_buffer') {
-                    const timedIndices: number[] = [];
-                    profile.recentBuffer.forEach((entry, idx) => {
-                        if (entry.storyDay !== undefined || entry.chapter !== undefined) {
-                            timedIndices.push(idx);
-                        }
-                    });
-                    if (timedIndices.length > op.max_entries) {
-                        const dropCount = timedIndices.length - op.max_entries;
-                        const dropSet = new Set(timedIndices.slice(0, dropCount));
-                        profile.recentBuffer = profile.recentBuffer.filter((_, idx) => !dropSet.has(idx));
-                    }
-                }
-            }
-        }
-
-        profile.metadata = EntityMetadataSchema.parse(profile.metadata);
-        return profile;
+        return mergeEntityProfilePatch(existing, patch, allowInnateMutation);
     }
 
     /** 构建 O(1) 外键可达性查找集合（活跃实体 + 冷归档 + 已落盘章节 + 本批新建实体） */

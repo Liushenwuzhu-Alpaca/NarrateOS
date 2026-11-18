@@ -1027,4 +1027,386 @@ describe('BookStore', () => {
             writer: { model: 'anthropic:claude-sonnet-4-5', reasoning_effort: 'medium' }
         });
     });
+
+    it('BookConfigSchema 补齐 6 组可配变量默认值并向后兼容旧配置，RunRecordSchema 保留扩展字段（ISS-010）', async () => {
+        const { store } = await createTempBookRepo();
+        const cfg = await store.readBookConfig();
+        expect(cfg.opening).toEqual({
+            voice_seed_mode: 'hybrid_rolling',
+            target_voice_pool_size: 4,
+            voice_rolling_warmup_chapters: 3,
+            pause_after_chapter_1: false,
+            first_chapter_max_beats: 1
+        });
+        expect(cfg.retrieval.max_slices_per_entity).toBe(3);
+        expect(cfg.retrieval.l2_full_unfrozen_threshold).toBe(40);
+        expect(cfg.context_assembly.wakeup_gap_chapters).toBe(30);
+        expect(cfg.repair_loop.gate_max_patch_paragraphs).toBe(15);
+        expect(cfg.repair_loop.max_total_rewrites_per_chapter).toBe(2);
+        expect(cfg.dreaming.word_threshold).toBe(15000);
+        expect(cfg.ops_and_sync.tx_lock_stale_ms).toBe(30000);
+
+        await store.writeBookConfig({
+            ...cfg,
+            opening: { ...cfg.opening, pause_after_chapter_1: true },
+            dreaming: { ...cfg.dreaming, word_threshold: 22000 }
+        });
+        const reloadedCfg = await store.readBookConfig();
+        expect(reloadedCfg.opening.pause_after_chapter_1).toBe(true);
+        expect(reloadedCfg.dreaming.word_threshold).toBe(22000);
+
+        await store.appendRunRecord({
+            runId: 'run-ext-01',
+            chapter: 2,
+            stage: 'writer',
+            role: 'writer',
+            sessionId: 'sess-w2',
+            status: 'completed',
+            startedAt: '2026-11-18T00:00:00.000Z',
+            attempt: 2,
+            triggerReason: 'gate_rewrite',
+            parentSessionId: 'sess-parent',
+            mode: 'MAINLINE'
+        });
+        const records = await store.listRunRecords({ runId: 'run-ext-01' });
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({
+            attempt: 2,
+            triggerReason: 'gate_rewrite',
+            parentSessionId: 'sess-parent',
+            mode: 'MAINLINE'
+        });
+    });
+
+    it('entity-parser 严格标题前缀、顶格引用续行、vis/status 大小写不敏感与非法 vis 标记、分隔符拒绝（ISS-007, 009, 019）', () => {
+        const md = [
+            '---',
+            'entity_id: char_003',
+            'canonical_name: 顾清寒',
+            '---',
+            '',
+            '## 1. Innate Locks',
+            '- [vis: self_only] 怕冷',
+            '',
+            '## 2. Acquired State',
+            '- [day:1 | ch:01 | vis: omniscient_secret | slot:secret_plan] 暗中调换印章',
+            '- [day:1 | ch:01 | vis: secret | status: active] 未知可见性标签应标记非法态',
+            '- [day:1 | ch:01 | status: warped] 提及 Innate Locks 与 Acquired State 正文不串段',
+            '',
+            '## 3. Irreversible Trajectory',
+            '- [day:1 | ch:01] 抵达港口',
+            '',
+            '## 4. Recent Sliding Buffer & Voice',
+            '- 对话声纹：语速缓慢',
+            '> 标本：「钥匙不在我这儿。」',
+            '* 兼容星号列表项',
+            ''
+        ].join('\n');
+
+        const parsed = parseEntityMarkdown(md);
+        expect(parsed.innateLocks[0]?.visibility).toBe('SELF_ONLY');
+        expect(parsed.acquiredState[0]?.visibility).toBe('OMNISCIENT_SECRET');
+        expect(parsed.acquiredState[1]?.visibility).toBeUndefined();
+        expect(parsed.acquiredState[1]?.rawInvalidVisibility).toBe('secret');
+        expect(parsed.acquiredState[1]?.extraTags?.['vis']).toBe('secret');
+        expect(parsed.acquiredState[1]?.status).toBe('ACTIVE');
+        expect(parsed.acquiredState[2]?.status).toBe('WARPED');
+        expect(parsed.sectionHeadings.acquiredState).toBe('## 2. Acquired State');
+        expect(parsed.recentBuffer[0]?.continuationLines).toEqual(['> 标本：「钥匙不在我这儿。」']);
+        expect(parsed.recentBuffer[1]?.text).toBe('兼容星号列表项');
+
+        const serialized = serializeEntityMarkdown(parsed);
+        expect(parseEntityMarkdown(serialized)).toEqual(parsed);
+
+        // 非列表的未知顶格正文行禁止静默丢弃
+        const strayLineMd = md.replace('* 兼容星号列表项', '一段不带列表前缀的孤立正文');
+        expect(() => parseEntityMarkdown(strayLineMd)).toThrow('无法识别的非列表内容行');
+
+        // 数值账本键/owner/slotKey 含分隔符或换行符时拒绝解析
+        const badLedgerMd = md.replace(
+            '- [day:1 | ch:01 | vis: omniscient_secret | slot:secret_plan] 暗中调换印章',
+            '- [Tracked Numeric Ledger] 金币[旧]: 10'
+        );
+        expect(() => parseEntityMarkdown(badLedgerMd)).toThrow('禁止包含');
+    });
+
+    it('upsert_slot 跨 3 章无冒号文本原地覆盖、upsert_ledger 同步刷新 text、新建实体校验中文名与第 1 区禁写 OMNISCIENT_SECRET（ISS-005, 008, 009, 024, Q7）', async () => {
+        const { bookRoot, store } = await createTempBookRepo();
+
+        // 连续 3 章无冒号文本 upsert_slot，同槽位条目数恒为 1 且保留最新值
+        for (const [ch, locText] of [
+            [2, '当前驻留于旧港码头一号库房'],
+            [3, '当前转移至钟楼地下室'],
+            [4, '当前潜伏于火车站货场']
+        ] as const) {
+            await store.commitDraft(ch, `第${ch}章正文\n`);
+            await store.applyStatePatch(ch, [
+                {
+                    entity_id: 'char_001',
+                    last_seen_ch: ch,
+                    acquired_state_ops: [
+                        {
+                            op: 'upsert_slot',
+                            slot_key: 'location',
+                            entry: {
+                                storyDay: ch,
+                                chapter: ch,
+                                visibility: 'PUBLIC',
+                                status: 'ACTIVE',
+                                text: locText
+                            }
+                        },
+                        {
+                            op: 'upsert_ledger',
+                            entries: { 社团剩余经费: `${1000 - ch * 100}日元` }
+                        }
+                    ],
+                    buffer_ops: [
+                        {
+                            op: 'upsert_slot',
+                            slot_key: 'mood',
+                            entry: {
+                                storyDay: ch,
+                                chapter: ch,
+                                text: `第${ch}章心境紧绷`
+                            }
+                        }
+                    ]
+                }
+            ]);
+        }
+
+        const charProfile = parseEntityMarkdown(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8'));
+        const locationSlots = charProfile.acquiredState.filter((e) => e.slotKey === 'location');
+        expect(locationSlots).toHaveLength(1);
+        expect(locationSlots[0]?.text).toBe('当前潜伏于火车站货场');
+        const moodSlots = charProfile.recentBuffer.filter((e) => e.slotKey === 'mood');
+        expect(moodSlots).toHaveLength(1);
+        expect(moodSlots[0]?.text).toBe('第4章心境紧绷');
+        const ledger = charProfile.acquiredState.find((e) => e.isNumericLedger);
+        expect(ledger?.text).toContain('社团剩余经费: 600日元');
+
+        // 第 5 章准备测试校验拦截
+        await store.commitDraft(5, '第5章正文\n');
+
+        // 拦截纯英文或缺失 canonical_name 新建实体（ISS-008）
+        await expect(
+            store.applyStatePatch(5, [{ entity_id: 'char_new_ascii', canonical_name: 'LinMo' }])
+        ).rejects.toThrow('中文字符');
+        await expect(
+            store.applyStatePatch(5, [{ entity_id: 'char_new_missing' }])
+        ).rejects.toThrow('中文字符');
+
+        // 拦截新建实体第 1 区写入 OMNISCIENT_SECRET（含显式字段与内联文本）（Q7）
+        await expect(
+            store.applyStatePatch(5, [
+                {
+                    entity_id: 'char_new_secret',
+                    canonical_name: '暗影',
+                    innate_locks_ops: [
+                        { op: 'append', entry: { visibility: 'OMNISCIENT_SECRET', text: '真实身份为卧底' } }
+                    ]
+                }
+            ])
+        ).rejects.toThrow(InnateLockViolationError);
+        await expect(
+            store.applyStatePatch(5, [
+                {
+                    entity_id: 'char_new_secret_inline',
+                    canonical_name: '暗影二号',
+                    innate_locks_ops: [
+                        { op: 'append', entry: { text: '[vis: OMNISCIENT_SECRET] 内联底牌' } }
+                    ]
+                }
+            ])
+        ).rejects.toThrow(InnateLockViolationError);
+
+        // 存量卡第 1 区已有 OMNISCIENT_SECRET 时，仅更新第 2 区不得误拦
+        const legacyCard = [
+            '---',
+            'entity_id: char_legacy_sec',
+            'canonical_name: 老周',
+            'last_seen_ch: 1',
+            '---',
+            '',
+            '## 1. Innate Locks',
+            '- [vis: OMNISCIENT_SECRET] 存量底牌',
+            '',
+            '## 2. Acquired State',
+            '',
+            '## 3. Irreversible Trajectory',
+            '',
+            '## 4. Recent Sliding Buffer & Voice',
+            ''
+        ].join('\n');
+        await writeFile(join(bookRoot, 'entities/char_legacy_sec.md'), legacyCard, 'utf8');
+        await expect(
+            store.applyStatePatch(5, [
+                {
+                    entity_id: 'char_legacy_sec',
+                    acquired_state_ops: [
+                        { op: 'upsert_slot', slot_key: 'role', entry: { visibility: 'PUBLIC', text: '码头看门人' } }
+                    ]
+                }
+            ])
+        ).resolves.toBeDefined();
+
+        // 拦截 slotKey / owner / ledger 键含 '|', '[', ']', 换行符（ISS-009）
+        await store.commitDraft(6, '第6章正文\n');
+        await expect(
+            store.applyStatePatch(6, [
+                {
+                    entity_id: 'char_001',
+                    acquired_state_ops: [
+                        { op: 'upsert_slot', slot_key: 'bad|slot', entry: { text: '破坏分隔符' } }
+                    ]
+                }
+            ])
+        ).rejects.toThrow('禁止包含');
+        await expect(
+            store.applyStatePatch(6, [
+                {
+                    entity_id: 'char_001',
+                    acquired_state_ops: [
+                        { op: 'upsert_ledger', entries: { '金币[总]': 10 } }
+                    ]
+                }
+            ])
+        ).rejects.toThrow('禁止包含');
+        await expect(
+            store.applyStatePatch(6, [
+                {
+                    entity_id: 'char_001',
+                    acquired_state_ops: [
+                        {
+                            op: 'append',
+                            entry: {
+                                text: '附带非法 extraTags',
+                                extraTags: { note: 'bad|tag' }
+                            }
+                        }
+                    ]
+                }
+            ])
+        ).rejects.toThrow('禁止包含');
+    });
+
+    it('coldArchiveIds 过滤非实体归档、支持冷宫唤醒单事务写回删旧与失败回滚，且 FLASHBACK 拒收第 2/4 区写入（ISS-006, ISS-047）', async () => {
+        const { bookRoot, system, store } = await createTempBookRepo();
+
+        // 写入非实体冷宫文件（warped_horizon 与 saga 分片）
+        await writeFile(join(bookRoot, 'entities/cold_archive/warped_horizon.md'), '# warped\n', 'utf8');
+        await writeFile(
+            join(bookRoot, 'entities/cold_archive/char_lin_daiyu_saga_01.md'),
+            '---\nentity_id: char_lin_daiyu\ncanonical_name: 林黛玉\n---\n',
+            'utf8'
+        );
+        await system.commitPaths(bookRoot, ['entities/cold_archive'], 'chore: add non-entity cold archive docs');
+
+        const snapshot = await store.loadSnapshot();
+        expect(snapshot.coldArchiveIds).toEqual(['char_099']);
+        const coldEntity = await store.readColdArchivedEntity('char_099');
+        expect(coldEntity?.metadata.canonical_name).toBe('旧任部长');
+
+        // FLASHBACK 拒收非空 acquired_state_ops 与 buffer_ops
+        await store.commitDraft(2, '第2章回忆正文\n', {
+            timelineMode: 'FLASHBACK',
+            targetDay: -10,
+            povCharIds: ['char_001']
+        });
+        await expect(
+            store.applyStatePatch(
+                2,
+                [
+                    {
+                        entity_id: 'char_001',
+                        acquired_state_ops: [
+                            { op: 'upsert_slot', slot_key: 'location', entry: { text: '回忆旧址' } }
+                        ]
+                    }
+                ],
+                { timelineMode: 'FLASHBACK' }
+            )
+        ).rejects.toThrow('FLASHBACK');
+        await expect(
+            store.applyStatePatch(
+                2,
+                [
+                    {
+                        entity_id: 'char_001',
+                        buffer_ops: [{ op: 'append', entry: { storyDay: -10, text: '回忆片段' } }]
+                    }
+                ],
+                { timelineMode: 'FLASHBACK' }
+            )
+        ).rejects.toThrow('FLASHBACK');
+
+        // FLASHBACK 允许追加第 3 区历史履历
+        await store.applyStatePatch(
+            2,
+            [
+                {
+                    entity_id: 'char_001',
+                    trajectory_ops: [{ op: 'append', entry: { storyDay: -10, chapter: 2, text: '十年前旧约' } }]
+                }
+            ],
+            { timelineMode: 'FLASHBACK' }
+        );
+
+        // MAINLINE 唤醒冷宫 char_099：禁止篡改其原 Innate Locks，提交失败完整回滚冷宫旧档
+        await store.commitDraft(3, '第3章主线正文\n');
+        await expect(
+            store.applyStatePatch(
+                3,
+                [
+                    {
+                        entity_id: 'char_099',
+                        innate_locks_ops: [{ op: 'append', entry: { text: '试图覆写冷宫红线' } }]
+                    }
+                ],
+                { timelineMode: 'MAINLINE' }
+            )
+        ).rejects.toThrow(InnateLockViolationError);
+
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('冷宫唤醒提交失败'));
+        await expect(
+            store.applyStatePatch(
+                3,
+                [
+                    {
+                        entity_id: 'char_099',
+                        last_seen_ch: 3,
+                        acquired_state_ops: [
+                            { op: 'upsert_slot', slot_key: 'location', entry: { storyDay: 3, chapter: 3, text: '重返旧校舍' } }
+                        ]
+                    }
+                ],
+                { timelineMode: 'MAINLINE' }
+            )
+        ).rejects.toThrow('冷宫唤醒提交失败');
+        const recovery = await store.recoverWal();
+        expect(recovery.clean).toBe(true);
+        await access(join(bookRoot, 'entities/cold_archive/char_099.md'));
+        await expect(access(join(bookRoot, 'entities/char_099.md'))).rejects.toThrow();
+
+        // 正常提交唤醒 char_099：保留原有 Innate Locks + 写回 entities/ + 删除 cold_archive/
+        await store.applyStatePatch(
+            3,
+            [
+                {
+                    entity_id: 'char_099',
+                    last_seen_ch: 3,
+                    acquired_state_ops: [
+                        { op: 'upsert_slot', slot_key: 'location', entry: { storyDay: 3, chapter: 3, text: '重返旧校舍' } }
+                    ]
+                }
+            ],
+            { timelineMode: 'MAINLINE' }
+        );
+        expect(await system.isWorkingTreeClean(bookRoot)).toBe(true);
+        await expect(access(join(bookRoot, 'entities/cold_archive/char_099.md'))).rejects.toThrow();
+        const woken = parseEntityMarkdown(await readFile(join(bookRoot, 'entities/char_099.md'), 'utf8'));
+        expect(woken.innateLocks[0]?.text).toBe('已毕业离校');
+        expect(woken.acquiredState.some((e) => e.text === '重返旧校舍')).toBe(true);
+    });
 });

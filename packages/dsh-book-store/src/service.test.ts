@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as bookStorePlugin from './index.js';
-import { BookSwitchConflictError, NarrateStoreService } from './index.js';
+import { BookSwitchConflictError, NarrateStoreService, TxLockConflictError } from './index.js';
 
 const tempDirs: string[] = [];
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -252,5 +252,101 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
             'store.dispose'
         ]);
         expect(disposeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('onBookSwitched 仅在切书成功后触发、支持取消订阅，且 isTxLockHeld 遇到 ENOENT 返回 false（ISS-003, ISS-012）', async () => {
+        const bookA = await createBookWorkspace('book-a');
+        const bookB = await createBookWorkspace('book-b');
+        const service = new NarrateStoreService({ bookRoot: bookA });
+        registerCleanup(() => service.dispose());
+
+        const switchedEvents: Array<{ prev: string | null; next: string; slug: string }> = [];
+        const unsubscribe = service.onBookSwitched(async (evt) => {
+            const cfg = await evt.store.readBookConfig();
+            switchedEvents.push({
+                prev: evt.previousBookRoot,
+                next: evt.nextBookRoot,
+                slug: cfg.book_slug
+            });
+        });
+
+        // 活跃运行期间切书失败（409），不应触发 onBookSwitched
+        const runId = service.beginRun('active-run-no-event');
+        await expect(service.switchBook(bookB)).rejects.toBeInstanceOf(BookSwitchConflictError);
+        expect(switchedEvents).toHaveLength(0);
+        service.endRun(runId);
+
+        // 验证空字节新鲜锁会在过期前拦截，过期或已删除的空字节锁不阻断切书
+        const lockPathB = join(bookB, '.ops/tx.lock');
+        await writeFile(lockPathB, '', 'utf8');
+        await expect(service.switchBook(bookB)).rejects.toBeInstanceOf(BookSwitchConflictError);
+        const past = new Date(Date.now() - 60_000);
+        await utimes(lockPathB, past, past);
+        await expect(service.switchBook(bookB)).resolves.toBeDefined();
+        expect(switchedEvents).toHaveLength(1);
+        expect(switchedEvents[0]).toEqual({
+            prev: resolve(bookA),
+            next: resolve(bookB),
+            slug: 'book-b'
+        });
+
+        // 取消订阅后不再收到通知
+        await rm(lockPathB, { force: true });
+        unsubscribe();
+        await service.switchBook(bookA);
+        expect(switchedEvents).toHaveLength(1);
+    });
+
+    it('同 bookRoot 并发 openStore().withTxLock 争抢过期锁时严格串行回收，绝不双持锁（ISS-003）', async () => {
+        const bookA = await createBookWorkspace('book-lock-race');
+        const service = new NarrateStoreService({ bookRoot: bookA });
+        registerCleanup(() => service.dispose());
+
+        // 写入死进程残留的过期锁
+        const lockPath = join(bookA, '.ops/tx.lock');
+        await writeFile(
+            lockPath,
+            JSON.stringify({ pid: 99999999, acquiredAt: '2020-01-01T00:00:00.000Z' }),
+            'utf8'
+        );
+        const past = new Date(Date.now() - 60_000);
+        await utimes(lockPath, past, past);
+
+        const store1 = service.openStore();
+        const store2 = service.openStore();
+        let activeHolders = 0;
+        let maxConcurrentHolders = 0;
+        const holdReady = Promise.withResolvers<void>();
+        let releaseFirst!: () => void;
+        const firstGate = new Promise<void>((res) => {
+            releaseFirst = res;
+        });
+
+        const task1 = store1.withTxLock(async () => {
+            activeHolders += 1;
+            maxConcurrentHolders = Math.max(maxConcurrentHolders, activeHolders);
+            holdReady.resolve();
+            await firstGate;
+            activeHolders -= 1;
+            return 'winner-1';
+        });
+
+        const task2 = store2.withTxLock(async () => {
+            activeHolders += 1;
+            maxConcurrentHolders = Math.max(maxConcurrentHolders, activeHolders);
+            activeHolders -= 1;
+            return 'winner-2';
+        });
+
+        await holdReady.promise;
+        releaseFirst();
+        const results = await Promise.allSettled([task1, task2]);
+        const fulfilled = results.filter((r) => r.status === 'fulfilled');
+        const rejected = results.filter((r) => r.status === 'rejected');
+
+        expect(maxConcurrentHolders).toBe(1);
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(TxLockConflictError);
     });
 });
