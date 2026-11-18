@@ -33,7 +33,8 @@ import {
 import {
     DshLlmAdapter,
     resolveCompatibleReasoningEffort,
-    resolvePoolRoute
+    resolveRoleReasoningEffort,
+    resolveRoleRoute
 } from './dsh-llm-adapter.js';
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -108,6 +109,55 @@ function isAgentInstructionsMessage(msg: unknown): boolean {
         source !== null &&
         (source as { kind?: unknown }).kind === 'agent-instructions'
     );
+}
+
+/** 从 assistant/message 事件载荷中兜底提取未走流式 reasoning-delta 的思考文本 */
+function extractFallbackReasoningFromAssistantEvent(data: unknown): string {
+    if (!data || typeof data !== 'object') {
+        return '';
+    }
+    const record = data as {
+        reasoning?: unknown;
+        message?: { content?: unknown };
+        stream?: unknown;
+    };
+    const parts: string[] = [];
+
+    if (typeof record.reasoning === 'string' && record.reasoning.length > 0) {
+        parts.push(record.reasoning);
+    }
+
+    const content = record.message?.content;
+    if (Array.isArray(content)) {
+        for (const block of content) {
+            if (!block || typeof block !== 'object') continue;
+            const b = block as { type?: unknown; text?: unknown; thinking?: unknown };
+            if (b.type === 'reasoning' || b.type === 'thinking') {
+                if (typeof b.text === 'string' && b.text.length > 0) {
+                    parts.push(b.text);
+                } else if (typeof b.thinking === 'string' && b.thinking.length > 0) {
+                    parts.push(b.thinking);
+                }
+            }
+        }
+    }
+
+    if (parts.length === 0 && Array.isArray(record.stream)) {
+        for (const item of record.stream) {
+            if (!item || typeof item !== 'object') continue;
+            const s = item as { type?: unknown; texts?: unknown; text?: unknown };
+            if (s.type === 'reasoning-chunks' && Array.isArray(s.texts)) {
+                const joined = s.texts.filter((t): t is string => typeof t === 'string').join('');
+                if (joined.length > 0) {
+                    parts.push(joined);
+                }
+            } else if (s.type === 'reasoning-delta' && typeof s.text === 'string' && s.text.length > 0) {
+                parts.push(s.text);
+            }
+        }
+    }
+
+    return parts.join('');
 }
 
 async function waitRetryBackoff(delayMs: number, signal?: AbortSignal): Promise<boolean> {
@@ -330,6 +380,15 @@ export class RoleRunner {
         let handle: AgentHandle | undefined;
         let abortCleanup: (() => void) | undefined;
 
+        const route = resolveRoleRoute(
+            this.poolRouting,
+            params.roleId,
+            roleCfg.pool,
+            params.bookConfig,
+            params.poolOverride
+        );
+        const modelId = `${route.provider}:${route.model}`;
+
         const sessionDetail: StageSessionDetail = {
             sessionId: sessionIdStr,
             runId,
@@ -337,6 +396,8 @@ export class RoleRunner {
             role: params.roleId,
             chapter,
             status: 'running',
+            startedAt,
+            modelId,
             ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
             ...(params.agentMode ? { mode: params.agentMode } : {}),
             live: true,
@@ -370,14 +431,10 @@ export class RoleRunner {
         let disposeSessionEventListener: (() => void) | undefined;
         let lastAgentError: Error | undefined;
         let latestAssistantText = '';
+        let currentTurnReasoningText = '';
         let latestReasoningText = '';
         let malformedRetries = 0;
         const multiTurnUsage = createEmptyUsage();
-        const route = resolvePoolRoute(
-            this.poolRouting,
-            params.poolOverride ?? roleCfg.pool,
-            params.bookConfig
-        );
 
         try {
             if (!isCleanroom) {
@@ -456,11 +513,28 @@ export class RoleRunner {
                                 outputTokens: msgUsage.outputTokens ?? 0
                             });
                         }
+                        if (currentTurnReasoningText.length === 0 || latestReasoningText.length === 0) {
+                            const fallbackReasoning = extractFallbackReasoningFromAssistantEvent(ev.data);
+                            if (fallbackReasoning.length > 0) {
+                                currentTurnReasoningText += fallbackReasoning;
+                                latestReasoningText += fallbackReasoning;
+                                recordSessionEvent({
+                                    timestamp: new Date().toISOString(),
+                                    kind: 'thinking',
+                                    text: fallbackReasoning
+                                });
+                            }
+                        }
                     }
                 });
             }
 
-            const requestedEffort = params.reasoningEffortOverride ?? roleCfg.reasoningEffort;
+            const requestedEffort = resolveRoleReasoningEffort(
+                params.roleId,
+                roleCfg.reasoningEffort,
+                params.bookConfig,
+                params.reasoningEffortOverride
+            );
             const compatibleEffort = await resolveCompatibleReasoningEffort(
                 this.execCtx.llm,
                 route.provider,
@@ -573,7 +647,10 @@ export class RoleRunner {
                     // 透传外部化角色配置的采样温度，并在每次新发起 LLM 请求时重置当前轮次输出缓冲
                     agentCtx.on('agent/request', async (_payload, next) => {
                         latestAssistantText = '';
-                        latestReasoningText = '';
+                        currentTurnReasoningText = '';
+                        if (isCleanroom) {
+                            latestReasoningText = '';
+                        }
                         const base = await next();
                         return {
                             ...base,
@@ -606,6 +683,7 @@ export class RoleRunner {
                         if (frame.type !== 'chunk') return;
                         const ts = new Date().toISOString();
                         if (frame.chunk.type === 'reasoning-delta') {
+                            currentTurnReasoningText += frame.chunk.text;
                             latestReasoningText += frame.chunk.text;
                             recordSessionEvent({
                                 timestamp: ts,
@@ -756,6 +834,12 @@ export class RoleRunner {
             disposeSessionEventListener?.();
             abortCleanup?.();
             sessionDetail.live = false;
+            sessionDetail.startedAt = startedAt;
+            sessionDetail.finishedAt = new Date().toISOString();
+            sessionDetail.modelId = modelId;
+            sessionDetail.usage = { ...multiTurnUsage };
+            sessionDetail.reasoning = latestReasoningText;
+            sessionDetail.thinkingChars = latestReasoningText.length;
             if (SESSION_ID_SAFE_RE.test(sessionIdStr)) {
                 try {
                     const logsDir = join(params.bookRoot, '.ops/session_logs');
@@ -800,16 +884,18 @@ export class RoleRunner {
             throw new Error(`净室工种 ${roleId} 禁止配置 tools 或 yield_tool`);
         }
 
+        const resolvedEffort = resolveRoleReasoningEffort(
+            roleId,
+            roleCfg.reasoningEffort,
+            options.bookConfig,
+            options.request.reasoningEffort
+        );
         const req: CleanroomRequest = {
             pool: options.request.pool ?? roleCfg.pool,
             staticPrefixBlocks: options.request.staticPrefixBlocks,
             dynamicTail: options.request.dynamicTail,
             temperature: options.request.temperature ?? roleCfg.temperature,
-            ...(options.request.reasoningEffort !== undefined
-                ? { reasoningEffort: options.request.reasoningEffort }
-                : roleCfg.reasoningEffort !== undefined
-                  ? { reasoningEffort: roleCfg.reasoningEffort }
-                  : {}),
+            ...(resolvedEffort !== undefined ? { reasoningEffort: resolvedEffort } : {}),
             ...(options.request.maxTokens !== undefined
                 ? { maxTokens: options.request.maxTokens }
                 : {}),
@@ -819,7 +905,17 @@ export class RoleRunner {
         };
 
         if (typeof this.execCtx.agents?.create !== 'function') {
-            const response = await generateTraced(this.llmAdapter, req, options.signal);
+            const response = await generateTraced(
+                {
+                    generate: (tracedReq, signal) =>
+                        this.llmAdapter.generate(tracedReq, signal, {
+                            roleId,
+                            bookConfig: options.bookConfig
+                        })
+                },
+                req,
+                options.signal
+            );
             return {
                 response,
                 roleConfig: roleCfg

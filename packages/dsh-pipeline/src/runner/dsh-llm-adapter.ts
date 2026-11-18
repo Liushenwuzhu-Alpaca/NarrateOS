@@ -43,6 +43,9 @@ const RETRYABLE_NODE_CODES = new Set<string>([
 export interface DshLlmAdapterOptions {
     poolRouting: LlmPoolRouting;
     resolveModelRouting?: () => Promise<Record<string, string> | undefined>;
+    resolveBookConfig?:
+        | (() => Promise<Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined>)
+        | undefined;
     maxRetries?: number | undefined;
     backoffMs?: readonly number[] | undefined;
     retryableCodes?: readonly string[] | undefined;
@@ -134,6 +137,51 @@ export function resolvePoolRoute(
     return { provider: base.provider, model: override };
 }
 
+/**
+ * 解析单个工种的最终 provider 与 model：
+ * 优先级：Layer 2 role_routing[roleId].model -> Layer 1 role_routing[roleId].tier -> poolOverride ?? defaultPool -> model_routing/poolRouting
+ */
+export function resolveRoleRoute(
+    poolRouting: LlmPoolRouting,
+    roleId: string | undefined,
+    defaultPool: LlmPool,
+    bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined,
+    poolOverride?: LlmPool | undefined
+): LlmRouteTarget {
+    const roleOverride = roleId ? bookConfig?.role_routing?.[roleId] : undefined;
+    const effectivePool: LlmPool =
+        roleOverride?.tier === 'strong'
+            ? 'strong_creative'
+            : roleOverride?.tier === 'weak'
+              ? 'fast_retrieval'
+              : (poolOverride ?? defaultPool);
+    const baseRoute = resolvePoolRoute(poolRouting, effectivePool, bookConfig);
+    const modelOverride = roleOverride?.model?.trim();
+    if (!modelOverride) {
+        return baseRoute;
+    }
+    const colonIdx = modelOverride.indexOf(':');
+    if (colonIdx > 0 && colonIdx < modelOverride.length - 1) {
+        const provider = modelOverride.slice(0, colonIdx).trim();
+        const model = modelOverride.slice(colonIdx + 1).trim();
+        if (provider.length > 0 && model.length > 0) {
+            return { provider, model };
+        }
+    }
+    return { provider: baseRoute.provider, model: modelOverride };
+}
+
+/** 解析单个工种的推理强度（role_routing[roleId].reasoning_effort > override > defaultEffort） */
+export function resolveRoleReasoningEffort(
+    roleId: string | undefined,
+    defaultEffort: ReasoningEffortLevel | undefined,
+    bookConfig?: Pick<BookConfig, 'role_routing'> | undefined,
+    override?: ReasoningEffortLevel | undefined
+): ReasoningEffortLevel | undefined {
+    const roleEffort = roleId ? bookConfig?.role_routing?.[roleId]?.reasoning_effort : undefined;
+    return roleEffort ?? override ?? defaultEffort;
+}
+
 const REASONING_FALLBACK_ORDER: Record<ReasoningEffortLevel, readonly string[]> = {
     off: ['off'],
     low: ['low', 'off'],
@@ -208,6 +256,7 @@ export class DshLlmAdapter implements LlmPort {
     private readonly retryableCodes: Set<string>;
     private readonly sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>;
     private readonly resolveModelRouting: DshLlmAdapterOptions['resolveModelRouting'];
+    private readonly resolveBookConfig: DshLlmAdapterOptions['resolveBookConfig'];
 
     constructor(
         private readonly llm: Pick<LlmRuntime, 'stream'> & {
@@ -217,6 +266,7 @@ export class DshLlmAdapter implements LlmPort {
     ) {
         this.poolRouting = options.poolRouting;
         this.resolveModelRouting = options.resolveModelRouting;
+        this.resolveBookConfig = options.resolveBookConfig;
         this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
         this.backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;
         this.retryableCodes = options.retryableCodes
@@ -225,13 +275,36 @@ export class DshLlmAdapter implements LlmPort {
         this.sleepFn = options.sleepFn ?? sleepWithSignal;
     }
 
-    async generate(req: CleanroomRequest, signal?: AbortSignal): Promise<CleanroomResponse> {
+    async generate(
+        req: CleanroomRequest,
+        signal?: AbortSignal,
+        roleContext?: {
+            roleId?: string | undefined;
+            bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined;
+        }
+    ): Promise<CleanroomResponse> {
         if (signal?.aborted) {
             throw signal.reason instanceof Error ? signal.reason : new Error('Aborted');
         }
 
-        const modelRouting = await this.resolveModelRouting?.();
-        const route = resolvePoolRoute(this.poolRouting, req.pool, modelRouting);
+        const resolvedBookConfig =
+            roleContext?.bookConfig ?? (await this.resolveBookConfig?.());
+        const modelRouting = resolvedBookConfig
+            ? resolvedBookConfig.model_routing
+            : await this.resolveModelRouting?.();
+        const effectiveBookConfig: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined =
+            resolvedBookConfig ?? (modelRouting ? { model_routing: modelRouting } : undefined);
+        const route = resolveRoleRoute(
+            this.poolRouting,
+            roleContext?.roleId,
+            req.pool,
+            effectiveBookConfig
+        );
+        const effectiveReasoningEffort = resolveRoleReasoningEffort(
+            roleContext?.roleId,
+            req.reasoningEffort,
+            effectiveBookConfig
+        );
 
         const options: GenerateOptions = {
             provider: route.provider,
@@ -254,12 +327,12 @@ export class DshLlmAdapter implements LlmPort {
         if (req.maxTokens !== undefined) {
             options.maxTokens = req.maxTokens;
         }
-        if (req.reasoningEffort !== undefined) {
+        if (effectiveReasoningEffort !== undefined) {
             const compatibleEffort = await resolveCompatibleReasoningEffort(
                 this.llm,
                 route.provider,
                 route.model,
-                req.reasoningEffort,
+                effectiveReasoningEffort,
                 signal
             );
             if (compatibleEffort !== undefined) {

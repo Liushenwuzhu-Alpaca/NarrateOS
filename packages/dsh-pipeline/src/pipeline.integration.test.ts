@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Context } from '@deepseek-ai/cordis';
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { scopeTarget } from '@deepseek-ai/dsh-scope';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import { ToolsService } from '@deepseek-ai/dsh-tools';
 import * as bookStorePlugin from '@narrateos/dsh-book-store';
@@ -12,7 +13,10 @@ import { TxLockConflictError } from '@narrateos/dsh-book-store';
 import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from './index.js';
-import { DshLlmAdapter } from './runner/dsh-llm-adapter.js';
+import { ensureChapterHeading } from './pipeline/chapter-pipeline.js';
+import { DshLlmAdapter, resolveRoleReasoningEffort, resolveRoleRoute } from './runner/dsh-llm-adapter.js';
+import { RoleLoader } from './roles/role-loader.js';
+import { RoleRunner } from './runner/role-runner.js';
 import {
     createGitBookWorkspace,
     createHeadlessMockServices,
@@ -1592,7 +1596,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         ctx.provide('agents', mockAgents as never);
         ctx.provide('llm', { stream: () => textToStreamChunks('unused') } as never);
 
-        const roleLoader = new RoleLoader(join(process.cwd(), 'presets/dsh-preset-narrateos'));
+        const roleLoader = new RoleLoader();
         const runner = new RoleRunner({
             ctx,
             storeService: ctx.narrateStore,
@@ -1649,5 +1653,642 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const sessionLog = await readFile(sessionLogPath, 'utf8');
         expect(sessionLog).toContain('先锚定潮湿码头与冷风声线');
         expect(sessionLog).toContain('陈砚把油印票据折进袖口');
+    });
+
+    it('Audit #1: session_logs 完整持久化 startedAt/finishedAt/modelId/usage/reasoning/thinkingChars，并支持 assistant/message 思考兜底', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'audit-session-logs');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, agentCtx, agent }) => {
+                if (tools.has('yield_context_pack')) {
+                    // 模拟只通过 assistant/message content 块返回思考（无流式 reasoning-delta）
+                    ctx.emit(
+                        'session/event',
+                        agent.session as never,
+                        {
+                            type: 'assistant/message',
+                            data: {
+                                turn: 1,
+                                step: 1,
+                                message: {
+                                    id: 'msg-1',
+                                    role: 'assistant',
+                                    source: { kind: 'model' },
+                                    content: [
+                                        { type: 'reasoning', text: '兜底检索思考链：先锁定三号码头与 char_001' }
+                                    ]
+                                },
+                                usage: {
+                                    inputTokens: 210,
+                                    cacheReadTokens: 80,
+                                    cacheWriteTokens: 20,
+                                    outputTokens: 65
+                                }
+                            }
+                        } as never
+                    );
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    // 模拟通过流式 reasoning-delta 返回思考
+                    agentCtx.emit(
+                        scopeTarget(agent, agent),
+                        'agent/assistant-stream',
+                        {
+                            frame: {
+                                type: 'chunk',
+                                chunk: { type: 'reasoning-delta', index: 0, text: '流式细纲思考' }
+                            }
+                        } as never
+                    );
+                    ctx.emit(
+                        'session/event',
+                        agent.session as never,
+                        {
+                            type: 'assistant/message',
+                            data: {
+                                usage: {
+                                    inputTokens: 300,
+                                    cacheReadTokens: 100,
+                                    cacheWriteTokens: 0,
+                                    outputTokens: 120
+                                }
+                            }
+                        } as never
+                    );
+                    await execTool('yield_outline', {
+                        chapter_title: '日志观测',
+                        target_word_count: 1800,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '查验账页',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对三号码头账簿。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '日志观测完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('# 日志观测\n\n沈默核对完最后一行数字，合上账册。')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const seenSessions: Array<{ stage: string; sessionId: string }> = [];
+        await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '验证 session_logs 完整观测字段',
+            onStageSession(evt) {
+                seenSessions.push({ stage: evt.stage, sessionId: evt.sessionId });
+            }
+        });
+
+        const librarianSession = seenSessions.find((s) => s.stage === 'LIBRARIAN');
+        expect(librarianSession).toBeDefined();
+        const libLog = JSON.parse(
+            await readFile(join(bookRoot, `.ops/session_logs/${librarianSession!.sessionId}.json`), 'utf8')
+        ) as {
+            startedAt?: string;
+            finishedAt?: string;
+            modelId?: string;
+            usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
+            reasoning?: string;
+            thinkingChars?: number;
+            events: Array<{ kind: string; text?: string }>;
+        };
+        expect(libLog.startedAt).toBeTruthy();
+        expect(libLog.finishedAt).toBeTruthy();
+        expect(libLog.modelId).toBe('deepseek-official:deepseek-flash');
+        expect(libLog.usage).toMatchObject({
+            inputTokens: 210,
+            cacheReadTokens: 80,
+            cacheWriteTokens: 20,
+            outputTokens: 65
+        });
+        expect(libLog.reasoning).toBe('兜底检索思考链：先锁定三号码头与 char_001');
+        expect(libLog.thinkingChars).toBe('兜底检索思考链：先锁定三号码头与 char_001'.length);
+        expect(
+            libLog.events.some(
+                (ev) =>
+                    ev.kind === 'thinking' &&
+                    ev.text === '兜底检索思考链：先锁定三号码头与 char_001'
+            )
+        ).toBe(true);
+
+        const plannerSession = seenSessions.find((s) => s.stage === 'PLANNER');
+        expect(plannerSession).toBeDefined();
+        const planLog = JSON.parse(
+            await readFile(join(bookRoot, `.ops/session_logs/${plannerSession!.sessionId}.json`), 'utf8')
+        ) as typeof libLog;
+        expect(planLog.modelId).toBe('deepseek-official:deepseek-v4-pro');
+        expect(planLog.usage?.outputTokens).toBe(120);
+        expect(planLog.reasoning).toBe('流式细纲思考');
+        expect(planLog.thinkingChars).toBe('流式细纲思考'.length);
+
+        // 失败路径（未调用 yieldTool）也必须落盘完整 session_logs 元数据
+        const failCtx = new Context();
+        const failPrompt = await failCtx.plugin(SystemPrompt);
+        registerCleanup(() => failPrompt.dispose());
+        const failTools = await failCtx.plugin(ToolsService);
+        registerCleanup(() => failTools.dispose());
+        const failStore = await failCtx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => failStore.dispose());
+        const failBookTools = await failCtx.plugin(bookToolsPlugin);
+        registerCleanup(() => failBookTools.dispose());
+        await createHeadlessMockServices(failCtx, {
+            onAgent: async ({ agentCtx, agent }) => {
+                agentCtx.emit(
+                    scopeTarget(agent, agent),
+                    'agent/assistant-stream',
+                    {
+                        frame: {
+                            type: 'chunk',
+                            chunk: { type: 'reasoning-delta', index: 0, text: '失败前思考片段' }
+                        }
+                    } as never
+                );
+                failCtx.emit(
+                    'session/event',
+                    agent.session as never,
+                    {
+                        type: 'assistant/message',
+                        data: { usage: { inputTokens: 50, outputTokens: 12 } }
+                    } as never
+                );
+            },
+            onLlmStream: () => textToStreamChunks('unused')
+        });
+        const failPipe = await failCtx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => failPipe.dispose());
+
+        const failSessionId = 'narrate-librarian-fail-audit-01';
+        await expect(
+            failCtx.narratePipeline.roleRunner.runMultiTurn({
+                roleId: 'librarian',
+                stage: 'LIBRARIAN',
+                bookRoot,
+                chapterNumber: 1,
+                sessionId: failSessionId,
+                taskPrompt: '触发未 yield 失败'
+            })
+        ).rejects.toThrow(/未调用终态门禁工具/);
+
+        const failLog = JSON.parse(
+            await readFile(join(bookRoot, `.ops/session_logs/${failSessionId}.json`), 'utf8')
+        ) as typeof libLog & { status?: string };
+        expect(failLog.status).toBe('failed');
+        expect(failLog.startedAt).toBeTruthy();
+        expect(failLog.finishedAt).toBeTruthy();
+        expect(failLog.modelId).toBe('deepseek-official:deepseek-flash');
+        expect(failLog.usage?.inputTokens).toBe(50);
+        expect(failLog.usage?.outputTokens).toBe(12);
+        expect(failLog.reasoning).toBe('失败前思考片段');
+        expect(failLog.thinkingChars).toBe('失败前思考片段'.length);
+    });
+
+    it('两层分角色模型覆盖 (resolveRoleRoute + resolveRoleReasoningEffort) 与 RoleRunner/runCleanroom 兜底生效并向后兼容 model_routing', async () => {
+        const poolRouting = {
+            strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+            fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
+            audit: { provider: 'audit-provider', model: 'audit-v1' }
+        };
+
+        // 1. 纯路由优先级单元测试
+        expect(
+            resolveRoleRoute(poolRouting, 'librarian', 'fast_retrieval', {
+                model_routing: { strong_creative: 'legacy-strong', fast_retrieval: 'legacy-fast' },
+                role_routing: {
+                    librarian: { tier: 'strong' },
+                    planner: { tier: 'weak', model: 'custom-planner' },
+                    writer: { model: 'openai:gpt-5-prose' },
+                    patch: { tier: 'weak' }
+                }
+            })
+        ).toEqual({ provider: 'deepseek-official', model: 'legacy-strong' });
+
+        expect(
+            resolveRoleRoute(poolRouting, 'planner', 'strong_creative', {
+                model_routing: { fast_retrieval: 'legacy-fast' },
+                role_routing: {
+                    planner: { tier: 'weak', model: 'custom-planner' }
+                }
+            })
+        ).toEqual({ provider: 'deepseek-official', model: 'custom-planner' });
+
+        expect(
+            resolveRoleRoute(poolRouting, 'writer', 'strong_creative', {
+                role_routing: {
+                    writer: { model: 'openai:gpt-5-prose' }
+                }
+            })
+        ).toEqual({ provider: 'openai', model: 'gpt-5-prose' });
+
+        // 无 role_routing 时完全向后兼容 model_routing
+        expect(
+            resolveRoleRoute(poolRouting, 'fact-checker', 'audit', {
+                model_routing: { audit: 'legacy-audit' }
+            })
+        ).toEqual({ provider: 'audit-provider', model: 'legacy-audit' });
+
+        expect(
+            resolveRoleReasoningEffort('writer', 'medium', {
+                role_routing: { writer: { reasoning_effort: 'high' } }
+            })
+        ).toBe('high');
+        expect(resolveRoleReasoningEffort('writer', 'medium', {}, 'low')).toBe('low');
+
+        // 2. 无头端到端：验证 agents.create 模式与无 agents.create 兜底 runCleanroom 均按两层覆盖路由
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'role-routing-override');
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const oldCfg = await readFile(cfgPath, 'utf8');
+        await writeFile(
+            cfgPath,
+            [
+                oldCfg.trimEnd(),
+                'model_routing:',
+                '  fast_retrieval: legacy-fast-model',
+                'role_routing:',
+                '  librarian:',
+                '    tier: strong',
+                '  planner:',
+                '    tier: weak',
+                '    reasoning_effort: low',
+                '  writer:',
+                '    model: custom-anthropic:claude-prose',
+                '    reasoning_effort: high'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+        await execFileAsync('git', ['-C', bookRoot, 'add', 'world/book_config.yaml']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'chore: set role_routing']);
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const { agentRuns } = await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '路由测试',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '核对路由',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '核对', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对货单。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '路由测试完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('# 路由测试\n\n沈默合上货单，朝栈桥外走去。')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            poolRouting,
+            heartbeatIntervalMs: 0
+        });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '验证两层路由覆盖'
+        });
+
+        const librarianRun = agentRuns.find((r) => r.toolNames.includes('yield_context_pack'));
+        const plannerRun = agentRuns.find((r) => r.toolNames.includes('yield_outline'));
+        const writerRun = agentRuns.find((r) => r.sessionId.startsWith('narrate-writer-'));
+        const factCheckerRun = agentRuns.find((r) => r.toolNames.includes('yield_verdict'));
+
+        expect(librarianRun?.provider).toBe('deepseek-official');
+        expect(librarianRun?.model).toBe('deepseek-v4-pro');
+        expect(plannerRun?.provider).toBe('deepseek-official');
+        expect(plannerRun?.model).toBe('legacy-fast-model');
+        expect(plannerRun?.reasoningEffort).toBe(ReasoningEffortId('low'));
+        expect(writerRun?.provider).toBe('custom-anthropic');
+        expect(writerRun?.model).toBe('claude-prose');
+        expect(writerRun?.reasoningEffort).toBe(ReasoningEffortId('high'));
+        expect(factCheckerRun?.provider).toBe('audit-provider');
+        expect(factCheckerRun?.model).toBe('audit-v1');
+
+        // 3. 无 ctx.agents.create 时兜底 runCleanroom 也必须走 resolveRoleRoute 与 resolveRoleReasoningEffort
+        const fallbackLlmCalls: Array<{ provider: string; model: string; reasoningEffort?: string }> = [];
+        const fallbackCtx = new Context();
+        fallbackCtx.provide('llm', {
+            stream(opts: { provider: string; model: string; reasoningEffort?: string }) {
+                fallbackLlmCalls.push({
+                    provider: opts.provider,
+                    model: opts.model,
+                    ...(opts.reasoningEffort ? { reasoningEffort: String(opts.reasoningEffort) } : {})
+                });
+                return textToStreamChunks('# 兜底正文\n\n码头起风了。');
+            }
+        } as never);
+        const fallbackStoreFiber = await fallbackCtx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => fallbackStoreFiber.dispose());
+        const fallbackToolsFiber = await fallbackCtx.plugin(bookToolsPlugin);
+        registerCleanup(() => fallbackToolsFiber.dispose());
+
+        const bookCfg = await fallbackCtx.narrateStore.openStore(bookRoot).readBookConfig();
+        const fallbackRunner = new RoleRunner({
+            ctx: fallbackCtx,
+            storeService: fallbackCtx.narrateStore,
+            toolsService: fallbackCtx.narrateTools,
+            roleLoader: new RoleLoader(),
+            llmAdapter: new DshLlmAdapter(fallbackCtx.llm, { poolRouting }),
+            poolRouting
+        });
+        const fallbackRes = await fallbackRunner.runCleanroom({
+            roleId: 'writer',
+            bookRoot,
+            bookConfig: bookCfg,
+            chapterNumber: 2,
+            request: {
+                staticPrefixBlocks: ['静态前缀'],
+                dynamicTail: '第二章写作指令'
+            }
+        });
+        expect(fallbackRes.response.modelId).toBe('claude-prose');
+        expect(fallbackLlmCalls[0]).toEqual({
+            provider: 'custom-anthropic',
+            model: 'claude-prose',
+            reasoningEffort: 'high'
+        });
+    });
+
+    it('Audit #5: ensureChapterHeading 自动补全首行 # 标题（剥离第X章前缀、纯数字兜底）且已有 # 标题原样保留', async () => {
+        expect(ensureChapterHeading('正文第一段。', 2, '第2章：潮汐账簿')).toBe('# 潮汐账簿\n\n正文第一段。');
+        expect(ensureChapterHeading('正文第一段。', 2, '第十二章 暗潮')).toBe('# 暗潮\n\n正文第一段。');
+        expect(ensureChapterHeading('正文第一段。', 2, '第二章')).toBe('# 2\n\n正文第一段。');
+        expect(ensureChapterHeading('正文第一段。', 2)).toBe('# 2\n\n正文第一段。');
+        expect(ensureChapterHeading('# 自定义标题\n\n正文第一段。', 2, '第2章：潮汐账簿')).toBe(
+            '# 自定义标题\n\n正文第一段。'
+        );
+
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'chapter-heading-fallback');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let writerCall = 0;
+        let factCheckerDraftSeen = '';
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '第1章：夜泊三号码头',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '查验潮汐单',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }
+                        ],
+                        outline_text: '沈默登船核对账簿。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    factCheckerDraftSeen = taskPrompt;
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成夜泊核对。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => {
+                writerCall += 1;
+                if (writerCall === 1) {
+                    // 第 1 章 Writer 未输出 # 标题
+                    return textToStreamChunks('<blocking>三号码头</blocking>\n\n沈默站在栈桥边，把灯绳绕回指节。');
+                }
+                // 第 2 章 Writer 已输出自定义 # 标题
+                return textToStreamChunks('<blocking>货栈</blocking>\n\n# 潮起之时\n\n木门吱呀一声开了。');
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 1, chapterGoal: '无标题补全' });
+        const ch1 = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(ch1.startsWith('# 夜泊三号码头\n\n')).toBe(true);
+        expect(factCheckerDraftSeen).toContain('[P0] # 夜泊三号码头');
+
+        await ctx.narratePipeline.stepChapter({ chapterNumber: 2, chapterGoal: '已有标题保留' });
+        const ch2 = await readFile(join(bookRoot, 'manuscripts/ch_0002.md'), 'utf8');
+        expect(ch2.startsWith('# 潮起之时\n\n')).toBe(true);
+        expect(ch2).not.toContain('# 夜泊三号码头');
+    });
+
+    it('Audit #4: Librarian 预注入 last_seen_ch 与冷宫档案清单，Extractor 预注入 world_state/open_threads/近期至多2条L2卡', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'audit-preinjection', {
+            currentChapter: 3,
+            storyDay: 4
+        });
+        await writeFile(
+            join(bookRoot, 'entities/cold_archive/char_cold.md'),
+            [
+                '---',
+                'entity_id: char_cold',
+                'canonical_name: 旧港关长',
+                'unique_aliases: []',
+                'contextual_titles: []',
+                'historical_anchors: []',
+                'last_seen_ch: 1',
+                '---',
+                '',
+                '## 1. Innate Locks',
+                '- [vis: PUBLIC] 右手戴铜戒',
+                '',
+                '## 2. Acquired State',
+                '- [day:1 | ch:1 | vis: PUBLIC] 已调离本港',
+                '',
+                '## 3. Irreversible Trajectory',
+                '- [day:1 | ch:1] 调离',
+                '',
+                '## 4. Recent Sliding Buffer',
+                '- [day:1 | ch:1] 离开三号码头'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+        await writeFile(
+            join(bookRoot, 'index/L2_cards/vol_01_cards.md'),
+            [
+                '# 第 1 卷双轨章卡',
+                '',
+                '## ch_0001 (day:1)',
+                '- 主干剧情：OLDER_CARD_CH1_SHOULD_BE_OMITTED',
+                '- 出场实体：char_001',
+                '',
+                '## ch_0002 (day:2)',
+                '- 主干剧情：RECENT_CARD_CH2_EXPECTED',
+                '- 出场实体：char_001, char_002',
+                '',
+                '## ch_0003 (day:4)',
+                '- 主干剧情：RECENT_CARD_CH3_EXPECTED',
+                '- 出场实体：char_001'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+        await execFileAsync('git', ['-C', bookRoot, 'add', '.']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'chore: add cold entity and l2 cards']);
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let librarianPrompt = '';
+        let extractorPrompt = '';
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    librarianPrompt = taskPrompt;
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '预注入验证',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '检查冷宫与L2注入',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '巡检', is_spotlight: true }
+                        ],
+                        outline_text: '沈默沿泊位巡检。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    extractorPrompt = taskPrompt;
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '第四章预注入验证完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('# 预注入验证\n\n沈默走过泊位，记录潮位刻度。')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        await ctx.narratePipeline.stepChapter({
+            chapterNumber: 4,
+            chapterGoal: '检验 Librarian 与 Extractor 预注入上下文'
+        });
+
+        expect(librarianPrompt).toContain('[last_seen_ch=3]');
+        expect(librarianPrompt).toContain('[last_seen_ch=0]');
+        expect(librarianPrompt).toContain('char_cold');
+
+        expect(extractorPrompt).toContain('海港处于封港戒备前夕');
+        expect(extractorPrompt).toContain('黄铜钥匙究竟能打开哪一扇旧闸门');
+        expect(extractorPrompt).toContain('RECENT_CARD_CH2_EXPECTED');
+        expect(extractorPrompt).toContain('RECENT_CARD_CH3_EXPECTED');
+        expect(extractorPrompt).not.toContain('OLDER_CARD_CH1_SHOULD_BE_OMITTED');
     });
 });
