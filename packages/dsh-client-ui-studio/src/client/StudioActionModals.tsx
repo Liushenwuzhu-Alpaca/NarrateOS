@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives';
 
 const WINDOW_ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -103,12 +103,14 @@ export const AdvanceVolumeModal: React.FC<AdvanceVolumeModalProps> = ({
 }) => {
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const [completeBook, setCompleteBook] = useState(false);
+    const wasOpenRef = useRef(false);
 
     useEffect(() => {
-        if (open) {
+        if (open && !wasOpenRef.current) {
             setSelectedIds(entities.map((entity) => entity.id));
             setCompleteBook(false);
         }
+        wasOpenRef.current = open;
     }, [open, entities]);
 
     if (!open) {
@@ -256,13 +258,15 @@ export const ParallelWindowModal: React.FC<ParallelWindowModalProps> = ({
     const [windowId, setWindowId] = useState(activeWindowId);
     const [branchId, setBranchId] = useState(activeBranchId);
     const [validationError, setValidationError] = useState<string | null>(null);
+    const wasOpenRef = useRef(false);
 
     useEffect(() => {
-        if (open) {
+        if (open && !wasOpenRef.current) {
             setWindowId(activeWindowId);
             setBranchId(activeBranchId);
             setValidationError(null);
         }
+        wasOpenRef.current = open;
     }, [open, activeWindowId, activeBranchId]);
 
     if (!open) {

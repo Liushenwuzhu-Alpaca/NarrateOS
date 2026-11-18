@@ -1025,4 +1025,13 @@ export const INSPECTOR_CSS = `
     font-family: inherit;
     font-size: 12px;
 }
+
+/* 确保原生 [hidden] 不被作者 display: flex 覆盖 */
+.ns-i-rule-list[hidden],
+.ns-role-detail[hidden],
+.ns-panel-section[hidden],
+.ns-ops-inspector [hidden],
+.ns-i-list [hidden] {
+    display: none;
+}
 `;
