@@ -43,11 +43,11 @@ export function attachYieldEnforcementHook(
     let currentStepCountedByPreStep = false;
     let cleaned = false;
 
-    const runCleanupOnce = () => {
+    function runCleanupOnce(): void {
         if (cleaned) return;
         cleaned = true;
         options.cleanupStaging?.();
-    };
+    }
 
     const disposePreStep = agentCtx.on('agent/pre-step', async (_payload, next) => {
         const decision = await next();

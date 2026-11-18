@@ -101,6 +101,67 @@ export function formatPatchViolationsText(
     return lines.join('\n');
 }
 
+function validateAndSortPatchEdits(
+    edits: readonly PatchParagraphEdit[],
+    currentLength: number
+): PatchParagraphEdit[] {
+    for (const edit of edits) {
+        if (edit.start_paragraph > edit.end_paragraph) {
+            throw new Error(
+                `无效段落区间: start_paragraph (${edit.start_paragraph}) 不能大于 end_paragraph (${edit.end_paragraph})`
+            );
+        }
+        if (edit.end_paragraph >= currentLength) {
+            throw new Error(
+                `段落索引越界: end_paragraph (${edit.end_paragraph}) 超出当前总段数 (${currentLength})`
+            );
+        }
+    }
+
+    const sortedAsc = [...edits].sort(
+        (a, b) => a.start_paragraph - b.start_paragraph || a.end_paragraph - b.end_paragraph
+    );
+    for (let i = 1; i < sortedAsc.length; i += 1) {
+        const prev = sortedAsc[i - 1]!;
+        const curr = sortedAsc[i]!;
+        if (curr.start_paragraph <= prev.end_paragraph) {
+            throw new Error(
+                `编辑区间重叠: [${prev.start_paragraph}, ${prev.end_paragraph}] 与 [${curr.start_paragraph}, ${curr.end_paragraph}]`
+            );
+        }
+    }
+    return sortedAsc;
+}
+
+function buildPatchResultMessage(
+    modifiedRanges: readonly PatchModifiedRange[],
+    totalParagraphs: number,
+    titlePreserved: boolean,
+    preservedTitleLine: string | undefined,
+    report: PatchGateReport
+): string {
+    const rangeSummary = modifiedRanges
+        .map((r) => `[${r.start_paragraph}..${r.end_paragraph}]->${r.replaced_with_count}段`)
+        .join(', ');
+
+    const messageParts: string[] = [
+        `已完成段落修补 (${rangeSummary})，最新总段数: ${totalParagraphs}。`
+    ];
+    if (titlePreserved && preservedTitleLine) {
+        messageParts.push(`检测到第 0 段失去一级标题前缀，已自动保留原标题行「${preservedTitleLine}」。`);
+    }
+    if (!report.configured) {
+        messageParts.push('内存段落替换已完成（未配置 StaticProseGate 实时复检），可调用 yield_patched_draft 提交定稿。');
+    } else if (report.passed) {
+        messageParts.push('已通过静态文风门禁，可立即调用 yield_patched_draft 提交定稿。');
+    } else {
+        messageParts.push(
+            `剩余 ${report.violatedParagraphCount} 个违规段落 [${report.violatedParagraphIndices.join(', ')}]，请继续修正。`
+        );
+    }
+    return messageParts.join(' ');
+}
+
 /**
  * 纯内存段落修补会话（零磁盘读写、零全知档案依赖）
  * - 基于 analyzeParagraphs 按空行维护 0-based 段落数组与 editCount；
@@ -189,33 +250,7 @@ export class InMemoryDraftPatchSession {
     /** 校验并按逆序应用一组互不重叠的 0-based 段落区间替换 */
     applyEdits(rawEdits: readonly PatchParagraphEdit[]): PatchParagraphsResult {
         const parsed = PatchParagraphsInputSchema.parse({ edits: rawEdits });
-        const currentLength = this.paragraphs.length;
-
-        for (const edit of parsed.edits) {
-            if (edit.start_paragraph > edit.end_paragraph) {
-                throw new Error(
-                    `无效段落区间: start_paragraph (${edit.start_paragraph}) 不能大于 end_paragraph (${edit.end_paragraph})`
-                );
-            }
-            if (edit.end_paragraph >= currentLength) {
-                throw new Error(
-                    `段落索引越界: end_paragraph (${edit.end_paragraph}) 超出当前总段数 (${currentLength})`
-                );
-            }
-        }
-
-        const sortedAsc = [...parsed.edits].sort(
-            (a, b) => a.start_paragraph - b.start_paragraph || a.end_paragraph - b.end_paragraph
-        );
-        for (let i = 1; i < sortedAsc.length; i += 1) {
-            const prev = sortedAsc[i - 1]!;
-            const curr = sortedAsc[i]!;
-            if (curr.start_paragraph <= prev.end_paragraph) {
-                throw new Error(
-                    `编辑区间重叠: [${prev.start_paragraph}, ${prev.end_paragraph}] 与 [${curr.start_paragraph}, ${curr.end_paragraph}]`
-                );
-            }
-        }
+        const sortedAsc = validateAndSortPatchEdits(parsed.edits, this.paragraphs.length);
 
         const originalParagraph0 = this.paragraphs[0];
         const nextParagraphs = [...this.paragraphs];
@@ -260,26 +295,6 @@ export class InMemoryDraftPatchSession {
 
         const report = this.evaluateGateReport();
 
-        const rangeSummary = modifiedRanges
-            .map((r) => `[${r.start_paragraph}..${r.end_paragraph}]->${r.replaced_with_count}段`)
-            .join(', ');
-
-        const messageParts: string[] = [
-            `已完成段落修补 (${rangeSummary})，最新总段数: ${this.paragraphs.length}。`
-        ];
-        if (titlePreserved && preservedTitleLine) {
-            messageParts.push(`检测到第 0 段失去一级标题前缀，已自动保留原标题行「${preservedTitleLine}」。`);
-        }
-        if (!report.configured) {
-            messageParts.push('内存段落替换已完成（未配置 StaticProseGate 实时复检），可调用 yield_patched_draft 提交定稿。');
-        } else if (report.passed) {
-            messageParts.push('已通过静态文风门禁，可立即调用 yield_patched_draft 提交定稿。');
-        } else {
-            messageParts.push(
-                `剩余 ${report.violatedParagraphCount} 个违规段落 [${report.violatedParagraphIndices.join(', ')}]，请继续修正。`
-            );
-        }
-
         return {
             totalParagraphs: this.paragraphs.length,
             editCount: this.editCount,
@@ -290,7 +305,13 @@ export class InMemoryDraftPatchSession {
             violatedParagraphIndices: report.violatedParagraphIndices,
             violations: report.violations,
             violatedParagraphs: report.violatedParagraphs,
-            message: messageParts.join(' ')
+            message: buildPatchResultMessage(
+                modifiedRanges,
+                this.paragraphs.length,
+                titlePreserved,
+                preservedTitleLine,
+                report
+            )
         };
     }
 }

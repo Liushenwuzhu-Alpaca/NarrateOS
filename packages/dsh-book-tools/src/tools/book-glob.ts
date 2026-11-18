@@ -4,6 +4,7 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
+import { isEnoentError, matchesAnyPathPrefix } from './shared.js';
 
 export interface BookGlobToolOptions {
     store: NarrateStoreService;
@@ -53,7 +54,7 @@ async function collectFilesUnderScope(
     try {
         targetStat = await lstat(absTarget);
     } catch (err: unknown) {
-        if ((err as { code?: string }).code === 'ENOENT') {
+        if (isEnoentError(err)) {
             return;
         }
         throw err;
@@ -92,6 +93,36 @@ async function collectFilesUnderScope(
                 continue;
             }
             results.add(childRel);
+        }
+    }
+}
+
+function applyOverlayAndStagingToFileSet(
+    fileSet: Set<string>,
+    store: NarrateStoreService,
+    runId: string,
+    fence: PathFence,
+    allowedDirs: readonly string[],
+    stagingOverlay?: ReadonlyMap<string, string | null>
+): void {
+    if (stagingOverlay) {
+        for (const [overlayRel, overlayVal] of stagingOverlay.entries()) {
+            if (overlayVal === null) {
+                fileSet.delete(overlayRel);
+                continue;
+            }
+            if (matchesAnyPathPrefix(overlayRel, allowedDirs) && fence.isReadPathAllowed(overlayRel)) {
+                fileSet.add(overlayRel);
+            }
+        }
+    }
+
+    if (!store.staging.has(runId)) {
+        return;
+    }
+    for (const stagedRel of store.staging.getPendingWrites(runId).keys()) {
+        if (matchesAnyPathPrefix(stagedRel, allowedDirs) && fence.isReadPathAllowed(stagedRel)) {
+            fileSet.add(stagedRel);
         }
     }
 }
@@ -144,35 +175,14 @@ export function createBookGlobTool(options: BookGlobToolOptions): ToolDefinition
                 await collectFilesUnderScope(fence, dir, fileSet);
             }
 
-            if (stagingOverlay) {
-                for (const [overlayRel, overlayVal] of stagingOverlay.entries()) {
-                    if (overlayVal === null) {
-                        fileSet.delete(overlayRel);
-                        continue;
-                    }
-                    if (
-                        scope.allowedDirs.some(
-                            (d) => overlayRel === d || overlayRel.startsWith(`${d}/`)
-                        ) &&
-                        fence.isReadPathAllowed(overlayRel)
-                    ) {
-                        fileSet.add(overlayRel);
-                    }
-                }
-            }
-
-            if (store.staging.has(runId)) {
-                for (const stagedRel of store.staging.getPendingWrites(runId).keys()) {
-                    if (
-                        scope.allowedDirs.some(
-                            (d) => stagedRel === d || stagedRel.startsWith(`${d}/`)
-                        ) &&
-                        fence.isReadPathAllowed(stagedRel)
-                    ) {
-                        fileSet.add(stagedRel);
-                    }
-                }
-            }
+            applyOverlayAndStagingToFileSet(
+                fileSet,
+                store,
+                runId,
+                fence,
+                scope.allowedDirs,
+                stagingOverlay
+            );
 
             let files = Array.from(fileSet)
                 .filter((f) => fence.isReadPathAllowed(f))
