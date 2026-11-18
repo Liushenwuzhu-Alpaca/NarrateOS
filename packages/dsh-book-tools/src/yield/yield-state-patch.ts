@@ -129,7 +129,17 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                 type: 'array',
                 required: true,
                 items: { type: 'json' },
-                description: '实体增量补丁列表 (EntityPatch[])'
+                description: [
+                    '实体增量补丁列表 (EntityPatch[])。每项结构：',
+                    '{ entity_id: "char_xxx"|"item_xxx", last_seen_ch?: int>=0, canonical_name?: string(新建必填且含中文，既有不可改),',
+                    '  add_unique_aliases?: string[], add_contextual_titles?: string[], add_historical_anchors?: string[],',
+                    '  buffer_ops?: Array<{ op: "upsert_slot", slot_key: string, entry: Entry } | { op: "append", entry: Entry } | { op: "trim_buffer", max_entries: int>0 }>,',
+                    '  acquired_state_ops?: Array<{ op: "upsert_slot", slot_key: string, entry: Entry } | { op: "append", entry: Entry } | { op: "remove_slot", slot_key: string } | { op: "upsert_ledger", entries: Record<string, string|number> }>,',
+                    '  trajectory_ops?: Array<{ op: "append", entry: Entry }>,',
+                    '  innate_locks_ops?: Array<{ op: "append", entry: Entry } | { op: "remove_slot", slot_key: string }>(仅新建或显式放行可用) }。',
+                    '其中 entry 对象结构：{ text: string(必填), storyDay?: int, chapter?: int>=0, visibility?: "SELF_ONLY"|"OMNISCIENT_SECRET"|"PUBLIC"|"READER_KNOWN", owner?: string, status?: "ACTIVE"|"WARPED", slotKey?: string, extraTags?: Record<string, string>, isNumericLedger?: boolean, ledger?: Record<string, string>, continuationLines?: string[] }。',
+                    '示例：{"entity_id":"char_001","last_seen_ch":2,"acquired_state_ops":[{"op":"upsert_slot","slot_key":"location","entry":{"storyDay":2,"chapter":2,"visibility":"PUBLIC","text":"位于旧码头仓库"}},{"op":"upsert_ledger","entries":{"随身银元":"15枚"}}],"trajectory_ops":[{"op":"append","entry":{"storyDay":2,"chapter":2,"text":"确认仓库账本被篡改"}}],"buffer_ops":[{"op":"upsert_slot","slot_key":"focus","entry":{"storyDay":2,"chapter":2,"text":"盘查夜班记录"}},{"op":"append","entry":{"storyDay":2,"chapter":2,"text":"与货主核对提单"}},{"op":"trim_buffer","max_entries":8}]}'
+                ].join('\n')
             },
             story_day_delta: {
                 type: 'integer',

@@ -908,4 +908,85 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         expect(okRes.updatedEntities).toEqual(['char_branch_01']);
         expect(okSpy.concludedCount()).toBe(1);
     });
+
+    it('yield_state_patch 的 entity_patches 描述包含完整 ops 与 entry 结构示例且保持严格 Zod 校验', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-yield-schema-desc',
+            bookRoot,
+            yieldTool: 'yield_state_patch',
+            chapterNumber: 2
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const yieldPatch = roleSet.toolMap.get('yield_state_patch')!;
+        const props = (yieldPatch.parameters as {
+            properties?: Record<string, { description?: string }>;
+        }).properties;
+        const entityPatchesDesc = props?.entity_patches?.description ?? '';
+
+        for (const keyword of [
+            'buffer_ops',
+            'upsert_slot',
+            'append',
+            'trim_buffer',
+            'max_entries',
+            'acquired_state_ops',
+            'remove_slot',
+            'upsert_ledger',
+            'trajectory_ops',
+            'innate_locks_ops',
+            'slot_key',
+            'entry',
+            'text',
+            'storyDay',
+            'chapter',
+            'visibility',
+            'owner',
+            'status',
+            'slotKey'
+        ]) {
+            expect(entityPatchesDesc).toContain(keyword);
+        }
+
+        // 校验逻辑不得放松：缺少 text 或非法的 trim_buffer.max_entries 必须拒绝
+        const badSpy = createSpyExec('yield_state_patch', {});
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_001',
+                            buffer_ops: [{ op: 'trim_buffer', max_entries: 0 }]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    chapter_summary: '非法参数测试'
+                },
+                badSpy.exec
+            )
+        ).rejects.toThrow();
+        await expect(
+            yieldPatch.execute(
+                {
+                    entity_patches: [
+                        {
+                            entity_id: 'char_001',
+                            buffer_ops: [{ op: 'append', entry: { storyDay: 2 } }]
+                        }
+                    ],
+                    story_day_delta: 0,
+                    chapter_summary: '缺少 entry.text 测试'
+                },
+                badSpy.exec
+            )
+        ).rejects.toThrow();
+        expect(badSpy.concludedCount()).toBe(0);
+    });
 });

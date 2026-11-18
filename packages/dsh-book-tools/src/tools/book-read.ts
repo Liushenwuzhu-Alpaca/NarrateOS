@@ -4,6 +4,17 @@ import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
 
+const MAX_BATCH_READ_PATHS = 8;
+
+export interface BookReadItem {
+    path: string;
+    content: string;
+    totalLines: number;
+    startLine: number;
+    endLine: number;
+    fromStaging: boolean;
+}
+
 export interface BookReadToolOptions {
     store: NarrateStoreService;
     runId: string;
@@ -11,19 +22,77 @@ export interface BookReadToolOptions {
     quota: ReadQuotaCounter;
 }
 
-/** 创建受控作品只读工具 book_read（优先读取当前 runId 的 StagingSession 暂存覆盖层） */
+/** 保序去重路径列表 */
+function dedupeStringsPreserveOrder(values: readonly string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of values) {
+        if (!seen.has(value)) {
+            seen.add(value);
+            result.push(value);
+        }
+    }
+    return result;
+}
+
+/** 读取单个已通过 PathFence 校验的目标文件并按 offset/limit 切片 */
+async function readSingleTarget(
+    store: NarrateStoreService,
+    runId: string,
+    target: { normalized: string; absPath: string },
+    offset?: number,
+    limit?: number
+): Promise<BookReadItem> {
+    let rawText: string;
+    let fromStaging = false;
+    if (store.staging.has(runId)) {
+        fromStaging = store.staging.getPendingWrites(runId).has(target.normalized);
+        rawText = await store.staging.read(runId, target.normalized);
+    } else {
+        rawText = await readFile(target.absPath, 'utf8');
+    }
+
+    const allLines = rawText.split(/\r?\n/);
+    const totalLines = allLines.length;
+    const startLine = offset ?? 1;
+    const sliced =
+        offset === undefined && limit === undefined
+            ? rawText
+            : allLines
+                  .slice(startLine - 1, limit !== undefined ? startLine - 1 + limit : undefined)
+                  .join('\n');
+    const endLine =
+        offset === undefined && limit === undefined
+            ? totalLines
+            : Math.min(totalLines, startLine - 1 + (limit ?? totalLines));
+
+    return {
+        path: target.normalized,
+        content: sliced,
+        totalLines,
+        startLine,
+        endLine: Math.max(startLine - 1, endLine),
+        fromStaging
+    };
+}
+
+/** 创建受控作品只读工具 book_read（优先读取当前 runId 的 StagingSession 暂存覆盖层，支持单文件与最多 8 路批量读取） */
 export function createBookReadTool(options: BookReadToolOptions): ToolDefinition {
     const { store, runId, fence, quota } = options;
 
     return defineTool({
         name: 'book_read',
         description:
-            '受控读取作品文件（限 world/、lore_library/、index/、entities/、manuscripts/）。优先读取当前 runId 的暂存修改（Read-Your-Own-Writes），禁止读取 .ops/、.git/ 或越界路径。',
+            '受控读取作品文件（限 world/、lore_library/、index/、entities/、manuscripts/）。支持 path 单文件读取或 paths 批量读取（最多 8 个路径，自动去重且仅消耗 1 次配额）。优先读取当前 runId 的暂存修改（Read-Your-Own-Writes），禁止读取 .ops/、.git/ 或越界路径。',
         parameters: {
             path: {
                 type: 'string',
-                required: true,
-                description: '作品内相对路径，例如 world/open_threads.md'
+                description: '单文件读取时的作品内相对路径，例如 world/open_threads.md（与 paths 二选一）'
+            },
+            paths: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '批量读取的作品内相对路径列表（最多 8 个，保序去重），仅消耗 1 次只读配额（与 path 二选一）'
             },
             offset: {
                 type: 'integer',
@@ -44,10 +113,28 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                     totalLines: { type: 'integer', required: true },
                     startLine: { type: 'integer', required: true },
                     endLine: { type: 'integer', required: true },
-                    fromStaging: { type: 'boolean', required: true }
+                    fromStaging: { type: 'boolean', required: true },
+                    items: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                path: { type: 'string', required: true },
+                                content: { type: 'string', required: true },
+                                totalLines: { type: 'integer', required: true },
+                                startLine: { type: 'integer', required: true },
+                                endLine: { type: 'integer', required: true },
+                                fromStaging: { type: 'boolean', required: true }
+                            }
+                        }
+                    }
                 }
             },
             render(_args, value) {
+                if (value.items && value.items.length > 1) {
+                    return [{ type: 'text', text: value.content }];
+                }
                 const header = `path: ${value.path} (lines ${value.startLine}-${value.endLine} of ${value.totalLines}, staging=${String(value.fromStaging)})`;
                 return [{ type: 'text', text: `${header}\n\n${value.content}` }];
             }
@@ -62,39 +149,79 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                 throw new Error(`book_read 的 limit 必须 >= 1，收到: ${args.limit}`);
             }
 
-            const { normalized, absPath } = await fence.assertReadFile(args.path);
-            quota.consume('book_read');
-
-            let rawText: string;
-            let fromStaging = false;
-            if (store.staging.has(runId)) {
-                fromStaging = store.staging.getPendingWrites(runId).has(normalized);
-                rawText = await store.staging.read(runId, normalized);
-            } else {
-                rawText = await readFile(absPath, 'utf8');
+            const requestedPaths: string[] = [];
+            if (args.path !== undefined) {
+                requestedPaths.push(args.path);
+            }
+            if (args.paths !== undefined) {
+                requestedPaths.push(...args.paths);
+            }
+            if (requestedPaths.length === 0) {
+                throw new Error('book_read 需要提供 path 或非空 paths 参数');
             }
 
-            const allLines = rawText.split(/\r?\n/);
-            const totalLines = allLines.length;
-            const startLine = args.offset ?? 1;
-            const sliced =
-                args.offset === undefined && args.limit === undefined
-                    ? rawText
-                    : allLines
-                          .slice(startLine - 1, args.limit !== undefined ? startLine - 1 + args.limit : undefined)
-                          .join('\n');
-            const endLine =
-                args.offset === undefined && args.limit === undefined
-                    ? totalLines
-                    : Math.min(totalLines, startLine - 1 + (args.limit ?? totalLines));
+            // 1. 原始路径保序去重后校验数量上限（超限时不消耗配额）
+            const dedupedRaw = dedupeStringsPreserveOrder(requestedPaths);
+            if (dedupedRaw.length > MAX_BATCH_READ_PATHS) {
+                throw new Error(
+                    `book_read 单次最多读取 ${MAX_BATCH_READ_PATHS} 个路径，收到 ${dedupedRaw.length} 个`
+                );
+            }
+
+            // 2. 必须在消耗 ReadQuotaCounter 前对全部目标路径逐一执行 PathFence 校验
+            const verifiedTargets: Array<{ normalized: string; absPath: string }> = [];
+            const seenNormalized = new Set<string>();
+            for (const rawPath of dedupedRaw) {
+                exec.signal.throwIfAborted();
+                const verified = await fence.assertReadFile(rawPath);
+                if (!seenNormalized.has(verified.normalized)) {
+                    seenNormalized.add(verified.normalized);
+                    verifiedTargets.push(verified);
+                }
+            }
+            if (verifiedTargets.length > MAX_BATCH_READ_PATHS) {
+                throw new Error(
+                    `book_read 单次最多读取 ${MAX_BATCH_READ_PATHS} 个路径，收到 ${verifiedTargets.length} 个`
+                );
+            }
+
+            // 3. 全部围栏校验通过后，仅消耗 1 次只读配额
+            quota.consume('book_read');
+
+            // 4. 逐一读取并保持兼容返回结构
+            const items: BookReadItem[] = [];
+            for (const target of verifiedTargets) {
+                exec.signal.throwIfAborted();
+                items.push(await readSingleTarget(store, runId, target, args.offset, args.limit));
+            }
+
+            const first = items[0]!;
+            if (args.paths === undefined && items.length === 1) {
+                return first;
+            }
+
+            if (items.length === 1) {
+                return {
+                    ...first,
+                    items
+                };
+            }
+
+            const combinedContent = items
+                .map((item) => {
+                    const header = `=== ${item.path} (lines ${item.startLine}-${item.endLine} of ${item.totalLines}, staging=${String(item.fromStaging)}) ===`;
+                    return `${header}\n${item.content}`;
+                })
+                .join('\n\n');
 
             return {
-                path: normalized,
-                content: sliced,
-                totalLines,
-                startLine,
-                endLine: Math.max(startLine - 1, endLine),
-                fromStaging
+                path: items.map((item) => item.path).join(', '),
+                content: combinedContent,
+                totalLines: items.reduce((sum, item) => sum + item.totalLines, 0),
+                startLine: args.offset ?? 1,
+                endLine: items.reduce((sum, item) => sum + item.endLine, 0),
+                fromStaging: items.some((item) => item.fromStaging),
+                items
             };
         }
     });

@@ -393,4 +393,152 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
             )
         ).rejects.toThrow(/fixed_strings=true/);
     });
+
+    it('book_read 支持 paths[] 批量保序去重读取、兼容暂存覆盖且仅消耗 1 次配额', async () => {
+        const { bookRoot } = await createSampleBook();
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-batch-read',
+            bookRoot,
+            maxReadCalls: 3
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const bookEdit = roleSet.toolMap.get('book_edit')!;
+        const bookRead = roleSet.toolMap.get('book_read')!;
+
+        await bookEdit.execute(
+            {
+                path: 'world/open_threads.md',
+                target_text: '- [thread_001 | status: ACTIVE] 黄铜钥匙来源',
+                replacement_text: '- [thread_001 | status: RESOLVED] 黄铜钥匙来源（批量暂存可见）'
+            },
+            createMockExec('book_edit', {})
+        );
+
+        const batchRes = (await bookRead.execute(
+            {
+                paths: [
+                    'entities/char_001.md',
+                    'world/open_threads.md',
+                    'entities/char_001.md',
+                    './world/open_threads.md',
+                    'manuscripts/ch_0001.md'
+                ]
+            },
+            createMockExec('book_read', {})
+        )) as {
+            path: string;
+            content: string;
+            totalLines: number;
+            startLine: number;
+            endLine: number;
+            fromStaging: boolean;
+            items?: Array<{
+                path: string;
+                content: string;
+                totalLines: number;
+                startLine: number;
+                endLine: number;
+                fromStaging: boolean;
+            }>;
+        };
+
+        // 仅消耗 1 次只读配额
+        expect(roleSet.quota.count).toBe(1);
+        expect(roleSet.quota.remaining).toBe(2);
+
+        // 去重并保持首次出现顺序
+        expect(batchRes.items).toHaveLength(3);
+        expect(batchRes.items?.map((item) => item.path)).toEqual([
+            'entities/char_001.md',
+            'world/open_threads.md',
+            'manuscripts/ch_0001.md'
+        ]);
+        expect(batchRes.items?.[1]?.fromStaging).toBe(true);
+        expect(batchRes.items?.[1]?.content).toContain('批量暂存可见');
+        expect(batchRes.fromStaging).toBe(true);
+        expect(batchRes.content).toContain('沈默');
+        expect(batchRes.content).toContain('批量暂存可见');
+        expect(batchRes.content).toContain('铁门');
+
+        // 支持单路径与 offset/limit 兼容，也支持批量 offset/limit
+        const singleSliced = (await bookRead.execute(
+            { path: 'manuscripts/ch_0001.md', offset: 1, limit: 1 },
+            createMockExec('book_read', {})
+        )) as {
+            path: string;
+            content: string;
+            startLine: number;
+            endLine: number;
+            fromStaging: boolean;
+        };
+        expect(singleSliced.path).toBe('manuscripts/ch_0001.md');
+        expect(singleSliced.content).toBe('# 第一章 雨夜');
+        expect(singleSliced.startLine).toBe(1);
+        expect(singleSliced.endLine).toBe(1);
+        expect(roleSet.quota.count).toBe(2);
+    });
+
+    it('book_read 批量校验在扣配额前执行：任意路径越界、空 paths 或超过 8 个路径均不消耗配额', async () => {
+        const { bookRoot } = await createSampleBook();
+        for (let i = 1; i <= 9; i += 1) {
+            await writeFile(join(bookRoot, `world/note_${i}.md`), `笔记 ${i}\n`, 'utf8');
+        }
+
+        const ctx = new Context();
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const toolsFiber = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => toolsFiber.dispose());
+
+        const roleSet = ctx.narrateTools.buildRoleTools({
+            runId: 'run-batch-fence-quota',
+            bookRoot,
+            maxReadCalls: 2
+        });
+        registerCleanup(() => roleSet.cleanup());
+
+        const bookRead = roleSet.toolMap.get('book_read')!;
+
+        // 1. 合法路径在前、越界路径在后 -> 必须先抛 PathFenceError 且不扣配额
+        await expect(
+            bookRead.execute(
+                { paths: ['world/open_threads.md', '../book-beta/world/secret.md'] },
+                createMockExec('book_read', {})
+            )
+        ).rejects.toThrow(PathFenceError);
+        expect(roleSet.quota.count).toBe(0);
+
+        await expect(
+            bookRead.execute(
+                { paths: ['entities/char_001.md', '.ops/tx_state.json'] },
+                createMockExec('book_read', {})
+            )
+        ).rejects.toThrow(PathFenceError);
+        expect(roleSet.quota.count).toBe(0);
+
+        // 2. 空 paths 或无参数 -> 拒绝且不扣配额
+        await expect(bookRead.execute({ paths: [] }, createMockExec('book_read', {}))).rejects.toThrow();
+        await expect(bookRead.execute({}, createMockExec('book_read', {}))).rejects.toThrow();
+        expect(roleSet.quota.count).toBe(0);
+
+        // 3. 超过 8 个去重路径 -> 拒绝且不扣配额
+        const ninePaths = Array.from({ length: 9 }, (_, idx) => `world/note_${idx + 1}.md`);
+        await expect(bookRead.execute({ paths: ninePaths }, createMockExec('book_read', {}))).rejects.toThrow(/8/);
+        expect(roleSet.quota.count).toBe(0);
+
+        // 4. 恰好 8 个路径 -> 成功且仅扣 1 次配额
+        const eightRes = (await bookRead.execute(
+            { paths: ninePaths.slice(0, 8) },
+            createMockExec('book_read', {})
+        )) as { items?: unknown[] };
+        expect(eightRes.items).toHaveLength(8);
+        expect(roleSet.quota.count).toBe(1);
+    });
 });
