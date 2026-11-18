@@ -205,15 +205,45 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         let plannerCallCount = 0;
         let writerCallCount = 0;
+        let patchCallCount = 0;
         let factCheckerCallCount = 0;
 
         const { agentRuns, llmCalls } = await createHeadlessMockServices(ctx, {
-            onAgent: async ({ tools, execTool }) => {
+            onAgent: async ({ tools, execTool, systemPromptText, taskPrompt }) => {
                 if (tools.has('yield_context_pack')) {
                     await execTool('yield_context_pack', {
                         selected_entity_ids: ['char_001', 'char_002'],
                         recall_queries: [],
                         selected_lore_files: []
+                    });
+                    return;
+                }
+
+                if (tools.has('yield_patched_draft')) {
+                    patchCallCount += 1;
+                    // 验证 Patch 净室隔离：无磁盘工具且不泄露任何全知档案或导演禁区
+                    expect(tools.has('book_read')).toBe(false);
+                    expect(tools.has('book_edit')).toBe(false);
+                    const combined = `${systemPromptText}\n${taskPrompt}`;
+                    expect(combined).not.toContain('CHARTER_SECRET_ANCHOR');
+                    expect(combined).not.toContain('DIRECTOR_SECRET_CEILING');
+                    expect(combined).not.toContain('OMNISCIENT_SECRET_TOKEN');
+                    expect(combined).not.toContain('WARPED_SECRET_ENTRY');
+                    expect(combined).not.toContain('SELF_ONLY_CHAR002_SECRET');
+
+                    await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 2,
+                                end_paragraph: 2,
+                                replacement_paragraphs: [
+                                    '他只觉得掌心微潮，手指顺着账册边缘的红墨线划过去。'
+                                ]
+                            }
+                        ]
+                    });
+                    await execTool('yield_patched_draft', {
+                        summary: '改写第 2 段抽象情绪表达为具体动作'
                     });
                     return;
                 }
@@ -366,6 +396,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(result.chapterNumber).toBe(1);
         expect(result.replanCount).toBe(1);
         expect(result.patchRounds).toBe(1);
+        expect(patchCallCount).toBe(1);
         expect(plannerCallCount).toBe(2);
         expect(factCheckerCallCount).toBe(2);
         expect(result.featCommitSha).toBeTruthy();
@@ -376,11 +407,12 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const runs = await ctx.narrateStore.openStore().listRunRecords({ chapter: 1 });
         expect(runs.some((r) => r.stage === 'LIBRARIAN' && r.status === 'completed')).toBe(true);
         expect(runs.some((r) => r.stage === 'PLANNER' && r.status === 'completed')).toBe(true);
+        expect(runs.some((r) => r.stage === 'LOCAL_PATCH' && r.role === 'patch' && r.status === 'completed')).toBe(true);
         expect(runs.some((r) => r.stage === 'FACT_CHECKER' && r.status === 'completed')).toBe(true);
         expect(runs.some((r) => r.stage === 'EXTRACTOR' && r.status === 'completed')).toBe(true);
 
         // 2. 验证 Writer 净室隔离：零工具、零 sessionId、物理剥离禁区与秘密词汇
-        const writerCalls = llmCalls.filter((c) => !c.options.system?.includes('局部修补'));
+        const writerCalls = llmCalls;
         expect(writerCalls.length).toBeGreaterThanOrEqual(2);
         for (const call of writerCalls) {
             expect(call.options.tools).toBeUndefined();
@@ -784,7 +816,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(plannerRun?.temperature).toBe(0.5);
     });
 
-    it('非相邻多段局部 Patch 按连续区间分组改写（零重写中间合规段落），并走外部 patch.yml 配置', async () => {
+    it('非相邻多段局部 Patch 通过 patch_paragraphs + yield_patched_draft 净室多轮闭环改写（门禁未清零拒交、保留标题与未触及段落），且支持单书 cleanroom=true 回退', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'grouped-local-patch');
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
@@ -797,11 +829,12 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         registerCleanup(() => bookToolsFiber.dispose());
 
         let writerCount = 0;
-        const patchPrompts: string[] = [];
-        const patchTemperatures: Array<number | undefined> = [];
+        let prematureYieldError: unknown = null;
+        let secondPatchPassed = false;
+        let capturedPatchTaskPrompt = '';
 
-        await createHeadlessMockServices(ctx, {
-            onAgent: async ({ tools, execTool }) => {
+        const { agentRuns } = await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_context_pack')) {
                     await execTool('yield_context_pack', {
                         selected_entity_ids: ['char_001'],
@@ -826,6 +859,41 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                     });
                     return;
                 }
+                if (tools.has('yield_patched_draft')) {
+                    capturedPatchTaskPrompt = taskPrompt;
+                    // 第 1 次仅修第 1 段，故意漏掉第 3 段并尝试提前 yield，验证 enforceProseGateOnYield 拦截
+                    const firstPatch = (await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 1,
+                                end_paragraph: 1,
+                                replacement_paragraphs: ['沈默低头核对箱号，在簿子上划了一道斜杠。']
+                            }
+                        ]
+                    })) as { passed: boolean; violatedParagraphIndices: number[] };
+                    expect(firstPatch.passed).toBe(false);
+                    expect(firstPatch.violatedParagraphIndices).toEqual([3]);
+
+                    try {
+                        await execTool('yield_patched_draft', { summary: '提前提交' });
+                    } catch (err) {
+                        prematureYieldError = err;
+                    }
+
+                    // 第 2 次修正剩余第 3 段，门禁通过后调用 yield_patched_draft 提交
+                    const secondPatch = (await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 3,
+                                end_paragraph: 3,
+                                replacement_paragraphs: ['「班次单和船期对不上。」沈默把纸折好塞进口袋。']
+                            }
+                        ]
+                    })) as { passed: boolean };
+                    secondPatchPassed = secondPatch.passed;
+                    await execTool('yield_patched_draft', { summary: '修正第 1 与第 3 段' });
+                    return;
+                }
                 if (tools.has('yield_verdict')) {
                     await execTool('yield_verdict', { passed: true, issues: [] });
                     return;
@@ -839,16 +907,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                     });
                 }
             },
-            onLlmStream: (opts) => {
-                if (opts.system?.includes('局部修补')) {
-                    const userBlock = JSON.stringify(opts.messages);
-                    patchPrompts.push(userBlock);
-                    patchTemperatures.push(opts.temperature);
-                    if (userBlock.includes('第一违规段')) {
-                        return textToStreamChunks('沈默低头核对箱号，在簿子上划了一道斜杠。');
-                    }
-                    return textToStreamChunks('「班次单和船期对不上。」沈默把纸折好塞进口袋。');
-                }
+            onLlmStream: () => {
                 writerCount += 1;
                 if (writerCount === 1) {
                     return textToStreamChunks(
@@ -878,14 +937,125 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(res.status).toBe('COMMITTED');
         expect(res.patchRounds).toBe(1);
         expect(res.rewriteCount).toBe(0);
-        // 两个不相邻违规段落应触发两次独立局部 Patch，且每次传给 patch 的目标段落都不包含中间合规段落
-        expect(patchPrompts.length).toBe(2);
-        expect(patchTemperatures).toEqual([0.4, 0.4]);
-        for (const p of patchPrompts) {
-            expect(p).not.toContain('第一违规段：他心中涌起一股莫名的情绪，指节泛白。\n\nMIDDLE_CLEAN_PARAGRAPH');
-        }
+        expect(prematureYieldError).toBeInstanceOf(Error);
+        expect(String(prematureYieldError)).toContain('StaticProseGate');
+        expect(secondPatchPassed).toBe(true);
+        expect(capturedPatchTaskPrompt).toContain('[1] 第一违规段');
+        expect(capturedPatchTaskPrompt).toContain('[3] 第三违规段');
+
+        const patchRun = agentRuns.find((r) => r.toolNames.includes('yield_patched_draft'));
+        expect(patchRun).toBeDefined();
+        expect(patchRun?.temperature).toBe(0.4);
+        expect(patchRun?.toolNames).toEqual(['patch_paragraphs', 'yield_patched_draft']);
+
         const saved = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(saved.startsWith('# 分组修补\n\n')).toBe(true);
         expect(saved).toContain('MIDDLE_CLEAN_PARAGRAPH: 货栈角落的煤油灯晃了两下，灯油快见底了。');
+
+        // 补充验证：单书 world/roles/patch.yml 覆盖 cleanroom: true 时保留单轮净室回退兼容
+        const cleanBookRoot = await createGitBookWorkspace(tempDirs, 'patch-cleanroom-fallback');
+        await mkdir(join(cleanBookRoot, 'world/roles/prompts'), { recursive: true });
+        await writeFile(
+            join(cleanBookRoot, 'world/roles/prompts/patch.md'),
+            '# 单书净室局部修补专员\n\n仅改写指定目标段落正文。\n',
+            'utf8'
+        );
+        await writeFile(
+            join(cleanBookRoot, 'world/roles/patch.yml'),
+            [
+                'id: patch',
+                'pool: strong_creative',
+                'cleanroom: true',
+                'promptFile: ./prompts/patch.md',
+                'temperature: 0.35',
+                'reasoningEffort: low',
+                'maxSteps: 1',
+                'maxReadCalls: 0',
+                'tools: []',
+                'yieldTool: null'
+            ].join('\n') + '\n',
+            'utf8'
+        );
+
+        const cleanCtx = new Context();
+        const cleanPromptFiber = await cleanCtx.plugin(SystemPrompt);
+        registerCleanup(() => cleanPromptFiber.dispose());
+        const cleanToolsFiber = await cleanCtx.plugin(ToolsService);
+        registerCleanup(() => cleanToolsFiber.dispose());
+        const cleanStoreFiber = await cleanCtx.plugin(bookStorePlugin, { bookRoot: cleanBookRoot });
+        registerCleanup(() => cleanStoreFiber.dispose());
+        const cleanBookToolsFiber = await cleanCtx.plugin(bookToolsPlugin);
+        registerCleanup(() => cleanBookToolsFiber.dispose());
+
+        const cleanPatchPrompts: string[] = [];
+        await createHeadlessMockServices(cleanCtx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '净室回退',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'CLOSURE',
+                        director_rationale: '秘辛',
+                        chapter_turn: '查验货箱',
+                        scene_plan: [
+                            { scene_index: 1, location: '货栈', summary: '清点', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对货箱。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '净室回退完成。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                const msgText = JSON.stringify(opts.messages);
+                if (msgText.includes('单书净室局部修补专员')) {
+                    cleanPatchPrompts.push(msgText);
+                    return textToStreamChunks('沈默低头核对箱号，转身记下编号。');
+                }
+                return textToStreamChunks(
+                    [
+                        '<blocking>货栈</blocking>',
+                        '',
+                        '他指节泛白，喉结滚动。',
+                        '',
+                        'CLEAN_MIDDLE_STAY: 货栈门外的汽笛响了一声。'
+                    ].join('\n')
+                );
+            }
+        });
+        const cleanPipeFiber = await cleanCtx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => cleanPipeFiber.dispose());
+
+        const cleanRes = await cleanCtx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '测试 cleanroom=true 回退'
+        });
+        expect(cleanRes.status).toBe('COMMITTED');
+        expect(cleanRes.patchRounds).toBe(1);
+        expect(cleanPatchPrompts.length).toBe(1);
+        const cleanSaved = await readFile(join(cleanBookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(cleanSaved).toContain('CLEAN_MIDDLE_STAY: 货栈门外的汽笛响了一声。');
     });
 
     it('narration_subjectivity=subjective_first 透传 StaticProseGate 并豁免 subjective_judgment 与 negation_contrast', async () => {
@@ -2421,5 +2591,495 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                 (ev) => ev.kind === 'text' && ev.text === '# 兜底正文\n\n仅通过 block-end 块输出的正文内容。'
             )
         ).toBe(true);
+    });
+
+    it('Gate 超出2段但<=15段且<=60%优先触发 LOCAL_PATCH，FactChecker <=4段亦走带 proseGateOptions 的 LOCAL_PATCH', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'patch-threshold-and-fc');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let factCheckerRound = 0;
+        let patchRoundSeen = 0;
+        let fcPatchClicheRejected = false;
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '阈值放宽修补',
+                        target_word_count: 1800,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '三处事实与四处文风同时修正',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '核对', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对货单。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_patched_draft')) {
+                    patchRoundSeen += 1;
+                    if (patchRoundSeen === 1) {
+                        // 第 1 轮修补来自 StaticProseGate 4 个违规段（超过旧版 >2 即 REWRITE 阈值）
+                        await execTool('patch_paragraphs', {
+                            edits: [
+                                { start_paragraph: 2, end_paragraph: 2, replacement_paragraphs: ['沈默把灯绳绕回铁钩。'] },
+                                { start_paragraph: 4, end_paragraph: 4, replacement_paragraphs: ['他低声问了一句船期。'] },
+                                { start_paragraph: 6, end_paragraph: 6, replacement_paragraphs: ['货栈外传来一声汽笛。'] },
+                                { start_paragraph: 8, end_paragraph: 8, replacement_paragraphs: ['林小满合上算盘本。'] }
+                            ]
+                        });
+                        await execTool('yield_patched_draft', { summary: '修正 4 段门禁违规' });
+                        return;
+                    }
+                    // 第 2 轮修补来自 FactChecker（3 个段落）：先故意引入套话，验证 proseGateOptions 生效拦截
+                    const badFcPatch = (await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 1,
+                                end_paragraph: 1,
+                                replacement_paragraphs: ['他指节泛白，喉结滚动。']
+                            }
+                        ]
+                    })) as { passed: boolean };
+                    expect(badFcPatch.passed).toBe(false);
+                    try {
+                        await execTool('yield_patched_draft', { summary: '含套话尝试提交' });
+                    } catch {
+                        fcPatchClicheRejected = true;
+                    }
+                    await execTool('patch_paragraphs', {
+                        edits: [
+                            { start_paragraph: 1, end_paragraph: 1, replacement_paragraphs: ['沈默站在三号泊位木棚下。'] },
+                            { start_paragraph: 3, end_paragraph: 3, replacement_paragraphs: ['他右手拎着煤油灯。'] },
+                            { start_paragraph: 5, end_paragraph: 5, replacement_paragraphs: ['桌角压着昨夜的船期单。'] }
+                        ]
+                    });
+                    await execTool('yield_patched_draft', { summary: '修正 FactChecker 3 处事实偏差' });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    factCheckerRound += 1;
+                    if (factCheckerRound === 1) {
+                        await execTool('yield_verdict', {
+                            passed: false,
+                            issues: [
+                                {
+                                    severity: 'LOCAL_PATCH',
+                                    paragraph_indices: [1, 3, 5],
+                                    description: '泊位编号、提灯手别与船期单日期需按档案修正',
+                                    quote_draft: '沈默站在二号泊位木棚下。'
+                                }
+                            ]
+                        });
+                        return;
+                    }
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成多段局部修补验证。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () =>
+                textToStreamChunks(
+                    [
+                        '沈默站在二号泊位木棚下。',
+                        '他指节泛白地握住栏杆。',
+                        '他左手拎着煤油灯。',
+                        '他不由得停下脚步。',
+                        '桌角压着前天的船期单。',
+                        '他喉结滚动着咽了口唾沫。',
+                        '海风吹得木门吱呀作响。',
+                        '林小满下意识地往后缩了半步。',
+                        '码头远处的铁锚落水。'
+                    ].join('\n\n')
+                )
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const res = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '测试 Gate 4段与 FactChecker 3段局部修补路由'
+        });
+
+        expect(res.status).toBe('COMMITTED');
+        expect(res.patchRounds).toBe(2);
+        expect(res.rewriteCount).toBe(0);
+        expect(patchRoundSeen).toBe(2);
+        expect(fcPatchClicheRejected).toBe(true);
+    });
+
+    it('REWRITE 透传 stage/attempt/triggerReason 并正向转写 rewriteFeedback（零负面黑名单词与零全知/WARPED泄露）', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'rewrite-positive-feedback');
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let writerAttempt = 0;
+        let fcAttempt = 0;
+        let rewritePhase: 'gate' | 'fc' = 'gate';
+        const stageSessions: Array<{ stage: string; attempt?: number; triggerReason?: string }> = [];
+
+        const { llmCalls } = await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001', 'char_002'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '重写校准',
+                        target_word_count: 1600,
+                        focus_cast: ['char_001'],
+                        background_cast: ['char_002'],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '潮汐对不上',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '核对', is_spotlight: true }
+                        ],
+                        outline_text: '沈默在货栈核对潮汐账册。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    fcAttempt += 1;
+                    if (fcAttempt === 1) {
+                        await execTool('yield_verdict', {
+                            passed: false,
+                            issues: [
+                                {
+                                    severity: 'MULTI_REWRITE',
+                                    paragraph_indices: [1, 2],
+                                    description:
+                                        '禁止跨越物理动线：第1段写沈默在东侧门，第2段直接写他在西库翻账册；严禁泄露 OMNISCIENT_SECRET_TOKEN 与 WARPED_SECRET_ENTRY。',
+                                    quote_draft: '沈默推开铁门走进账房。',
+                                    quote_source: '驻留节点：三号码头货栈',
+                                    source_ref: 'entities/char_001.md'
+                                }
+                            ]
+                        });
+                        return;
+                    }
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '重写校准通过。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => {
+                writerAttempt += 1;
+                if (rewritePhase === 'gate' && writerAttempt === 1) {
+                    // 3/4 段落违规 (75% > 60%)，直接触发 Gate REWRITE
+                    return textToStreamChunks(
+                        [
+                            '他指节泛白，攥着钢笔。',
+                            '他喉结滚动，目光落在账册上。',
+                            '空气里飘着一丝铁锈味。'
+                        ].join('\n\n')
+                    );
+                }
+                return textToStreamChunks(
+                    [
+                        '沈默推开铁门走进账房。',
+                        '煤油灯照亮摊开的潮汐账簿。',
+                        '林小满把算盘推到桌角。'
+                    ].join('\n\n')
+                );
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        // 用 Ch.1 验证 Gate >60% 直接走 REWRITE -> SafeHalt 额度耗尽前先用无 FC 阻塞通过，再测 FC MULTI_REWRITE
+        // 这里 Ch.1 在 writerAttempt 2 过 Gate，但因为 rewriteCount 已为 1 且 FC 返回 MULTI_REWRITE，预期触发 SafeHalt，
+        // 若先只测 Gate REWRITE，我们在 writerAttempt===2 时让 FC 直接 pass；再单独跑 Ch.2 测 FC MULTI_REWRITE。
+        // 调整：让 Ch.1 FC 直接 pass，先完整验证 Gate REWRITE，再用 Ch.2 验证 FactChecker MULTI_REWRITE。
+        fcAttempt = 99;
+        const gateRes = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '测试 Gate 触发 REWRITE',
+            onStageSession: (evt) => {
+                stageSessions.push({
+                    stage: evt.stage,
+                    ...(evt.attempt !== undefined ? { attempt: evt.attempt } : {}),
+                    ...(evt.triggerReason !== undefined ? { triggerReason: evt.triggerReason } : {})
+                });
+            }
+        });
+
+        expect(gateRes.status).toBe('COMMITTED');
+        expect(gateRes.patchRounds).toBe(0);
+        expect(gateRes.rewriteCount).toBe(1);
+
+        const forbiddenTokens = [
+            '禁止', '严禁', '不要', '不得', '切忌',
+            '必须', '务必', '千万', '绝对', '哪怕', '就算', '即便',
+            '指节', '喉结', '瞳孔', '睫毛', '一丝', '一抹',
+            'OMNISCIENT_SECRET', 'WARPED', 'CHARTER_SECRET_ANCHOR',
+            'DIRECTOR_SECRET_CEILING', 'SELF_ONLY_CHAR002_SECRET'
+        ];
+        expect(llmCalls.length).toBe(2);
+        const gateRewritePrompt = `${llmCalls[1]!.options.system ?? ''}\n${JSON.stringify(llmCalls[1]!.options.messages)}`;
+        expect(gateRewritePrompt).toContain('重写');
+        for (const token of forbiddenTokens) {
+            expect(gateRewritePrompt).not.toContain(token);
+        }
+
+        const ch1Runs = await ctx.narrateStore.openStore().listRunRecords({ chapter: 1 });
+        expect(ch1Runs.some((r) => r.stage === 'WRITER' && r.status === 'completed')).toBe(true);
+        expect(ch1Runs.some((r) => r.stage === 'REWRITE' && r.status === 'completed')).toBe(true);
+        expect(stageSessions.some((s) => s.stage === 'REWRITE' && s.attempt === 1 && Boolean(s.triggerReason))).toBe(true);
+
+        // Ch.2: 验证 FactChecker MULTI_REWRITE 触发 REWRITE 并对含敏感词/负面禁令词的问题做脱敏正向转写
+        rewritePhase = 'fc';
+        writerAttempt = 0;
+        fcAttempt = 0;
+        const ch2CallsBefore = llmCalls.length;
+        const ch2Res = await ctx.narratePipeline.stepChapter({
+            chapterNumber: 2,
+            chapterGoal: '测试 FactChecker MULTI_REWRITE 正向转写'
+        });
+        expect(ch2Res.status).toBe('COMMITTED');
+        expect(ch2Res.rewriteCount).toBe(1);
+
+        const fcRewriteCall = llmCalls[ch2CallsBefore + 1]!;
+        const fcRewritePrompt = `${fcRewriteCall.options.system ?? ''}\n${JSON.stringify(fcRewriteCall.options.messages)}`;
+        expect(fcRewritePrompt).toContain('物理动线');
+        expect(fcRewritePrompt).toContain('驻留节点：三号码头货栈');
+        for (const token of forbiddenTokens) {
+            expect(fcRewritePrompt).not.toContain(token);
+        }
+
+        const ch2Runs = await ctx.narrateStore.openStore().listRunRecords({ chapter: 2 });
+        const ch2RewriteRun = ch2Runs.find((r) => r.stage === 'REWRITE' && r.status === 'completed');
+        expect(ch2RewriteRun).toBeDefined();
+    });
+
+    it('session_logs 全量写入 requestInput (trace_level!==off)、放宽 tool-result 截断至 32000，且 Librarian 附加 <=60 字实体现状摘要', async () => {
+        const longStatus = '在三号码头旧货栈西侧账房核查十余本发黄的潮汐登记簿并逐页比对进港船舶记录与夜班舵工签名直到天亮前仍未合眼';
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'request-input-and-entity-summary', {
+            extraEntities: {
+                char_long_state: [
+                    '---',
+                    'entity_id: char_long_state',
+                    'canonical_name: 赵老五',
+                    'unique_aliases: []',
+                    'contextual_titles: []',
+                    'historical_anchors: []',
+                    'last_seen_ch: 1',
+                    '---',
+                    '',
+                    '## 1. Innate Locks',
+                    '- [vis: PUBLIC] 右脚微跛',
+                    '',
+                    '## 2. Acquired State & Numeric Ledger',
+                    `- [day:1 | ch:1 | vis: PUBLIC] ${longStatus}`,
+                    '- [day:1 | ch:1 | vis: PUBLIC | status: WARPED] WARPED_SHOULD_SKIP_THIS',
+                    '- [day:1 | ch:1 | vis: OMNISCIENT_SECRET] OMNISCIENT_SHOULD_SKIP_THIS',
+                    '',
+                    '## 3. Irreversible Trajectory',
+                    '- [day:1 | ch:1] 受雇看守二号库',
+                    '',
+                    '## 4. Recent Sliding Buffer & Voice',
+                    '- [day:1 | ch:1] 提着马灯巡夜'
+                ].join('\n'),
+                char_buffer_only: [
+                    '---',
+                    'entity_id: char_buffer_only',
+                    'canonical_name: 钱大',
+                    'unique_aliases: []',
+                    'contextual_titles: []',
+                    'historical_anchors: []',
+                    'last_seen_ch: 1',
+                    '---',
+                    '',
+                    '## 1. Innate Locks',
+                    '- [vis: PUBLIC] 嗓音沙哑',
+                    '',
+                    '## 2. Acquired State & Numeric Ledger',
+                    '',
+                    '## 3. Irreversible Trajectory',
+                    '- [day:1 | ch:1] 进港卸货',
+                    '',
+                    '## 4. Recent Sliding Buffer & Voice',
+                    '- [day:1 | ch:1] 在西栈桥搬运盐包'
+                ].join('\n')
+            }
+        });
+
+        // 写入一个 >2000 字符的设定文件，验证 tool-result 不再于 800 字符处截断
+        const longLoreContent = `# 海港潮汐细则\n\n${'A'.repeat(2100)}_END_MARKER`;
+        await writeFile(join(bookRoot, 'lore_library/lore_tide_rules.md'), longLoreContent, 'utf8');
+        await execFileAsync('git', ['-C', bookRoot, 'add', '.']);
+        await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'chore: add long lore and entities']);
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        let capturedLibrarianPrompt = '';
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    capturedLibrarianPrompt = taskPrompt;
+                    await execTool('book_read', { path: 'lore_library/lore_tide_rules.md' });
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '留档与摘要',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '查验档案',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '核对', is_spotlight: true }
+                        ],
+                        outline_text: '沈默核对三号码头档案。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '完成留档与摘要验证。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('# 留档与摘要\n\n沈默合上潮汐细则册，转身离开货栈。')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const sessions: Array<{ stage: string; sessionId: string }> = [];
+        await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '验证 requestInput、32000 tool-result 与实体摘要',
+            onStageSession: (evt) => sessions.push({ stage: evt.stage, sessionId: evt.sessionId })
+        });
+
+        // 1. 验证 Librarian 实体现状摘要（<=60 字、跳过 WARPED/OMNISCIENT_SECRET、空 acquiredState 回退 recentBuffer）
+        const entityLines = capturedLibrarianPrompt
+            .split('\n')
+            .filter((line) => line.startsWith('- char_'));
+        const longLine = entityLines.find((line) => line.startsWith('- char_long_state:'));
+        expect(longLine).toBeDefined();
+        expect(longLine!).not.toContain('WARPED_SHOULD_SKIP_THIS');
+        expect(longLine!).not.toContain('OMNISCIENT_SHOULD_SKIP_THIS');
+        const longSummaryPart = longLine!.split('现状: ')[1]?.trim() ?? '';
+        expect(longSummaryPart.length).toBeGreaterThan(0);
+        expect(longSummaryPart.length).toBeLessThanOrEqual(60);
+
+        const bufferLine = entityLines.find((line) => line.startsWith('- char_buffer_only:'));
+        expect(bufferLine).toContain('在西栈桥搬运盐包');
+
+        // 2. 验证 Librarian session_logs 包含完整 requestInput 与超过 800 字符的 tool-result
+        const libSession = sessions.find((s) => s.stage === 'LIBRARIAN');
+        expect(libSession).toBeDefined();
+        const libLog = JSON.parse(
+            await readFile(join(bookRoot, `.ops/session_logs/${libSession!.sessionId}.json`), 'utf8')
+        ) as {
+            requestInput?: {
+                systemPrompt?: string;
+                taskPromptBlocks?: string[];
+                temperature?: number;
+                reasoningEffort?: string;
+                pool?: string;
+                tools?: string[];
+            };
+            events: Array<{ kind: string; toolName?: string; text?: string }>;
+        };
+        expect(libLog.requestInput).toBeDefined();
+        expect(libLog.requestInput?.systemPrompt).toContain('Librarian');
+        expect(libLog.requestInput?.taskPromptBlocks?.[0]).toContain('char_long_state');
+        expect(libLog.requestInput?.pool).toBe('fast_retrieval');
+        expect(libLog.requestInput?.tools).toContain('book_read');
+        expect(typeof libLog.requestInput?.temperature).toBe('number');
+
+        const readResultEvent = libLog.events.find(
+            (ev) => ev.kind === 'tool-result' && ev.toolName === 'book_read'
+        );
+        expect(readResultEvent?.text).toContain('_END_MARKER');
+        expect((readResultEvent?.text ?? '').length).toBeGreaterThan(2000);
+
+        // 3. 验证 trace_level='off' 时不写入 requestInput
+        const cfgPath = join(bookRoot, 'world/book_config.yaml');
+        const oldCfg = await readFile(cfgPath, 'utf8');
+        await writeFile(cfgPath, oldCfg.replace('trace_level: full', 'trace_level: off'), 'utf8');
+        const offSessions: Array<{ stage: string; sessionId: string }> = [];
+        await ctx.narratePipeline.stepChapter({
+            chapterNumber: 2,
+            chapterGoal: '验证 trace_level=off 不写入 requestInput',
+            onStageSession: (evt) => offSessions.push({ stage: evt.stage, sessionId: evt.sessionId })
+        });
+        const offLibSession = offSessions.find((s) => s.stage === 'LIBRARIAN');
+        const offLibLog = JSON.parse(
+            await readFile(join(bookRoot, `.ops/session_logs/${offLibSession!.sessionId}.json`), 'utf8')
+        ) as { requestInput?: unknown };
+        expect(offLibLog.requestInput).toBeUndefined();
     });
 });

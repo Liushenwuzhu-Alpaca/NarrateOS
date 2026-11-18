@@ -1291,4 +1291,169 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             expect(lockConflictRes.statusCode).toBe(409);
         });
     });
+
+    it('POST /api/narrate/voice-harvest 路由契约及 runs/detail (attempt, triggerReason, requestInput) 暴露', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'voice-harvest-and-runs-contract');
+        const booksRoot = join(bookRoot, '..');
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot, booksRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+
+        const web = createMockWebServer(ctx);
+        let writerCalls = 0;
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: [],
+                        selected_lore_files: []
+                    });
+                    return;
+                }
+                if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '契约测试',
+                        target_word_count: 1500,
+                        focus_cast: ['char_001'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '秘辛',
+                        chapter_turn: '账页异常',
+                        scene_plan: [
+                            { scene_index: 1, location: '码头', summary: '查账', is_spotlight: true }
+                        ],
+                        outline_text: '沈默在货栈核对账册。'
+                    });
+                    return;
+                }
+                if (tools.has('yield_patched_draft')) {
+                    await execTool('patch_paragraphs', {
+                        edits: [
+                            {
+                                start_paragraph: 2,
+                                end_paragraph: 2,
+                                replacement_paragraphs: ['沈默搁下钢笔，把账册推到油灯下。']
+                            }
+                        ]
+                    });
+                    await execTool('yield_patched_draft', { summary: '修正第 2 段' });
+                    return;
+                }
+                if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                    return;
+                }
+                if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [],
+                        story_day_delta: 0,
+                        chapter_summary: '首章通过。',
+                        next_chapter_options: ['继续']
+                    });
+                }
+            },
+            onLlmStream: (opts) => {
+                if (opts.system?.includes('Voice Harvest')) {
+                    return textToStreamChunks(
+                        JSON.stringify({
+                            samples: [
+                                {
+                                    tag: '白描动作',
+                                    text: '煤油灯焰矮了一截，灯罩内壁蒙着薄灰，照得账页发黄。'
+                                },
+                                {
+                                    tag: '克制对白',
+                                    text: '「账页是今早才沾的水，昨夜值班簿上可没这一笔。」'
+                                }
+                            ]
+                        })
+                    );
+                }
+                writerCalls += 1;
+                if (writerCalls === 1) {
+                    return textToStreamChunks(
+                        [
+                            '沈默翻开潮汐账册，油灯照亮页码。',
+                            '',
+                            '他指节泛白，喉结滚动着咽下一口气。',
+                            '',
+                            '窗外拖轮鸣了两声短笛。'
+                        ].join('\n')
+                    );
+                }
+                return textToStreamChunks('沈默合上账册。');
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { booksRoot, heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        // 1. 先跑第 1 章（触发 WRITER + LOCAL_PATCH），验证 runs 与 runs/detail 契约
+        await ctx.narratePipeline.stepChapter({
+            chapterNumber: 1,
+            chapterGoal: '产出第一章供 Voice Harvest 采集'
+        });
+
+        const runsRes = await web.invoke('GET', '/api/narrate/runs?chapter=1');
+        expect(runsRes.statusCode).toBe(200);
+        const runItems = runsRes.json['runs'] as Array<{
+            stage: string;
+            sessionId: string;
+            status: string;
+            attempt?: number;
+            triggerReason?: string;
+        }>;
+        const patchRun = runItems.find((r) => r.stage === 'LOCAL_PATCH' && r.status === 'completed');
+        expect(patchRun).toBeDefined();
+        expect(patchRun?.attempt).toBe(1);
+        expect(patchRun?.triggerReason).toContain('PROSE_GATE');
+
+        const patchDetailRes = await web.invoke(
+            'GET',
+            `/api/narrate/runs/detail?sessionId=${encodeURIComponent(patchRun!.sessionId)}`
+        );
+        expect(patchDetailRes.statusCode).toBe(200);
+        expect(patchDetailRes.json['requestInput']).toMatchObject({
+            pool: 'strong_creative',
+            tools: ['patch_paragraphs', 'yield_patched_draft']
+        });
+
+        // 2. 验证 POST /api/narrate/voice-harvest 方法与参数校验
+        expect((await web.invoke('GET', '/api/narrate/voice-harvest')).statusCode).toBe(405);
+        expect(
+            (await web.invoke('POST', '/api/narrate/voice-harvest', { chapterNumber: 0 })).statusCode
+        ).toBe(400);
+        expect(
+            (await web.invoke('POST', '/api/narrate/voice-harvest', { chapterNumber: '1' })).statusCode
+        ).toBe(400);
+
+        // 3. 首次调用 POST /api/narrate/voice-harvest 应成功采集 2 条样本
+        const harvestRes = await web.invoke('POST', '/api/narrate/voice-harvest', {
+            chapterNumber: 1
+        });
+        expect(harvestRes.statusCode).toBe(200);
+        expect(harvestRes.json).toMatchObject({
+            harvestedCount: 2,
+            skipped: false
+        });
+        expect((harvestRes.json['samples'] as unknown[]).length).toBe(2);
+
+        // 4. 重复调用应返回 skipped: true
+        const skippedRes = await web.invoke('POST', '/api/narrate/voice-harvest', {});
+        expect(skippedRes.statusCode).toBe(200);
+        expect(skippedRes.json).toEqual({
+            harvestedCount: 0,
+            skipped: true,
+            samples: []
+        });
+    });
 });

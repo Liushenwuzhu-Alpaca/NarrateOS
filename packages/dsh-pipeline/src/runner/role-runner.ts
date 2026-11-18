@@ -15,6 +15,7 @@ import {
     type EntityProfile,
     type NarrationSubjectivity,
     type NarrateStoreService,
+    type ProseGateOptions,
     type TimelineMode,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
@@ -73,6 +74,10 @@ export interface RunMultiTurnOptions {
     visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
     reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
     narrationSubjectivity?: NarrationSubjectivity | undefined;
+    proseGateOptions?: ProseGateOptions | undefined;
+    enforceProseGateOnYield?: boolean | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
     signal?: AbortSignal | undefined;
     onStageSession?: ((event: StageSessionEvent) => void) | undefined;
     onStageEvent?: ((event: StageStreamSseEvent) => void) | undefined;
@@ -90,6 +95,9 @@ export interface RunMultiTurnResult<TYield = unknown> {
 /** 净室单轮执行选项 */
 export interface RunCleanroomOptions {
     roleId?: string | undefined;
+    stage?: string | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
     bookRoot: string;
     bookConfig?: BookConfig | undefined;
     chapterNumber?: number | undefined;
@@ -100,6 +108,7 @@ export interface RunCleanroomOptions {
 }
 
 const MAX_AGENT_MALFORMED_RETRIES = 2;
+const MAX_TOOL_RESULT_LOG_CHARS = 32_000;
 
 function isAgentInstructionsMessage(msg: unknown): boolean {
     if (typeof msg !== 'object' || msg === null) return false;
@@ -303,6 +312,10 @@ export class RoleRunner {
             visibleEntities: options.visibleEntities,
             reachableIds: options.reachableIds,
             narrationSubjectivity: options.narrationSubjectivity,
+            proseGateOptions: options.proseGateOptions,
+            enforceProseGateOnYield: options.enforceProseGateOnYield,
+            attempt: options.attempt,
+            triggerReason: options.triggerReason,
             signal: options.signal,
             onStageSession: options.onStageSession,
             onStageEvent: options.onStageEvent
@@ -347,6 +360,10 @@ export class RoleRunner {
         visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
         reachableIds?: ReadonlySet<string> | readonly string[] | undefined;
         narrationSubjectivity?: NarrationSubjectivity | undefined;
+        proseGateOptions?: ProseGateOptions | undefined;
+        enforceProseGateOnYield?: boolean | undefined;
+        attempt?: number | undefined;
+        triggerReason?: string | undefined;
         signal?: AbortSignal | undefined;
         onStageSession?: ((event: StageSessionEvent) => void) | undefined;
         onStageEvent?: ((event: StageStreamSseEvent) => void) | undefined;
@@ -400,6 +417,8 @@ export class RoleRunner {
             modelId,
             ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
             ...(params.agentMode ? { mode: params.agentMode } : {}),
+            ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+            ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
             live: true,
             events: []
         };
@@ -465,7 +484,13 @@ export class RoleRunner {
                     applyOptions: params.applyOptions,
                     visibleEntities: params.visibleEntities,
                     reachableIds: params.reachableIds,
-                    narrationSubjectivity: params.narrationSubjectivity
+                    narrationSubjectivity: params.narrationSubjectivity,
+                    ...(params.proseGateOptions !== undefined
+                        ? { proseGateOptions: params.proseGateOptions }
+                        : {}),
+                    ...(params.enforceProseGateOnYield !== undefined
+                        ? { enforceProseGateOnYield: params.enforceProseGateOnYield }
+                        : {})
                 });
             }
 
@@ -478,7 +503,9 @@ export class RoleRunner {
                 status: 'running',
                 startedAt,
                 ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-                ...(params.agentMode ? { mode: params.agentMode } : {})
+                ...(params.agentMode ? { mode: params.agentMode } : {}),
+                ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+                ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
             });
 
             try {
@@ -491,7 +518,9 @@ export class RoleRunner {
                     ...(params.parentSessionId
                         ? { parentSessionId: params.parentSessionId }
                         : {}),
-                    ...(params.agentMode ? { mode: params.agentMode } : {})
+                    ...(params.agentMode ? { mode: params.agentMode } : {}),
+                    ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+                    ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
                 });
             } catch {
                 // 避免 SSE 回调异常中断执行
@@ -545,6 +574,27 @@ export class RoleRunner {
             const builtToolset = toolset;
             const effectiveTemperature = params.temperatureOverride ?? roleCfg.temperature;
 
+            if (params.bookConfig?.trace_level !== 'off') {
+                const roleOverride = params.bookConfig?.role_routing?.[params.roleId];
+                const effectivePool =
+                    roleOverride?.tier === 'strong'
+                        ? 'strong_creative'
+                        : roleOverride?.tier === 'weak'
+                          ? 'fast_retrieval'
+                          : (params.poolOverride ?? roleCfg.pool);
+                sessionDetail.requestInput = {
+                    systemPrompt: roleCfg.promptText,
+                    taskPromptBlocks: [...params.taskPromptBlocks],
+                    temperature: effectiveTemperature,
+                    ...(compatibleEffort !== undefined
+                        ? { reasoningEffort: String(compatibleEffort) }
+                        : {}),
+                    ...(params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
+                    pool: effectivePool,
+                    tools: builtToolset ? builtToolset.tools.map((t) => t.name) : []
+                };
+            }
+
             handle = await this.execCtx.agents.create({
                 sessionId,
                 meta: {
@@ -578,8 +628,8 @@ export class RoleRunner {
                                             const out = await tool.execute(args, exec);
                                             const preview =
                                                 typeof out === 'string'
-                                                    ? out.slice(0, 800)
-                                                    : JSON.stringify(out).slice(0, 800);
+                                                    ? out.slice(0, MAX_TOOL_RESULT_LOG_CHARS)
+                                                    : JSON.stringify(out).slice(0, MAX_TOOL_RESULT_LOG_CHARS);
                                             recordSessionEvent({
                                                 timestamp: new Date().toISOString(),
                                                 kind: 'tool-result',
@@ -811,7 +861,9 @@ export class RoleRunner {
                 startedAt,
                 finishedAt: new Date().toISOString(),
                 ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-                ...(params.agentMode ? { mode: params.agentMode } : {})
+                ...(params.agentMode ? { mode: params.agentMode } : {}),
+                ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+                ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
             });
 
             return {
@@ -843,7 +895,9 @@ export class RoleRunner {
                 finishedAt: new Date().toISOString(),
                 error: err instanceof Error ? err.message : String(err),
                 ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
-                ...(params.agentMode ? { mode: params.agentMode } : {})
+                ...(params.agentMode ? { mode: params.agentMode } : {}),
+                ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+                ...(params.triggerReason ? { triggerReason: params.triggerReason } : {})
             }).catch(() => {});
             throw err;
         } finally {
@@ -938,7 +992,9 @@ export class RoleRunner {
             };
         }
 
-        const stageName = (req.traceStage ?? roleId).toUpperCase();
+        const traceStageUpper = (req.traceStage ?? roleId).toUpperCase();
+        const stageName =
+            options.stage ?? (traceStageUpper === 'PATCH' ? 'LOCAL_PATCH' : traceStageUpper);
         let capturedRunId: string | undefined;
         let capturedSessionId: string | undefined;
         const taskPromptBlocks = [
@@ -953,7 +1009,7 @@ export class RoleRunner {
                         mode: 'cleanroom',
                         roleCfg,
                         roleId,
-                        stage: stageName === 'PATCH' ? 'LOCAL_PATCH' : stageName,
+                        stage: stageName,
                         bookRoot: options.bookRoot,
                         bookConfig: options.bookConfig,
                         chapterNumber: options.chapterNumber,
@@ -962,6 +1018,8 @@ export class RoleRunner {
                         temperatureOverride: req.temperature,
                         reasoningEffortOverride: req.reasoningEffort,
                         maxTokens: req.maxTokens,
+                        attempt: options.attempt,
+                        triggerReason: options.triggerReason,
                         signal: signal ?? options.signal,
                         onStageSession: options.onStageSession,
                         onStageEvent: options.onStageEvent

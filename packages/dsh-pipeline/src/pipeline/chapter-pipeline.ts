@@ -30,6 +30,8 @@ import {
     type MergeParallelWindowOptions,
     type PlannerOutline,
     type PreviousChapterContext,
+    type ProseGateOptions,
+    type ProseGateResult,
     type RecallSlice,
     type StaticPrefixInput,
     type SystemPort,
@@ -41,6 +43,7 @@ import type {
     FactCheckIssue,
     FactCheckOutput,
     YieldContextPackResult,
+    YieldPatchedDraftResult,
     YieldStatePatchResult
 } from '@narrateos/dsh-book-tools';
 import { PlanConflictError, SafeHaltError, type SafeHaltSnapshot } from '../errors.js';
@@ -94,6 +97,83 @@ function sanitizeExtractorPatches(
         }
         return patch;
     });
+}
+
+const GATE_POSITIVE_GUIDANCE: Record<string, string> = {
+    tag_residue: '直接输出纯粹的小说散文正文，保持段落干净自然。',
+    negation_contrast: '直接陈述当下发生的动作、神态与客观场景状态，以正面描摹推进句子。',
+    subjective_judgment: '坚持第三人称客观镜头白描，借助具体动作、手势与口语对白自然显现人物态度与情绪。',
+    micro_anatomy: '改用整体肢体动作、物件触碰、站位移动或简短对白刻画人物反应。',
+    skeletal_quota: '以日常衣着动静、步态姿势与环境交互展现人物体态。',
+    filler_trace: '选用具体可感的动作动词与实感细节描摹现场变化。',
+    deictic_na: '使用明确的人名、物件名称或干净的短句衔接指代。',
+    reduplication_verb: '采用干脆利落的单动作动词推进叙事节奏。',
+    deictic_density: '通过具体的光线、声响、温度、气味与触感细节营造现场氛围。',
+    filler_cliche: '使用贴合人物身份的生活化口语与日常动作白描推进情节。',
+    ending_moralizing: '结尾定格在具体的动作落点、环境声响或待解事态的客观画面上，留出自然余韵。',
+    cross_chapter_simile: '采用贴合当下场景的新鲜具象意象或直接白描，呈现独特的现场质感。'
+};
+
+const RESTRICTED_DIRECTIVE_CLAUSE_RE =
+    /OMNISCIENT_SECRET|\bWARPED\b|SELF_ONLY_[A-Z0-9_]*SECRET|CHARTER_SECRET|DIRECTOR_SECRET|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale|author_charter|arc_director_plan/i;
+
+/** 剥离全知/废止/禁区信息并正向转写，确保净室写手与修补专员零泄露、零负面黑名单词 */
+function sanitizeTextForCleanroomWriter(raw: string): string {
+    const clauses = raw
+        .split(/(?<=[。；\n])/)
+        .map((c) => c.trim())
+        .filter((c) => c.length > 0 && !RESTRICTED_DIRECTIVE_CLAUSE_RE.test(c));
+    const joined = clauses.join(' ').trim();
+    return joined
+        .replace(/(?:禁止|严禁|不要|不得|切忌)/g, '请调整')
+        .replace(/(?:必须|务必|千万|绝对)/g, '请确保')
+        .replace(/(?:哪怕|就算|即便)/g, '即使')
+        .replace(/(?:指节|喉结|瞳孔|睫毛|一丝|一抹)/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/** 将静态门禁超标规则正向转写为写手重写的具象写作目标 */
+function buildPositiveGateRewriteFeedback(gateResult: ProseGateResult): string {
+    const ruleIds = Array.from(
+        new Set(
+            gateResult.exceededRules.length > 0
+                ? gateResult.exceededRules
+                : gateResult.violations.map((v) => v.ruleId)
+        )
+    );
+    const directives = ruleIds.map(
+        (id) =>
+            GATE_POSITIVE_GUIDANCE[id] ??
+            '以具体人物动作、感官白描与生活化口语对白重新组织当前段落。'
+    );
+    return [
+        '保持细纲既定场景节奏、事件因果与人物落点，重点强化以下正向写作目标：',
+        ...directives.map((d) => `- ${d}`)
+    ].join('\n');
+}
+
+/** 将 FactChecker 审校问题脱敏并正向转写为写手重写的事实对齐目标 */
+function buildPositiveFactRewriteFeedback(issues: readonly FactCheckIssue[]): string {
+    const lines: string[] = [];
+    for (const issue of issues) {
+        if (issue.severity === 'PLAN_CONFLICT') continue;
+        const cleanDesc = sanitizeTextForCleanroomWriter(issue.description);
+        if (!cleanDesc) continue;
+        const cleanSource = issue.quote_source
+            ? sanitizeTextForCleanroomWriter(issue.quote_source)
+            : '';
+        lines.push(
+            `- 依循前文现场与档案事实校准叙事：${cleanDesc}${cleanSource ? `（对照基准：${cleanSource}）` : ''}`
+        );
+    }
+    if (lines.length === 0) {
+        lines.push('- 依循已交付的前文现场与角色档案，逐段核实空间站位、时间顺序与物品流转并重写本章。');
+    }
+    return [
+        '保持视角人物当前实时感知边界与细纲推进方向，逐项校准以下事实与动作衔接目标：',
+        ...lines
+    ].join('\n');
 }
 
 function splitParagraphs(text: string): string[] {
@@ -496,8 +576,12 @@ export class ChapterPipeline {
                 writerInjection,
                 voicePool,
                 totalUsage,
-                options.signal,
-                options.onStageSession
+                {
+                    traceStage: 'writer',
+                    attempt: 1,
+                    signal: options.signal,
+                    onStageSession: options.onStageSession
+                }
             );
             activeProse = drafted.prose;
             updatedVoicePool = drafted.updatedVoicePool;
@@ -512,17 +596,18 @@ export class ChapterPipeline {
                 // Step 4: StaticProseGate (0 Token)
                 emit('PROSE_GATE', chapterNumber, '运行 0 Token 静态文风门禁');
                 await traceArtifact('draft.before_gate', activeProse);
+                const proseGateOptions: ProseGateOptions = {
+                    enableAntiCliche: snapshot.config.prose_gate.enable_anti_cliche,
+                    enableCrossChapterSimile:
+                        snapshot.config.prose_gate.enable_cross_chapter_simile,
+                    crossChapterSimileWindow:
+                        snapshot.config.prose_gate.cross_chapter_simile_window,
+                    narrationSubjectivity: snapshot.config.narration_subjectivity,
+                    rules: gateRules,
+                    historicalChapters
+                };
                 const gateResult = await withTraceStage('prose_gate', async () =>
-                    this.gate.evaluate(activeProse, {
-                        enableAntiCliche: snapshot.config.prose_gate.enable_anti_cliche,
-                        enableCrossChapterSimile:
-                            snapshot.config.prose_gate.enable_cross_chapter_simile,
-                        crossChapterSimileWindow:
-                            snapshot.config.prose_gate.cross_chapter_simile_window,
-                        narrationSubjectivity: snapshot.config.narration_subjectivity,
-                        rules: gateRules,
-                        historicalChapters
-                    })
+                    this.gate.evaluate(activeProse, proseGateOptions)
                 );
                 lastGateViolations = gateResult.violations;
                 await traceArtifact('prose_gate.result', gateResult);
@@ -533,7 +618,14 @@ export class ChapterPipeline {
                 });
 
                 if (!gateResult.passed) {
-                    if (gateResult.recommendedAction === 'PATCH' && patchRounds < 2) {
+                    const paragraphCount = Math.max(1, splitParagraphs(activeProse).length);
+                    const violatedCount = gateResult.violatedParagraphIndices.length;
+                    if (
+                        violatedCount > 0 &&
+                        violatedCount <= 15 &&
+                        violatedCount / paragraphCount <= 0.6 &&
+                        patchRounds < 2
+                    ) {
                         patchRounds += 1;
                         emit('LOCAL_PATCH', chapterNumber, `Gate 触发第 ${patchRounds} 轮局部修补`);
                         const reason = gateResult.violations
@@ -546,8 +638,14 @@ export class ChapterPipeline {
                             gateResult.violatedParagraphIndices,
                             reason,
                             totalUsage,
-                            options.signal,
-                            options.onStageSession
+                            {
+                                proseGateOptions,
+                                violations: gateResult.violations,
+                                attempt: patchRounds,
+                                triggerReason: `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`,
+                                signal: options.signal,
+                                onStageSession: options.onStageSession
+                            }
                         );
                         continue;
                     }
@@ -555,6 +653,8 @@ export class ChapterPipeline {
                     if (rewriteCount < 1) {
                         rewriteCount += 1;
                         emit('REWRITE', chapterNumber, 'Gate 触发整章重写');
+                        const rewriteFeedback = buildPositiveGateRewriteFeedback(gateResult);
+                        const triggerReason = `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`;
                         const rewritten = await this.runWriter(
                             snapshot,
                             chapterNumber,
@@ -571,8 +671,14 @@ export class ChapterPipeline {
                             writerInjection,
                             voicePool,
                             totalUsage,
-                            options.signal,
-                            options.onStageSession
+                            {
+                                rewriteFeedback,
+                                traceStage: 'rewrite',
+                                attempt: rewriteCount,
+                                triggerReason,
+                                signal: options.signal,
+                                onStageSession: options.onStageSession
+                            }
                         );
                         activeProse = rewritten.prose;
                         updatedVoicePool = rewritten.updatedVoicePool;
@@ -659,7 +765,7 @@ export class ChapterPipeline {
                 if (
                     !hasMultiRewrite &&
                     patchIndices.length > 0 &&
-                    patchIndices.length <= 2 &&
+                    patchIndices.length <= 4 &&
                     patchRounds < 2
                 ) {
                     patchRounds += 1;
@@ -672,8 +778,14 @@ export class ChapterPipeline {
                         patchIndices,
                         reason,
                         totalUsage,
-                        options.signal,
-                        options.onStageSession
+                        {
+                            proseGateOptions,
+                            factIssues: verifiedIssues,
+                            attempt: patchRounds,
+                            triggerReason: `FACT_CHECKER: ${reason}`,
+                            signal: options.signal,
+                            onStageSession: options.onStageSession
+                        }
                     );
                     continue;
                 }
@@ -681,6 +793,8 @@ export class ChapterPipeline {
                 if (rewriteCount < 1) {
                     rewriteCount += 1;
                     emit('REWRITE', chapterNumber, 'Fact Checker 触发整章重写');
+                    const rewriteFeedback = buildPositiveFactRewriteFeedback(verifiedIssues);
+                    const triggerReason = `FACT_CHECKER: ${verifiedIssues.map((i) => i.severity).join(',')}`;
                     const rewritten = await this.runWriter(
                         snapshot,
                         chapterNumber,
@@ -697,8 +811,14 @@ export class ChapterPipeline {
                         writerInjection,
                         voicePool,
                         totalUsage,
-                        options.signal,
-                        options.onStageSession
+                        {
+                            rewriteFeedback,
+                            traceStage: 'rewrite',
+                            attempt: rewriteCount,
+                            triggerReason,
+                            signal: options.signal,
+                            onStageSession: options.onStageSession
+                        }
                     );
                     activeProse = rewritten.prose;
                     updatedVoicePool = rewritten.updatedVoicePool;
@@ -810,7 +930,27 @@ export class ChapterPipeline {
                     extraParts.push(`称谓: ${e.metadata.contextual_titles.join('、')}`);
                 }
                 const suffix = extraParts.length > 0 ? ` (${extraParts.join(' | ')})` : '';
-                return `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}${suffix} [last_seen_ch=${e.metadata.last_seen_ch}]`;
+                const eligibleAcquired = e.acquiredState.filter(
+                    (entry) =>
+                        entry.status !== 'WARPED' &&
+                        entry.visibility !== 'OMNISCIENT_SECRET' &&
+                        entry.text.trim().length > 0
+                );
+                const eligibleBuffer = e.recentBuffer.filter(
+                    (entry) =>
+                        entry.status !== 'WARPED' &&
+                        entry.visibility !== 'OMNISCIENT_SECRET' &&
+                        entry.text.trim().length > 0
+                );
+                const latestSummarySource =
+                    eligibleAcquired.at(-1)?.text ?? eligibleBuffer.at(-1)?.text ?? '';
+                const normalizedSummary = latestSummarySource.replace(/\s+/g, ' ').trim();
+                const statusSummary =
+                    normalizedSummary.length > 60
+                        ? `${normalizedSummary.slice(0, 59)}…`
+                        : normalizedSummary;
+                const statusSuffix = statusSummary ? ` | 现状: ${statusSummary}` : '';
+                return `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}${suffix} [last_seen_ch=${e.metadata.last_seen_ch}]${statusSuffix}`;
             })
             .join('\n');
 
@@ -1007,8 +1147,14 @@ export class ChapterPipeline {
         writerInjection: string,
         voicePool: VoiceSamplePool | undefined,
         totalUsage: TokenUsage,
-        signal?: AbortSignal,
-        onStageSession?: (event: StageSessionEvent) => void
+        writeOptions?: {
+            rewriteFeedback?: string | undefined;
+            traceStage?: 'writer' | 'rewrite' | undefined;
+            attempt?: number | undefined;
+            triggerReason?: string | undefined;
+            signal?: AbortSignal | undefined;
+            onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+        }
     ): Promise<{
         prose: string;
         writerView: ReturnType<ViewSlicer['slice']>;
@@ -1037,7 +1183,10 @@ export class ChapterPipeline {
             `收尾节拍：${outline.ending_beat}`,
             `本章实质波折：${outline.chapter_turn}`,
             outline.outline_text,
-            writerInjection ? `\n文风插件要求：\n${writerInjection}` : ''
+            writerInjection ? `\n文风插件要求：\n${writerInjection}` : '',
+            writeOptions?.rewriteFeedback
+                ? `\n本轮重写正向校准目标：\n${writeOptions.rewriteFeedback}`
+                : ''
         ]
             .filter(Boolean)
             .join('\n');
@@ -1058,17 +1207,22 @@ export class ChapterPipeline {
             pool: 'strong_creative'
         });
 
+        const traceStage = writeOptions?.traceStage ?? 'writer';
+        const stage = traceStage === 'rewrite' ? 'REWRITE' : 'WRITER';
         const { response } = await this.roleRunner.runCleanroom({
             roleId: 'writer',
+            stage,
+            attempt: writeOptions?.attempt,
+            triggerReason: writeOptions?.triggerReason,
             bookRoot: this.store.bookRoot,
             bookConfig: snapshot.config,
             chapterNumber,
             request: {
                 ...assembled.request,
-                traceStage: 'writer'
+                traceStage
             },
-            signal,
-            onStageSession
+            signal: writeOptions?.signal,
+            onStageSession: writeOptions?.onStageSession
         });
         addUsage(totalUsage, response.usage);
 
@@ -1084,7 +1238,11 @@ export class ChapterPipeline {
         };
     }
 
-    /** 执行局部 Patch（净室零工具单轮 Agent，按连续相邻索引分组，仅重写目标段落与紧邻参考） */
+    /**
+     * 执行局部 Patch：
+     * - 当 patch.yml 配置 cleanroom=false（默认预设）时，运行纯内存多轮净室闭环（patch_paragraphs + yield_patched_draft）；
+     * - 当单书覆写 patch.yml 配置 cleanroom=true 时，保留单轮净室分组改写向后兼容。
+     */
     private async runLocalPatch(
         bookConfig: BookSnapshot['config'],
         chapterNumber: number,
@@ -1092,8 +1250,15 @@ export class ChapterPipeline {
         violatedIndices: number[],
         reason: string,
         totalUsage: TokenUsage,
-        signal?: AbortSignal,
-        onStageSession?: (event: StageSessionEvent) => void
+        patchOptions: {
+            proseGateOptions?: ProseGateOptions | undefined;
+            violations?: GateViolation[] | undefined;
+            factIssues?: FactCheckIssue[] | undefined;
+            attempt?: number | undefined;
+            triggerReason?: string | undefined;
+            signal?: AbortSignal | undefined;
+            onStageSession?: ((event: StageSessionEvent) => void) | undefined;
+        } = {}
     ): Promise<string> {
         const paragraphs = splitParagraphs(prose);
         if (paragraphs.length === 0 || violatedIndices.length === 0) {
@@ -1107,17 +1272,6 @@ export class ChapterPipeline {
             return prose;
         }
 
-        // 将连续相邻索引归并为一个分组，非相邻段落独立分组修补，严禁跨区间重写中间合规段落
-        const groups: Array<{ start: number; end: number }> = [];
-        for (const idx of sortedUnique) {
-            const last = groups[groups.length - 1];
-            if (last && idx === last.end + 1) {
-                last.end = idx;
-            } else {
-                groups.push({ start: idx, end: idx });
-            }
-        }
-
         let patchRoleCfg;
         try {
             patchRoleCfg = await this.roleLoader.loadRoleConfig('patch', this.store.bookRoot);
@@ -1128,8 +1282,70 @@ export class ChapterPipeline {
                 throw err;
             }
         }
+
         if (!patchRoleCfg.cleanroom) {
-            throw new Error(`角色 ${patchRoleCfg.id} 必须保持 cleanroom: true`);
+            const cleanReason = sanitizeTextForCleanroomWriter(reason);
+            const violationLines = (patchOptions.violations ?? []).map(
+                (v) =>
+                    `- [${v.paragraphIndex}] (${v.ruleId}, line ${v.line}:${v.column}) 命中 "${v.matchedText}" | 行内容: ${v.lineText}`
+            );
+            const factIssueLines = (patchOptions.factIssues ?? []).map((issue) => {
+                const indices = [
+                    ...(issue.paragraph_index !== undefined ? [issue.paragraph_index] : []),
+                    ...(issue.paragraph_indices ?? [])
+                ];
+                const idxLabel = indices.length > 0 ? `[${indices.join(', ')}]` : '[待定位]';
+                const cleanDesc = sanitizeTextForCleanroomWriter(issue.description);
+                const cleanSource = issue.quote_source
+                    ? sanitizeTextForCleanroomWriter(issue.quote_source)
+                    : '';
+                const quoteInfo = cleanSource ? ` | 参考基准: ${cleanSource}` : '';
+                return `- ${idxLabel} ${cleanDesc}${quoteInfo}`;
+            });
+            const numberedParagraphs = paragraphs
+                .map((p, idx) => `[${idx}] ${p}`)
+                .join('\n\n');
+
+            const taskPrompt = [
+                `## 修补原因与触发来源\n${cleanReason || reason}`,
+                `## 待修补段落索引 (0-based)\n[${sortedUnique.join(', ')}]`,
+                violationLines.length > 0 ? `## 静态门禁违规定位清单\n${violationLines.join('\n')}` : '',
+                factIssueLines.length > 0 ? `## 事实核查修补清单\n${factIssueLines.join('\n')}` : '',
+                `## 叙事人称与主观度基准\n${bookConfig.narration_subjectivity}`,
+                `## 当前待修补正文（0-based 段落索引）\n${numberedParagraphs}`,
+                '请对照 0-based 段落索引调用 `patch_paragraphs` 精准替换目标段落；每次修改后依据即时门禁诊断继续微调，确认全部段落通过后调用 `yield_patched_draft` 提交定稿。'
+            ]
+                .filter(Boolean)
+                .join('\n\n');
+
+            const runRes = await this.roleRunner.runMultiTurn<YieldPatchedDraftResult>({
+                roleId: patchRoleCfg.id,
+                stage: 'LOCAL_PATCH',
+                chapterNumber,
+                bookRoot: this.store.bookRoot,
+                bookConfig,
+                draftText: prose,
+                proseGateOptions: patchOptions.proseGateOptions,
+                enforceProseGateOnYield: true,
+                attempt: patchOptions.attempt,
+                triggerReason: patchOptions.triggerReason,
+                taskPrompt,
+                signal: patchOptions.signal,
+                onStageSession: patchOptions.onStageSession
+            });
+            addUsage(totalUsage, runRes.usage);
+            return runRes.yieldResult.patchedProse;
+        }
+
+        // 单书显式覆写 cleanroom=true 时的单轮分组净室兼容分支
+        const groups: Array<{ start: number; end: number }> = [];
+        for (const idx of sortedUnique) {
+            const last = groups[groups.length - 1];
+            if (last && idx === last.end + 1) {
+                last.end = idx;
+            } else {
+                groups.push({ start: idx, end: idx });
+            }
         }
 
         const updatedParagraphs = [...paragraphs];
@@ -1144,6 +1360,9 @@ export class ChapterPipeline {
 
             const { response } = await this.roleRunner.runCleanroom({
                 roleId: patchRoleCfg.id,
+                stage: 'LOCAL_PATCH',
+                attempt: patchOptions.attempt,
+                triggerReason: patchOptions.triggerReason,
                 bookRoot: this.store.bookRoot,
                 bookConfig,
                 chapterNumber,
@@ -1161,8 +1380,8 @@ export class ChapterPipeline {
                         .filter(Boolean)
                         .join('\n\n')
                 },
-                signal,
-                onStageSession
+                signal: patchOptions.signal,
+                onStageSession: patchOptions.onStageSession
             });
             addUsage(totalUsage, response.usage);
 

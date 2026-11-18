@@ -54,6 +54,8 @@ export interface StageSessionEvent {
     sessionId: string;
     parentSessionId?: string | undefined;
     mode?: string | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
 }
 
 /** 工种运行实时流/工具事件项 */
@@ -78,6 +80,17 @@ export interface StageStreamSseEvent {
     status?: string | undefined;
 }
 
+/** 阶段会话请求入参快照 */
+export interface StageSessionRequestInput {
+    systemPrompt?: string | undefined;
+    taskPromptBlocks?: string[] | undefined;
+    temperature?: number | undefined;
+    reasoningEffort?: string | undefined;
+    maxTokens?: number | undefined;
+    pool?: string | undefined;
+    tools?: string[] | undefined;
+}
+
 /** 阶段会话详情载荷 (GET /api/narrate/runs/detail?sessionId=...) */
 export interface StageSessionDetail {
     sessionId: string;
@@ -88,6 +101,8 @@ export interface StageSessionDetail {
     status?: string | undefined;
     parentSessionId?: string | undefined;
     mode?: string | undefined;
+    attempt?: number | undefined;
+    triggerReason?: string | undefined;
     live: boolean;
     startedAt?: string | undefined;
     finishedAt?: string | undefined;
@@ -95,6 +110,7 @@ export interface StageSessionDetail {
     usage?: TokenUsage | undefined;
     reasoning?: string | undefined;
     thinkingChars?: number | undefined;
+    requestInput?: StageSessionRequestInput | undefined;
     events: StageSessionEventItem[];
 }
 
@@ -137,7 +153,9 @@ export const ExtendedRunRecordSchema = z.object({
     finishedAt: z.string().min(1).optional(),
     error: z.string().optional(),
     parentSessionId: z.string().min(1).optional(),
-    mode: z.string().min(1).optional()
+    mode: z.string().min(1).optional(),
+    attempt: z.number().int().nonnegative().optional(),
+    triggerReason: z.string().min(1).optional()
 });
 export type ExtendedRunRecord = z.infer<typeof ExtendedRunRecordSchema>;
 
