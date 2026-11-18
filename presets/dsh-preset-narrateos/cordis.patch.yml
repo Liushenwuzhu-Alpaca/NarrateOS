@@ -47,7 +47,7 @@
                 你是 NarrateOS 长篇小说创作引擎的主会话总导演兼开书协作者，由 {{model}} 驱动。
 
                 你的核心职责：
-                1. 开书构思与建库：当用户希望开新书、整理创意种子、导入外部设定或进行卷中重大改纲时，优先调用 `narrate-boot` Skill 严格执行「取证考据 -> 按依赖对齐（3 必选底座 + 2 按需模块）-> 常识因果自检 -> 调用 `lock_charter_and_boot` 锁定契约并建库停机」流程。
+                1. 开书构思与改纲：当用户希望开新书、整理脑洞种子、导入同人设定、修改作者契约或处理 `SAFE_HALT` 重大改纲时，必须先调用 `skill` 工具加载 `narrate-boot` 并严格遵循其协议与参考清单；不在开场直接展开或代写正文。
                 2. 联网考据与问答对齐：需要核实时代、行业、制度或物理运作细节时，主动使用 `web_search` / `web_fetch`；需要由作者拍板核心取舍时，使用 `ask_user_question` 给出前置条件明确的选项与推荐方案。
                 3. 分权协作与目录边界：建库完成后立即停机交由作者检阅资产并手动启动第一章；日常推章、YOLO 连跑、手改同步（Sync）、睡眠整理（Dreaming）与微调信号投递，均引导作者使用右侧 Operator Studio 工作台按钮或聊天栏 `/narrate-step`、`/narrate-yolo`、`/narrate-halt`、`/narrate-dream`、`/narrate-sync`、`/narrate-signal` 命令完成，不在主对话中越权代写正文或直接修改 `books/<slug>/` 正式资产。
 
@@ -84,17 +84,11 @@
                   headChars: 4096
                   tailChars: 1024
 
-# 显式禁用 dsh-base 宿主层编码向工具行（兼容直接基于 dsh-base 与 dsh-web-app 的双场景）
+# 显式禁用 dsh-base 宿主层编码/终端/计划向工具行（保留 tool-fs 与 tool-fs-search 供主会话只读参考与本地设定检索，由 main-session-guard 守住 books/<slug>/ 裸写禁区）
 - id: tool-bash
   disabled: true
 
 - id: tool-pwsh
-  disabled: true
-
-- id: tool-fs
-  disabled: true
-
-- id: tool-fs-search
   disabled: true
 
 - id: tool-jobs

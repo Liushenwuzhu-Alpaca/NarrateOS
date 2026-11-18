@@ -31,7 +31,7 @@ presets/dsh-preset-narrateos/
 ## 设计约定
 
 1. **单一顶层模式与宿主/预设分层**：`cordis.patch.yml` 在宿主平面（顶层 `- insert:`）注册 `@narrateos/dsh-book-store`、`@narrateos/dsh-book-tools`、`@narrateos/dsh-pipeline` 共享服务插件、`@narrateos/dsh-client-ui-studio` 浏览器工作台，以及唯一面向作者的 `@deepseek-ai/dsh-agent-preset`（`id: narrateos`，名称「NarrateOS 创作模式」），不将后台工种注册为模式下拉选项。
-2. **工具隔离与净室**：`preset-narrateos.config.plugins` 仅保留会话级插件（零根作用域服务泄露），省略全部编码向工具，并在顶层补丁显式禁用 `dsh-base` 宿主层的 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、`tool-jobs`、`tool-todo`、`tool-goal`、`plan-mode`；写手（`writer`）保持 `cleanroom: true`、`tools: []` 单轮净室，且提示词仅陈述正向目标状态。
+2. **工具隔离与净室**：`preset-narrateos.config.plugins` 仅保留会话级插件（零根作用域服务泄露），并在顶层补丁显式禁用 `dsh-base` 宿主层的 `tool-bash`、`tool-pwsh`、`tool-jobs`、`tool-todo`、`tool-goal`、`plan-mode` 6 项编码/终端向宿主行（保留 `tool-fs` 与 `tool-fs-search` 供主会话只读加载 `references/` 与本地设定文件，并由 `main-session-guard` 守住 `books/<slug>/` 裸写禁区）；写手（`writer`）保持 `cleanroom: true`、`tools: []` 单轮净室，且提示词仅陈述正向目标状态。
 3. **单书覆盖**：各作品可在 `books/<slug>/world/roles/` 放置同名 YAML 或 `prompts/*.md` 覆盖本预设包的默认参数与提示词，无需重新编译。
 
 ## 运行测试

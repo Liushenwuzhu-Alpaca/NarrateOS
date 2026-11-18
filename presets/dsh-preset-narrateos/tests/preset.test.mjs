@@ -173,6 +173,8 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.equal(persona.config?.complete, true);
     assert.equal(persona.config?.includeRuntimeContext, false);
     assert.ok(typeof persona.config?.prefix === 'string' && persona.config.prefix.includes('{{model}}'));
+    assert.ok(persona.config.prefix.includes('skill') && persona.config.prefix.includes('narrate-boot'));
+    assert.ok(!persona.config.prefix.includes('->'), 'persona.prefix 不应展开流程箭头摘要诱发跳过 Skill');
 
     const web = byName.get('@deepseek-ai/dsh-tool-web');
     assert.equal(web.config?.fetch, true);
@@ -191,13 +193,11 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.ok(pruner);
     assert.equal(pruner.config?.thresholdChars, 8192);
 
-    // 4. 顶层覆盖仅禁用 dsh-base 真实存在的编码向宿主行（无虚假 ID）
+    // 4. 顶层覆盖仅禁用 dsh-base 真实存在的 6 个编码/终端/计划宿主行（保留 tool-fs 与 tool-fs-search 供只读加载 references 与设定）
     const overrideRows = parsed.filter((item) => !Array.isArray(item?.insert));
     const expectedDisabledHostIds = [
         'tool-bash',
         'tool-pwsh',
-        'tool-fs',
-        'tool-fs-search',
         'tool-jobs',
         'tool-todo',
         'tool-goal',
@@ -206,7 +206,7 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!
     assert.deepEqual(
         overrideRows.map((row) => ({ id: row.id, disabled: row.disabled })),
         expectedDisabledHostIds.map((id) => ({ id, disabled: true })),
-        '顶层禁用行应精确覆盖 dsh-base 真实存在的 8 个编码向宿主行'
+        '顶层禁用行应精确覆盖 dsh-base 真实存在的 6 个编码/终端向宿主行（放开 tool-fs 与 tool-fs-search）'
     );
 });
 
@@ -236,13 +236,18 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
 
     for (const composed of [composedWithWeb, composedBaseOnly]) {
         const byId = new Map(composed.map((entry) => [entry.id, entry]));
-        for (const hostCodingId of ['tool-bash', 'tool-pwsh', 'tool-fs', 'tool-fs-search', 'tool-jobs', 'tool-todo', 'tool-goal', 'plan-mode']) {
+        for (const hostCodingId of ['tool-bash', 'tool-pwsh', 'tool-jobs', 'tool-todo', 'tool-goal', 'plan-mode']) {
             assert.equal(byId.get(hostCodingId)?.disabled, true, `宿主行 ${hostCodingId} 必须保持 disabled: true`);
         }
         assert.ok(byId.get('narrateos-book-store'), '组合结果缺少 narrateos-book-store');
         assert.ok(byId.get('narrateos-client-ui-studio'), '组合结果缺少 narrateos-client-ui-studio');
         assert.ok(byId.get('preset-narrateos'), '组合结果缺少 preset-narrateos');
     }
+
+    // 纯 dsh-base 组合下，tool-fs 与 tool-fs-search 不再被 narrateos 顶层补丁禁用（dsh-web-app 自身会在宿主平面禁用并下放至 preset）
+    const baseOnlyById = new Map(composedBaseOnly.map((entry) => [entry.id, entry]));
+    assert.notEqual(baseOnlyById.get('tool-fs')?.disabled, true, '纯 dsh-base 组合下 tool-fs 不应被禁用');
+    assert.notEqual(baseOnlyById.get('tool-fs-search')?.disabled, true, '纯 dsh-base 组合下 tool-fs-search 不应被禁用');
 
     // 2. 在真实 Cordis + Loader + AgentPresetRegistry 中挂载，验证 leakedServices 为 [] 且宿主入口可发现
     const ctx = new Context();
@@ -407,15 +412,39 @@ test('narrate-boot Skill 满足 < 8,192 字符预算并附带完整 references',
     assert.equal(frontmatter.name, 'narrate-boot');
     assert.equal(typeof frontmatter.description, 'string');
     assert.ok(frontmatter.description.trim().length > 10);
+    assert.ok(!frontmatter.description.includes('->'), 'SKILL.md description 不得包含流程箭头摘要');
+    for (const csoKeyword of ['T0', 'Canon Delta', 'SAFE_HALT', 'Stage Ceiling']) {
+        assert.ok(frontmatter.description.includes(csoKeyword), `SKILL.md description 缺少 CSO 触发关键词: ${csoKeyword}`);
+    }
 
-    for (const marker of ['web_search', 'ask_user_question', 'lock_charter_and_boot', 'T0', 'Voice Harvest', 'OPEN_HORIZON', 'Local Closure', 'Canon Delta']) {
+    for (const marker of [
+        'web_search',
+        'ask_user_question',
+        'lock_charter_and_boot',
+        'T0',
+        'Voice Harvest',
+        'OPEN_HORIZON',
+        'Local Closure',
+        'Canon Delta',
+        'When NOT to Use',
+        'Red Flags',
+        'StaticProseGate',
+        'entityId',
+        'camelCase',
+        'snake_case',
+        'fanfic-canon-delta.md'
+    ]) {
         assert.ok(content.includes(marker), `SKILL.md 缺少关键流程锚点: ${marker}`);
     }
 
-    for (const refFile of ['charter-and-beats.md', 't0-causality-checklist.md', 'replan-protocol.md']) {
+    for (const refFile of ['charter-and-beats.md', 't0-causality-checklist.md', 'replan-protocol.md', 'fanfic-canon-delta.md']) {
         const refPath = path.join(skillDir, 'references', refFile);
         assert.ok(fs.existsSync(refPath), `缺少参考文档 ${refFile}`);
-        assert.ok(fs.readFileSync(refPath, 'utf8').trim().length > 200, `参考文档 ${refFile} 内容过短`);
+        const refText = fs.readFileSync(refPath, 'utf8').trim();
+        assert.ok(refText.length > 200, `参考文档 ${refFile} 内容过短`);
+        if (refFile === 'fanfic-canon-delta.md') {
+            assert.ok(refText.length < 2500, `同人参考文档 ${refFile} 长度 (${refText.length}) 应控制在 2500 字符以内`);
+        }
     }
 });
 
