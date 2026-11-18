@@ -172,10 +172,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** 校验并清洗 PUT /api/narrate/model-routing 请求载荷（剥离空字符串与 null 覆盖项） */
+/** 校验并清洗 PUT /api/narrate/model-routing 请求载荷（剥离空字符串与 null 覆盖项，并记录被显式清空的池/角色） */
 function parseModelRoutingRequest(body: Record<string, unknown>): {
     model_routing?: Record<string, string> | undefined;
     role_routing?: Record<string, RoleModelOverride> | undefined;
+    clearedPools?: string[] | undefined;
+    clearedRoles?: string[] | undefined;
 } {
     if (body['model_routing'] === undefined && body['role_routing'] === undefined) {
         throw new PathValidationError('请求体至少需要包含 model_routing 或 role_routing');
@@ -184,6 +186,8 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
     const result: {
         model_routing?: Record<string, string> | undefined;
         role_routing?: Record<string, RoleModelOverride> | undefined;
+        clearedPools?: string[] | undefined;
+        clearedRoles?: string[] | undefined;
     } = {};
 
     if (body['model_routing'] !== undefined) {
@@ -191,8 +195,10 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
             throw new PathValidationError('model_routing 必须为键值对对象');
         }
         const cleanedModelRouting: Record<string, string> = {};
+        const clearedPools: string[] = [];
         for (const [poolKey, rawVal] of Object.entries(body['model_routing'])) {
             if (rawVal === null || rawVal === undefined) {
+                clearedPools.push(poolKey);
                 continue;
             }
             if (typeof rawVal !== 'string') {
@@ -201,9 +207,14 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
             const trimmed = rawVal.trim();
             if (trimmed.length > 0) {
                 cleanedModelRouting[poolKey] = trimmed;
+            } else {
+                clearedPools.push(poolKey);
             }
         }
         result.model_routing = cleanedModelRouting;
+        if (clearedPools.length > 0) {
+            result.clearedPools = clearedPools;
+        }
     }
 
     if (body['role_routing'] !== undefined) {
@@ -211,8 +222,10 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
             throw new PathValidationError('role_routing 必须为角色覆盖映射对象');
         }
         const cleanedRoleRouting: Record<string, RoleModelOverride> = {};
+        const clearedRoles: string[] = [];
         for (const [roleId, rawEntry] of Object.entries(body['role_routing'])) {
             if (rawEntry === null || rawEntry === undefined) {
+                clearedRoles.push(roleId);
                 continue;
             }
             if (!isPlainObject(rawEntry)) {
@@ -263,9 +276,14 @@ function parseModelRoutingRequest(body: Record<string, unknown>): {
                 cleanedEntry.reasoning_effort !== undefined
             ) {
                 cleanedRoleRouting[roleId] = cleanedEntry;
+            } else {
+                clearedRoles.push(roleId);
             }
         }
         result.role_routing = cleanedRoleRouting;
+        if (clearedRoles.length > 0) {
+            result.clearedRoles = clearedRoles;
+        }
     }
 
     return result;
@@ -624,6 +642,59 @@ export function registerNarrateRoutes(
     const handleStatus = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'GET')) return;
         try {
+            const rt = controller.runtimeStatus;
+            if (!controller.bookRoot) {
+                const availableModels = await controller.listAvailableModels();
+                const roleDefinitions = await controller.resolveRoleDefinitions();
+                sendJson(res, 200, {
+                    bookRoot: '',
+                    bookSlug: '',
+                    title: '',
+                    walPhase: 'IDLE',
+                    activeChapter: null,
+                    lastCommittedChapter: 0,
+                    latestChapter: 0,
+                    chapterCount: 0,
+                    entityCount: 0,
+                    coldArchiveCount: 0,
+                    worldState: {
+                        story_day: 0,
+                        current_chapter: 0,
+                        current_volume: 1,
+                        timeline_mode: 'MAINLINE'
+                    },
+                    defaultModel: controller.getHostDefaultModel(),
+                    poolOverrides: controller.resolvePoolOverrides(),
+                    modelRouting: resolveStatusModelRouting(controller.poolRouting),
+                    roleRouting: controller.getGlobalRoleRouting(),
+                    roleDefinitions,
+                    availableModels,
+                    pendingSignalsCount: 0,
+                    yolo: rt.yolo,
+                    runtime: {
+                        activeTask: rt.activeTask,
+                        haltRequested: rt.haltRequested
+                    },
+                    txLockHeld: false,
+                    featCommitSha: null,
+                    stateCommitSha: null,
+                    recentCommits: { featCommitSha: null, stateCommitSha: null },
+                    writerAssemblyReport: null,
+                    lastCheckerResult: null,
+                    dreamWatermark: null,
+                    dirtyEntityCount: 0,
+                    dirtyEntityThreshold: 6,
+                    spotlightQueue: [],
+                    nextChapterOptions: [],
+                    nextChapterOptionsSourceChapter: null,
+                    openingBeats: null,
+                    volumeProgress: null,
+                    healPlan: null,
+                    syncConflictsCount: 0
+                });
+                return;
+            }
+
             const store = controller.requireBookStore();
             const snapshot = await store.loadSnapshot();
             let latestChapter = snapshot.txState.last_committed_ch;
@@ -637,14 +708,12 @@ export function registerNarrateRoutes(
                 }
             }
 
-            const [pendingSignalsCount, roleDefinitions, availableModels, diagnostics] =
-                await Promise.all([
-                    controller.countPendingSignals(),
-                    controller.resolveRoleDefinitions(snapshot.config, store.bookRoot),
-                    controller.listAvailableModels(snapshot.config),
-                    controller.getDiagnosticsStatus(store, snapshot)
-                ]);
-            const rt = controller.runtimeStatus;
+            const availableModels = await controller.listAvailableModels(snapshot.config);
+            const [pendingSignalsCount, roleDefinitions, diagnostics] = await Promise.all([
+                controller.countPendingSignals(),
+                controller.resolveRoleDefinitions(snapshot.config, store.bookRoot),
+                controller.getDiagnosticsStatus(store, snapshot)
+            ]);
 
             sendJson(res, 200, {
                 bookRoot: store.bookRoot,
@@ -658,11 +727,13 @@ export function registerNarrateRoutes(
                 entityCount: Object.keys(snapshot.entities).length,
                 coldArchiveCount: snapshot.coldArchiveIds.length,
                 worldState: snapshot.worldState.frontmatter,
+                defaultModel: controller.getHostDefaultModel(),
+                poolOverrides: controller.resolvePoolOverrides(snapshot.config),
                 modelRouting: resolveStatusModelRouting(
                     controller.poolRouting,
                     snapshot.config.model_routing
                 ),
-                roleRouting: snapshot.config.role_routing ?? {},
+                roleRouting: controller.resolveEffectiveRoleRouting(snapshot.config),
                 roleDefinitions,
                 availableModels,
                 pendingSignalsCount,
@@ -702,6 +773,10 @@ export function registerNarrateRoutes(
     const handleChapters = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'GET')) return;
         try {
+            if (!controller.bookRoot) {
+                sendJson(res, 200, { chapters: [] });
+                return;
+            }
             const list = await controller.listChapters();
             const bookRoot = controller.requireBookStore().bookRoot;
             const commitMap = await readLatestChapterCommitMap(bookRoot);
@@ -855,6 +930,64 @@ export function registerNarrateRoutes(
         const kind = url.searchParams.get('kind');
 
         try {
+            if (kind === 'status') {
+                await handleStatus(req, res);
+                return;
+            }
+
+            if (!controller.bookRoot) {
+                switch (kind) {
+                    case 'entities':
+                        sendJson(res, 200, {
+                            kind: 'entities',
+                            entities: [],
+                            coldArchiveCount: 0,
+                            coldArchiveIds: []
+                        });
+                        return;
+                    case 'horizon':
+                        sendJson(res, 200, { kind: 'horizon', content: '' });
+                        return;
+                    case 'threads':
+                        sendJson(res, 200, { kind: 'threads', content: '' });
+                        return;
+                    case 'telemetry':
+                        sendJson(res, 200, { kind: 'telemetry', entries: [] });
+                        return;
+                    case 'signals':
+                        sendJson(res, 200, {
+                            kind: 'signals',
+                            signals: [],
+                            pending: [],
+                            pendingCount: 0
+                        });
+                        return;
+                    case 'sync_conflicts':
+                    case 'conflicts':
+                        sendJson(res, 200, {
+                            kind: 'sync_conflicts',
+                            syncConflicts: null,
+                            conflicts: [],
+                            dirtyChapters: [],
+                            stateDiffAdvisories: [],
+                            updatedAt: null
+                        });
+                        return;
+                    case 'halt':
+                        sendJson(res, 200, {
+                            kind: 'halt',
+                            safeHalt: null,
+                            quarantineReport: null
+                        });
+                        return;
+                    default:
+                        sendJson(res, 400, {
+                            error: '无效的视图类型 kind，允许值: entities|horizon|threads|telemetry|signals|sync_conflicts|halt|status'
+                        });
+                        return;
+                }
+            }
+
             const store = controller.requireBookStore();
             const bookRoot = store.bookRoot;
 

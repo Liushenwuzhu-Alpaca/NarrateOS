@@ -1,14 +1,17 @@
 import { access, lstat, readFile, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeLlmPool, type ActiveLlmPool } from '@narrateos/dsh-book-store';
 import type { ControlledBookToolName, YieldToolName } from '@narrateos/dsh-book-tools';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
 const ROLE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
-/** 支持的模型池标识 */
-export const RolePoolSchema = z.enum(['strong_creative', 'fast_retrieval', 'audit']);
+/** 支持的模型池标识（兼容旧书配置中可能残留的 'audit' 并无损回退至 strong_creative） */
+export const RolePoolSchema = z
+    .enum(['strong_creative', 'fast_retrieval', 'audit'])
+    .transform((pool): ActiveLlmPool => normalizeLlmPool(pool));
 export type RolePool = z.infer<typeof RolePoolSchema>;
 
 /** 支持的受控读写工具名 */

@@ -664,7 +664,7 @@ export class DreamingPipeline {
         const classified = await generateStructuredJson(
             this.llm,
             {
-                pool: 'audit',
+                pool: 'strong_creative',
                 traceStage: 'heal.classify',
                 staticPrefixBlocks: ['你是长篇小说跨章连续性自愈裁判。仅输出合法 JSON。'],
                 dynamicTail: classifyPrompt

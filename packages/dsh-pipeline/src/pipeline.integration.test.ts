@@ -1957,7 +1957,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         };
         expect(libLog.startedAt).toBeTruthy();
         expect(libLog.finishedAt).toBeTruthy();
-        expect(libLog.modelId).toBe('deepseek-official:deepseek-flash');
+        expect(libLog.modelId).toBe('deepseek-official:deepseek-chat');
         expect(libLog.usage).toMatchObject({
             inputTokens: 210,
             cacheReadTokens: 80,
@@ -1979,7 +1979,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const planLog = JSON.parse(
             await readFile(join(bookRoot, `.ops/session_logs/${plannerSession!.sessionId}.json`), 'utf8')
         ) as typeof libLog;
-        expect(planLog.modelId).toBe('deepseek-official:deepseek-v4-pro');
+        expect(planLog.modelId).toBe('deepseek-official:deepseek-chat');
         expect(planLog.usage?.outputTokens).toBe(120);
         expect(planLog.reasoning).toBe('流式细纲思考');
         expect(planLog.thinkingChars).toBe('流式细纲思考'.length);
@@ -2038,7 +2038,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(failLog.status).toBe('failed');
         expect(failLog.startedAt).toBeTruthy();
         expect(failLog.finishedAt).toBeTruthy();
-        expect(failLog.modelId).toBe('deepseek-official:deepseek-flash');
+        expect(failLog.modelId).toBe('deepseek-official:deepseek-chat');
         expect(failLog.usage?.inputTokens).toBe(50);
         expect(failLog.usage?.outputTokens).toBe(12);
         expect(failLog.reasoning).toBe('失败前思考片段');
@@ -2082,12 +2082,22 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             })
         ).toEqual({ provider: 'openai', model: 'gpt-5-prose' });
 
-        // 无 role_routing 时完全向后兼容 model_routing
+        // 无 role_routing 时完全向后兼容 model_routing，且双池缺少 audit 时无损回退 strong_creative
         expect(
             resolveRoleRoute(poolRouting, 'fact-checker', 'audit', {
                 model_routing: { audit: 'legacy-audit' }
             })
         ).toEqual({ provider: 'audit-provider', model: 'legacy-audit' });
+        expect(
+            resolveRoleRoute(
+                {
+                    strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+                    fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' }
+                },
+                'fact-checker',
+                'audit'
+            )
+        ).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' });
 
         expect(
             resolveRoleReasoningEffort('writer', 'medium', {
@@ -2197,8 +2207,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(writerRun?.provider).toBe('custom-anthropic');
         expect(writerRun?.model).toBe('claude-prose');
         expect(writerRun?.reasoningEffort).toBe(ReasoningEffortId('high'));
-        expect(factCheckerRun?.provider).toBe('audit-provider');
-        expect(factCheckerRun?.model).toBe('audit-v1');
+        expect(factCheckerRun?.provider).toBe('deepseek-official');
+        expect(factCheckerRun?.model).toBe('deepseek-v4-pro');
 
         // 3. 无 ctx.agents.create 时兜底 runCleanroom 也必须走 resolveRoleRoute 与 resolveRoleReasoningEffort
         const fallbackLlmCalls: Array<{ provider: string; model: string; reasoningEffort?: string }> = [];

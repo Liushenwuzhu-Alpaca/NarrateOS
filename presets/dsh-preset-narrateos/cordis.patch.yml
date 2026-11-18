@@ -17,15 +17,8 @@
       config:
         booksRoot: ./books
         poolRouting:
-          strong_creative:
-            provider: deepseek-official
-            model: deepseek-v4-pro
-          fast_retrieval:
-            provider: deepseek-official
-            model: deepseek-flash
-          audit:
-            provider: deepseek-official
-            model: deepseek-flash
+          strong_creative: {}
+          fast_retrieval: {}
 
     - id: narrateos-client-ui-studio
       name: '@narrateos/dsh-client-ui-studio'

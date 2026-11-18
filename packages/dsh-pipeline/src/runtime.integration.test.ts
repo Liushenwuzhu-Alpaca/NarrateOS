@@ -250,21 +250,23 @@ function createMockCommandsRuntime(ctx: Context) {
 }
 
 describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停机集成测试', () => {
-    it('Config 满足 DSH Schemastery 原生协议 (isNativeConfigSchema === true)', () => {
+    it('Config 满足 DSH Schemastery 原生协议 (isNativeConfigSchema === true) 且无写死假模型/audit 池', () => {
         expect(isNativeConfigSchema(pipelinePlugin.Config)).toBe(true);
         const normalized = pipelinePlugin.Config(undefined);
-        expect(normalized.poolRouting?.strong_creative.provider).toBe('deepseek-official');
+        expect(normalized.poolRouting).toEqual({
+            strong_creative: { provider: '', model: '' },
+            fast_retrieval: { provider: '', model: '' }
+        });
+        expect((normalized.poolRouting as Record<string, unknown>)['audit']).toBeUndefined();
         expect(normalized.heartbeatIntervalMs).toBe(15_000);
         expect(normalized.shutdownTimeoutMs).toBe(5_000);
     });
 
-    it('环境变量 NARRATEOS_MODEL_* 可覆写插件 poolRouting 默认模型', async () => {
+    it('环境变量 NARRATEOS_MODEL_* 可覆写插件 poolRouting 默认模型（强/弱双池）', async () => {
         const prevStrong = process.env.NARRATEOS_MODEL_STRONG;
         const prevFast = process.env.NARRATEOS_MODEL_FAST;
-        const prevAudit = process.env.NARRATEOS_MODEL_AUDIT;
         process.env.NARRATEOS_MODEL_STRONG = 'override-strong-model';
         process.env.NARRATEOS_MODEL_FAST = 'override-fast-model';
-        process.env.NARRATEOS_MODEL_AUDIT = 'override-audit-model';
         try {
             const bookRoot = await createGitBookWorkspace(tempDirs, 'book-env-model');
             const booksRoot = join(bookRoot, '..');
@@ -287,16 +289,13 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
 
             expect(ctx.narratePipeline.poolRouting).toEqual({
                 strong_creative: { provider: 'deepseek-official', model: 'override-strong-model' },
-                fast_retrieval: { provider: 'deepseek-official', model: 'override-fast-model' },
-                audit: { provider: 'deepseek-official', model: 'override-audit-model' }
+                fast_retrieval: { provider: 'deepseek-official', model: 'override-fast-model' }
             });
         } finally {
             if (prevStrong === undefined) delete process.env.NARRATEOS_MODEL_STRONG;
             else process.env.NARRATEOS_MODEL_STRONG = prevStrong;
             if (prevFast === undefined) delete process.env.NARRATEOS_MODEL_FAST;
             else process.env.NARRATEOS_MODEL_FAST = prevFast;
-            if (prevAudit === undefined) delete process.env.NARRATEOS_MODEL_AUDIT;
-            else process.env.NARRATEOS_MODEL_AUDIT = prevAudit;
         }
     });
 
@@ -1160,8 +1159,7 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             heartbeatIntervalMs: 0,
             poolRouting: {
                 strong_creative: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-                fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' },
-                audit: { provider: 'deepseek-official', model: 'deepseek-flash' }
+                fast_retrieval: { provider: 'deepseek-official', model: 'deepseek-flash' }
             }
         });
         registerCleanup(() => pipeFiber.dispose());
@@ -1169,6 +1167,15 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         // 1. GET /api/narrate/status 验证新增字段
         const statusBefore = await web.invoke('GET', '/api/narrate/status');
         expect(statusBefore.statusCode).toBe(200);
+        expect(statusBefore.json['defaultModel']).toBeNull();
+        expect(statusBefore.json['poolOverrides']).toEqual({
+            strong_creative: 'deepseek-official:deepseek-v4-pro',
+            fast_retrieval: 'deepseek-official:deepseek-flash'
+        });
+        expect(statusBefore.json['modelRouting']).toEqual({
+            strong_creative: 'deepseek-official:deepseek-v4-pro',
+            fast_retrieval: 'deepseek-official:deepseek-flash'
+        });
         expect(statusBefore.json['roleRouting']).toEqual({});
         const roleDefsBefore = statusBefore.json['roleDefinitions'] as Array<{
             id: string;
@@ -1187,6 +1194,9 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             'dreamer',
             'boot-compiler'
         ]);
+        expect(roleDefsBefore.find((r) => r.id === 'fact-checker')?.defaultPool).toBe(
+            'strong_creative'
+        );
         const availableModels = statusBefore.json['availableModels'] as Array<{
             provider: string;
             model: string;
@@ -2778,5 +2788,264 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(resumedHealRes.json['quarantined']).toBe(false);
         expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(3);
         await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
+    });
+
+    it('Wave 4D: 动态继承 agentDefaultModel、剔除假模型污染、SSE default_model_changed 与无书态 200', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-w4d-nobook-'));
+        tempDirs.push(booksRoot);
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+        const web = createMockWebServer(ctx);
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async () => {},
+            onLlmStream: () => textToStreamChunks('')
+        });
+
+        let currentDefault: { provider: string; model: string; reasoningEffort?: string } = {
+            provider: 'openai',
+            model: 'gpt-5',
+            reasoningEffort: 'medium'
+        };
+        ctx.provide('agentDefaultModel' as never, {
+            currentSelection: () => ({ ...currentDefault })
+        } as never);
+
+        Object.assign(ctx.llm as unknown as Record<string, unknown>, {
+            listProviders: () => [
+                { id: 'openai', name: 'OpenAI' },
+                { id: 'anthropic', name: 'Anthropic' }
+            ],
+            listModels: async (provider: string) => {
+                if (provider === 'openai') {
+                    return [
+                        { provider, id: 'gpt-5', name: 'GPT-5' },
+                        { provider, id: 'gpt-5-mini', name: 'GPT-5 Mini' }
+                    ];
+                }
+                if (provider === 'anthropic') {
+                    return [{ provider, id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' }];
+                }
+                return [];
+            }
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            booksRoot,
+            heartbeatIntervalMs: 0
+        });
+        registerCleanup(() => pipeFiber.dispose());
+
+        // 1. 无书态 (!controller.bookRoot) GET /api/narrate/status、/views、/chapters、/runs 均返回 200
+        const statusNoBook = await web.invoke('GET', '/api/narrate/status');
+        expect(statusNoBook.statusCode).toBe(200);
+        expect(statusNoBook.json['bookRoot']).toBe('');
+        expect(statusNoBook.json['defaultModel']).toEqual({
+            provider: 'openai',
+            model: 'gpt-5',
+            reasoningEffort: 'medium'
+        });
+        expect(statusNoBook.json['poolOverrides']).toEqual({});
+        expect(statusNoBook.json['modelRouting']).toEqual({
+            strong_creative: 'openai:gpt-5',
+            fast_retrieval: 'openai:gpt-5'
+        });
+        expect((statusNoBook.json['modelRouting'] as Record<string, unknown>)['audit']).toBeUndefined();
+        const modelsNoBook = statusNoBook.json['availableModels'] as Array<{
+            provider: string;
+            model: string;
+        }>;
+        expect(modelsNoBook.map((m) => `${m.provider}:${m.model}`)).toEqual([
+            'openai:gpt-5',
+            'openai:gpt-5-mini',
+            'anthropic:claude-sonnet-4-5'
+        ]);
+        expect(modelsNoBook.some((m) => m.model === 'deepseek-v4-pro' || m.model === 'deepseek-flash')).toBe(
+            false
+        );
+
+        const roleDefsNoBook = statusNoBook.json['roleDefinitions'] as Array<{
+            id: string;
+            defaultPool: string;
+            effectiveProvider: string;
+            effectiveModel: string;
+        }>;
+        expect(roleDefsNoBook.find((r) => r.id === 'fact-checker')).toMatchObject({
+            defaultPool: 'strong_creative',
+            effectiveProvider: 'openai',
+            effectiveModel: 'gpt-5'
+        });
+
+        const chaptersNoBook = await web.invoke('GET', '/api/narrate/chapters');
+        expect(chaptersNoBook.statusCode).toBe(200);
+        expect(chaptersNoBook.json).toEqual({ chapters: [] });
+
+        const runsNoBook = await web.invoke('GET', '/api/narrate/runs');
+        expect(runsNoBook.statusCode).toBe(200);
+        expect(runsNoBook.json).toEqual({ runs: [] });
+
+        for (const kind of [
+            'entities',
+            'horizon',
+            'threads',
+            'telemetry',
+            'signals',
+            'sync_conflicts',
+            'halt',
+            'status'
+        ]) {
+            const viewRes = await web.invoke('GET', `/api/narrate/views?kind=${kind}`);
+            expect(viewRes.statusCode).toBe(200);
+        }
+        const invalidViewRes = await web.invoke('GET', '/api/narrate/views?kind=unknown');
+        expect(invalidViewRes.statusCode).toBe(400);
+
+        // 2. 监听 SSE default_model_changed 实时同步 DSH 主对话切模型与 llm/models-updated
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+
+        currentDefault = {
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-5',
+            reasoningEffort: 'high'
+        };
+        (ctx.emit as (name: string, ...args: unknown[]) => void)(
+            'session/event',
+            { id: 'main-chat-session' },
+            { type: 'model/selection', data: { ...currentDefault } }
+        );
+
+        const changedEvt = await sse.waitForEvent((e) => e.event === 'default_model_changed');
+        expect(changedEvt.data['defaultModel']).toEqual({
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-5',
+            reasoningEffort: 'high'
+        });
+        expect(changedEvt.data['poolOverrides']).toEqual({});
+        expect(changedEvt.data['modelRouting']).toEqual({
+            strong_creative: 'anthropic:claude-sonnet-4-5',
+            fast_retrieval: 'anthropic:claude-sonnet-4-5'
+        });
+        expect(typeof changedEvt.data['timestamp']).toBe('string');
+        expect(Array.isArray(changedEvt.data['availableModels'])).toBe(true);
+        expect(Array.isArray(changedEvt.data['roleDefinitions'])).toBe(true);
+
+        const countAfterSelection = sse.events.filter(
+            (e) => e.event === 'default_model_changed'
+        ).length;
+        (ctx.emit as (name: string, ...args: unknown[]) => void)('llm/models-updated', 'openai');
+        await sse.waitForEvent(
+            () =>
+                sse.events.filter((e) => e.event === 'default_model_changed').length >
+                countAfterSelection
+        );
+
+        // 3. 无书态 PUT /api/narrate/model-routing 保存全局内存路由 -> 新选书未单独覆盖时继承 -> 空串 "" 清除恢复默认
+        const globalPutRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+            model_routing: {
+                strong_creative: 'openai:gpt-5',
+                fast_retrieval: ''
+            }
+        });
+        expect(globalPutRes.statusCode).toBe(200);
+        expect(globalPutRes.json['status']).toBe('ok');
+        expect(globalPutRes.json['defaultModel']).toEqual({
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-5',
+            reasoningEffort: 'high'
+        });
+        expect(globalPutRes.json['poolOverrides']).toEqual({
+            strong_creative: 'openai:gpt-5'
+        });
+        expect(globalPutRes.json['modelRouting']).toEqual({
+            strong_creative: 'openai:gpt-5',
+            fast_retrieval: 'anthropic:claude-sonnet-4-5'
+        });
+
+        // 创建并切入新书（world/book_config.yaml 未配置 model_routing），验证继承全局内存路由
+        const tmpBookRoot = await createGitBookWorkspace(tempDirs, 'inherit-global-book');
+        const newBookRoot = join(booksRoot, 'inherit-global-book');
+        await rename(tmpBookRoot, newBookRoot);
+        const selectRes = await web.invoke('POST', '/api/narrate/book/select', {
+            bookRoot: newBookRoot
+        });
+        expect(selectRes.statusCode).toBe(200);
+
+        const statusWithBook = await web.invoke('GET', '/api/narrate/status');
+        expect(statusWithBook.statusCode).toBe(200);
+        expect(statusWithBook.json['poolOverrides']).toEqual({
+            strong_creative: 'openai:gpt-5'
+        });
+        expect(statusWithBook.json['modelRouting']).toEqual({
+            strong_creative: 'openai:gpt-5',
+            fast_retrieval: 'anthropic:claude-sonnet-4-5'
+        });
+
+        // 传入空串 "" 清除强池显式覆盖，恢复跟随 DSH 本体默认模型
+        const clearRes = await web.invoke('PUT', '/api/narrate/model-routing', {
+            model_routing: {
+                strong_creative: '',
+                fast_retrieval: ''
+            }
+        });
+        expect(clearRes.statusCode).toBe(200);
+        expect(clearRes.json['poolOverrides']).toEqual({});
+        expect(clearRes.json['modelRouting']).toEqual({
+            strong_creative: 'anthropic:claude-sonnet-4-5',
+            fast_retrieval: 'anthropic:claude-sonnet-4-5'
+        });
+
+        // 4. 卸载后对称解绑，不再接收或触发广播
+        sse.close();
+        await pipeFiber.dispose();
+        expect(() =>
+            (ctx.emit as (name: string, ...args: unknown[]) => void)(
+                'session/event',
+                { id: 'main-chat-session' },
+                { type: 'model/selection', data: { provider: 'openai', model: 'gpt-5-mini' } }
+            )
+        ).not.toThrow();
+    });
+
+    it('Wave 4D: 无 agentDefaultModel 且无已注册模型时 availableModels 为空且不混入假模型', async () => {
+        const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-w4d-headless-'));
+        tempDirs.push(booksRoot);
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { booksRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin, { booksRoot });
+        registerCleanup(() => bookToolsFiber.dispose());
+        const web = createMockWebServer(ctx);
+
+        await createHeadlessMockServices(ctx, {
+            onAgent: async () => {},
+            onLlmStream: () => textToStreamChunks('')
+        });
+
+        const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            booksRoot,
+            heartbeatIntervalMs: 0
+        });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const statusRes = await web.invoke('GET', '/api/narrate/status');
+        expect(statusRes.statusCode).toBe(200);
+        expect(statusRes.json['bookRoot']).toBe('');
+        expect(statusRes.json['defaultModel']).toBeNull();
+        expect(statusRes.json['poolOverrides']).toEqual({});
+        expect(statusRes.json['availableModels']).toEqual([]);
     });
 });

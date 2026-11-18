@@ -4,8 +4,19 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ZodType } from 'zod';
 
-/** 模型池路由分类 */
-export type LlmPool = 'strong_creative' | 'fast_retrieval' | 'audit';
+/** 活跃双模型池分类（强创意池 / 快检索池） */
+export type ActiveLlmPool = 'strong_creative' | 'fast_retrieval';
+
+/** 模型池路由分类（兼容历史配置中可能残留的 'audit'，运行时无损回退至 strong_creative） */
+export type LlmPool = ActiveLlmPool | 'audit';
+
+/** 将模型池标识（含历史残留 'audit'）无损规范化为强/弱双池 */
+export function normalizeLlmPool(pool: string | undefined): ActiveLlmPool {
+    if (pool === 'fast_retrieval') {
+        return 'fast_retrieval';
+    }
+    return 'strong_creative';
+}
 
 /** 标准化无交集 Token 用量统计 */
 export interface TokenUsage {

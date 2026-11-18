@@ -1,5 +1,5 @@
 id: fact-checker
-pool: audit
+pool: strong_creative
 cleanroom: false
 promptFile: ./prompts/fact-checker.md
 temperature: 0.1

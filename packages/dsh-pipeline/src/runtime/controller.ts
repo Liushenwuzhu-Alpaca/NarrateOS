@@ -10,13 +10,14 @@ import {
     BookStore,
     BookSwitchConflictError,
     NodeSystemAdapter,
+    normalizeLlmPool,
     parseL2CardSections,
     TxLockConflictError,
     TxLockPayloadSchema,
+    type ActiveLlmPool,
     type BookConfig,
     type BookSnapshot,
     type ForkParallelWindowOptions,
-    type LlmPool,
     type MergeParallelWindowOptions,
     type NarrationSubjectivity,
     type NarrateStoreService,
@@ -68,6 +69,7 @@ import { VolumePipeline } from '../pipeline/volume-pipeline.js';
 import { RoleLoader } from '../roles/role-loader.js';
 import {
     DshLlmAdapter,
+    parseProviderModelSpec,
     resolveRoleReasoningEffort,
     resolveRoleRoute,
     resolveTierPool
@@ -83,8 +85,11 @@ import {
     type ExtendedRunRecord,
     type HealConflictsOptions,
     type HealConflictsResult,
+    type HostDefaultModelSelection,
     type LlmPoolRouting,
+    type LlmRouteTarget,
     type OpsSignal,
+    type PoolModelOverrides,
     type RoleDefinitionItem,
     type RunDreamingOptions,
     type RunDreamingResult,
@@ -109,6 +114,8 @@ const MAX_SYMLINK_DEPTH = 32;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_STALE_MS = 30_000;
+const LIGHTWEIGHT_FALLBACK_PROVIDER = 'deepseek-official';
+const LIGHTWEIGHT_FALLBACK_MODEL = 'deepseek-chat';
 export const DEFAULT_YOLO_GOAL = '按既定主线与人物弧光自然推进下一章';
 
 /** 规范顺序的 8 个标准工种 ID */
@@ -123,22 +130,33 @@ export const CANONICAL_ROLE_IDS = [
     'boot-compiler'
 ] as const;
 
-const CANONICAL_ROLE_DEFAULT_POOLS: Record<(typeof CANONICAL_ROLE_IDS)[number], LlmPool> = {
+const CANONICAL_ROLE_DEFAULT_POOLS: Record<(typeof CANONICAL_ROLE_IDS)[number], ActiveLlmPool> = {
     librarian: 'fast_retrieval',
     planner: 'strong_creative',
     writer: 'strong_creative',
     patch: 'strong_creative',
-    'fact-checker': 'audit',
+    'fact-checker': 'strong_creative',
     extractor: 'fast_retrieval',
     dreamer: 'strong_creative',
     'boot-compiler': 'strong_creative'
 };
 
+export interface PluginPoolRouteOverride {
+    provider?: string | undefined;
+    model?: string | undefined;
+}
+
+export interface PluginPoolRoutingOverrides {
+    strong_creative?: PluginPoolRouteOverride | undefined;
+    fast_retrieval?: PluginPoolRouteOverride | undefined;
+}
+
 export interface NarrateControllerConfig {
     bookRoot?: string | undefined;
     booksRoot?: string | undefined;
     presetRoot?: string | undefined;
-    poolRouting: LlmPoolRouting;
+    poolRouting?: LlmPoolRouting | undefined;
+    poolRoutingOverrides?: PluginPoolRoutingOverrides | undefined;
     heartbeatIntervalMs?: number | undefined;
     shutdownTimeoutMs?: number | undefined;
     pluginSearchDirs?: string[] | undefined;
@@ -379,22 +397,53 @@ export async function isValidBookDirectory(dirPath: string): Promise<boolean> {
     }
 }
 
+function formatRouteTargetSpec(target: LlmRouteTarget): string {
+    const model = target.model.trim();
+    const provider = target.provider.trim();
+    if (model.includes(':') || provider.length === 0) {
+        return model;
+    }
+    return `${provider}:${model}`;
+}
+
+function normalizePluginPoolOverrides(
+    config: NarrateControllerConfig
+): PluginPoolRoutingOverrides {
+    if (config.poolRoutingOverrides) {
+        return {
+            ...(config.poolRoutingOverrides.strong_creative
+                ? { strong_creative: { ...config.poolRoutingOverrides.strong_creative } }
+                : {}),
+            ...(config.poolRoutingOverrides.fast_retrieval
+                ? { fast_retrieval: { ...config.poolRoutingOverrides.fast_retrieval } }
+                : {})
+        };
+    }
+    const out: PluginPoolRoutingOverrides = {};
+    if (config.poolRouting) {
+        for (const pool of ['strong_creative', 'fast_retrieval'] as const) {
+            const target = config.poolRouting[pool];
+            const provider = target?.provider?.trim() ?? '';
+            const model = target?.model?.trim() ?? '';
+            if (provider.length > 0 || model.length > 0) {
+                out[pool] = { provider, model };
+            }
+        }
+    }
+    return out;
+}
+
 export function resolveStatusModelRouting(
     poolRouting: LlmPoolRouting,
     configured?: Record<string, string>
 ): Record<string, string> {
     const routing: Record<string, string> = {};
-    if (configured) {
-        for (const [key, value] of Object.entries(configured)) {
-            const trimmed = value.trim();
-            if (trimmed.length > 0) {
-                routing[key] = trimmed;
-            }
-        }
-    }
-    for (const [pool, target] of Object.entries(poolRouting)) {
-        if (!routing[pool]) {
-            routing[pool] = target.model;
+    for (const pool of ['strong_creative', 'fast_retrieval'] as const) {
+        const explicit = configured?.[pool]?.trim();
+        if (explicit) {
+            routing[pool] = explicit;
+        } else {
+            routing[pool] = formatRouteTargetSpec(poolRouting[pool]);
         }
     }
     return routing;
@@ -414,9 +463,9 @@ export class NarrateRuntimeController {
     public readonly roleLoader: RoleLoader;
     public readonly llmAdapter: DshLlmAdapter;
     public readonly roleRunner: RoleRunner;
-    public readonly poolRouting: LlmPoolRouting;
     public readonly booksRoot: string;
 
+    private readonly explicitPoolOverrides: PluginPoolRoutingOverrides;
     private readonly defaultBookRoot: string | null;
     private readonly pluginSearchDirs: string[];
     private readonly shutdownTimeoutMs: number;
@@ -426,6 +475,12 @@ export class NarrateRuntimeController {
     private readonly signalQueues = new Map<string, Promise<void>>();
     private readonly disposeBookSwitched: () => void;
 
+    private globalModelRouting: Record<string, string> = {};
+    private globalRoleRouting: Record<string, RoleModelOverride> = {};
+    private discoveredFallbackModel: LlmRouteTarget | null = null;
+    private discoveredFallbackLoaded = false;
+    private lastObservedAgentDefaultKey: string | null = null;
+    private pendingSessionDefaultSelection: HostDefaultModelSelection | null = null;
     private activeTask: RuntimeTaskKind = 'IDLE';
     private haltRequested = false;
     private shuttingDown = false;
@@ -469,7 +524,7 @@ export class NarrateRuntimeController {
         this.storeService = storeService;
         this.toolsService = toolsService;
         this.system = storeService.system ?? new NodeSystemAdapter();
-        this.poolRouting = config.poolRouting;
+        this.explicitPoolOverrides = normalizePluginPoolOverrides(config);
         this.defaultBookRoot =
             config.bookRoot && config.bookRoot.trim().length > 0
                 ? resolve(config.bookRoot)
@@ -484,8 +539,12 @@ export class NarrateRuntimeController {
         this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
         this.roleLoader = new RoleLoader(config.presetRoot);
 
+        const initialPoolRouting = this.poolRouting;
         this.llmAdapter = new DshLlmAdapter(ctx.llm, {
-            poolRouting: config.poolRouting,
+            poolRouting: initialPoolRouting,
+            resolvePoolRouting: () => this.poolRouting,
+            ensurePoolRoutingReady: () => this.ensurePoolRoutingReady(),
+            resolveGlobalRoleRouting: () => this.getGlobalRoleRouting(),
             resolveModelRouting: async () => {
                 if (!this.bookRoot) return undefined;
                 try {
@@ -511,7 +570,10 @@ export class NarrateRuntimeController {
             toolsService,
             roleLoader: this.roleLoader,
             llmAdapter: this.llmAdapter,
-            poolRouting: config.poolRouting,
+            poolRouting: initialPoolRouting,
+            resolvePoolRouting: () => this.poolRouting,
+            ensurePoolRoutingReady: () => this.ensurePoolRoutingReady(),
+            resolveGlobalRoleRouting: () => this.getGlobalRoleRouting(),
             onStageEvent: (evt) => {
                 if (
                     evt.stage === 'FACT_CHECKER' &&
@@ -546,6 +608,299 @@ export class NarrateRuntimeController {
     /** 当前激活作品目录（未选书时为 null） */
     get bookRoot(): string | null {
         return this.storeService.bookRoot ?? this.defaultBookRoot;
+    }
+
+    /** 当前强/弱双池动态生效基础路由 */
+    get poolRouting(): LlmPoolRouting {
+        return {
+            strong_creative: this.resolvePoolTarget('strong_creative'),
+            fast_retrieval: this.resolvePoolTarget('fast_retrieval')
+        };
+    }
+
+    private readAgentDefaultSelection(): HostDefaultModelSelection | null {
+        try {
+            const ctxRecord = this.ctx as unknown as {
+                get?: (name: string) => unknown;
+                agentDefaultModel?: unknown;
+            };
+            const svc =
+                (typeof ctxRecord.get === 'function'
+                    ? ctxRecord.get('agentDefaultModel')
+                    : undefined) ?? ctxRecord.agentDefaultModel;
+            if (!svc || typeof svc !== 'object') {
+                return null;
+            }
+            const currentFn = (svc as { currentSelection?: unknown }).currentSelection;
+            if (typeof currentFn !== 'function') {
+                return null;
+            }
+            const sel = (currentFn as () => unknown).call(svc) as
+                | { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+                | undefined;
+            if (!sel || typeof sel.provider !== 'string' || typeof sel.model !== 'string') {
+                return null;
+            }
+            const provider = sel.provider.trim();
+            const model = sel.model.trim();
+            if (provider.length === 0 || model.length === 0) {
+                return null;
+            }
+            const reasoningEffort =
+                typeof sel.reasoningEffort === 'string' && sel.reasoningEffort.trim().length > 0
+                    ? sel.reasoningEffort.trim()
+                    : undefined;
+            return {
+                provider,
+                model,
+                ...(reasoningEffort !== undefined ? { reasoningEffort } : {})
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /** 读取 DSH 本体当前默认模型选择（未配置时返回 null） */
+    getHostDefaultModel(): HostDefaultModelSelection | null {
+        const agentSel = this.readAgentDefaultSelection();
+        const agentKey = agentSel
+            ? `${agentSel.provider}\0${agentSel.model}\0${agentSel.reasoningEffort ?? ''}`
+            : null;
+        if (this.lastObservedAgentDefaultKey !== agentKey) {
+            this.lastObservedAgentDefaultKey = agentKey;
+            this.pendingSessionDefaultSelection = null;
+        }
+        if (this.pendingSessionDefaultSelection) {
+            return { ...this.pendingSessionDefaultSelection };
+        }
+        return agentSel;
+    }
+
+    private readFirstRegisteredProviderId(): string | undefined {
+        const llm = this.ctx.llm as unknown as {
+            listProviders?: () => Array<{ id?: unknown }>;
+        };
+        if (!llm || typeof llm.listProviders !== 'function') {
+            return undefined;
+        }
+        try {
+            const providers = llm.listProviders();
+            if (!Array.isArray(providers)) {
+                return undefined;
+            }
+            for (const providerInfo of providers) {
+                if (typeof providerInfo?.id === 'string' && providerInfo.id.trim().length > 0) {
+                    return providerInfo.id.trim();
+                }
+            }
+        } catch {
+            return undefined;
+        }
+        return undefined;
+    }
+
+    private resolveFallbackBaseTarget(): LlmRouteTarget {
+        const hostDefault = this.getHostDefaultModel();
+        if (hostDefault) {
+            return { provider: hostDefault.provider, model: hostDefault.model };
+        }
+        if (this.discoveredFallbackModel) {
+            return { ...this.discoveredFallbackModel };
+        }
+        const firstProvider = this.readFirstRegisteredProviderId();
+        return {
+            provider: firstProvider ?? LIGHTWEIGHT_FALLBACK_PROVIDER,
+            model: LIGHTWEIGHT_FALLBACK_MODEL
+        };
+    }
+
+    private resolvePoolTarget(pool: ActiveLlmPool): LlmRouteTarget {
+        const baseDefault = this.resolveFallbackBaseTarget();
+        const globalSpec = this.globalModelRouting[pool]?.trim();
+        if (globalSpec) {
+            const pluginProvider = this.explicitPoolOverrides[pool]?.provider?.trim();
+            return parseProviderModelSpec(
+                globalSpec,
+                pluginProvider || baseDefault.provider
+            );
+        }
+        const pluginOverride = this.explicitPoolOverrides[pool];
+        const overrideModel = pluginOverride?.model?.trim() ?? '';
+        const overrideProvider = pluginOverride?.provider?.trim() ?? '';
+        if (overrideModel.length > 0) {
+            return parseProviderModelSpec(
+                overrideModel,
+                overrideProvider || baseDefault.provider
+            );
+        }
+        if (overrideProvider.length > 0) {
+            return { provider: overrideProvider, model: baseDefault.model };
+        }
+        return baseDefault;
+    }
+
+    /** 探测并缓存首个可用 provider/model（仅当未加载且无 agentDefaultModel 时探测） */
+    async refreshDiscoveredDefaultModel(): Promise<void> {
+        await this.listAvailableModels();
+    }
+
+    private async ensurePoolRoutingReady(): Promise<void> {
+        if (this.getHostDefaultModel() || this.discoveredFallbackLoaded) {
+            return;
+        }
+        await this.refreshDiscoveredDefaultModel();
+    }
+
+    /** 返回无书态全局分角色覆盖快照 */
+    getGlobalRoleRouting(): Record<string, RoleModelOverride> {
+        return { ...this.globalRoleRouting };
+    }
+
+    /** 返回当前有效的分角色路由（单书覆盖优先，未覆盖时继承全局内存路由） */
+    resolveEffectiveRoleRouting(
+        bookConfig?: Pick<BookConfig, 'role_routing'>
+    ): Record<string, RoleModelOverride> {
+        return {
+            ...this.globalRoleRouting,
+            ...(bookConfig?.role_routing ?? {})
+        };
+    }
+
+    private resolveEffectiveBookConfig(
+        bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'>
+    ): Pick<BookConfig, 'model_routing' | 'role_routing'> {
+        const mergedModelRouting = {
+            ...this.globalModelRouting,
+            ...(bookConfig?.model_routing ?? {})
+        };
+        const mergedRoleRouting = this.resolveEffectiveRoleRouting(bookConfig);
+        return {
+            ...(Object.keys(mergedModelRouting).length > 0
+                ? { model_routing: mergedModelRouting }
+                : {}),
+            ...(Object.keys(mergedRoleRouting).length > 0
+                ? { role_routing: mergedRoleRouting }
+                : {})
+        };
+    }
+
+    /** 返回强/弱双池的显式覆盖映射（跟随 DSH 默认时省略对应键） */
+    resolvePoolOverrides(
+        bookConfig?: Pick<BookConfig, 'model_routing'>
+    ): PoolModelOverrides {
+        const overrides: PoolModelOverrides = {};
+        const baseDefault = this.resolveFallbackBaseTarget();
+
+        for (const pool of ['strong_creative', 'fast_retrieval'] as const) {
+            const bookVal = bookConfig?.model_routing?.[pool]?.trim();
+            if (bookVal) {
+                overrides[pool] = bookVal;
+                continue;
+            }
+            const globalVal = this.globalModelRouting[pool]?.trim();
+            if (globalVal) {
+                overrides[pool] = globalVal;
+                continue;
+            }
+            const pluginOv = this.explicitPoolOverrides[pool];
+            const ovModel = pluginOv?.model?.trim() ?? '';
+            const ovProvider = pluginOv?.provider?.trim() ?? '';
+            if (ovModel.length > 0) {
+                overrides[pool] = formatRouteTargetSpec(
+                    parseProviderModelSpec(ovModel, ovProvider || baseDefault.provider)
+                );
+            } else if (ovProvider.length > 0) {
+                overrides[pool] = formatRouteTargetSpec({
+                    provider: ovProvider,
+                    model: baseDefault.model
+                });
+            }
+        }
+        return overrides;
+    }
+
+    /** 处理宿主主对话会话 model/selection 事件并向 SSE 推送 default_model_changed */
+    handleHostSessionModelSelection(rawData: unknown): void {
+        if (this.isAdmissionClosed || !rawData || typeof rawData !== 'object') {
+            return;
+        }
+        const rec = rawData as {
+            provider?: unknown;
+            model?: unknown;
+            reasoningEffort?: unknown;
+        };
+        if (typeof rec.provider !== 'string' || typeof rec.model !== 'string') {
+            return;
+        }
+        const provider = rec.provider.trim();
+        const model = rec.model.trim();
+        if (provider.length === 0 || model.length === 0) {
+            return;
+        }
+        const reasoningEffort =
+            typeof rec.reasoningEffort === 'string' && rec.reasoningEffort.trim().length > 0
+                ? rec.reasoningEffort.trim()
+                : undefined;
+        const selected: HostDefaultModelSelection = {
+            provider,
+            model,
+            ...(reasoningEffort !== undefined ? { reasoningEffort } : {})
+        };
+
+        const agentSel = this.readAgentDefaultSelection();
+        this.lastObservedAgentDefaultKey = agentSel
+            ? `${agentSel.provider}\0${agentSel.model}\0${agentSel.reasoningEffort ?? ''}`
+            : null;
+        const matchesAgentSel =
+            agentSel !== null &&
+            agentSel.provider === selected.provider &&
+            agentSel.model === selected.model &&
+            agentSel.reasoningEffort === selected.reasoningEffort;
+        this.pendingSessionDefaultSelection = matchesAgentSel ? null : selected;
+
+        void this.trackBackgroundTask(this.broadcastDefaultModelChanged());
+    }
+
+    /** 处理宿主 LLM 适配器或模型目录更新事件并向 SSE 推送 default_model_changed */
+    handleHostLlmCatalogUpdated(): void {
+        if (this.isAdmissionClosed) {
+            return;
+        }
+        this.discoveredFallbackLoaded = false;
+        this.discoveredFallbackModel = null;
+        void this.trackBackgroundTask(this.broadcastDefaultModelChanged());
+    }
+
+    /** 汇总最新默认模型与双池状态并广播 SSE default_model_changed */
+    async broadcastDefaultModelChanged(): Promise<void> {
+        if (this.isAdmissionClosed) {
+            return;
+        }
+        let bookCfg: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined;
+        let activeRoot: string | undefined;
+        if (this.bookRoot) {
+            activeRoot = this.bookRoot;
+            try {
+                bookCfg = await this.storeService.openStore(this.bookRoot).readBookConfig();
+            } catch {
+                bookCfg = undefined;
+            }
+        }
+        const [availableModels, roleDefinitions] = await Promise.all([
+            this.listAvailableModels(bookCfg),
+            this.resolveRoleDefinitions(bookCfg, activeRoot)
+        ]);
+        if (this.isAdmissionClosed) {
+            return;
+        }
+        this.emitEvent('default_model_changed', {
+            defaultModel: this.getHostDefaultModel(),
+            availableModels,
+            poolOverrides: this.resolvePoolOverrides(bookCfg),
+            modelRouting: resolveStatusModelRouting(this.poolRouting, bookCfg?.model_routing),
+            roleDefinitions,
+            timestamp: new Date().toISOString()
+        });
     }
 
     /** 准入闸门是否已关闭（包含 Cordis Fiber 卸载态 5/uid=null 的同步检测） */
@@ -773,6 +1128,9 @@ export class NarrateRuntimeController {
 
     /** 读取工种运行会话索引 (.ops/runs.jsonl，保留扩展字段 parentSessionId 与 mode) */
     async listRunRecords(chapter?: number): Promise<ExtendedRunRecord[]> {
+        if (!this.bookRoot) {
+            return [];
+        }
         const store = this.requireBookStore();
         const raw = await readOptionalText(join(store.bookRoot, '.ops/runs.jsonl'));
         if (raw === null) {
@@ -2417,6 +2775,9 @@ export class NarrateRuntimeController {
             commitSha: string | null;
         }>;
     }> {
+        if (!this.bookRoot) {
+            return { chapters: [] };
+        }
         const store = this.requireBookStore();
         const bookRoot = store.bookRoot;
         const manuscriptsDir = join(bookRoot, 'manuscripts');
@@ -2465,11 +2826,14 @@ export class NarrateRuntimeController {
         bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'>,
         bookRoot?: string
     ): Promise<RoleDefinitionItem[]> {
+        await this.ensurePoolRoutingReady();
         const targetBookRoot = bookRoot ?? this.bookRoot ?? undefined;
+        const effectiveBookConfig = this.resolveEffectiveBookConfig(bookConfig);
+        const activePoolRouting = this.poolRouting;
         const definitions: RoleDefinitionItem[] = [];
 
         for (const roleId of CANONICAL_ROLE_IDS) {
-            let defaultPool: LlmPool = CANONICAL_ROLE_DEFAULT_POOLS[roleId];
+            let defaultPool: ActiveLlmPool = CANONICAL_ROLE_DEFAULT_POOLS[roleId];
             let defaultReasoningEffort: ReasoningEffortLevel | undefined;
 
             try {
@@ -2480,17 +2844,24 @@ export class NarrateRuntimeController {
                 // 预设目录缺失或单书覆写异常时回退到标准默认池定义
             }
 
-            const roleOverride = bookConfig?.role_routing?.[roleId];
+            const roleOverride = effectiveBookConfig.role_routing?.[roleId];
             const effectiveTier =
                 roleOverride?.tier === 'strong' || roleOverride?.tier === 'weak'
                     ? roleOverride.tier
                     : null;
-            const effectivePool = resolveTierPool(effectiveTier ?? undefined, defaultPool);
-            const route = resolveRoleRoute(this.poolRouting, roleId, defaultPool, bookConfig);
+            const effectivePool = normalizeLlmPool(
+                resolveTierPool(effectiveTier ?? undefined, defaultPool)
+            );
+            const route = resolveRoleRoute(
+                activePoolRouting,
+                roleId,
+                defaultPool,
+                effectiveBookConfig
+            );
             const effectiveReasoningEffort = resolveRoleReasoningEffort(
                 roleId,
                 defaultReasoningEffort,
-                bookConfig
+                effectiveBookConfig
             );
 
             definitions.push({
@@ -2508,11 +2879,13 @@ export class NarrateRuntimeController {
         return definitions;
     }
 
-    /** 探测并汇总当前运行时所有可用模型候选（去重，任何枚举异常静默降级） */
+    /** 探测并汇总当前运行时所有真实可用模型候选（剔除假模型兜底，仅含已注册模型、DSH 默认模型与非空显式覆盖） */
     async listAvailableModels(
         bookConfig?: Pick<BookConfig, 'model_routing' | 'role_routing'>
     ): Promise<AvailableModelItem[]> {
         const seen = new Map<string, AvailableModelItem>();
+        const hostDefault = this.getHostDefaultModel();
+        const fallbackProvider = hostDefault?.provider ?? this.readFirstRegisteredProviderId() ?? '';
 
         const addCandidate = (rawProvider: string, rawModel: string, label?: string): void => {
             let provider = rawProvider.trim();
@@ -2529,7 +2902,7 @@ export class NarrateRuntimeController {
                 }
             }
             if (provider.length === 0) {
-                provider = this.poolRouting.strong_creative.provider;
+                provider = fallbackProvider;
             }
 
             const key = `${provider}\0${model}`;
@@ -2553,6 +2926,7 @@ export class NarrateRuntimeController {
             ) => Promise<Array<{ id?: unknown; model?: unknown; name?: unknown }>>;
         };
 
+        let firstDiscovered: LlmRouteTarget | null = null;
         if (llm && typeof llm.listProviders === 'function') {
             try {
                 const providers = llm.listProviders();
@@ -2570,8 +2944,12 @@ export class NarrateRuntimeController {
                                 const modelId = extractModelId(modelInfo);
                                 const modelName =
                                     typeof modelInfo?.name === 'string' ? modelInfo.name : undefined;
-                                if (modelId.trim().length > 0) {
-                                    addCandidate(providerId, modelId, modelName);
+                                const trimmedModel = modelId.trim();
+                                if (trimmedModel.length > 0) {
+                                    if (!firstDiscovered) {
+                                        firstDiscovered = { provider: providerId, model: trimmedModel };
+                                    }
+                                    addCandidate(providerId, trimmedModel, modelName);
                                 }
                             }
                         } catch {
@@ -2583,42 +2961,54 @@ export class NarrateRuntimeController {
                 // listProviders 异常静默降级
             }
         }
+        this.discoveredFallbackModel = firstDiscovered;
+        this.discoveredFallbackLoaded = true;
 
-        for (const target of Object.values(this.poolRouting)) {
-            addCandidate(target.provider, target.model);
+        if (hostDefault) {
+            addCandidate(hostDefault.provider, hostDefault.model);
+        }
+
+        const activePoolRouting = this.poolRouting;
+        for (const pool of ['strong_creative', 'fast_retrieval'] as const) {
+            const ov = this.explicitPoolOverrides[pool];
+            const ovModel = ov?.model?.trim() ?? '';
+            if (ovModel.length > 0) {
+                const ovProvider = ov?.provider?.trim() || activePoolRouting[pool].provider;
+                addCandidate(ovProvider, ovModel);
+            }
+        }
+
+        for (const [poolKey, rawModel] of Object.entries(this.globalModelRouting)) {
+            const pool = normalizeLlmPool(poolKey);
+            addCandidate(activePoolRouting[pool].provider, rawModel);
         }
 
         if (bookConfig?.model_routing) {
             for (const [poolKey, rawModel] of Object.entries(bookConfig.model_routing)) {
-                const poolTarget =
-                    poolKey === 'strong_creative' ||
-                    poolKey === 'fast_retrieval' ||
-                    poolKey === 'audit'
-                        ? this.poolRouting[poolKey]
-                        : this.poolRouting.strong_creative;
-                addCandidate(poolTarget.provider, rawModel);
+                const pool = normalizeLlmPool(poolKey);
+                addCandidate(activePoolRouting[pool].provider, rawModel);
             }
         }
 
-        if (bookConfig?.role_routing) {
-            for (const [roleId, override] of Object.entries(bookConfig.role_routing)) {
-                if (!override?.model) continue;
-                const defaultPool =
-                    CANONICAL_ROLE_DEFAULT_POOLS[
-                        roleId as (typeof CANONICAL_ROLE_IDS)[number]
-                    ] ?? 'strong_creative';
-                const effectivePool = resolveTierPool(override.tier, defaultPool);
-                addCandidate(this.poolRouting[effectivePool].provider, override.model);
-            }
+        const combinedRoleRouting = this.resolveEffectiveRoleRouting(bookConfig);
+        for (const [roleId, override] of Object.entries(combinedRoleRouting)) {
+            if (!override?.model) continue;
+            const defaultPool =
+                CANONICAL_ROLE_DEFAULT_POOLS[roleId as (typeof CANONICAL_ROLE_IDS)[number]] ??
+                'strong_creative';
+            const effectivePool = normalizeLlmPool(resolveTierPool(override.tier, defaultPool));
+            addCandidate(activePoolRouting[effectivePool].provider, override.model);
         }
 
         return Array.from(seen.values());
     }
 
-    /** 在非忙碌状态与事务锁保护下更新单书 world/book_config.yaml 模型路由配置 */
+    /** 更新模型路由配置：无书态保存至全局内存路由，有书态在事务锁保护下落盘 world/book_config.yaml */
     async updateModelRouting(input: {
         model_routing?: Record<string, string> | undefined;
         role_routing?: Record<string, RoleModelOverride> | undefined;
+        clearedPools?: readonly string[] | undefined;
+        clearedRoles?: readonly string[] | undefined;
     }): Promise<SaveModelRoutingResult> {
         this.assertAdmissionOpen();
         if (this.activeTask !== 'IDLE' || this.yoloState.running) {
@@ -2627,12 +3017,46 @@ export class NarrateRuntimeController {
             );
         }
 
+        await this.ensurePoolRoutingReady();
+
+        if (!this.bookRoot) {
+            if (input.model_routing !== undefined) {
+                const nextGlobal: Record<string, string> = {};
+                for (const [poolKey, val] of Object.entries(input.model_routing)) {
+                    const trimmed = val.trim();
+                    if (trimmed.length > 0) {
+                        nextGlobal[poolKey] = trimmed;
+                    }
+                }
+                this.globalModelRouting = nextGlobal;
+            }
+            if (input.role_routing !== undefined) {
+                this.globalRoleRouting = { ...input.role_routing };
+            }
+
+            const effectiveBookCfg = this.resolveEffectiveBookConfig(undefined);
+            return {
+                status: 'ok',
+                defaultModel: this.getHostDefaultModel(),
+                poolOverrides: this.resolvePoolOverrides(undefined),
+                modelRouting: resolveStatusModelRouting(
+                    this.poolRouting,
+                    effectiveBookCfg.model_routing
+                ),
+                roleRouting: this.getGlobalRoleRouting(),
+                roleDefinitions: await this.resolveRoleDefinitions(undefined, undefined)
+            };
+        }
+
         const store = this.requireBookStore();
         return await store.withTxLock(async () => {
             const currentConfig = await store.readBookConfig();
             const nextConfig: BookConfig = { ...currentConfig };
 
             if (input.model_routing !== undefined) {
+                for (const clearedPool of input.clearedPools ?? []) {
+                    delete this.globalModelRouting[clearedPool];
+                }
                 if (Object.keys(input.model_routing).length > 0) {
                     nextConfig.model_routing = input.model_routing;
                 } else {
@@ -2641,6 +3065,9 @@ export class NarrateRuntimeController {
             }
 
             if (input.role_routing !== undefined) {
+                for (const clearedRole of input.clearedRoles ?? []) {
+                    delete this.globalRoleRouting[clearedRole];
+                }
                 if (Object.keys(input.role_routing).length > 0) {
                     nextConfig.role_routing = input.role_routing;
                 } else {
@@ -2672,13 +3099,16 @@ export class NarrateRuntimeController {
                 await store.writeBookConfig(nextConfig);
             }
 
+            const effectiveBookCfg = this.resolveEffectiveBookConfig(nextConfig);
             return {
                 status: 'ok',
+                defaultModel: this.getHostDefaultModel(),
+                poolOverrides: this.resolvePoolOverrides(nextConfig),
                 modelRouting: resolveStatusModelRouting(
                     this.poolRouting,
-                    nextConfig.model_routing
+                    effectiveBookCfg.model_routing
                 ),
-                roleRouting: nextConfig.role_routing ?? {},
+                roleRouting: this.resolveEffectiveRoleRouting(nextConfig),
                 roleDefinitions: await this.resolveRoleDefinitions(nextConfig, store.bookRoot)
             };
         });
