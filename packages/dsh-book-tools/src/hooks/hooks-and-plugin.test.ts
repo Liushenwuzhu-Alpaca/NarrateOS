@@ -108,7 +108,12 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
             path: join(bookDir, 'manuscripts/ch_0001.md'),
             content: '越权正文'
         });
-        expect(ctx.tools.checkGuards(rawWriteAbs)).toContain('主会话写保护拦截');
+        const rawWriteReason = ctx.tools.checkGuards(rawWriteAbs);
+        expect(rawWriteReason).toContain('主会话写保护拦截');
+        expect(rawWriteReason).toContain('lock_charter_and_boot');
+        expect(rawWriteReason).toContain('Studio');
+        expect(rawWriteReason).not.toContain('book_edit');
+        expect(rawWriteReason).not.toContain('yield_*');
 
         const rawEditRel = makeToolExecution('str_replace_editor', {
             path: join(booksRoot, 'demo-book/world/world_state.md'),

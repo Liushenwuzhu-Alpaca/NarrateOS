@@ -153,7 +153,7 @@ export function evaluateMainSessionWriteGuard(
         for (const candidate of candidates) {
             for (const absCandidate of resolveCandidateTargets(candidate, sessionCwd, booksParentDir)) {
                 if (isPathInsideDir(absCandidate, resolvedBooksRoot)) {
-                    return `主会话写保护拦截：禁止使用裸工具 ${exec.name} 直接写入 ${candidate}。请改用 lock_charter_and_boot、book_edit 或 yield_* 受控工具。`;
+                    return `主会话写保护拦截：禁止使用裸工具 ${exec.name} 直接写入 ${candidate}。请改用 lock_charter_and_boot 或右侧 Studio 工作台操作。`;
                 }
             }
         }

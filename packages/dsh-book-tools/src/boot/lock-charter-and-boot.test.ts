@@ -8,7 +8,11 @@ import { NodeSystemAdapter } from '@narrateos/dsh-book-store';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BootGateError } from '../errors.js';
 import * as bookToolsPlugin from '../index.js';
-import { lockCharterAndBoot, type LockCharterAndBootInput } from './lock-charter-and-boot.js';
+import {
+    createLockCharterAndBootTool,
+    lockCharterAndBoot,
+    type LockCharterAndBootInput
+} from './lock-charter-and-boot.js';
 
 const tempDirs: string[] = [];
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -288,5 +292,41 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         await expect(
             toolsService.lockCharterAndBoot(buildMinimalValidBootInput({ book_slug: 'after-dispose' }))
         ).rejects.toThrow('已卸载');
+    });
+
+    it('允许 max_auto_rollback_chapters 为 0（关闭自动回滚），拒绝负数，且工具 Schema 描述标明 camelCase/snake_case 差异', async () => {
+        const booksRoot = await makeTempBooksRoot();
+
+        const res = await lockCharterAndBoot(
+            buildMinimalValidBootInput({
+                book_slug: 'zero-rollback-book',
+                max_auto_rollback_chapters: 0
+            }),
+            { booksRoot }
+        );
+        expect(res.halted).toBe(true);
+        const bookConfigYaml = await readFile(join(res.bookRoot, 'world/book_config.yaml'), 'utf8');
+        expect(bookConfigYaml).toContain('max_auto_rollback_chapters: 0');
+
+        await expect(
+            lockCharterAndBoot(
+                buildMinimalValidBootInput({
+                    book_slug: 'negative-rollback-book',
+                    max_auto_rollback_chapters: -1
+                }),
+                { booksRoot }
+            )
+        ).rejects.toThrow();
+        expect(existsSync(join(booksRoot, 'negative-rollback-book'))).toBe(false);
+
+        const tool = createLockCharterAndBootTool({ booksRoot });
+        const props = (tool.parameters as { properties?: Record<string, { description?: string }> }).properties ?? {};
+        expect(props['entities']?.description).toContain('camelCase');
+        expect(props['entities']?.description).toContain('entityId');
+        expect(props['entities']?.description).toContain('snake_case');
+        expect(props['lore_entries']?.description).toContain('lore_*');
+        expect(props['open_threads']?.description).toContain('15');
+        expect(props['future_horizon_events']?.description).toContain('story_day');
+        expect(props['voice_samples']?.description).toContain('StaticProseGate');
     });
 });

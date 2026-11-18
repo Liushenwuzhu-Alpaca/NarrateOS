@@ -87,7 +87,7 @@ export const LockCharterAndBootInputSchema = z.object({
     tokens_per_char: z.number().positive().default(0.6),
     narration_subjectivity: z.enum(['objective_third', 'subjective_first']).default('objective_third'),
     writer_token_budget: z.number().int().positive().nullable().default(null),
-    max_auto_rollback_chapters: z.number().int().positive().default(3),
+    max_auto_rollback_chapters: z.number().int().nonnegative().default(3),
     craft_plugins: z.array(z.string()).default([]),
     model_routing: z.record(z.string(), z.string()).optional()
 });
@@ -532,20 +532,42 @@ export function createLockCharterAndBootTool(options: LockCharterAndBootOptions)
             static_base_and_voice: { type: 'string', required: true, description: '世界底层法则与句法纪律' },
             world_summary: { type: 'string', required: true, description: '开局世界观与局势摘要' },
             l0_sagas_markdown: { type: 'string', description: 'L0 纪元总表 Markdown' },
-            l1_volumes_markdown: { type: 'string', required: true, description: 'L1 活跃卷级总表（支持 >=1 卷）' },
-            entities: { type: 'array', required: true, items: { type: 'json' }, description: '初始实体档案列表（>=1 个）' },
-            lore_entries: { type: 'array', items: { type: 'json' }, description: '世界书词条列表' },
-            open_threads: { type: 'array', items: { type: 'json' }, description: '首批跨卷伏笔列表' },
-            future_horizon_events: { type: 'array', items: { type: 'json' }, description: 'T0 后预定惯性事件列表' },
-            voice_samples: { type: 'array', items: { type: 'json' }, description: '作者提供的声纹样本（未提供时保持空数组）' },
+            l1_volumes_markdown: { type: 'string', required: true, description: 'L1 活跃卷级总表（必填，至少包含 1 个 vol_XX 或 第X卷 标记）' },
+            entities: {
+                type: 'array',
+                required: true,
+                items: { type: 'json' },
+                description:
+                    '初始实体档案列表（>=1 个）。注意 entities[] 元素内部使用 camelCase：entityId (char_*/item_*)、canonicalName (须含中文)、uniqueAliases、contextualTitles、innateLocks ([{ visibility, text }])、acquiredState ([{ storyDay<=0, visibility, slotKey?, text }])、irreversibleTrajectory ([{ storyDay<=0, text }])、recentBuffer ([{ storyDay?<=0, text }])；顶层与其余数组使用 snake_case。'
+            },
+            lore_entries: {
+                type: 'array',
+                items: { type: 'json' },
+                description: '世界书词条列表（snake_case 数组项：{ id: "lore_*", title, summary, content }）'
+            },
+            open_threads: {
+                type: 'array',
+                items: { type: 'json' },
+                description: '首批跨卷伏笔列表（最多 15 条，每项为 { thread_id, title, wakeup_condition }）'
+            },
+            future_horizon_events: {
+                type: 'array',
+                items: { type: 'json' },
+                description: 'T0 后预定惯性事件列表（每项为 { event_id, story_day (>0), premise, description }）'
+            },
+            voice_samples: {
+                type: 'array',
+                items: { type: 'json' },
+                description: '作者提供的声纹样本（每项为 { tag, sample }，须通过 StaticProseGate；作者未提供样章时必须传空数组 []，严禁伪造）'
+            },
             tokens_per_char: { type: 'number', description: '分词率系数（默认 0.6）' },
             narration_subjectivity: {
                 type: 'string',
                 enum: ['objective_third', 'subjective_first'],
-                description: '叙述人称主观度'
+                description: '叙述人称主观度（objective_third | subjective_first，默认 objective_third）'
             },
             writer_token_budget: { type: 'integer', description: '写手窗口 Token 预算上限' },
-            max_auto_rollback_chapters: { type: 'integer', description: '最大自动回滚章数' },
+            max_auto_rollback_chapters: { type: 'integer', description: '最大自动回滚章数（>=0，0 表示关闭自动回滚，默认 3）' },
             craft_plugins: { type: 'array', items: { type: 'string' }, description: '启用的认知插件列表' },
             model_routing: { type: 'json', description: '单书模型路由覆盖表' }
         },
