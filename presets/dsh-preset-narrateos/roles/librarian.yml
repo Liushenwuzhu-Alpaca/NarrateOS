@@ -10,4 +10,7 @@ tools:
     - book_glob
     - book_grep
     - book_read
+blockedReadPaths:
+    - world/author_charter.md
+    - world/arc_director_plan.md
 yieldTool: yield_context_pack

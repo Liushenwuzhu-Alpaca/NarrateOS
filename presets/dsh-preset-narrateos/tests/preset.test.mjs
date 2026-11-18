@@ -281,7 +281,7 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
         });
     }
 
-    // 2. 在真实 Cordis + Loader + AgentPresetRegistry 中挂载，验证 leakedServices 为 []、宿主入口可发现且仅注册只读文件工具
+    // 2. 在真实 Cordis + Loader + AgentPresetRegistry 中挂载全套 4 个核心插件，验证 leakedServices 为 []、宿主入口可发现且仅注册只读文件工具
     const ctx = new Context();
     ctx.baseUrl = pathToFileURL(path.join(REPO_ROOT, 'package.json')).href;
     await ctx.plugin(Loader);
@@ -291,8 +291,17 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
             if (specifier === '@narrateos/dsh-book-store') {
                 return await import(pathToFileURL(path.join(REPO_ROOT, 'packages/dsh-book-store/dist/index.js')).href);
             }
+            if (specifier === '@narrateos/dsh-book-tools') {
+                return await import(pathToFileURL(path.join(REPO_ROOT, 'packages/dsh-book-tools/dist/index.js')).href);
+            }
+            if (specifier === '@narrateos/dsh-pipeline') {
+                return await import(pathToFileURL(path.join(REPO_ROOT, 'packages/dsh-pipeline/dist/index.js')).href);
+            }
             if (specifier === '@narrateos/dsh-client-ui-studio') {
-                // Phase 4 浏览器包若尚未构建，仍应可在 Host Loader entries 中被声明发现
+                const studioDistPath = path.join(REPO_ROOT, 'packages/dsh-client-ui-studio/dist/index.js');
+                if (fs.existsSync(studioDistPath)) {
+                    return await import(pathToFileURL(studioDistPath).href);
+                }
                 return { name: 'narrateos-client-ui-studio', apply() {} };
             }
             return await importFromRoot(specifier);
@@ -307,9 +316,14 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
             if (def?.name) registeredToolNames.push(def.name);
             return () => {};
         },
-        get: () => undefined
+        get: () => undefined,
+        guard: () => () => {}
     });
-    ctx.provide('skills', { registerProvider: () => () => {} });
+    ctx.provide('skills', {
+        get: async () => undefined,
+        register: () => () => {},
+        registerProvider: () => () => {}
+    });
     ctx.provide('web', { registerSearchProvider: () => {}, registerFetchProvider: () => {} });
     ctx.provide('userQuestions', { ask: async () => ({}) });
     ctx.provide('commands', { register: () => () => {} });
@@ -338,10 +352,8 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
     await ctx.plugin(AgentPresetRegistry, { default: 'narrateos' });
 
     try {
-        // 挂载宿主与预设行（跳过尚未进入本分支的 Phase 2/3 包）
-        const insertRows = narratePatches[0].insert.filter(
-            (row) => !['narrateos-book-tools', 'narrateos-pipeline'].includes(row.id)
-        );
+        // 挂载完整宿主与预设行（包含全部 4 个核心插件）
+        const insertRows = narratePatches[0].insert;
         await ctx.loader.root.update(insertRows);
         await ctx.loader.await();
 
@@ -354,6 +366,14 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
         assert.ok(storeEntry, 'Host ctx.loader.entries() 必须包含 narrateos-book-store');
         assert.equal(ctx.get('narrateStore')?.booksRoot, path.resolve('./books'));
 
+        const toolsEntry = hostEntries.find((entry) => entry.id === 'narrateos-book-tools');
+        assert.ok(toolsEntry, 'Host ctx.loader.entries() 必须包含 narrateos-book-tools');
+        assert.ok(ctx.get('narrateTools'), 'Host ctx.get("narrateTools") 必须已注册');
+
+        const pipelineEntry = hostEntries.find((entry) => entry.id === 'narrateos-pipeline');
+        assert.ok(pipelineEntry, 'Host ctx.loader.entries() 必须包含 narrateos-pipeline');
+        assert.ok(ctx.get('narratePipeline'), 'Host ctx.get("narratePipeline") 必须已注册');
+
         const compositions = ctx.agentPresets.inspectCompositions();
         assert.equal(compositions.length, 1);
         assert.equal(compositions[0].id, 'narrateos');
@@ -364,10 +384,10 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
         assert.ok(narrateosRow, 'agentPresets.list() 应包含 narrateos');
         assert.equal(narrateosRow.broken, undefined, `preset-narrateos 不应存在诊断异常: ${narrateosRow.broken}`);
 
-        for (const expectedReadOnlyTool of ['read', 'glob', 'grep']) {
+        for (const expectedReadOnlyTool of ['read', 'glob', 'grep', 'lock_charter_and_boot']) {
             assert.ok(
                 registeredToolNames.includes(expectedReadOnlyTool),
-                `preset-narrateos 必须挂载只读工具 ${expectedReadOnlyTool}，实际已注册: ${registeredToolNames.join(', ')}`
+                `preset-narrateos 必须挂载工具 ${expectedReadOnlyTool}，实际已注册: ${registeredToolNames.join(', ')}`
             );
         }
         for (const forbiddenWriteTool of ['write', 'edit', 'apply_patch', 'read_image']) {
@@ -388,7 +408,7 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         librarian: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_context_pack', tools: ['book_glob', 'book_grep', 'book_read'] },
         planner: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_outline', tools: ['book_read', 'book_grep'] },
         writer: { pool: 'strong_creative', reasoningEffort: 'medium', cleanroom: true, yieldTool: null, tools: [], maxSteps: 1, maxReadCalls: 0 },
-        patch: { pool: 'strong_creative', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_patched_draft', tools: ['patch_paragraphs'], maxSteps: 6, maxReadCalls: 0 },
+        patch: { pool: 'strong_creative', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_patched_draft', tools: ['patch_paragraphs'], maxSteps: 8, maxReadCalls: 0 },
         'fact-checker': { pool: 'audit', reasoningEffort: 'medium', cleanroom: false, yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep'] },
         extractor: { pool: 'fast_retrieval', reasoningEffort: 'low', cleanroom: false, yieldTool: 'yield_state_patch', tools: ['book_read', 'book_grep'] },
         dreamer: { pool: 'strong_creative', reasoningEffort: 'high', cleanroom: false, yieldTool: 'yield_dream_commit', tools: ['book_read', 'book_grep', 'book_glob', 'book_edit'] }
@@ -417,6 +437,26 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         assert.deepEqual(cfg.tools, expected.tools);
         assert.equal(cfg.yieldTool, expected.yieldTool);
 
+        if (roleId === 'librarian' || roleId === 'extractor') {
+            assert.deepEqual(
+                cfg.blockedReadPaths,
+                ['world/author_charter.md', 'world/arc_director_plan.md'],
+                `${roleId}.yml 必须声明 blockedReadPaths 物理屏蔽全知契约与导演底牌`
+            );
+        }
+        if (roleId === 'dreamer') {
+            assert.deepEqual(
+                cfg.allowedOpsRead,
+                ['.ops/voice_samples.yaml', '.ops/signals.jsonl', '.ops/telemetry.jsonl'],
+                'dreamer.yml 仅允许只读访问 voice_samples.yaml / signals.jsonl / telemetry.jsonl'
+            );
+            assert.deepEqual(
+                cfg.allowedOpsWrite,
+                ['.ops/voice_samples.yaml'],
+                'dreamer.yml 严禁包含 .ops/signals.jsonl 写权限'
+            );
+        }
+
         const promptPath = path.resolve(rolesDir, cfg.promptFile);
         assert.ok(fs.existsSync(promptPath), `角色 ${roleId} 引用的提示词文件不存在: ${promptPath}`);
         const promptText = fs.readFileSync(promptPath, 'utf8').trim();
@@ -439,6 +479,7 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     // 校验 Ch.2 修复相关的提示词契约锚点
     const writerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/writer.md'), 'utf8');
     assert.ok(writerPrompt.includes('# 标题名称'), 'writer.md 必须正向说明正文首行输出 `# 标题名称` 一级标题');
+    assert.ok(!writerPrompt.includes('局部定点修补') && !writerPrompt.includes('Patch'), 'writer.md 不应残留局部定点修补（Patch）模式章节');
 
     const patchPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/patch.md'), 'utf8');
     for (const marker of ['# ', '0-based', 'patch_paragraphs', 'StaticProseGate', 'yield_patched_draft']) {
@@ -462,7 +503,9 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         'world/future_horizon.md',
         'manuscripts/',
         'book_grep',
-        'recall_queries'
+        'recall_queries',
+        'wakeup_entity_ids',
+        '首次登场'
     ]) {
         assert.ok(librarianPrompt.includes(marker), `librarian.md 缺少关键契约锚点: ${marker}`);
     }
@@ -472,8 +515,19 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     }
 
     const factCheckerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/fact-checker.md'), 'utf8');
-    assert.ok(factCheckerPrompt.includes('1-4 个自然段'), 'fact-checker.md LOCAL_PATCH 阈值必须为 1-4 个自然段');
-    assert.ok(factCheckerPrompt.includes('5 个及以上自然段'), 'fact-checker.md MULTI_REWRITE 阈值必须为 5 个及以上自然段');
+    for (const marker of [
+        '已由管线预注入',
+        'manuscripts/ch_0001.md',
+        '1-6 个自然段',
+        '<= 35%',
+        '7+ 段',
+        '> 35%',
+        'quote_draft',
+        'source_ref',
+        'quote_source'
+    ]) {
+        assert.ok(factCheckerPrompt.includes(marker), `fact-checker.md 缺少关键契约锚点: ${marker}`);
+    }
 
     const plannerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/planner.md'), 'utf8');
     for (const marker of ['实体档案摘要', '上章上下文', '点查']) {
@@ -492,7 +546,13 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         'upsert_ledger',
         'trajectory_ops',
         'entry',
-        'yield_state_patch'
+        'yield_state_patch',
+        'plot_summary',
+        'prose_anchors',
+        'appeared_entity_ids',
+        'OMNISCIENT_SECRET',
+        'READER_KNOWN',
+        'slot_key'
     ]) {
         assert.ok(extractorPrompt.includes(marker), `extractor.md 缺少关键契约锚点: ${marker}`);
     }
@@ -500,11 +560,43 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     const jsonMatch = /```json\r?\n([\s\S]*?)\r?\n```/.exec(extractorPrompt);
     assert.ok(jsonMatch, 'extractor.md 必须包含 JSON 示例块');
     const examplePayload = JSON.parse(jsonMatch[1]);
+    assert.equal(typeof examplePayload.plot_summary, 'string');
+    assert.ok(Array.isArray(examplePayload.prose_anchors));
+    assert.ok(Array.isArray(examplePayload.appeared_entity_ids));
     assert.ok(Array.isArray(examplePayload.entity_patches) && examplePayload.entity_patches.length >= 1);
     const firstPatch = examplePayload.entity_patches[0];
     assert.ok(Array.isArray(firstPatch.acquired_state_ops) && firstPatch.acquired_state_ops.some((op) => op.op === 'upsert_slot'));
     assert.ok(Array.isArray(firstPatch.trajectory_ops) && firstPatch.trajectory_ops.some((op) => op.op === 'append'));
     assert.ok(Array.isArray(firstPatch.buffer_ops) && firstPatch.buffer_ops.some((op) => op.op === 'upsert_slot') && firstPatch.buffer_ops.some((op) => op.op === 'trim_buffer'));
+
+    const dreamerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/dreamer.md'), 'utf8');
+    for (const marker of [
+        'advanceVolume',
+        'world/current_arc_envelope.md',
+        'prose_anchors',
+        'Archived WARPED',
+        'world/future_horizon.md',
+        '.ops/signals.jsonl',
+        'spotlight_triggers'
+    ]) {
+        assert.ok(dreamerPrompt.includes(marker), `dreamer.md 缺少关键契约锚点: ${marker}`);
+    }
+
+    const bootPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/boot-compiler.md'), 'utf8');
+    for (const marker of [
+        'author_sample',
+        'boot_seed',
+        '15-45',
+        'OMNISCIENT_SECRET',
+        'slotKey',
+        'innateLocks',
+        'acquiredState'
+    ]) {
+        assert.ok(bootPrompt.includes(marker), `boot-compiler.md 缺少关键契约锚点: ${marker}`);
+    }
+
+    const readmeText = fs.readFileSync(path.join(PRESET_ROOT, 'README.md'), 'utf8');
+    assert.ok(readmeText.includes('8 大工种') && readmeText.includes('patch.yml'), 'README.md 必须更新为 8 大工种并列出 patch.yml');
 });
 
 test('narrate-boot Skill 满足 < 8,192 字符预算并附带完整 references', () => {
@@ -542,7 +634,11 @@ test('narrate-boot Skill 满足 < 8,192 字符预算并附带完整 references',
         'entityId',
         'camelCase',
         'snake_case',
-        'fanfic-canon-delta.md'
+        'fanfic-canon-delta.md',
+        'hybrid_rolling',
+        'boot_seed',
+        'chapter_harvest',
+        'switchConflictReason'
     ]) {
         assert.ok(content.includes(marker), `SKILL.md 缺少关键流程锚点: ${marker}`);
     }

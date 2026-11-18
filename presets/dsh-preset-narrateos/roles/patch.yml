@@ -4,7 +4,7 @@ cleanroom: false
 promptFile: ./prompts/patch.md
 temperature: 0.4
 reasoningEffort: low
-maxSteps: 6
+maxSteps: 8
 maxReadCalls: 0
 tools:
   - patch_paragraphs

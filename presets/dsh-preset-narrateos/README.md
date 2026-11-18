@@ -11,11 +11,12 @@ presets/dsh-preset-narrateos/
 ├── locale/
 │   ├── en.json
 │   └── zh.json
-├── roles/                        # 后台 7 大工种的外部化 YAML 配置与中文提示词
+├── roles/                        # 后台 8 大工种的外部化 YAML 配置与中文提示词
 │   ├── boot-compiler.yml
 │   ├── librarian.yml
 │   ├── planner.yml
 │   ├── writer.yml
+│   ├── patch.yml
 │   ├── fact-checker.yml
 │   ├── extractor.yml
 │   ├── dreamer.yml
