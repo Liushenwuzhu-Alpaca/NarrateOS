@@ -2658,7 +2658,7 @@ export class NarrateRuntimeController {
         }> = [];
 
         for (const entry of entries) {
-            if (!entry.isDirectory()) continue;
+            if (!entry.isDirectory() || entry.name.startsWith('.boot-')) continue;
             const dirPath = resolve(this.booksRoot, entry.name);
             if (!(await isValidBookDirectory(dirPath))) continue;
 

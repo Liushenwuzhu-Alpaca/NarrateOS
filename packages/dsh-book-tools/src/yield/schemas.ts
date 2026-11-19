@@ -341,7 +341,7 @@ const SuccessfulBootBundleSchema = z.object({
         .default([]),
     lore_entries: z.array(CompiledLoreEntrySchema).default([]),
     entities: z.array(CompiledEntitySchema).min(1),
-    contract_conflicts: z.array(z.string().min(1)).default([])
+    contract_conflicts: z.array(z.string().trim().min(1)).max(0).default([])
 });
 export const BootBundleOutputSchema = z.union([
     z.object({ contract_conflicts: z.array(z.string().trim().min(1)).nonempty() }),

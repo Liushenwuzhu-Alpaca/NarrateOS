@@ -738,6 +738,8 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
     it('book_grep 入口无条件预校验正则并支持 max_matches 与 maxOutputChars 限流截断 (ISS-023)', async () => {
         const { bookRoot } = await createSampleBook();
         const manyLines = Array.from({ length: 120 }, (_, i) => `第${i + 1}行：铁门与潮汐标记_${'甲'.repeat(120)}`).join('\n');
+        const windows = ['前一', '７号', '后一', '.', '.', '前二', '９号', '后二'].join('\n');
+        await writeFile(join(bookRoot, 'lore_library/disk.md'), windows);
         await writeFile(join(bookRoot, 'world/large.md'), manyLines, 'utf8');
 
         const ctx = new Context();
@@ -749,11 +751,17 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
         const roleSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-grep-limit',
             bookRoot,
+            stagingOverlay: new Map([['lore_library/staged.md', windows]]),
             maxReadCalls: 10
         });
         registerCleanup(() => roleSet.cleanup());
 
         const bookGrep = roleSet.toolMap.get('book_grep')!;
+        const result = await bookGrep.execute({ pattern: '\\d号', path: 'lore_library', context_lines: 1 }, createMockExec('book_grep', {}));
+        expect(result).toMatchObject({ matches: ['disk', 'staged'].flatMap(file => [
+            { file: `lore_library/${file}.md`, line: 2, contextBefore: ['前一'], contextAfter: ['后一'] },
+            { file: `lore_library/${file}.md`, line: 7, contextBefore: ['前二'], contextAfter: ['后二'] }
+        ]) });
 
         // 1. 即使在空目录或不存在路径分支前，非法正则也必抛错
         await expect(

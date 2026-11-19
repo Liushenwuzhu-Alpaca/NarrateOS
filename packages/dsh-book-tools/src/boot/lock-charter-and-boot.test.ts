@@ -355,10 +355,8 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         expect(ctx.narrateTools.booksRoot).toBe(booksRoot);
         const toolsService = ctx.narrateTools;
 
-        let release!: () => void;
-        let entered!: () => void;
-        const gate = new Promise<void>(resolve => { release = resolve; });
-        const started = new Promise<void>(resolve => { entered = resolve; });
+        const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+        const { promise: started, resolve: entered } = Promise.withResolvers<void>();
         const boot = toolsService.lockCharterAndBoot(buildMinimalValidBootInput(), {
             onBookBooted: async () => { entered(); await gate; }
         });

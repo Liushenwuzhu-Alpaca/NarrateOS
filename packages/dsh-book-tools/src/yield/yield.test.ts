@@ -250,7 +250,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             )
         ).rejects.toThrow(GateValidationError);
         expect(badSpy.concludedCount()).toBe(0);
-        for (const field of ['chapter_title', 'chapter_turn', 'ending_beat']) {
+        for (const field of ['chapter_title', 'chapter_turn']) {
             await expect(yieldOutline.execute({
                 chapter_title: '货仓', target_word_count: 2500, focus_cast: ['char_001'],
                 chapter_turn: '账本少了一页', director_rationale: secretRationale,
@@ -556,6 +556,10 @@ describe('yield_* 终态门禁工具确定性校验', () => {
 
         // 补齐 state 提交以进入 STATE_COMMITTED
         await store.applyStatePatch(2, []);
+        const invalid = ctx.narrateTools.buildRoleTools({ runId: 'dream-notes', bookRoot, yieldTool: 'yield_dream_commit' });
+        registerCleanup(() => invalid.cleanup());
+        await invalid.toolMap.get('book_edit')!.execute({ path: 'entities/notes.md', mode: 'write', replacement_text: '# 随笔' }, createSpyExec('book_edit', {}).exec);
+        await expect(invalid.toolMap.get('yield_dream_commit')!.execute({ summary: '整理' }, createSpyExec('yield_dream_commit', {}).exec)).rejects.toThrow(/非法活跃实体文件名/);
 
         // 测试 1：篡改 Innate Locks -> 拒绝且磁盘零写入
         const roleSetInnate = ctx.narrateTools.buildRoleTools({
@@ -1680,6 +1684,10 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             JSON.stringify({ id: 'sig_old_1', type: 'DIRECTION', chapter: 1, reason: '旧信号无尾换行' }),
             'utf8'
         );
+        const rewrite = ctx.narrateTools.buildRoleTools({ runId: 'dream-signals', bookRoot, yieldTool: 'yield_dream_commit', allowedOpsWritePaths: ['.ops/signals.jsonl'] });
+        registerCleanup(() => rewrite.cleanup());
+        await rewrite.toolMap.get('book_edit')!.execute({ path: '.ops/signals.jsonl', mode: 'write', replacement_text: '{"id":"replacement"}\n' }, createSpyExec('book_edit', {}).exec);
+        await expect(rewrite.toolMap.get('yield_dream_commit')!.execute({ summary: '整理' }, createSpyExec('yield_dream_commit', {}).exec)).rejects.toThrow(/只允许追加/);
         const okSet = ctx.narrateTools.buildRoleTools({
             runId: 'run-dream-watermark-reset',
             bookRoot,

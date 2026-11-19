@@ -2,6 +2,7 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
     analyzeParagraphs,
     BookRepairLoopConfigSchema,
+    normalizeForQuoteMatch,
     verifyDualQuotes,
     type NarrateStoreService
 } from '@narrateos/dsh-book-store';
@@ -233,11 +234,11 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                 }
                 const dual = verifyDualQuotes(draftQuote, resolvedDraft, sourceQuote, sourceText);
                 if (!dual.sideA.matched || (targets && !targets.some(idx =>
-                    verifyDualQuotes(draftQuote, draftParagraphs[idx]!, sourceQuote, sourceText).sideA.matched
+                    normalizeForQuoteMatch(draftParagraphs[idx]!).includes(dual.sideA.normalizedQuote)
                 ))) {
                     throw new GateValidationError(
                         'yield_verdict',
-                        `第 ${issueNumber} 条问题的 quote_draft 未在草稿正文中命中（疑似捏造或改写引文），请重新读取草稿逐字核查`
+                        `第 ${issueNumber} 条问题的 quote_draft 未在${targets ? '指定段落' : '草稿正文'}中命中，请重新读取草稿逐字核查`
                     );
                 }
                 if (!dual.sideB.matched) {

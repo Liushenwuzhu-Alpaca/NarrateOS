@@ -12,6 +12,7 @@ import {
 import { GateValidationError } from '../errors.js';
 import { isEnoentError, readOptionalBookConfig } from '../tools/shared.js';
 import { PlannerOutlineSchema } from './schemas.js';
+import { extractSubstantiveNormalizedClauses } from './restricted-clauses.js';
 import { ENTITY_FILENAME_RE, toVisibleEntityMap } from './shared.js';
 
 const DEFAULT_FIRST_CHAPTER_MAX_BEATS = BookOpeningConfigSchema.parse({}).first_chapter_max_beats;
@@ -27,8 +28,6 @@ export interface YieldOutlineOptions {
     visibleEntities?: ReadonlyMap<string, EntityProfile> | Record<string, EntityProfile> | undefined;
     onYield?: ((outline: PlannerOutline) => void) | undefined;
 }
-
-import { extractSubstantiveNormalizedClauses } from './restricted-clauses.js';
 
 async function loadKnownEntityProfiles(
     bookRoot: string | undefined,
