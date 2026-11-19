@@ -13,6 +13,7 @@ import * as bookStorePlugin from '@narrateos/dsh-book-store';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as bookToolsPlugin from '../index.js';
 import { evaluateMainSessionWriteGuard } from '../hooks/main-session-guard.js';
+import { attachYieldEnforcementHook } from './yield-enforcement.js';
 
 const tempDirs: string[] = [];
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -483,6 +484,29 @@ describe('防逃逸 Hook、主会话写保护守卫与 Cordis 插件集成', () 
                 `期望放行只读命令: ${cmd}`
             ).toBeUndefined();
         }
+    });
+
+    it('连续工具步不能绕过 maxSteps；超额步在进入模型之前拒绝', async () => {
+        const ctx = new Context();
+        let exhausted = 0;
+        let cleaned = 0;
+        const dispose = attachYieldEnforcementHook(ctx, {
+            expectedYieldTool: 'yield_outline', maxSteps: 2, hasYielded: () => false,
+            onExhausted: () => { exhausted++; }, cleanupStaging: () => { cleaned++; }
+        });
+        try {
+            for (const step of [1, 2, 3, 4]) {
+                const decision = await ctx.waterfall('agent/pre-step', {
+                    agent: {} as Agent, messages: [], turn: 1, step,
+                    signal: new AbortController().signal, modelSelection: { provider: 'mock', model: 'mock' }
+                }, async () => ({ kind: 'enter' as const, messages: [] }));
+                expect(decision.kind).toBe(step <= 2 ? 'enter' : 'reject');
+            }
+            expect(exhausted).toBe(1);
+        } finally {
+            dispose();
+        }
+        expect(cleaned).toBe(1);
     });
 
     it('attachYieldEnforcementHook 将工具调用回合与 turn-stopping 纠偏合并计入 maxSteps 上限，并在 hasYielded 后于 agent/disposed 幂等清理 StagingSession', async () => {

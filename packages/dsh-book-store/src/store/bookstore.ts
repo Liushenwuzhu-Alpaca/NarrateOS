@@ -46,6 +46,8 @@ const SAGA_SHARD_RE = /_saga_\d+$/;
 const BEGIN_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
 const COMMIT_DRAFT_ALLOWED_PHASES = new Set<WalPhase>(['IDLE', 'DRAFTING', 'STATE_COMMITTED', 'DREAM_COMMITTED']);
 const PendingWritesSchema = z.object({
+    owner: z.string().optional(),
+    sync: z.object({ id: z.string().uuid(), report: z.string().optional() }).optional(),
     baseWal: z.string().nullable(),
     baseRevision: z.string(),
     paths: z.array(z.string().min(1).refine((path) =>
@@ -137,19 +139,28 @@ export async function collectReachableKeys(
     return keys;
 }
 
-/** 校验序列化档案中的全部实体与章节外键引用均可到达 */
+/** 按原始字段值查找引用，避免序列化转义符改变标识符的词边界。 */
 export function assertForeignKeysReachable(
     sourceEntityId: string,
-    content: string,
-    reachableKeys: Set<string>
+    content: string | EntityProfile,
+    reachableKeys: ReadonlySet<string>
 ): void {
     const missing = new Set<string>();
-    for (const match of content.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
-        const refId = match[1];
-        if (refId && !reachableKeys.has(refId)) {
-            missing.add(refId);
+    function inspect(value: unknown): void {
+        if (typeof value === 'string') {
+            for (const match of value.matchAll(/\b(?:char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
+                if (!reachableKeys.has(match[0])) missing.add(match[0]);
+            }
+        } else if (Array.isArray(value)) {
+            for (const item of value) inspect(item);
+        } else if (value && typeof value === 'object') {
+            for (const [key, item] of Object.entries(value)) {
+                inspect(key);
+                inspect(item);
+            }
         }
     }
+    inspect(content);
     if (missing.size > 0) {
         throw new ForeignKeyError([...missing], sourceEntityId);
     }
@@ -157,7 +168,7 @@ export function assertForeignKeysReachable(
 
 /** 作品纯文本数据库存储与原子事务层 */
 export class BookStore {
-    private readonly lockContext = new AsyncLocalStorage<boolean>();
+    private readonly lockContext = new AsyncLocalStorage<{ owner: string; active: boolean }>();
     private acquireQueue: Promise<void> = Promise.resolve();
 
     constructor(
@@ -256,9 +267,11 @@ export class BookStore {
             }
         });
 
+        const context = { owner: randomUUID(), active: true };
         try {
-            return await this.lockContext.run(true, fn);
+            return await this.lockContext.run(context, fn);
         } finally {
+            context.active = false;
             try {
                 if (await readFile(this.txLockPath, 'utf8') === payload) {
                     await unlink(this.txLockPath);
@@ -274,7 +287,7 @@ export class BookStore {
 
     /** 内部事务辅助：仅允许同一异步调用链重入已持有的事务锁，拦截跨异步任务并发 */
     async runWithTxLock<T>(fn: () => Promise<T>): Promise<T> {
-        if (this.lockContext.getStore() === true) {
+        if (this.lockContext.getStore()?.active) {
             return await fn();
         }
         return await this.withTxLock(fn);
@@ -541,13 +554,23 @@ export class BookStore {
         }
     }
 
-    private async writeTxState(state: TxState): Promise<void> {
+    async writeTxState(state: TxState): Promise<void> {
         await mkdir(this.opsDir, { recursive: true });
         const validated = TxStateSchema.parse({
             ...state,
             updated_at: new Date().toISOString()
         });
-        await writeFile(this.txStatePath, `${JSON.stringify(validated, null, 4)}\n`, 'utf8');
+        await this.replaceFile(this.txStatePath, `${JSON.stringify(validated, null, 4)}\n`);
+    }
+
+    private async replaceFile(path: string, content: string): Promise<void> {
+        const temporaryPath = `${path}.${randomUUID()}.tmp`;
+        try {
+            await writeFile(temporaryPath, content, { flag: 'wx' });
+            await rename(temporaryPath, path);
+        } finally {
+            await rm(temporaryPath, { force: true });
+        }
     }
 
     /** 从当前磁盘手稿目录初始化 .ops/tx_state.json（用于夹具或开书初始化） */
@@ -665,30 +688,89 @@ export class BookStore {
         return result;
     }
 
-    async recordPendingWrites(paths: string[]): Promise<void> {
-        const record = PendingWritesSchema.parse({
-            baseWal: await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json'),
-            baseRevision: await this.system.currentRevision(this.bookRoot),
-            paths: [...new Set([...paths, '.ops/tx_state.json'])]
+    private async readPendingWrites(): Promise<z.infer<typeof PendingWritesSchema> | null> {
+        try {
+            return PendingWritesSchema.parse(JSON.parse(await readFile(join(this.opsDir, 'pending_writes.json'), 'utf8')));
+        } catch (error) {
+            if (isEnoentError(error)) return null;
+            throw error;
+        }
+    }
+
+    async assertNoPendingWrites(): Promise<void> {
+        if (await this.readPendingWrites()) throw new TxLockConflictError('已有未恢复的事务写集，请先恢复 WAL');
+    }
+
+    async recordPendingWrites(paths: string[], sync?: { id: string; report?: string }): Promise<void> {
+        await this.runWithTxLock(async () => {
+            const owner = this.lockContext.getStore()!.owner;
+            const path = join(this.opsDir, 'pending_writes.json');
+            const prior = await this.readPendingWrites();
+            if (prior && prior.owner !== owner) {
+                throw new TxLockConflictError('已有未恢复的事务写集，请先恢复 WAL');
+            }
+            const record = PendingWritesSchema.parse({
+                ...(prior ?? {
+                    baseWal: await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json'),
+                    baseRevision: await this.system.currentRevision(this.bookRoot)
+                }),
+                owner,
+                ...(sync ? { sync } : {}),
+                paths: [...new Set([...(prior?.paths ?? []), ...paths, '.ops/tx_state.json'])]
+            });
+            await this.replaceFile(path, JSON.stringify(record));
         });
-        await mkdir(this.opsDir, { recursive: true });
-        const temporaryPath = join(this.opsDir, 'pending_writes.tmp');
-        await writeFile(temporaryPath, JSON.stringify(record), 'utf8');
-        await rename(temporaryPath, join(this.opsDir, 'pending_writes.json'));
+    }
+
+    /** Sync 只能续办自己的写集。半章和未知写集留给章节恢复入口。 */
+    async prepareSync(): Promise<void> {
+        const baseline = await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json');
+        if (baseline === null) throw new Error('无法同步：Git 中缺少已提交事务状态');
+        const committed = TxStateSchema.parse(JSON.parse(baseline));
+        let working: TxState | undefined;
+        try {
+            working = TxStateSchema.parse(JSON.parse(await readFile(this.txStatePath, 'utf8')));
+        } catch (error) {
+            if (!(error instanceof SyntaxError || error instanceof z.ZodError || isEnoentError(error))) throw error;
+        }
+        for (const tx of [committed, working]) {
+            if (tx?.phase === 'FEAT_COMMITTED' || tx?.phase === 'DRAFTING') {
+                throw new TxLockConflictError(`第 ${tx.active_chapter} 章的 ${tx.phase} 事务尚未完成，请先恢复再 Sync`);
+            }
+        }
+        const pending = await this.readPendingWrites();
+        if (pending && !pending.sync) throw new TxLockConflictError('已有其他事务的写集，请先恢复 WAL');
+        if (!working || pending) await this.restorePendingWrites(baseline, ['.ops/tx_state.json']);
+    }
+
+    /** 报告仅在对应指纹提交后公开。若发布失败，写集保留报告供恢复重放。 */
+    async finishSyncWrites(syncId: string): Promise<void> {
+        const record = await this.readPendingWrites();
+        if (record?.sync?.id !== syncId) throw new Error('Sync 写集归属不符');
+        if (record.sync.report !== undefined) await this.replaceFile(join(this.opsDir, 'sync_conflicts.json'), record.sync.report);
+        await rm(join(this.opsDir, 'pending_writes.json'));
     }
 
     private async restorePendingWrites(committedRaw: string, fallbackPaths: string[]): Promise<void> {
         const pendingPath = join(this.opsDir, 'pending_writes.json');
         let paths = fallbackPaths;
-        try {
-            const record = PendingWritesSchema.parse(JSON.parse(await readFile(pendingPath, 'utf8')));
+        const record = await this.readPendingWrites();
+        if (record) {
+            if (record.sync) {
+                if (TxStateSchema.parse(JSON.parse(committedRaw)).last_sync_id === record.sync.id) {
+                    await this.system.restorePaths(this.bookRoot, ['.ops/tx_state.json']);
+                    await this.finishSyncWrites(record.sync.id);
+                    return;
+                }
+                if (record.baseWal !== committedRaw || record.baseRevision !== await this.system.currentRevision(this.bookRoot)) {
+                    throw new Error('无法确定 Sync 写集所属提交，已保留恢复现场');
+                }
+            }
             paths =
                 record.baseRevision === (await this.system.currentRevision(this.bookRoot)) &&
                 record.baseWal === committedRaw
                     ? record.paths
                     : fallbackPaths;
-        } catch (error: unknown) {
-            if (!isEnoentError(error)) throw error;
         }
         const backupRoot = join(this.opsDir, 'recovery', randomUUID());
         for (const path of paths) {
@@ -809,6 +891,9 @@ export class BookStore {
             if (currentTx.phase !== 'FEAT_COMMITTED') {
                 throw new Error(`非法 WAL 状态迁移: 无法从 ${currentTx.phase} 执行 applyStatePatch，需先处于 FEAT_COMMITTED`);
             }
+            if (currentTx.active_chapter !== chapterNumber) {
+                throw new Error(`FEAT_COMMITTED 属于第 ${currentTx.active_chapter} 章，不能提交第 ${chapterNumber} 章状态`);
+            }
 
             await mkdir(this.entitiesDir, { recursive: true });
 
@@ -870,8 +955,7 @@ export class BookStore {
             // 第二阶段：1ms 跨文件外键可达性校验
             const reachableKeys = await collectReachableKeys(this.bookRoot, pendingNewEntityIds);
             for (const [entityId, profile] of stagedProfiles.entries()) {
-                const serialized = serializeEntityMarkdown(profile);
-                assertForeignKeysReachable(entityId, serialized, reachableKeys);
+                assertForeignKeysReachable(entityId, profile, reachableKeys);
             }
 
             // 第三阶段：全部校验通过后落盘（含冷宫唤醒写回与旧档删除双路径）并提交 Git
@@ -972,19 +1056,21 @@ export class BookStore {
     /** 崩溃恢复：检查 WAL 相位并清理未提交脏文件 */
     async recoverWal(): Promise<WalRecoveryResult> {
         const result = await this.runWithTxLock(async (): Promise<Omit<WalRecoveryResult, 'clean'>> => {
-            let txState = await this.readTxState();
             const committedRaw = await this.system.readFileAtRef(this.bookRoot, 'HEAD', '.ops/tx_state.json');
             if (committedRaw === null) {
                 throw new Error('无法恢复 WAL：Git 中缺少已提交事务状态');
             }
             const committed = TxStateSchema.parse(JSON.parse(committedRaw));
+            let txState: TxState;
+            try {
+                txState = await this.readTxState();
+            } catch (error) {
+                if (!(error instanceof SyntaxError || error instanceof z.ZodError)) throw error;
+                await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
+                txState = committed;
+            }
             if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) === JSON.stringify(committed)) {
-                try {
-                    await stat(join(this.opsDir, 'pending_writes.json'));
-                    await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
-                } catch (error: unknown) {
-                    if (!isEnoentError(error)) throw error;
-                }
+                if (await this.readPendingWrites()) await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
             }
             if (txState.phase !== 'DRAFTING' && JSON.stringify(txState) !== JSON.stringify(committed)) {
                 const pendingChapter = txState.active_chapter;
@@ -1015,7 +1101,6 @@ export class BookStore {
             }
 
             if (txState.phase === 'FEAT_COMMITTED') {
-                await this.restorePendingWrites(committedRaw, ['.ops/tx_state.json']);
                 return {
                     action: 'NEEDS_STATE_EXTRACTION',
                     phase: 'FEAT_COMMITTED',
@@ -1040,6 +1125,12 @@ export class BookStore {
         const txState = await this.readTxState();
         const chapterFiles = await this.listChapterFiles();
         const dirty: DirtyChapter[] = [];
+        const present = new Set(chapterFiles);
+        for (const key of Object.keys(txState.chapter_hashes)) {
+            if (!present.has(`${key}.md`)) {
+                throw new Error(`已登记的正文 manuscripts/${key}.md 缺失，请确认或恢复原稿后再同步`);
+            }
+        }
 
         for (const fileName of chapterFiles) {
             const match = CHAPTER_FILE_RE.exec(fileName);

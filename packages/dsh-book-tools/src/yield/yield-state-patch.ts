@@ -2,10 +2,10 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
-    InnateLockViolationError,
+    mergeEntityProfilePatch,
     normalizeForQuoteMatch,
     parseEntityMarkdown,
-    serializeEntityMarkdown,
+    assertForeignKeysReachable,
     type ApplyStatePatchOptions,
     type EntityPatch,
     type EntityProfile,
@@ -17,7 +17,6 @@ import { GateValidationError } from '../errors.js';
 import { isEnoentError, readOptionalDiskText } from '../tools/shared.js';
 import { ExtractorOutputSchema, hasChineseCharacter, type ExtractorOutput } from './schemas.js';
 import {
-    assertTextForeignKeys,
     collectReachableKeysFromBookDirs,
     ENTITY_FILENAME_RE,
     ENTITY_ID_PATTERN_RE,
@@ -129,7 +128,7 @@ function assertTimelineStatePatchConstraints(
     parsed: ExtractorOutput,
     timelineMode?: TimelineMode
 ): void {
-    if ((timelineMode === 'PARALLEL' || timelineMode === 'FLASHBACK') && parsed.story_day_delta > 0) {
+    if (timelineMode === 'FLASHBACK' && parsed.story_day_delta > 0) {
         throw new GateValidationError(
             'yield_state_patch',
             `${timelineMode} 模式下严禁推进主线 story_day（story_day_delta 必须为 0，收到 ${parsed.story_day_delta}）`
@@ -158,10 +157,10 @@ async function inspectAndValidateEntityPatches(params: {
     patches: ExtractorOutput['entity_patches'];
     visibleEntityMap: ReadonlyMap<string, EntityProfile>;
     allowInnateMutation: boolean;
-}): Promise<{ newEntityIds: Set<string>; existingProfiles: Map<string, EntityProfile> }> {
+}): Promise<{ newEntityIds: Set<string>; mergedProfiles: Map<string, EntityProfile> }> {
     const { bookRoot, bookStore, patches, visibleEntityMap, allowInnateMutation } = params;
     const newEntityIds = new Set<string>();
-    const existingProfiles = new Map<string, EntityProfile>();
+    const mergedProfiles = new Map<string, EntityProfile>();
 
     for (const patch of patches) {
         if (patch.innate_locks_ops) {
@@ -176,7 +175,7 @@ async function inspectAndValidateEntityPatches(params: {
         }
 
         let existing: EntityProfile | null =
-            existingProfiles.get(patch.entity_id) ??
+            mergedProfiles.get(patch.entity_id) ??
             visibleEntityMap.get(patch.entity_id) ??
             null;
 
@@ -198,29 +197,12 @@ async function inspectAndValidateEntityPatches(params: {
                     `新建实体 ${patch.entity_id} 必须提供包含中文字符的标准名称 canonical_name`
                 );
             }
-            continue;
         }
 
-        existingProfiles.set(patch.entity_id, existing);
-        if (
-            !allowInnateMutation &&
-            patch.canonical_name !== undefined &&
-            patch.canonical_name !== existing.metadata.canonical_name
-        ) {
-            throw new InnateLockViolationError(
-                patch.entity_id,
-                `禁止篡改既有实体 ${patch.entity_id} 的 canonical_name`
-            );
-        }
-        if (!allowInnateMutation && patch.innate_locks_ops && patch.innate_locks_ops.length > 0) {
-            throw new InnateLockViolationError(
-                patch.entity_id,
-                `禁止篡改既有实体 ${patch.entity_id} 的 1. Innate Locks`
-            );
-        }
+        mergedProfiles.set(patch.entity_id, mergeEntityProfilePatch(existing, patch, allowInnateMutation));
     }
 
-    return { newEntityIds, existingProfiles };
+    return { newEntityIds, mergedProfiles };
 }
 
 /** 创建 Extractor 终态门禁工具 yield_state_patch（校验中文标准名、固有锁、1ms 外键可达性与 state 原子提交） */
@@ -266,7 +248,7 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             story_day_delta: {
                 type: 'integer',
                 required: true,
-                description: '本章推进的故事天数增量（非负整数；PARALLEL/FLASHBACK 须为 0）'
+                description: '本章历时（非负整数；PARALLEL 只累计本支线，FLASHBACK 须为 0）'
             },
             plot_summary: {
                 type: 'string',
@@ -322,6 +304,9 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             const parsed = ExtractorOutputSchema.parse(args);
 
             assertTimelineStatePatchConstraints(parsed, timelineMode);
+            if (timelineMode === 'PARALLEL' && !deferCommit) {
+                throw new GateValidationError('yield_state_patch', 'PARALLEL 章必须经分支增量暂存，不得直接提交主线');
+            }
 
             // Q1 防死锁原稿锚点验真：首次全 0 命中打回重提；第 2 次或部分命中则自动过滤未命中词放行
             if (parsed.prose_anchors.length > 0) {
@@ -354,7 +339,7 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
 
             const bookStore = store.openStore(bookRoot);
             // 预检新建实体中文 canonical_name、Q7 第1区禁 OMNISCIENT_SECRET 与既有/冷宫实体 Innate Locks
-            const { newEntityIds, existingProfiles } = await inspectAndValidateEntityPatches({
+            const { newEntityIds, mergedProfiles } = await inspectAndValidateEntityPatches({
                 bookRoot,
                 bookStore,
                 patches: parsed.entity_patches,
@@ -389,13 +374,8 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                     visibleEntityMap,
                     reachableIds
                 );
-                for (const patch of patches) {
-                    const serializedPatch = JSON.stringify(patch);
-                    assertTextForeignKeys(patch.entity_id, serializedPatch, reachable);
-                    const existing = existingProfiles.get(patch.entity_id);
-                    if (existing) {
-                        assertTextForeignKeys(patch.entity_id, serializeEntityMarkdown(existing), reachable);
-                    }
+                for (const [id, profile] of mergedProfiles) {
+                    assertForeignKeysReachable(id, profile, reachable);
                 }
 
                 const result: YieldStatePatchResult = {

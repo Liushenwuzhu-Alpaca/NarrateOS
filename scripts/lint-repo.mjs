@@ -7,9 +7,10 @@
  * 4. 非 --fast 模式下校验 Studio 前端构建产物存在且不早于源码修改时间。
  */
 
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { extname, join, relative, resolve } from 'node:path';
+import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -56,8 +57,8 @@ async function collectTextFiles(absPath, out) {
         return;
     }
     if (info.isFile()) {
-        const name = absPath.split('/').pop() ?? '';
-        if (TEXT_EXTENSIONS.has(extname(name)) || absPath.includes('/.githooks/')) {
+        const name = basename(absPath);
+        if (name === '.env.example' || TEXT_EXTENSIONS.has(extname(name)) || absPath.split(sep).at(-2) === '.githooks') {
             out.push(absPath);
         }
         return;
@@ -131,6 +132,10 @@ async function main() {
         'docs',
         'packages',
         'presets',
+        'plugins',
+        'pnpm-workspace.yaml',
+        'tsconfig.base.json',
+        '.env.example',
         'scripts',
         '.github',
         '.githooks'
@@ -174,18 +179,16 @@ async function main() {
     }
 
     try {
-        const fixtureOut = execFileSync(
-            'git',
-            ['status', '--porcelain', '--', 'manuscript/vol-01/ch-01.md'],
-            { cwd: REPO_ROOT, encoding: 'utf8' }
-        ).trim();
-        if (fixtureOut.length > 0) {
+        const bytes = await readFile(join(REPO_ROOT, 'manuscript/vol-01/ch-01.md'));
+        if (createHash('sha256').update(bytes).digest('hex') !==
+            'e7f59296b7d61497639739807b5b477246daa046ade6ef38ce55f9020a564dc7') {
             violations.push(
-                `[readonly-fixture-clean] 只读样本 manuscript/vol-01/ch-01.md 发生变更：${fixtureOut}`
+                `[readonly-fixture-clean] 只读样本 manuscript/vol-01/ch-01.md 发生变更`
             );
         }
-    } catch {
-        // 非 Git 环境时跳过
+    } catch (error) {
+        // 样本不随 Git 分发；存在时必须可读且与基准一致。
+        if (error.code !== 'ENOENT') throw error;
     }
 
     if (!FAST_MODE) {
@@ -193,13 +196,15 @@ async function main() {
         const studioDistIndex = join(REPO_ROOT, 'packages/dsh-client-ui-studio/dist/index.js');
         const studioDistClient = join(REPO_ROOT, 'packages/dsh-client-ui-studio/dist/client.js');
         try {
-            const [srcMtime, idxStat, cliStat] = await Promise.all([
+            const [srcMtime, idxStat, cliStat, bundler, clientConfig] = await Promise.all([
                 latestMtimeMs(studioSrcDir),
                 stat(studioDistIndex),
-                stat(studioDistClient)
+                stat(studioDistClient),
+                stat(join(studioSrcDir, '../scripts/bundle-client.mjs')),
+                stat(join(studioSrcDir, '../tsconfig.client.json'))
             ]);
             const oldestDist = Math.min(idxStat.mtimeMs, cliStat.mtimeMs);
-            if (oldestDist + 50 < srcMtime) {
+            if (oldestDist + 50 < srcMtime || cliStat.mtimeMs + 50 < Math.max(bundler.mtimeMs, clientConfig.mtimeMs)) {
                 violations.push(
                     '[studio-bundle-fresh] packages/dsh-client-ui-studio/dist 产物早于 src 源码，请先执行 pnpm run build'
                 );

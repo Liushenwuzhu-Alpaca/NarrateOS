@@ -20,7 +20,11 @@ export function segmentWords(text: string): string[] {
  * 计算滑动窗口 MATTR-500 词汇丰富度（短于窗口时退化为全段 TTR）
  */
 export function computeMattr500(text: string, windowSize = 500): number {
-    const words = segmentWords(text);
+    return wordMattr(segmentWords(text), windowSize);
+}
+
+function wordMattr(words: string[], windowSize = 500): number {
+    if (!Number.isSafeInteger(windowSize) || windowSize <= 0) throw new RangeError('MATTR 窗口必须是正整数');
     const totalWords = words.length;
     if (totalWords === 0) {
         return 0;
@@ -74,54 +78,49 @@ export function computeKontoyiannisEntropy(text: string): number {
         return 0;
     }
 
-    const positions = new Map<string, number[]>();
-    const firstChar = chars[0];
-    if (firstChar !== undefined) {
-        positions.set(firstChar, [0]);
-    }
-
-    let normalizedMatchSum = 0;
-
-    for (let i = 1; i < n; i += 1) {
-        const currentChar = chars[i];
-        if (currentChar === undefined) {
-            continue;
+    // 后缀自动机：同一状态的子串共享结束位置集合，最早结束位置决定能否在历史中完整找到。
+    type State = { length: number; link: number; firstEnd: number; next: Map<string, number> };
+    const states: State[] = [{ length: 0, link: -1, firstEnd: -1, next: new Map() }];
+    let last = 0;
+    for (const [end, char] of chars.entries()) {
+        const cur = states.length;
+        states.push({ length: end + 1, link: 0, firstEnd: end, next: new Map() });
+        let p = last;
+        while (p >= 0 && !states[p]!.next.has(char)) {
+            states[p]!.next.set(char, cur);
+            p = states[p]!.link;
         }
-
-        const prevIndices = positions.get(currentChar);
-        let maxMatchLen = 0;
-
-        if (prevIndices !== undefined) {
-            const maxPossible = n - i;
-            for (let p = prevIndices.length - 1; p >= 0; p -= 1) {
-                const start = prevIndices[p];
-                if (start === undefined) {
-                    continue;
-                }
-                let matchLen = 1;
-                while (
-                    matchLen < maxPossible &&
-                    start + matchLen < i &&
-                    chars[start + matchLen] === chars[i + matchLen]
-                ) {
-                    matchLen += 1;
-                }
-                if (matchLen > maxMatchLen) {
-                    maxMatchLen = matchLen;
-                    if (maxMatchLen === maxPossible) {
-                        break;
-                    }
+        if (p >= 0) {
+            const q = states[p]!.next.get(char)!;
+            if (states[p]!.length + 1 === states[q]!.length) states[cur]!.link = q;
+            else {
+                const clone = states.length;
+                states.push({ ...states[q]!, length: states[p]!.length + 1, next: new Map(states[q]!.next) });
+                states[q]!.link = states[cur]!.link = clone;
+                while (p >= 0 && states[p]!.next.get(char) === q) {
+                    states[p]!.next.set(char, clone);
+                    p = states[p]!.link;
                 }
             }
         }
-
-        const shortestUnseenLen = maxMatchLen + 1;
-        normalizedMatchSum += shortestUnseenLen / Math.log2(i + 1);
-
-        if (prevIndices === undefined) {
-            positions.set(currentChar, [i]);
-        } else {
-            prevIndices.push(i);
+        last = cur;
+    }
+    // 起点右移后，去掉首字的旧匹配仍然有效，右端无需回退。
+    let normalizedMatchSum = 0;
+    let state = 0;
+    let length = 0;
+    for (let start = 1; start < n; start++) {
+        while (start + length < n) {
+            const next = states[state]!.next.get(chars[start + length]!);
+            if (next === undefined || states[next]!.firstEnd >= start) break;
+            state = next;
+            length++;
+        }
+        normalizedMatchSum += (length + 1) / Math.log2(start + 1);
+        if (length > 0) {
+            length--;
+            const suffix = states[state]!.link;
+            if (states[suffix]!.length === length) state = suffix;
         }
     }
 
@@ -133,16 +132,18 @@ export function computeKontoyiannisEntropy(text: string): number {
  * 按中英文句末标点与换行切分句段，计算句段长变异系数 (CV = 标准差 / 均值)
  */
 export function computeSentenceLengthCv(text: string): number {
-    const sentences = text
-        .split(/[。！？!?\r\n]+/)
-        .map((s) => s.replace(/\s+/g, ''))
-        .filter((s) => s.length > 0);
+    return sentenceCv(sentenceLengths(text));
+}
 
-    if (sentences.length < 2) {
+function sentenceLengths(text: string): number[] {
+    return text.split(/[。！？!?\r\n]+|\.(?!\d)/u).map((s) => Array.from(s.replace(/[\s“”‘’「」『』"«»]/gu, '')).length).filter(Boolean);
+}
+
+function sentenceCv(lengths: number[]): number {
+    if (lengths.length < 2) {
         return 0;
     }
 
-    const lengths = sentences.map((s) => Array.from(s).length);
     const mean = lengths.reduce((sum, len) => sum + len, 0) / lengths.length;
     if (mean <= 0) {
         return 0;
@@ -184,18 +185,15 @@ export function computeClicheDensity(text: string, clicheTerms: readonly string[
 export function computeTelemetry(text: string, options: TelemetryOptions = {}): TelemetryMetrics {
     const words = segmentWords(text);
     const charCount = text.replace(/\s+/g, '').length;
-    const sentenceCount = text
-        .split(/[。！？!?\r\n]+/)
-        .map((s) => s.replace(/\s+/g, ''))
-        .filter((s) => s.length > 0).length;
+    const lengths = sentenceLengths(text);
 
     return {
         charCount,
         wordCount: words.length,
-        sentenceCount,
-        mattr500: computeMattr500(text, options.mattrWindowSize),
+        sentenceCount: lengths.length,
+        mattr500: wordMattr(words, options.mattrWindowSize),
         kontoyiannisEntropy: computeKontoyiannisEntropy(text),
-        sentenceLengthCv: computeSentenceLengthCv(text),
+        sentenceLengthCv: sentenceCv(lengths),
         clicheDensityPer1k: computeClicheDensity(text, options.clicheTerms)
     };
 }

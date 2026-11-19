@@ -26,7 +26,7 @@
 
 ### 3. 三态时间线写回约束
 - `MAINLINE`：正常更新第 2-4 区并如实估算 `story_day_delta`（整数 >= 0）。
-- `PARALLEL`：冻结主线时钟累加，`story_day_delta` 必须保持 `0`。
+- `PARALLEL`：以 `story_day_delta` 如实估算本章在支线经历的天数。只累计本支线，主线时钟在合并前保持不变。
 - `FLASHBACK`：严禁覆写当前 `Acquired State` 或推进主线 `story_day`（`story_day_delta` 保持 `0`），仅将新揭露的历史事实带历史 `story_day` 记入第 3 区履历与对应知情者认知层。
 
 ### 4. 双轨 `L2` 章卡与候选方向（`Q1` 契约）

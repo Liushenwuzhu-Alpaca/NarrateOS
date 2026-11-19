@@ -19,7 +19,7 @@ import {
     type RoleModelOverride,
     type TokenUsage
 } from '@narrateos/dsh-book-store';
-import { isAbortError } from '../pipeline/helpers.js';
+import { addUsage, createEmptyUsage, isAbortError } from '../pipeline/helpers.js';
 import type { LlmPoolRouting, LlmRouteTarget } from '../schemas.js';
 
 const DEFAULT_MAX_RETRIES = 3;
@@ -393,6 +393,7 @@ export class DshLlmAdapter implements LlmPort {
         }
 
         let lastError: unknown;
+        const totalUsage = createEmptyUsage();
         for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
             if (attempt > 0) {
                 await traceEvent('transport.retry', { attempt: attempt + 1 });
@@ -406,9 +407,13 @@ export class DshLlmAdapter implements LlmPort {
                 provider: options.provider
             });
 
+            const attemptUsage = createEmptyUsage();
             try {
-                return await this.consumeStream(options, options.model, signal);
+                const result = await this.consumeStream(options, options.model, attemptUsage, signal);
+                addUsage(totalUsage, attemptUsage);
+                return { ...result, usage: totalUsage };
             } catch (err: unknown) {
+                addUsage(totalUsage, attemptUsage);
                 lastError = err;
                 if (isStreamAbortError(err, signal)) {
                     throw err;
@@ -425,16 +430,12 @@ export class DshLlmAdapter implements LlmPort {
     private async consumeStream(
         options: GenerateOptions,
         modelId: string,
+        usage: TokenUsage,
         signal?: AbortSignal
     ): Promise<CleanroomResponse> {
-        const textParts: string[] = [];
-        const deltaSeenIndices = new Set<number>();
-        const usage: TokenUsage = {
-            inputTokens: 0,
-            cacheReadTokens: 0,
-            cacheWriteTokens: 0,
-            outputTokens: 0
-        };
+        const textBlocks = new Map<number, string>();
+        const assembleText = () => [...textBlocks.keys()].sort((a, b) => a - b)
+            .map(index => textBlocks.get(index)).join('');
         let finishReason: string | undefined;
 
         try {
@@ -445,16 +446,15 @@ export class DshLlmAdapter implements LlmPort {
 
                 switch (chunk.type) {
                     case 'text-delta': {
-                        deltaSeenIndices.add(chunk.index);
-                        textParts.push(chunk.text);
+                        textBlocks.set(chunk.index, (textBlocks.get(chunk.index) ?? '') + chunk.text);
                         break;
                     }
                     case 'block-end': {
                         if (
                             chunk.block.type === 'text' &&
-                            !deltaSeenIndices.has(chunk.index)
+                            !textBlocks.has(chunk.index)
                         ) {
-                            textParts.push(chunk.block.text);
+                            textBlocks.set(chunk.index, chunk.block.text);
                         }
                         break;
                     }
@@ -489,9 +489,9 @@ export class DshLlmAdapter implements LlmPort {
                 }
             }
         } catch (error) {
-            if (textParts.length > 0) {
+            if (textBlocks.size > 0) {
                 await traceArtifact('transport.partial', {
-                    text: textParts.join(''),
+                    text: assembleText(),
                     modelId,
                     incomplete: true
                 });
@@ -500,7 +500,7 @@ export class DshLlmAdapter implements LlmPort {
         }
 
         const response: CleanroomResponse = {
-            text: textParts.join(''),
+            text: assembleText(),
             usage,
             modelId
         };

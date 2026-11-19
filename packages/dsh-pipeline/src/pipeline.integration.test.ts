@@ -352,15 +352,15 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                             samples: [
                                 {
                                     tag: '白描动作',
-                                    text: '煤油灯焰矮了一截，灯罩内壁蒙着一层薄灰，照得桌面木纹发暗。'
+                                    text: '指腹在十二页停住。'
                                 },
                                 {
                                     tag: '克制对白',
-                                    text: '「账页是今早才沾的水，昨夜值班簿上可没这一笔。」'
+                                    text: '「账页是今早才沾的水。」'
                                 },
                                 {
                                     tag: '感官节奏',
-                                    text: '窗外拖轮鸣了两声短笛，铁链落进水里的闷响隔着木板传进来。'
+                                    text: '抬头看向门边的算盘。'
                                 }
                             ]
                         })
@@ -695,6 +695,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                     return textToStreamChunks(
                         JSON.stringify({
                             current_arc_envelope: '# 第 2 卷正向舞台\n\n外港锚地开启全面盘查。',
+                            arc_director_plan: '第一拍：锚地盘查。',
                             future_horizon: '# 第 2 卷未来惯性\n\n- [event:evt_v2 | day:3 | status:ACTIVE] 锚地封锁'
                         })
                     );
@@ -1201,7 +1202,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                                     ]
                                 }
                             ],
-                            story_day_delta: 0,
+                            story_day_delta: 2,
                             chapter_summary: '支线第1章新建实体陈九。',
                             next_chapter_options: ['继续']
                         });
@@ -1226,7 +1227,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                                     ]
                                 }
                             ],
-                            story_day_delta: 0,
+                            story_day_delta: 3,
                             chapter_summary: '支线第2章二次更新陈九位置。',
                             next_chapter_options: ['合并窗口']
                         });
@@ -1240,7 +1241,11 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
         registerCleanup(() => pipeFiber.dispose());
 
-        await ctx.narratePipeline.forkParallelWindow({ windowId: 'win-branch' });
+        const store = ctx.narrateStore.openStore(bookRoot);
+        for (const options of [{ chapterNumber: 2 }, { targetDay: -1 }, { chapterNumber: 10000 }]) {
+            await expect(ctx.narratePipeline.stepChapter({ ...options, chapterGoal: '拒绝非法新章' })).rejects.toThrow(/章号|故事日/);
+        }
+        await ctx.narratePipeline.forkParallelWindow({ windowId: 'win-branch', maxChapters: 2 });
 
         const step1 = await ctx.narratePipeline.stepChapter({
             chapterNumber: 1,
@@ -1260,16 +1265,30 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             parallelBranchId: 'branch-a'
         });
         expect(step2.status).toBe('COMMITTED');
+        await expect(ctx.narratePipeline.stepChapter({ chapterGoal: '超额推进', timelineMode: 'PARALLEL',
+            parallelWindowId: 'win-branch', parallelBranchId: 'branch-b' })).rejects.toThrow(/跨度超限/);
+        expect((await store.readTxState()).last_committed_ch).toBe(2);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_0003.md'))).toBe(false);
+        expect((await store.readWorldState()).frontmatter.story_day).toBe(0);
+        const sandbox = new bookStorePlugin.ParallelSandbox(store, ctx.narrateStore.system);
+        expect(await sandbox.getBranchNextOptions('win-branch', 'branch-b')).toEqual([]);
+        expect(await sandbox.getBranchNextOptions('win-branch', 'branch-a')).toEqual(['合并窗口']);
+        await expect(ctx.narratePipeline.mergeParallelWindow({ windowId: 'win-branch', restoreTimelineMode: 'PARALLEL' })).rejects.toThrow(/不能恢复/);
 
         const mergeRes = await ctx.narratePipeline.mergeParallelWindow({ windowId: 'win-branch' });
         expect(mergeRes.updatedEntities).toContain('char_branch_01');
+        expect((await store.readWorldState()).frontmatter.story_day).toBe(5);
+        await expect(ctx.narratePipeline.stepChapter({ chapterGoal: '不可覆盖', chapterNumber: 2 })).rejects.toThrow(/下一个章号/);
         const mergedEntity = await readFile(join(bookRoot, 'entities/char_branch_01.md'), 'utf8');
         expect(mergedEntity).toContain('陈九');
         expect(mergedEntity).toContain('转赴二号泊位接应 char_001');
     });
 
-    it('3 级跨章自愈按 commit log 精准回滚多提交历史并清理未跟踪垃圾文件（保留 .ops 与持锁互斥）', async () => {
-        const bookRoot = await createGitBookWorkspace(tempDirs, 'heal-multicommit-rollback');
+    it('Heal 只按锁内连续 5..20 的预算回滚，保留作者文件与扫描证据', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'heal-multicommit-rollback', {
+            currentChapter: 4,
+            extraChapters: { 'ch_0004.md': '沈默右手戴着铁表。' }
+        });
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
         registerCleanup(() => promptFiber.dispose());
@@ -1286,18 +1305,28 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         });
 
         const store = ctx.narrateStore.openStore();
-        // 构建 ch1 (feat+state), ch2 (feat+state), ch3 (feat+state) 共 6 个事务提交
-        for (const [ch, text] of [
-            [1, '# 第一章\n\n沈默右手戴着铁表。\n'],
-            [2, '# 第二章\n\n沈默左手戴着金表，从此换了习惯。\n'],
-            [3, '# 第三章\n\n众人盯着沈默的金表看。\n']
-        ] as const) {
-            await store.beginDraft(ch);
-            await store.commitDraft(ch, text);
-            await store.applyStatePatch(ch, []);
+        const git = async (...args: string[]) => (await execFileAsync('git', ['-C', bookRoot, ...args])).stdout.trim();
+        const system = new bookStorePlugin.NodeSystemAdapter();
+        const syncPath = '.ops/sync_conflicts.json';
+        await writeFile(join(bookRoot, syncPath), '[]\n');
+        await writeFile(join(bookRoot, 'author-notes.md'), '历史版本');
+        const baseline = await system.commitPaths(bookRoot, [syncPath, 'author-notes.md'], 'baseline at ch4');
+        const text = '沈默左手戴着金表，从此换了习惯。';
+        await store.beginDraft(5);
+        await store.commitDraft(5, text);
+        await store.applyStatePatch(5, []);
+        // 将余下十五章合为一次 Git 提交，历史仍包含 ch5 的多阶段提交。
+        const paths = ['.ops/tx_state.json', syncPath, 'author-notes.md'];
+        for (let ch = 6; ch <= 20; ch++) {
+            const path = `manuscripts/ch_${String(ch).padStart(4, '0')}.md`;
+            await writeFile(join(bookRoot, path), '金表');
+            paths.push(path);
         }
-
-        // 制造未跟踪垃圾文件与 .ops/runs.jsonl 保护文件
+        await writeFile(join(bookRoot, paths[0]!), JSON.stringify({ ...await store.readTxState(), last_committed_ch: 20 }));
+        await rm(join(bookRoot, 'author-notes.md'));
+        const scan = '{"conflicts":[{"conflictId":"c-cascade"}]}\n';
+        await writeFile(join(bookRoot, syncPath), scan);
+        const tip = await system.commitPaths(bookRoot, paths, 'state through ch20');
         await writeFile(join(bookRoot, 'manuscripts/ch_9999_orphan.md'), 'orphan', 'utf8');
         await writeFile(join(bookRoot, '.ops/runs.jsonl'), '{"runId":"keep"}\n', 'utf8');
 
@@ -1306,22 +1335,17 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         let lockHeldInsideRerun = false;
         let healPlanPresentInsideRerun = false;
-        const healRes = await ctx.narratePipeline.healCrossChapterConflicts(
-            [
-                {
-                    conflictId: 'c-cascade',
-                    chapterA: 1,
-                    quoteA: '沈默右手戴着铁表。',
-                    chapterB: 2,
-                    quoteB: '沈默左手戴着金表，从此换了习惯。',
-                    description: '手表材质与左右手连环冲突',
-                    severityHint: 'CASCADING_HARD'
-                }
-            ],
-            {
-                onAutoRerun: async ({ rollbackToChapter }) => {
-                    expect(rollbackToChapter).toBe(1);
-                    healPlanPresentInsideRerun = existsSync(join(bookRoot, '.ops/heal_plan.json'));
+        const conflicts = [{
+            conflictId: 'c-cascade', chapterA: 4, quoteA: '沈默右手戴着铁表。',
+            chapterB: 5, quoteB: text, downstreamDependentChapters: [20],
+            description: '手表材质与左右手连环冲突', severityHint: 'CASCADING_HARD' as const
+        }];
+        let reruns = 0;
+        const onAutoRerun = async ({ rollbackToChapter }: { rollbackToChapter: number }) => {
+                    reruns++;
+                    expect(rollbackToChapter).toBe(4);
+                    expect(JSON.parse(await readFile(join(bookRoot, '.ops/heal_plan.json'), 'utf8'))).toMatchObject({ fromChapter: 5, toChapter: 20 });
+                    healPlanPresentInsideRerun = true;
                     // 验证 Tier 3 在调用 onAutoRerun 前已释放 tx.lock，内部可安全取锁重跑（无死锁）
                     try {
                         await store.withTxLock(async () => {});
@@ -1331,20 +1355,41 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                         }
                     }
                     return { success: true, stillConflicting: false };
-                }
-            }
-        );
+        };
+        const heal = ctx.narratePipeline;
+        const assertUntouched = async () => {
+            expect(await git('rev-parse', 'HEAD')).toBe(tip.sha);
+            expect(await git('tag', '--list', 'backup/pre-heal-*')).toBe('');
+            expect((await store.readTxState()).last_committed_ch).toBe(20);
+            expect(existsSync(join(bookRoot, '.ops/heal_plan.json'))).toBe(false);
+            expect(await readFile(join(bookRoot, syncPath), 'utf8')).toBe(scan);
+            expect(reruns).toBe(0);
+        };
+        const denied = await heal.healCrossChapterConflicts(conflicts, { maxAutoRollbackChapters: 2, onAutoRerun });
+        expect(denied.quarantineReport).toMatchObject({ rollback_chapters: 16, rollback_words: text.length + 30 });
+        await assertUntouched();
+        const approved = { maxAutoRollbackChapters: 16, onAutoRerun };
+        expect((await heal.healCrossChapterConflicts(conflicts, { ...approved, resolveRollbackRef: async () => tip.sha })).quarantined).toBe(true);
+        await assertUntouched();
+        await writeFile(join(bookRoot, 'author-notes.md'), '作者未提交的新笔记');
+        expect((await heal.healCrossChapterConflicts(conflicts, approved)).quarantined).toBe(true);
+        await assertUntouched();
+        expect(await readFile(join(bookRoot, 'author-notes.md'), 'utf8')).toBe('作者未提交的新笔记');
+        await rm(join(bookRoot, 'author-notes.md'));
+        const healRes = await heal.healCrossChapterConflicts(conflicts, approved);
 
         expect(healRes.results[0]?.action).toBe('AUTO_ROLLED_BACK_AND_RERUN');
         expect(lockHeldInsideRerun).toBe(false);
         expect(healPlanPresentInsideRerun).toBe(true);
         expect(existsSync(join(bookRoot, '.ops/heal_plan.json'))).toBe(false);
-        expect(existsSync(join(bookRoot, 'manuscripts/ch_0001.md'))).toBe(true);
-        expect(existsSync(join(bookRoot, 'manuscripts/ch_0002.md'))).toBe(false);
-        expect(existsSync(join(bookRoot, 'manuscripts/ch_0003.md'))).toBe(false);
-        expect(existsSync(join(bookRoot, 'manuscripts/ch_9999_orphan.md'))).toBe(false);
+        expect(await git('rev-parse', 'HEAD')).toBe(baseline.sha);
+        expect(reruns).toBe(1);
+        expect(await readFile(join(bookRoot, syncPath), 'utf8')).toBe(scan);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_0005.md'))).toBe(false);
+        expect(existsSync(join(bookRoot, 'manuscripts/ch_0020.md'))).toBe(false);
+        expect(await readFile(join(bookRoot, 'manuscripts/ch_9999_orphan.md'), 'utf8')).toBe('orphan');
         expect(existsSync(join(bookRoot, '.ops/runs.jsonl'))).toBe(true);
-        expect((await store.readTxState()).last_committed_ch).toBe(1);
+        expect((await store.readTxState()).last_committed_ch).toBe(4);
     });
 
     it('RoleRunner 汇总多轮 assistant/message usage 到 RunDreamingResult.usage 与 StepChapterResult.totalUsage', async () => {
@@ -1469,6 +1514,10 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             force: true
         });
         expect(agentRuns[0]?.reasoningEffort).toBe('off');
+        const definitions = await ctx.narratePipeline.resolveRoleDefinitions({
+            role_routing: { dreamer: { reasoning_effort: 'medium' } }
+        });
+        expect(definitions.find(role => role.id === 'dreamer')?.effectiveReasoningEffort).toBe('off');
 
         const adapter = new DshLlmAdapter(ctx.llm, {
             poolRouting: {
@@ -1529,12 +1578,30 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         ).rejects.toThrow(/does not support reasoning effort "medium"/);
     });
 
+    it('直调写手按块序重组交错文本，完整块只计一次', async () => {
+        const llm = { async *stream() {
+            yield { type: 'text-delta', index: 0, text: '甲' };
+            yield { type: 'text-delta', index: 1, text: '丙' };
+            yield { type: 'text-delta', index: 0, text: '乙' };
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: '甲乙' } };
+            yield { type: 'block-end', index: 2, block: { type: 'text', text: '丁' } };
+        } };
+        const route = { provider: 'mock', model: 'mock' };
+        const adapter = new DshLlmAdapter(llm as never, {
+            poolRouting: { strong_creative: route, fast_retrieval: route, audit: route }
+        });
+        const result = await adapter.generate({ pool: 'strong_creative', staticPrefixBlocks: [], dynamicTail: '写一章' });
+        expect(result.text).toBe('甲乙丙丁');
+    });
+
     it('DshLlmAdapter 遇到 MALFORMED_RESPONSE 时自动退避重试并返回后续成功响应', async () => {
         let attempts = 0;
         const mockLlm = {
             async *stream() {
                 attempts += 1;
                 if (attempts === 1) {
+                    yield { type: 'usage', usage: { inputTokens: 11, outputTokens: 2 } };
+                    yield { type: 'usage', usage: { inputTokens: 11, outputTokens: 5 } };
                     yield {
                         type: 'finish',
                         reason: {
@@ -1569,6 +1636,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         expect(attempts).toBe(2);
         expect(res.text).toContain('陈砚合上账册');
+        expect(res.usage).toEqual({ inputTokens: 131, outputTokens: 85, cacheReadTokens: 40, cacheWriteTokens: 10 });
     });
 
     it('全工种均在最外层过滤 agent-instructions (AGENTS.md)，且 WRITER 支持单轮无工具 Agent 会话与 MALFORMED_RESPONSE 重试', async () => {
@@ -1710,6 +1778,11 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                                 };
                                 const preStepResult = await dispatchPreStep(0);
                                 preStepCapturedMessages = preStepResult.messages as typeof preStepCapturedMessages;
+                                ctx.emit('session/event', { id: opts.sessionId } as never, {
+                                    type: 'assistant/attempt', data: { turn: 1, step: 1, stream: [
+                                        { type: 'chunk', time: 1, chunk: { type: 'usage', usage: { inputTokens: 9, outputTokens: 4 } } }
+                                    ] }
+                                } as never);
 
                                 // 模拟 3 次 MALFORMED_RESPONSE 请求错误：前 2 次应返回 retry，第 3 次不再无限重试
                                 for (let i = 0; i < 3; i += 1) {
@@ -1753,6 +1826,9 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                                         }
                                     }
                                 });
+                                latestStreamHandler?.({ frame: { type: 'chunk', chunk: {
+                                    type: 'block-end', index: 1, block: { type: 'text', text: '他走远了。' }
+                                } } });
                                 idleResolve?.();
                             })();
                         }
@@ -1806,6 +1882,8 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             { stage: 'WRITER', sessionId: writerRes.sessionId! }
         ]);
         expect(writerRes.response.text).toContain('陈砚把油印票据折进袖口');
+        expect(writerRes.response.text.endsWith('他走远了。')).toBe(true);
+        expect(writerRes.response.usage.outputTokens).toBe(4);
         expect(
             preStepCapturedMessages.some((m) => m.source?.kind === 'agent-instructions')
         ).toBe(false);
@@ -2212,15 +2290,18 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         // 3. 无 ctx.agents.create 时兜底 runCleanroom 也必须走 resolveRoleRoute 与 resolveRoleReasoningEffort
         const fallbackLlmCalls: Array<{ provider: string; model: string; reasoningEffort?: string }> = [];
+        let fallbackSystem: string | undefined;
+        let fallbackText = '# 兜底正文\n\n码头起风了。';
         const fallbackCtx = new Context();
         fallbackCtx.provide('llm', {
-            stream(opts: { provider: string; model: string; reasoningEffort?: string }) {
+            stream(opts: { provider: string; model: string; reasoningEffort?: string; system?: string }) {
+                fallbackSystem = opts.system;
                 fallbackLlmCalls.push({
                     provider: opts.provider,
                     model: opts.model,
                     ...(opts.reasoningEffort ? { reasoningEffort: String(opts.reasoningEffort) } : {})
                 });
-                return textToStreamChunks('# 兜底正文\n\n码头起风了。');
+                return textToStreamChunks(fallbackText);
             }
         } as never);
         const fallbackStoreFiber = await fallbackCtx.plugin(bookStorePlugin, { bookRoot });
@@ -2248,6 +2329,10 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             }
         });
         expect(fallbackRes.response.modelId).toBe('claude-prose');
+        expect(fallbackSystem).toBe(`${fallbackRes.roleConfig.promptText}\n\n静态前缀`);
+        fallbackText = ' ';
+        await expect(fallbackRunner.runCleanroom({ bookRoot, request: { staticPrefixBlocks: [], dynamicTail: '继续' } }))
+            .rejects.toThrow(/未输出有效正文/);
         expect(fallbackLlmCalls[0]).toEqual({
             provider: 'custom-anthropic',
             model: 'claude-prose',
@@ -2256,6 +2341,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
     });
 
     it('Audit #5: ensureChapterHeading 自动补全首行 # 标题（剥离第X章前缀、纯数字兜底）且已有 # 标题原样保留', async () => {
+        expect(() => ensureChapterHeading(bookStorePlugin.stripBlockingTags('<blocking>布景</blocking>').cleanText, 2)).toThrow(/未输出有效正文/);
         expect(ensureChapterHeading('正文第一段。', 2, '第2章：潮汐账簿')).toBe('# 潮汐账簿\n\n正文第一段。');
         expect(ensureChapterHeading('正文第一段。', 2, '第十二章 暗潮')).toBe('# 暗潮\n\n正文第一段。');
         expect(ensureChapterHeading('正文第一段。', 2, '第二章')).toBe('# 2\n\n正文第一段。');
@@ -2265,6 +2351,11 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         );
 
         const bookRoot = await createGitBookWorkspace(tempDirs, 'chapter-heading-fallback');
+        const writerConfig = await new RoleLoader().loadRoleConfig('writer');
+        await mkdir(join(bookRoot, 'world/roles/prompts'), { recursive: true });
+        await writeFile(join(bookRoot, 'world/roles/writer.yml'),
+            (await readFile(writerConfig.roleFilePath, 'utf8')).replace('strong_creative', 'fast_retrieval'));
+        await writeFile(join(bookRoot, 'world/roles/prompts/writer.md'), writerConfig.promptText);
         const ctx = new Context();
         const promptFiber = await ctx.plugin(SystemPrompt);
         registerCleanup(() => promptFiber.dispose());
@@ -2277,7 +2368,7 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
 
         let writerCall = 0;
         let factCheckerDraftSeen = '';
-        await createHeadlessMockServices(ctx, {
+        const { agentRuns } = await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_context_pack')) {
                     await execTool('yield_context_pack', {
@@ -2328,11 +2419,15 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
             }
         });
 
-        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            heartbeatIntervalMs: 0,
+            poolRouting: { fast_retrieval: { provider: 'test', model: 'writer-fast' } }
+        });
         registerCleanup(() => pipeFiber.dispose());
 
         await ctx.narratePipeline.stepChapter({ chapterNumber: 1, chapterGoal: '无标题补全' });
         const ch1 = await readFile(join(bookRoot, 'manuscripts/ch_0001.md'), 'utf8');
+        expect(agentRuns.find(run => run.sessionId.startsWith('narrate-writer-'))?.model).toBe('writer-fast');
         expect(ch1.startsWith('# 夜泊三号码头\n\n')).toBe(true);
         expect(factCheckerDraftSeen).toContain('[P0] # 夜泊三号码头');
 
@@ -2471,6 +2566,42 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         expect(extractorPrompt).not.toContain('OLDER_CARD_CH1_SHOULD_BE_OMITTED');
     });
 
+    it('句柄创建中卸载：迟到句柄仍取消并完成清理，且绝不发出 followup', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'late-handle');
+        const ctx = new Context();
+        const store = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => store.dispose());
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const calls: string[] = [];
+        ctx.provide('agents', { async create() {
+            entered.resolve();
+            await release.promise;
+            return {
+                agent: { cancel: () => calls.push('cancel'), followup: () => calls.push('followup'), whenIdle: async () => {} },
+                dispose: async () => { calls.push('dispose'); }
+            };
+        } } as never);
+        const poolRouting = {
+            strong_creative: { provider: 'test', model: 'strong' }, fast_retrieval: { provider: 'test', model: 'fast' }
+        };
+        const runner = new RoleRunner({
+            ctx, poolRouting, storeService: ctx.narrateStore, roleLoader: new RoleLoader(),
+            toolsService: ctx.narrateTools, llmAdapter: new DshLlmAdapter(ctx.llm, { poolRouting })
+        });
+        const options = { bookRoot, request: { staticPrefixBlocks: [], dynamicTail: '续写' } };
+        const outcome = expect(runner.runCleanroom(options)).rejects.toMatchObject({ name: 'AbortError' });
+        await entered.promise;
+        const drained = runner.drainActiveRuns();
+        expect(runner.activeCount).toBe(1);
+        release.resolve();
+        await Promise.all([drained, outcome]);
+        expect(calls).toEqual(['cancel', 'dispose']);
+        expect(ctx.narrateStore.hasActiveRuns()).toBe(false);
+        expect(runner.activeCount).toBe(0);
+        await expect(runner.runCleanroom(options)).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
     it('RoleRunner.runCleanroom 空输出在 runAgentSession 记为 failed（runs.jsonl 与 session_logs 一致），且支持仅发 block-end 文本块兜底', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'cleanroom-block-end-and-empty');
         const ctx = new Context();
@@ -2483,9 +2614,15 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
         const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
         registerCleanup(() => bookToolsFiber.dispose());
 
-        let streamMode: 'empty' | 'block-end-only' = 'empty';
+        let streamMode: 'empty' | 'block-end-only' | 'host-abort' = 'empty';
         await createHeadlessMockServices(ctx, {
-            onAgent: async () => {},
+            onAgent: async ({ agent, agentCtx }) => {
+                if (streamMode !== 'host-abort') return;
+                agentCtx.emit(scopeTarget(agent, agent), 'agent/assistant-stream', {
+                    frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: '未完成的草稿' } }
+                } as never);
+                ctx.emit('session/event', agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted' } } } as never);
+            },
             onLlmStream: () => {
                 if (streamMode === 'empty') {
                     return (async function* (): AsyncIterable<StreamChunk> {
@@ -2600,6 +2737,13 @@ describe('Phase 3 无头 Cordis 宿主多智能体管线与配置热覆盖集成
                 (ev) => ev.kind === 'text' && ev.text === '# 兜底正文\n\n仅通过 block-end 块输出的正文内容。'
             )
         ).toBe(true);
+
+        streamMode = 'host-abort';
+        await expect(runner.runCleanroom({ bookRoot, chapterNumber: 3, request: { staticPrefixBlocks: [], dynamicTail: '续写' } }))
+            .rejects.toMatchObject({ name: 'AbortError' });
+        const interruptedRuns = await ctx.narrateStore.openStore().listRunRecords({ chapter: 3 });
+        expect(interruptedRuns.map(r => r.status)).toContain('failed');
+        expect(interruptedRuns.map(r => r.status)).not.toContain('completed');
     });
 
     it('Gate 超出2段但<=15段且<=60%优先触发 LOCAL_PATCH，FactChecker <=4段亦走带 proseGateOptions 的 LOCAL_PATCH', async () => {

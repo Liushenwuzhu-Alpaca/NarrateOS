@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
@@ -123,19 +123,14 @@ export const HealPlanSchema = z.object({
     nextChapter: z.number().int().positive(),
     constraint: z.string().optional(),
     updatedAt: z.string()
-});
+}).refine(plan => plan.fromChapter <= plan.nextChapter && plan.nextChapter <= plan.toChapter + 1 && plan.fromChapter <= plan.toChapter, '自愈断点区间无效');
 export type HealPlan = z.infer<typeof HealPlanSchema>;
 
-/** 读取 .ops/heal_plan.json（不存在或损坏时返回 null） */
+/** 没有计划时返回 null；损坏的计划不可当作无待办处理。 */
 export async function readHealPlan(bookRoot: string): Promise<HealPlan | null> {
     const raw = await readOptionalText(join(bookRoot, HEAL_PLAN_REL_PATH));
     if (raw === null) return null;
-    try {
-        const parsed = HealPlanSchema.safeParse(JSON.parse(raw));
-        return parsed.success ? parsed.data : null;
-    } catch {
-        return null;
-    }
+    return HealPlanSchema.parse(JSON.parse(raw));
 }
 
 /** 写入 .ops/heal_plan.json */
@@ -149,11 +144,14 @@ export async function writeHealPlan(
         ...plan,
         updatedAt: plan.updatedAt ?? new Date().toISOString()
     });
-    await writeFile(
-        join(bookRoot, HEAL_PLAN_REL_PATH),
-        `${JSON.stringify(payload, null, 4)}\n`,
-        'utf8'
-    );
+    const path = join(bookRoot, HEAL_PLAN_REL_PATH);
+    const tmp = `${path}.${randomUUID()}.tmp`;
+    try {
+        await writeFile(tmp, `${JSON.stringify(payload, null, 4)}\n`, { flag: 'wx' });
+        await rename(tmp, path);
+    } finally {
+        await rm(tmp, { force: true });
+    }
     return payload;
 }
 
@@ -323,7 +321,7 @@ export function buildVolumeStaticPrefix(
 export function normalizeOpsStyleAmendments(raw: string | null): string | undefined {
     if (!raw) return undefined;
     const body = raw
-        .replace(/^#\s*卷中风格修订\s*\(Ops Style Amendments\)\s*$/gm, '')
+        .replace(/^#\s*卷中风格修订\s*\((?:Ops )?Style Amendments\)\s*$/gm, '')
         .replace(/<!--[\s\S]*?-->/g, '')
         .trim();
     if (!body) return undefined;
@@ -341,45 +339,7 @@ export function normalizeOpenThreads(raw: string | null): string | undefined {
     return raw.trim();
 }
 
-/** 追加或替换 L2 卷级章卡中的单章双轨摘要块（主干剧情 + 异象锚点 + 出场实体） */
-export function upsertVolumeCardEntry(
-    rawCardContent: string | null,
-    currentVolume: number,
-    chapterNumber: number,
-    storyDay: number,
-    chapterSummary: string,
-    appearanceEntityIds: string[],
-    proseAnchors?: readonly string[]
-): string {
-    const baseContent =
-        rawCardContent && rawCardContent.trim().length > 0
-            ? rawCardContent.replace(/\r\n/g, '\n')
-            : `# 第 ${currentVolume} 卷双轨章卡\n\n`;
-    const chKey = formatChapterKey(chapterNumber);
-    const uniqueAnchors = proseAnchors
-        ? Array.from(
-              new Set(proseAnchors.map((a) => a.trim()).filter((a) => a.length > 0))
-          )
-        : [];
-    const uniqueIds = Array.from(
-        new Set(appearanceEntityIds.map((id) => id.trim()).filter((id) => id.length > 0))
-    );
-    const entryBlock = [
-        `## ${chKey} (day:${storyDay})`,
-        `- 主干剧情：${chapterSummary.trim()}`,
-        `- 异象锚点：${uniqueAnchors.length > 0 ? uniqueAnchors.join('、') : '无'}`,
-        `- 出场实体：${uniqueIds.join(', ')}`
-    ].join('\n');
-    const sectionRe = new RegExp(
-        `^##\\s+${chKey}\\b[^\\n]*\\n[\\s\\S]*?(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
-        'm'
-    );
-    if (sectionRe.test(baseContent)) {
-        const replaced = baseContent.replace(sectionRe, `${entryBlock}\n\n`);
-        return `${replaced.trimEnd()}\n`;
-    }
-    return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
-}
+export { upsertVolumeCardEntry } from '@narrateos/dsh-book-store';
 
 /** 将 SlicedView 中的实体、召回切片与卷包络序列化为审校验真语料 */
 export function buildVerificationCorpus(
@@ -577,15 +537,13 @@ export async function listOpenParallelWindows(
     for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const raw = await readOptionalText(join(deltasDir, entry.name, 'window.json'));
-        if (!raw) continue;
-        try {
-            const parsed = JSON.parse(raw) as { status?: unknown; baseChapter?: unknown };
-            if (parsed.status === 'OPEN') {
-                const baseChapter = typeof parsed.baseChapter === 'number' ? parsed.baseChapter : 0;
-                openWindows.push({ windowId: entry.name, baseChapter });
-            }
-        } catch {
-            // 忽略损坏窗口元数据
+        if (!raw) throw new Error(`并行窗口 ${entry.name} 缺少元数据`);
+        const parsed = JSON.parse(raw) as { status?: unknown; baseChapter?: unknown };
+        if (!parsed || !Number.isSafeInteger(parsed.baseChapter) || Number(parsed.baseChapter) < 0 || !['MERGED', 'ABORTED', 'OPEN'].includes(String(parsed.status))) {
+            throw new Error(`并行窗口 ${entry.name} 元数据无效`);
+        }
+        if (parsed.status === 'OPEN') {
+            openWindows.push({ windowId: entry.name, baseChapter: Number(parsed.baseChapter) });
         }
     }
     return openWindows;

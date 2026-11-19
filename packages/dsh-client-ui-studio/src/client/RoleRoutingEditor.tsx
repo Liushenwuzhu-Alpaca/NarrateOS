@@ -82,7 +82,7 @@ function formatDefaultModelLabel(defaultModel: DefaultModelSelection | null | un
     const model = defaultModel?.model?.trim();
     if (!model) return '';
     const provider = defaultModel?.provider?.trim();
-    if (provider && !model.includes(':')) {
+    if (provider) {
         return `${provider}:${model}`;
     }
     return model;
@@ -163,9 +163,9 @@ export function normalizeRoleRoutingMap(
     return out;
 }
 
-/** 格式化候选模型值（provider:model），避免重复前缀 */
+/** 已拆分的候选只在生成配置值时拼接，原始模型名可以包含冒号。 */
 function formatAvailableModelValue(item: AvailableModelItem): string {
-    if (!item.provider || item.model.includes(':')) {
+    if (!item.provider) {
         return item.model;
     }
     return `${item.provider}:${item.model}`;
@@ -227,11 +227,12 @@ function resolveEffectiveReasoningEffort(
     draft: RoleModelOverride | undefined,
     serverEntry: RoleModelOverride | undefined
 ): RoleReasoningEffort | undefined {
+    if (draft?.reasoning_effort === serverEntry?.reasoning_effort) return roleDef.effectiveReasoningEffort;
     if (draft?.reasoning_effort) return draft.reasoning_effort;
     if (isValidReasoningEffort(serverEntry?.reasoning_effort)) {
         return roleDef.defaultReasoningEffort;
     }
-    return roleDef.effectiveReasoningEffort ?? roleDef.defaultReasoningEffort;
+    return roleDef.effectiveReasoningEffort;
 }
 
 function resolveDraftModelProvider(
@@ -335,7 +336,7 @@ export function resolveEffectiveRoleModelLabel(
         roleDef.effectiveModel &&
         roleDef.effectiveModel !== '--'
     ) {
-        if (roleDef.effectiveModel.includes(':') || !roleDef.effectiveProvider) {
+        if (!roleDef.effectiveProvider) {
             return roleDef.effectiveModel;
         }
         return `${roleDef.effectiveProvider}:${roleDef.effectiveModel}`;

@@ -61,6 +61,7 @@ describe('IndexRecall', () => {
         await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), '## ch_0001 (day:1)\n- 出场实体：char_002\n\n## ch_0002 (day:2)\n- 出场实体：char_003\n', 'utf8');
         const slices = await recall.recallEntitySlices(bookRoot, query);
         expect(slices.map((slice) => slice.chapterNumber)).toEqual([1]);
+        expect(slices[0]).toMatchObject({ chapterDay: 1, targetDay: 10, deltaDays: 9 });
     });
 
     it('构建双层章节目录：区分已封旧卷静态区与活跃卷动态尾，且活跃卷变更不破坏静态区字节稳定性', async () => {

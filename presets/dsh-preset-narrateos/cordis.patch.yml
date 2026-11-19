@@ -2,6 +2,13 @@
 # - 宿主平面（顶层 - insert:）挂载共享服务插件、浏览器 UI 插件与单一「NarrateOS 创作模式」预设；
 # - 预设作用域（preset-narrateos.config.plugins）仅保留会话/智能体级插件，不向根作用域泄露服务。
 - insert:
+    # web-app 已声明注册表；按配置树判断，不依赖并发插件的启动顺序。
+    - id: narrateos-headless-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
+      disabled: !!js loader.root.data.some(row => row.id !== 'narrateos-headless-registry' && row.name === '@deepseek-ai/dsh-agent-preset-registry')
+      config:
+        default: narrateos
+
     - id: narrateos-book-store
       name: '@narrateos/dsh-book-store'
       config:

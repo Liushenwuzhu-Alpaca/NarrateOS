@@ -195,7 +195,7 @@ function mergeSessionEvents(
                 merged.push(ev);
             }
         }
-        return merged;
+        return merged.sort((a, b) => a.seq! - b.seq!);
     }
 
     const archivedSigs = archivedList.map(eventContentSignature);
@@ -451,11 +451,20 @@ function normalizeEventsPayload(events: readonly StageSessionDetailEvent[] | und
     let thinkingSeparated = false;
     let outputBuffer = '';
     let outputSeparated = false;
+    let attemptOutputStart = 0;
+    let attemptThinkingStart = 0;
     const toolCalls: RunDetailToolCall[] = [];
     const callById = new Map<string, RunDetailToolCall>();
 
     for (const ev of events) {
         if (!ev || typeof ev !== 'object') continue;
+        if (ev.kind === 'status' && ev.status === 'attempt-start') {
+            attemptOutputStart = outputBuffer.length;
+            attemptThinkingStart = thinkingBuffer.length;
+        } else if (ev.kind === 'status' && ev.status === 'attempt-discarded') {
+            outputBuffer = outputBuffer.slice(0, attemptOutputStart);
+            thinkingBuffer = thinkingBuffer.slice(0, attemptThinkingStart);
+        }
         if (ev.kind === 'thinking') {
             if (typeof ev.text === 'string' && ev.text.length > 0) {
                 thinkingBuffer = appendSeparatedText(thinkingBuffer, ev.text, thinkingSeparated);

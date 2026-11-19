@@ -3,6 +3,7 @@ export * from './entity-parser.js';
 export * from './entity-patch.js';
 export {
     BookStore,
+    assertForeignKeysReachable,
     type ApplyStatePatchOptions,
     type CommitDraftOptions,
     type LockAcquireSerializer,

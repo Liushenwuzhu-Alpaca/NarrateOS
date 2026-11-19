@@ -20,7 +20,7 @@ export type ExtraGateRulePattern = z.infer<typeof ExtraGateRulePatternSchema>;
 
 /** 声明式额外门禁规则定义 Schema（映射到 GateRuleConfig） */
 export const ExtraGateRuleDefSchema = z.object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().optional(),
     max_count: z.number().int().nonnegative().optional(),
     scale_by_length: z.boolean().optional(),
     reference_chars: z.number().int().positive().optional(),

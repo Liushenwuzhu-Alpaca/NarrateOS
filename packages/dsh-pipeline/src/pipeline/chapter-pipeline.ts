@@ -9,6 +9,8 @@ import {
     IndexRecall,
     normalizeForQuoteMatch,
     ParallelSandbox,
+    readChapterDays,
+    parseL2CardSections,
     parseVoiceSamplesYaml,
     PlannerOutlineSchema,
     PrefixAssembler,
@@ -84,6 +86,7 @@ import {
     normalizeOpenThreads,
     readCombinedStyleAmendments,
     readOptionalText,
+    sha256Hex,
     readSignalsCursorState,
     resolveConsumedSignalIds,
     resolveSignalId,
@@ -95,6 +98,7 @@ import {
     writeSignalsCursorState
 } from './helpers.js';
 import { harvestVoiceWithPool } from './voice-harvest.js';
+import { resolveWriterGateRules } from './craft-gate.js';
 
 export interface ChapterPipelineDeps {
     store: BookStore;
@@ -169,7 +173,7 @@ const RESTRICTED_SOURCE_REF_RE =
 
 export function resolveDefaultEngineCraftPluginDir(): string {
     const currentDir = dirname(fileURLToPath(import.meta.url));
-    return resolve(currentDir, '../../../../plugins/craft');
+    return resolve(currentDir, '../../dist/assets/plugins/craft');
 }
 
 function isRestrictedFactQuoteSource(
@@ -335,6 +339,7 @@ export function ensureChapterHeading(
     chapterTitle?: string
 ): string {
     const trimmed = prose.trim();
+    if (!trimmed) throw new Error('写手未输出有效正文文本');
     const firstLine = trimmed.split(/\r?\n/, 1)[0]?.trim() ?? '';
     if (/^#\s+\S/.test(firstLine)) {
         return trimmed;
@@ -344,7 +349,7 @@ export function ensureChapterHeading(
         .replace(/^第[0-9零一二三四五六七八九十百千万两]+章[：:\s-]*/, '')
         .trim();
     const headingText = strippedTitle.length > 0 ? strippedTitle : String(chapterNumber);
-    return trimmed.length > 0 ? `# ${headingText}\n\n${trimmed}` : `# ${headingText}`;
+    return `# ${headingText}\n\n${trimmed}`;
 }
 
 /** 从当前卷 L2_cards Markdown 中提取最近至多 limit 条章节卡片 */
@@ -518,9 +523,18 @@ export class ChapterPipeline {
             recovery.action === 'NEEDS_STATE_EXTRACTION'
                 ? snapshot.txState.chapter_context
                 : undefined;
+        const nextChapter = Math.max(snapshot.worldState.frontmatter.current_chapter, snapshot.txState.last_committed_ch) + 1;
+        const chapterNumber = options.chapterNumber ?? nextChapter;
+        const lookbackChapters = snapshot.config.ops_and_sync?.signal_lookback_chapters ?? 1;
+        const signalPlan = recovery.action === 'NEEDS_STATE_EXTRACTION' ? undefined
+            : await this.loadActiveSignals(chapterNumber, lookbackChapters);
+        const flashbackNote = snapshot.worldState.frontmatter.timeline_mode !== 'PARALLEL'
+            ? signalPlan?.signals.findLast((s) => s.type === 'DIRECTOR_NOTE' && s.suggested_mode === 'FLASHBACK')
+            : undefined;
         const timelineMode: TimelineMode =
             recoveredContext?.timelineMode ??
             options.timelineMode ??
+            (flashbackNote ? 'FLASHBACK' : undefined) ??
             snapshot.worldState.frontmatter.timeline_mode;
         const povCharIds =
             recoveredContext?.povCharIds ??
@@ -554,8 +568,17 @@ export class ChapterPipeline {
         const branchStagingOverlay = parallel
             ? await this.buildParallelStagingOverlay(snapshot, parallel)
             : undefined;
-        const allowedChapterFiles = parallel ? snapshot.chapterFiles : undefined;
-        const lookbackChapters = snapshot.config.ops_and_sync?.signal_lookback_chapters ?? 1;
+        const targetDay = recoveredContext?.targetDay ?? options.targetDay ??
+            (timelineMode === 'FLASHBACK' ? flashbackNote?.target_day : undefined) ?? snapshot.worldState.frontmatter.story_day;
+        let allowedChapterFiles = parallel ? snapshot.chapterFiles : undefined;
+        if (timelineMode === 'FLASHBACK') {
+            const days = await this.recall.resolveChapterDayMap(this.store.bookRoot, snapshot.chapterFiles,
+                await readChapterDays(this.store.bookRoot));
+            allowedChapterFiles = snapshot.chapterFiles.filter((file) => {
+                const chapterDay = days.get(Number(file.slice(3, -3)));
+                return chapterDay !== undefined && chapterDay <= targetDay;
+            });
+        }
 
         // 崩溃恢复：处于 FEAT_COMMITTED 时跳过生成直接补跑 Extractor 与 state 提交
         if (recovery.action === 'NEEDS_STATE_EXTRACTION' && recovery.activeChapter !== null) {
@@ -565,7 +588,6 @@ export class ChapterPipeline {
                 recoveredContext,
                 timelineMode,
                 povCharIds,
-                lookbackChapters,
                 totalUsage,
                 options,
                 parallel,
@@ -575,26 +597,23 @@ export class ChapterPipeline {
             });
         }
 
-        const chapterNumber =
-            options.chapterNumber ??
-            Math.max(
-                snapshot.worldState.frontmatter.current_chapter,
-                snapshot.txState.last_committed_ch
-            ) + 1;
-        if (
-            parallel &&
-            (!Number.isSafeInteger(chapterNumber) ||
-                chapterNumber <=
-                    Math.max(
-                        snapshot.worldState.frontmatter.current_chapter,
-                        snapshot.txState.last_committed_ch
-                    ))
-        ) {
-            throw new Error('并行章号必须大于已提交章号，禁止覆盖主线或其他支线章节');
+        if (parallel) {
+            await new ParallelSandbox(this.store, this.system).assertChapterCapacity(parallel.windowId);
+        }
+        if (!Number.isSafeInteger(chapterNumber) || chapterNumber < 1 || chapterNumber > 9999) {
+            throw new Error('章号必须是 1 至 9999 的整数');
+        }
+        if (parallel ? chapterNumber < nextChapter : chapterNumber !== nextChapter) {
+            throw new Error(parallel
+                ? '并行章号必须大于已提交章号，禁止覆盖主线或其他支线章节'
+                : `新章必须按发表顺序推进，下一个章号为 ${nextChapter}`);
         }
         await traceEvent('run.context', { chapter: chapterNumber });
 
-        const targetDay = options.targetDay ?? snapshot.worldState.frontmatter.story_day;
+        if (!Number.isSafeInteger(targetDay) ||
+            (timelineMode !== 'FLASHBACK' && targetDay < snapshot.worldState.frontmatter.story_day)) {
+            throw new Error('目标故事日无效，非插叙章节不能倒退时钟');
+        }
         const [
             staticBaseAndVoiceRaw,
             currentArcEnvelopeRaw,
@@ -632,7 +651,7 @@ export class ChapterPipeline {
             currentArcEnvelopeRaw
         );
 
-        const { gateRules, customPlugins } = await this.loadActivePlugins(snapshot.config);
+        const { plugins, gateRules, customPlugins } = await this.loadActivePlugins(snapshot.config);
         // FLASHBACK 模式下物理屏蔽主线上一章尾窗正文，防止诱导续写未来现场
         const previousChapter =
             timelineMode === 'FLASHBACK'
@@ -640,7 +659,8 @@ export class ChapterPipeline {
                 : await this.loadPreviousChapter(
                       chapterNumber,
                       snapshot.worldState.frontmatter.current_volume,
-                      snapshot.chapterFiles
+                      snapshot.chapterFiles,
+                      branchStagingOverlay
                   );
         const futureHorizon = (await this.store.readFutureHorizon()) ?? undefined;
         const openThreads = normalizeOpenThreads(await this.store.readOpenThreads());
@@ -648,11 +668,10 @@ export class ChapterPipeline {
         const historicalChapters = await this.loadHistoricalChapters(
             chapterNumber,
             snapshot.config.prose_gate.cross_chapter_simile_window,
-            snapshot.chapterFiles
+            allowedChapterFiles ?? snapshot.chapterFiles
         );
         const voicePool = await this.readVoicePool();
-        const signalPlan = await this.loadActiveSignals(chapterNumber, lookbackChapters);
-        const activeSignals = signalPlan.signals;
+        const activeSignals = signalPlan?.signals ?? [];
 
         // Step 1: Librarian (多轮受控探查 -> yield_context_pack)
         emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
@@ -815,6 +834,7 @@ export class ChapterPipeline {
                 selectedLoreEntries,
                 outline: activeOutline,
                 staticPrefix: writerStaticPrefix,
+                rolePrompt: writerRoleCfg.promptText,
                 previousChapter,
                 opsStyleAmendments,
                 customPlugins,
@@ -941,6 +961,7 @@ export class ChapterPipeline {
                                 selectedLoreEntries,
                                 outline: activeOutline,
                                 staticPrefix: writerStaticPrefix,
+                                rolePrompt: writerRoleCfg.promptText,
                                 previousChapter,
                                 opsStyleAmendments,
                                 customPlugins,
@@ -992,6 +1013,7 @@ export class ChapterPipeline {
                     arcDirectorPlanRaw,
                     authorCharterRaw,
                     totalUsage,
+                    this.pluginLoader.mergePromptInjection(plugins, 'fact_checker'),
                     options,
                     allowedChapterFiles,
                     effectiveStagingOverlay
@@ -1122,6 +1144,7 @@ export class ChapterPipeline {
                         selectedLoreEntries,
                         outline: activeOutline,
                         staticPrefix: writerStaticPrefix,
+                        rolePrompt: writerRoleCfg.promptText,
                         previousChapter,
                         opsStyleAmendments,
                         customPlugins,
@@ -1165,6 +1188,11 @@ export class ChapterPipeline {
             chapterNumber,
             activeOutline.chapter_title
         );
+        const signalCursorUpdate =
+            !options.chapterGoal.includes('[待响应运维信号]') && signalPlan?.hasCursorChanges
+                ? signalPlan.nextCursorState
+                : undefined;
+
         await this.store.beginDraft(chapterNumber);
         const featRes = await this.store.commitDraft(
             chapterNumber,
@@ -1173,6 +1201,7 @@ export class ChapterPipeline {
                 timelineMode,
                 targetDay,
                 povCharIds,
+                signalCursorUpdate,
                 ...(parallel
                     ? {
                           parallelWindowId: parallel.windowId,
@@ -1182,11 +1211,6 @@ export class ChapterPipeline {
             },
             { outline: activeOutline }
         );
-
-        const signalCursorUpdate =
-            !options.chapterGoal.includes('[待响应运维信号]') && signalPlan.hasCursorChanges
-                ? signalPlan.nextCursorState
-                : undefined;
 
         emit('EXTRACTOR', chapterNumber, '增量抽取实体状态与四联遥测');
         const stateRes = await this.runExtractorAndCommitState({
@@ -1238,7 +1262,6 @@ export class ChapterPipeline {
         recoveredContext: BookSnapshot['txState']['chapter_context'];
         timelineMode: TimelineMode;
         povCharIds: string[];
-        lookbackChapters: number;
         totalUsage: TokenUsage;
         options: StepChapterOptions;
         parallel?: { windowId: string; branchId: string } | undefined;
@@ -1256,7 +1279,6 @@ export class ChapterPipeline {
             recoveredContext,
             timelineMode,
             povCharIds,
-            lookbackChapters,
             totalUsage,
             options,
             parallel,
@@ -1267,7 +1289,11 @@ export class ChapterPipeline {
         let snapshot = params.snapshot;
         emit('WAL_RECOVERY', activeCh, `从 FEAT_COMMITTED 恢复第 ${activeCh} 章状态抽取`);
         const relPath = `manuscripts/${formatChapterKey(activeCh)}.md`;
-        const prose = await readFile(join(this.store.bookRoot, relPath), 'utf8');
+        const featCommitSha = await this.system.currentRevision(this.store.bookRoot);
+        const prose = await this.system.readFileAtRef(this.store.bookRoot, featCommitSha, relPath);
+        if (prose === null || sha256Hex(prose) !== snapshot.txState.chapter_hashes[formatChapterKey(activeCh)]) {
+            throw new Error(`无法恢复第 ${activeCh} 章：Git 正文缺失或与 WAL 指纹不符`);
+        }
         const targetDay =
             recoveredContext?.targetDay ??
             options.targetDay ??
@@ -1315,12 +1341,6 @@ export class ChapterPipeline {
                   }).updatedPool;
         }
 
-        const recoverySignals = await this.loadActiveSignals(activeCh, lookbackChapters);
-        const recoverySignalCursorUpdate =
-            !options.chapterGoal.includes('[待响应运维信号]') && recoverySignals.hasCursorChanges
-                ? recoverySignals.nextCursorState
-                : undefined;
-        const featCommitSha = await this.system.currentRevision(this.store.bookRoot).catch(() => '');
         const recoveredSelectedIds = Array.from(new Set(recoveryWakeupIds));
 
         emit('EXTRACTOR', activeCh, '增量抽取实体状态与四联遥测');
@@ -1341,8 +1361,8 @@ export class ChapterPipeline {
             options,
             parallel,
             allowedChapterFiles,
-            stagingOverlay: recoveryStagingOverlay,
-            signalCursorUpdate: recoverySignalCursorUpdate
+            stagingOverlay: new Map(recoveryStagingOverlay).set(relPath, prose),
+            signalCursorUpdate: recoveredContext?.signalCursorUpdate
         });
 
         return {
@@ -1379,7 +1399,7 @@ export class ChapterPipeline {
         const retrievalCfg = snapshot.config.retrieval;
         const catalog = await this.recall.buildLibrarianCatalog(this.store.bookRoot, {
             currentVolume: snapshot.worldState.frontmatter.current_volume,
-            chapterFiles: snapshot.chapterFiles,
+            chapterFiles: allowedChapterFiles ?? snapshot.chapterFiles,
             ...(stagingOverlay !== undefined ? { stagingOverlay } : {}),
             ...(retrievalCfg?.l2_full_unfrozen_threshold !== undefined
                 ? { l2FullUnfrozenThreshold: retrievalCfg.l2_full_unfrozen_threshold }
@@ -1658,6 +1678,7 @@ export class ChapterPipeline {
         selectedLoreEntries: string[];
         outline: PlannerOutline;
         staticPrefix: StaticPrefixInput;
+        rolePrompt: string;
         previousChapter: PreviousChapterContext | undefined;
         opsStyleAmendments: string | undefined;
         customPlugins?: Record<string, CraftPluginDefinition> | undefined;
@@ -1687,6 +1708,7 @@ export class ChapterPipeline {
         selectedLoreEntries: string[];
         outline: PlannerOutline;
         staticPrefix: StaticPrefixInput;
+        rolePrompt: string;
         previousChapter: PreviousChapterContext | undefined;
         opsStyleAmendments: string | undefined;
         customPlugins?: Record<string, CraftPluginDefinition> | undefined;
@@ -1755,13 +1777,14 @@ export class ChapterPipeline {
             customPlugins: params.customPlugins,
             voicePool: params.voicePool,
             preferredVoiceTag: params.outline.preferred_voice_tag,
-            pool: 'strong_creative'
+            rolePrompt: params.rolePrompt
         });
 
         const traceStage = params.traceStage ?? 'writer';
         const stage = traceStage === 'rewrite' ? 'REWRITE' : 'WRITER';
         const { response } = await this.roleRunner.runCleanroom({
             roleId: 'writer',
+            budgetedRolePrompt: params.rolePrompt,
             stage,
             attempt: params.attempt,
             triggerReason: params.triggerReason,
@@ -1769,7 +1792,8 @@ export class ChapterPipeline {
             bookConfig: params.snapshot.config,
             chapterNumber: params.chapterNumber,
             request: {
-                ...assembled.request,
+                staticPrefixBlocks: assembled.request.staticPrefixBlocks,
+                dynamicTail: assembled.request.dynamicTail,
                 traceStage
             },
             signal: params.signal,
@@ -1958,6 +1982,7 @@ export class ChapterPipeline {
         arcDirectorPlan: string | null,
         authorCharter: string | null,
         totalUsage: TokenUsage,
+        pluginPrompt: string,
         options: StepChapterOptions,
         allowedChapterFiles?: string[] | undefined,
         stagingOverlay?: ReadonlyMap<string, string | null> | undefined
@@ -1985,6 +2010,7 @@ export class ChapterPipeline {
             .join('\n\n');
 
         const taskPrompt = [
+            pluginPrompt,
             authorCharter
                 ? `## 作者契约 (world/author_charter.md)\n${authorCharter.trim()}`
                 : '',
@@ -2170,12 +2196,14 @@ export class ChapterPipeline {
             timelineMode,
             prose,
             updatedVoicePool,
+            totalUsage,
+            addedNames: sanitizedPatches.flatMap((p) => [p.canonical_name ?? '', ...(p.add_unique_aliases ?? [])]),
             signal: options.signal
         });
 
         const plannedPaths = [
             '.ops/telemetry.jsonl',
-            '.ops/next_chapter_options.json',
+            ...(!parallel ? ['.ops/next_chapter_options.json'] : []),
             ...(signalCursorUpdate ? ['.ops/signals_cursor.json'] : []),
             ...(effectiveVoicePool ? ['.ops/voice_samples.yaml'] : []),
             ...(branchPath
@@ -2216,12 +2244,12 @@ export class ChapterPipeline {
         }
 
         const nextChapterOptions = extracted.next_chapter_options;
-        await writeNextChapterOptions(this.store.bookRoot, chapterNumber, nextChapterOptions);
-        extraCommitPaths.push('.ops/next_chapter_options.json');
+        if (!parallel) {
+            await writeNextChapterOptions(this.store.bookRoot, chapterNumber, nextChapterOptions);
+            extraCommitPaths.push('.ops/next_chapter_options.json');
+        }
 
-        const freezeMainlineStoryDay =
-            timelineMode === 'FLASHBACK' || timelineMode === 'PARALLEL';
-        const nextStoryDay = freezeMainlineStoryDay
+        const nextStoryDay = timelineMode === 'FLASHBACK'
             ? targetDay
             : targetDay + extracted.story_day_delta;
 
@@ -2287,7 +2315,8 @@ export class ChapterPipeline {
                 branchId: parallel.branchId,
                 chapterNumber,
                 patches: sanitizedPatches,
-                daySpan: extracted.story_day_delta,
+                nextChapterOptions,
+                daySpan: nextStoryDay - snapshot.worldState.frontmatter.story_day,
                 povCharacter: povCharIds[0],
                 l2Card: {
                     volumeNumber: currentVolume,
@@ -2383,6 +2412,8 @@ export class ChapterPipeline {
         timelineMode: TimelineMode;
         prose: string;
         updatedVoicePool: VoiceSamplePool | undefined;
+        totalUsage: TokenUsage;
+        addedNames: string[];
         signal?: AbortSignal | undefined;
     }): Promise<VoiceSamplePool | undefined> {
         const { snapshot, chapterNumber, timelineMode, prose, updatedVoicePool, signal } = params;
@@ -2400,7 +2431,7 @@ export class ChapterPipeline {
         if (!memoryBasePool || !memoryBasePool.samples.some((s) => s.source === 'boot_seed')) {
             return updatedVoicePool;
         }
-        const entityNames = collectEntityDisplayNames(snapshot.entities);
+        const entityNames = [...collectEntityDisplayNames(snapshot.entities), ...params.addedNames];
         try {
             const harvested = await harvestVoiceWithPool({
                 store: this.store,
@@ -2410,6 +2441,9 @@ export class ChapterPipeline {
                 chapterText: prose,
                 currentPool: memoryBasePool,
                 entityNames,
+                snapshot,
+                pluginSearchDirs: this.pluginSearchDirs,
+                onUsage: (usage) => addUsage(params.totalUsage, usage),
                 rollingReplaceBootSeeds: true,
                 writeToDisk: false,
                 signal
@@ -2435,13 +2469,14 @@ export class ChapterPipeline {
         if (config.craft_plugins.length === 0 || this.pluginSearchDirs.length === 0) {
             return {
                 plugins: [],
-                gateRules: {},
+                gateRules: resolveWriterGateRules(this.pluginLoader, [], config),
                 customPlugins: undefined
             };
         }
 
         const plugins = await this.pluginLoader.loadForBook({
             searchDirs: this.pluginSearchDirs,
+            onConflict: 'override',
             enabledPluginIds: config.craft_plugins
         });
 
@@ -2460,7 +2495,7 @@ export class ChapterPipeline {
 
         return {
             plugins,
-            gateRules: this.pluginLoader.mergeExtraGateRules(plugins),
+            gateRules: resolveWriterGateRules(this.pluginLoader, plugins, config),
             customPlugins: Object.keys(customPlugins).length > 0 ? customPlugins : undefined
         };
     }
@@ -2536,26 +2571,20 @@ export class ChapterPipeline {
 
     private async loadChapterSummaryFromCards(
         chapterNumber: number,
-        currentVolume: number
+        currentVolume: number,
+        overlay?: ReadonlyMap<string, string | null>
     ): Promise<string | undefined> {
-        const chKey = formatChapterKey(chapterNumber);
-        const sectionRe = new RegExp(
-            `^##\\s+${chKey}\\b[^\\n]*\\n([\\s\\S]*?)(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
-            'm'
-        );
         const candidateVolumes =
             currentVolume > 1 ? [currentVolume, currentVolume - 1] : [currentVolume];
         for (const vol of candidateVolumes) {
-            const cardPath = join(this.store.bookRoot, formatVolumeCardRelPath(vol));
-            const raw = await readOptionalText(cardPath);
+            const relPath = formatVolumeCardRelPath(vol);
+            const raw = overlay?.has(relPath)
+                ? overlay.get(relPath)
+                : await readOptionalText(join(this.store.bookRoot, relPath));
             if (!raw) continue;
-            const match = raw.match(sectionRe);
-            if (!match?.[1]) continue;
-            const blockBody = match[1].trim();
-            const mainPlotMatch = blockBody.match(/^-\s*主干剧情：\s*(.+)$/m);
-            const extracted = mainPlotMatch?.[1]?.trim() || blockBody;
-            if (extracted.length > 0) {
-                return extracted;
+            const section = parseL2CardSections(raw).sections.find((s) => s.chapterNumber === chapterNumber);
+            if (section) {
+                return section.plotSummary || undefined;
             }
         }
         return undefined;
@@ -2564,7 +2593,8 @@ export class ChapterPipeline {
     private async loadPreviousChapter(
         currentCh: number,
         currentVolume: number,
-        chapterFiles?: string[]
+        chapterFiles?: string[],
+        overlay?: ReadonlyMap<string, string | null>
     ): Promise<PreviousChapterContext | undefined> {
         if (currentCh <= 1) return undefined;
         const prevCh = chapterFiles
@@ -2580,7 +2610,7 @@ export class ChapterPipeline {
             join(this.store.bookRoot, 'manuscripts', `${formatChapterKey(prevCh)}.md`)
         );
         if (prevText === null) return undefined;
-        const summary = await this.loadChapterSummaryFromCards(prevCh, currentVolume);
+        const summary = await this.loadChapterSummaryFromCards(prevCh, currentVolume, overlay);
         return {
             chapterNumber: prevCh,
             fullText: prevText,

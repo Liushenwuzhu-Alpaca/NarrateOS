@@ -61,7 +61,10 @@ function upsertSlotInSection(
 ): void {
     assertSafeEntityTagValue('slotKey', slotKey);
     const nextEntry = toEntityEntry(entryInput);
-    nextEntry.slotKey = nextEntry.slotKey || slotKey;
+    if (!slotKey.trim() || (nextEntry.slotKey !== undefined && nextEntry.slotKey !== slotKey)) {
+        throw new Error(`upsert_slot 的 slot_key 不能为空且须与 entry.slotKey 一致: ${slotKey}`);
+    }
+    nextEntry.slotKey = slotKey;
     assertEntryTagsSafe(nextEntry);
     const idx = section.findIndex((e) => inferSlotKey(e) === slotKey);
     if (idx >= 0) {

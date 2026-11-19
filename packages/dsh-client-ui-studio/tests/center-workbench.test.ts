@@ -152,6 +152,8 @@ function baseProps(detail: ChapterDetailData): CenterWorkbenchProps {
 }
 
 const chapterOneDetail: ChapterDetailData = {
+    bookRoot: '/books/demo',
+    sha256: '原稿指纹',
     chapterNumber: 1,
     title: '雪夜入城',
     content: '第一章服务器原稿。'
@@ -165,12 +167,13 @@ describe('普通保存：显示章身份与在途状态', () => {
         const textarea = openEditorWithDraft(view, '第一章的未保存修订。');
 
         // 父组件已把 selectedChapter 指向第 2 章，但详情仍是第 1 章（新章 GET 未采纳）
-        view.rerender({ selectedChapter: 2 });
+        view.rerender({ selectedChapter: 2, chapterDetail: { ...chapterOneDetail, sha256: '新版指纹', content: '其他入口改过的正文' } });
         expect(editorTextarea(view.container).value).toBe('第一章的未保存修订。');
 
         click(buttonByText(view.container, '保存并自动同步'));
         expect(onSaveChapter).toHaveBeenCalledTimes(1);
-        expect(onSaveChapter).toHaveBeenCalledWith(1, '第一章的未保存修订。');
+        expect(onSaveChapter).toHaveBeenCalledWith({ bookRoot: '/books/demo', chapterNumber: 1,
+            baseSha256: '原稿指纹', content: '第一章的未保存修订。' });
 
         await act(async () => {
             saveGate.resolve();
@@ -179,6 +182,21 @@ describe('普通保存：显示章身份与在途状态', () => {
         expect(view.container.textContent).toContain('已保存第 1 章');
         expect(view.container.querySelector('textarea.ns-editor-textarea')).toBeNull();
         view.unmount();
+    });
+
+    it('恢复暂存稿前比对版本；原稿已改时保留可复制的草稿和当前正文', () => {
+        const onRestoreStashedDraft = vi.fn();
+        const draft = { bookRoot: '/books/demo', chapterNumber: 1, baseSha256: '旧稿指纹', content: '保留这份草稿', updatedAt: 100 };
+        const view = mountWorkbench({ ...baseProps(chapterOneDetail), stashedDraft: draft, onRestoreStashedDraft });
+        const restore = buttonByText(view.container, '继续改稿');
+        expect(restore.disabled).toBe(true);
+        click(restore);
+        expect(onRestoreStashedDraft).not.toHaveBeenCalled();
+        expect(view.container.querySelector<HTMLTextAreaElement>('textarea[readonly]')?.value).toBe(draft.content);
+        expect(view.container.textContent).toContain(chapterOneDetail.content);
+        view.rerender({ stashedDraft: { ...draft, baseSha256: chapterOneDetail.sha256! } });
+        click(buttonByText(view.container, '继续改稿'));
+        expect(editorTextarea(view.container).value).toBe(draft.content);
     });
 
     it('保存在途时按钮禁用并显示进度文案，重复点击不产生第二次 PUT', async () => {
@@ -625,7 +643,7 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
         expect(card?.textContent).toContain('波及 2 章');
         expect(card?.textContent).toContain('6,120 字');
 
-        click(buttonByText(card!, '自动修补这句冲突'));
+        click(buttonByText(card!, '处理本条冲突（可能按作品限额回滚重跑）'));
         expect(onHealConflicts).toHaveBeenCalledTimes(1);
 
         click(buttonByText(card!, '我自己动手改稿'));
@@ -667,7 +685,7 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
         expect(card?.textContent).toContain('micro_anatomy');
         expect(card?.textContent).toContain('含违禁微距词');
         expect(card?.textContent).not.toContain('我自己动手改稿');
-        expect(card?.textContent).not.toContain('自动修补这句冲突');
+        expect(card?.textContent).not.toContain('处理本条冲突');
 
         click(buttonByText(card!, '带上微调便签重写本章'));
         expect(onSubmitSignal).toHaveBeenCalledWith(

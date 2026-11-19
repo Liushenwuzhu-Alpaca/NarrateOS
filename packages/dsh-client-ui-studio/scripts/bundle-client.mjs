@@ -149,12 +149,7 @@ ${moduleBlocks.join(',\n')}
         return mod.exports;
     }
 
-    var entryId = ${JSON.stringify(entryId)};
-    if (Object.prototype.hasOwnProperty.call(__modules, entryId)) {
-        rootModule.exports = __execModule(entryId);
-    } else {
-        rootModule.exports = {};
-    }
+    rootModule.exports = __execModule(${JSON.stringify(entryId)});
 });
 `;
 }
@@ -173,9 +168,8 @@ async function main() {
     }
 
     const entryId = './index.js';
-    const hasEntry = moduleIds.includes(entryId);
-    if (!hasEntry) {
-        console.warn(`[bundle-client] 警告：未找到入口 ${entryId}，将生成仅包含子模块的 bundle。`);
+    if (!moduleIds.includes(entryId)) {
+        throw new Error(`[bundle-client] 未找到已编译的客户端入口 ${entryId}`);
     }
 
     const bundleCode = buildBundleSource(entries, entryId);

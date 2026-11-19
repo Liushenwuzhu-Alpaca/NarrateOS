@@ -1,8 +1,9 @@
-import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
     ENTITY_ID_RE,
-    ForeignKeyError,
+    assertForeignKeysReachable,
     generateStructuredJson,
     IndexRecall,
     mergeEntityProfilePatch,
@@ -230,8 +231,8 @@ function extractDiffKeywords(diffText: string): string[] {
  * - 预检跳号 UNTRACKED 手稿与活跃 PARALLEL 窗口；
  * - Step 1：升序处理历史脏章 (dirtyCh < last_committed_ch)，精准定位所属卷刷新双轨 L2 卡与哈希，严禁触发实体第 2/4 区覆写；
  * - Step 2：升序处理最新章或顺次新章，纯修辞润色仅刷哈希，事实变更保留原 chapter_context 经 Extractor 在内存演进校验；
- * - Step 3：全量预校验通过后，单次 recordPendingWrites + 单次 commitPaths 原子提交全部变更；
- * - Step 4：历史脏章两级分批只读下游冲突扫描 + 双侧 verifyDualQuotes 验真并落盘 .ops/sync_conflicts.json。
+ * - 扫描历史脏章下游冲突并双侧验真，随写集保存待发布报告；
+ * - 提交手稿、派生状态与指纹后发布报告。中断后按提交身份重试或补发。
  */
 export class SyncPipeline {
     private readonly store: BookStore;
@@ -255,9 +256,10 @@ export class SyncPipeline {
     async syncManuscripts(
         options: SyncManuscriptsOptions = {}
     ): Promise<SyncManuscriptsResult> {
-        return await withTraceRun(this.store.bookRoot, 'sync', {}, () =>
-            this.store.runWithTxLock(() => this.syncManuscriptsLocked(options))
-        );
+        return await this.store.runWithTxLock(async () => {
+            await this.store.prepareSync();
+            return await withTraceRun(this.store.bookRoot, 'sync', {}, () => this.syncManuscriptsLocked(options));
+        });
     }
 
     private async syncManuscriptsLocked(
@@ -601,12 +603,24 @@ export class SyncPipeline {
                 dirtyChapters.map((d) => d.chapterKey)
             );
             for (const [entityId, profile] of stagedEntities.entries()) {
-                this.assertForeignKeysReachable(
-                    entityId,
-                    serializeEntityMarkdown(profile),
-                    reachableKeys
-                );
+                assertForeignKeysReachable(entityId, profile, reachableKeys);
             }
+        }
+
+        // 扫描与报告是确认新指纹的前置条件。失败时原稿仍为脏章，重试不会跳过扫描。
+        let conflicts: DownstreamConflictReport[] = [];
+        let report: string | undefined;
+        if (historicalItems.length > 0) {
+            const scan = await this.scanDownstreamConflicts({
+                snapshot: workingSnapshot, historicalItems, stagedCards, retryOptions, signal: options.signal
+            });
+            conflicts = scan.conflicts;
+            addUsage(totalUsage, scan.scanUsage);
+            report = `${JSON.stringify({
+                updatedAt: new Date().toISOString(),
+                dirtyChapters: historicalItems.map((item) => item.dirty.chapterNumber),
+                conflicts
+            }, null, 4)}\n`;
         }
 
         // Step 3：单次 recordPendingWrites + 单次 commitPaths 原子提交全部变更
@@ -622,7 +636,6 @@ export class SyncPipeline {
 
         const allManagedPaths = [
             ...new Set([
-                ...dirtyPaths,
                 ...cardPaths,
                 ...entityPaths,
                 ...coldArchivePaths,
@@ -631,7 +644,8 @@ export class SyncPipeline {
             ])
         ];
 
-        await this.store.recordPendingWrites(allManagedPaths);
+        const syncId = randomUUID();
+        await this.store.recordPendingWrites(allManagedPaths, { id: syncId, ...(report !== undefined ? { report } : {}) });
 
         if (stagedEntities.size > 0) {
             await mkdir(join(this.store.bookRoot, 'entities'), { recursive: true });
@@ -666,6 +680,7 @@ export class SyncPipeline {
         const maxDirtyChapter = Math.max(...dirtyChapters.map((d) => d.chapterNumber));
         const nextTx = TxStateSchema.parse({
             ...currentTx,
+            last_sync_id: syncId,
             phase: hasFactualHeadOrNext ? 'STATE_COMMITTED' : currentTx.phase,
             active_chapter: hasFactualHeadOrNext ? lastFactualChapterNumber : currentTx.active_chapter,
             last_committed_ch: Math.max(currentTx.last_committed_ch, maxDirtyChapter),
@@ -676,11 +691,7 @@ export class SyncPipeline {
             },
             updated_at: new Date().toISOString()
         });
-        await writeFile(
-            join(this.store.bookRoot, '.ops/tx_state.json'),
-            `${JSON.stringify(nextTx, null, 4)}\n`,
-            'utf8'
-        );
+        await this.store.writeTxState(nextTx);
 
         const commitMsg = resolveSyncCommitMessage(
             dirtyChapters,
@@ -689,10 +700,10 @@ export class SyncPipeline {
         );
         await this.system.commitPaths(
             this.store.bookRoot,
-            [...allManagedPaths, '.ops/tx_state.json'],
+            [...dirtyPaths, ...allManagedPaths, '.ops/tx_state.json'],
             commitMsg
         );
-        await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
+        await this.store.finishSyncWrites(syncId);
 
         const updatedEntities = [...stagedEntities.keys()];
 
@@ -716,30 +727,6 @@ export class SyncPipeline {
             };
         }
 
-        // Step 4：历史脏章触发的两级分批只读下游冲突扫描 + 双侧 verifyDualQuotes 验真
-        const { conflicts, scanUsage } = await this.scanDownstreamConflicts({
-            snapshot: workingSnapshot,
-            historicalItems,
-            stagedCards,
-            retryOptions,
-            signal: options.signal
-        });
-        addUsage(totalUsage, scanUsage);
-
-        await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });
-        await writeFile(
-            join(this.store.bookRoot, '.ops/sync_conflicts.json'),
-            `${JSON.stringify(
-                {
-                    updatedAt: new Date().toISOString(),
-                    dirtyChapters: historicalItems.map((item) => item.dirty.chapterNumber),
-                    conflicts
-                },
-                null,
-                4
-            )}\n`,
-            'utf8'
-        );
 
         return {
             status:
@@ -784,22 +771,6 @@ export class SyncPipeline {
         return keys;
     }
 
-    private assertForeignKeysReachable(
-        sourceEntityId: string,
-        content: string,
-        reachableKeys: Set<string>
-    ): void {
-        const missing = new Set<string>();
-        for (const match of content.matchAll(/\b(char_[a-zA-Z0-9_]+|item_[a-zA-Z0-9_]+|ch_\d{4})\b/g)) {
-            const refId = match[1];
-            if (refId && !reachableKeys.has(refId)) {
-                missing.add(refId);
-            }
-        }
-        if (missing.size > 0) {
-            throw new ForeignKeyError([...missing], sourceEntityId);
-        }
-    }
 
     private async assertNoOpenParallelConflict(dirtyChapters: DirtyChapter[]): Promise<void> {
         const openWindows = await listOpenParallelWindows(this.store.bookRoot);
@@ -1102,34 +1073,30 @@ export class SyncPipeline {
         // 结合 L2 章卡与变更词检索补齐无实体卡纯物件/场景修改的关联章节
         const l2SectionMap = new Map<number, string>();
         const cardsDir = join(this.store.bookRoot, 'index/L2_cards');
-        const stagingOverlay = new Map<string, string | null>(stagedCards);
+        const cardPaths = new Set(stagedCards.keys());
         try {
-            const cardFiles = (await readdir(cardsDir)).filter((f) => VOLUME_CARD_FILE_RE.test(f)).sort();
-            for (const file of cardFiles) {
-                const relPath = `index/L2_cards/${file}`;
-                const raw = stagingOverlay.get(relPath) ?? (await readOptionalText(join(cardsDir, file)));
-                if (!raw) continue;
-                const parsed = parseL2CardSections(raw);
-                for (const section of parsed.sections) {
-                    if (section.chapterNumber <= minDirtyChapter) continue;
-                    l2SectionMap.set(
-                        section.chapterNumber,
-                        `- ${section.chapterId} (${section.dayLabel}): ${section.plotSummary}`
-                    );
-                    if (
-                        section.appearedEntityIds.some((id) => matchedEntityIds.has(id)) ||
-                        keywordList.some(
-                            (kw) =>
-                                section.plotSummary.includes(kw) ||
-                                section.anomalyAnchors.some((a) => a.includes(kw))
-                        )
-                    ) {
-                        relevantChapterSet.add(section.chapterNumber);
-                    }
-                }
+            for (const file of await readdir(cardsDir)) {
+                if (VOLUME_CARD_FILE_RE.test(file)) cardPaths.add(`index/L2_cards/${file}`);
             }
         } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') throw err;
+            if (!(err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT')) throw err;
+        }
+        for (const relPath of [...cardPaths].sort()) {
+            const raw = stagedCards.get(relPath) ?? (await readOptionalText(join(this.store.bookRoot, relPath)));
+            if (!raw) continue;
+            for (const section of parseL2CardSections(raw).sections) {
+                if (section.chapterNumber <= minDirtyChapter) continue;
+                l2SectionMap.set(
+                    section.chapterNumber,
+                    `- ${section.chapterId} (${section.dayLabel}): ${section.plotSummary}`
+                );
+                if (
+                    section.appearedEntityIds.some((id) => matchedEntityIds.has(id)) ||
+                    keywordList.some((kw) => section.plotSummary.includes(kw) || section.anomalyAnchors.some((a) => a.includes(kw)))
+                ) {
+                    relevantChapterSet.add(section.chapterNumber);
+                }
+            }
         }
 
         if (relevantChapterSet.size === 0 && keywordList.length > 0) {

@@ -93,6 +93,7 @@ let runsByChapter: Map<number, RunsListPayload['runs']>;
 
 function makeDetail(chapterNumber: number): ChapterDetail {
     return {
+        bookRoot: '/books/port',
         chapterNumber,
         content: `港口第 ${chapterNumber} 章正文内容。`,
         dirty: false,
@@ -228,6 +229,7 @@ beforeEach(() => {
     });
     vi.mocked(api.fetchViewSyncConflicts).mockResolvedValue({
         kind: 'sync_conflicts',
+        bookSlug: 'demo', reportRevision: null,
         syncConflicts: null,
         conflicts: [],
         dirtyChapters: [],
@@ -1444,7 +1446,11 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
                             text: '命中 ch_0001.md 第 4 行',
                             status: 'completed'
                         },
-                        { seq: 3, kind: 'text', text: '已打包港口相关实体。' }
+                        { seq: 3, kind: 'status', status: 'attempt-start' },
+                        { seq: 4, kind: 'text', text: '失败尝试的草稿' },
+                        { seq: 5, kind: 'status', status: 'attempt-discarded' },
+                        { seq: 6, kind: 'status', status: 'attempt-start' },
+                        { seq: 7, kind: 'text', text: '已打包港口相关实体。' }
                     ]
                 })
             );
@@ -1457,6 +1463,7 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         expect(liveDetail?.textContent).toContain('book_grep');
         expect(liveDetail?.textContent).toContain('命中 ch_0001.md 第 4 行');
         expect(liveDetail?.textContent).toContain('已打包港口相关实体。');
+        expect(liveDetail?.textContent).not.toContain('失败尝试的草稿');
     });
 
     it('FACT_CHECK 阶段标识规范化为 4. Checker，无 seq 多分片 thinking/text 无缝拼接且与带 seq runDetail 重叠去重', async () => {

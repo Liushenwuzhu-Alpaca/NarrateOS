@@ -159,12 +159,13 @@ function finalizeAssembleResult(
         loreEntries: draftParams.loreEntries,
         previousChapter: input.previousChapter,
         fallbackTailChars: input.config.context_assembly?.fallback_tail_chars,
+        requiredSlicesPerEntity: input.config.retrieval?.required_slices_per_entity,
         stripWarped: draftParams.stripWarped,
         cleanroomDisplay: draftParams.cleanroomDisplay
     };
 
     const eviction = evictDynamicTailToBudget(
-        staticPrefixBlocks,
+        'rolePrompt' in input && input.rolePrompt ? [input.rolePrompt, ...staticPrefixBlocks] : staticPrefixBlocks,
         draft,
         input.config.tokens_per_char,
         budget

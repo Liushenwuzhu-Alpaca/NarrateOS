@@ -613,6 +613,11 @@ samples:
         expect(noBudgetRes.diagnostics.truncated).toBe(false);
         expect(noBudgetRes.request.dynamicTail).toContain(longPrevFullText);
         expect(noBudgetRes.request.dynamicTail).toContain('刚才在楼梯口擦肩而过时');
+        const rolePrompt = '系统提示。'.repeat(5000);
+        expect(() => assembler.assembleWriterRequest({
+            ...baseInput, rolePrompt,
+            config: createBaseConfig({ writer_token_budget: noBudgetRes.diagnostics.estimatedTokens })
+        })).toThrow();
 
         // 2. L1 降级：前章全文 -> 尾窗摘要，L2 及之后不触碰
         const level1Budget = Math.ceil(

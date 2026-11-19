@@ -6,6 +6,7 @@ import {
     BookRetrievalConfigSchema,
     IndexRecall,
     parseEntityMarkdown,
+    readChapterDays,
     splitFrontmatter,
     verifyDualQuotes,
     type EntityProfile,
@@ -442,6 +443,8 @@ async function verifyAndEnvelopeManualSlices(params: {
     rawSlices: LibrarianOutput['recall_slices'];
     effectiveTargetChapter: number;
     effectiveTargetDay: number;
+    chapterDays: Record<number, number>;
+    accessiblePastChapterNums: ReadonlySet<number>;
     sliceMaxChars: number;
     sliceCountByEntity: Map<string, number>;
 }): Promise<TaggedRecallSlice[]> {
@@ -492,6 +495,9 @@ async function verifyAndEnvelopeManualSlices(params: {
             );
         }
 
+        if (!params.accessiblePastChapterNums.has(realChapterNumber)) {
+            throw new GateValidationError('yield_context_pack', `本时间线不可引用手稿 ${verified.normalized}`);
+        }
         const chapterText = await readOptionalWithOverlay(
             bookRoot,
             combinedOverlay,
@@ -517,7 +523,7 @@ async function verifyAndEnvelopeManualSlices(params: {
             );
         }
 
-        const chapterDay = extractChapterStoryDay(chapterText);
+        const chapterDay = params.chapterDays[realChapterNumber] ?? extractChapterStoryDay(chapterText);
         const truncatedSnippet = truncateSliceText(rawSlice.snippet, sliceMaxChars);
         const envelopedSlice: RecallSlice = {
             file: verified.normalized,
@@ -744,6 +750,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
 
             // 5. 校验手填 recall_slices 原稿存在性、章号一致性与时间差信封包覆
             const sliceCountByEntity = new Map<string, number>();
+            const chapterDays = await readChapterDays(bookRoot, { stagingOverlay: combinedOverlay });
             const manualSlices = await verifyAndEnvelopeManualSlices({
                 bookRoot,
                 fence,
@@ -751,6 +758,8 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 rawSlices: parsed.recall_slices,
                 effectiveTargetChapter,
                 effectiveTargetDay,
+                chapterDays,
+                accessiblePastChapterNums,
                 sliceMaxChars: retrievalCfg.slice_max_chars,
                 sliceCountByEntity
             });
@@ -778,6 +787,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                     targetChapter: effectiveTargetChapter,
                     targetDay: effectiveTargetDay,
                     chapterFiles: accessibleChapterFiles,
+                    chapterDays,
                     stagingOverlay: combinedOverlay,
                     chapterHashes,
                     extraKeywords: query.extra_keywords,

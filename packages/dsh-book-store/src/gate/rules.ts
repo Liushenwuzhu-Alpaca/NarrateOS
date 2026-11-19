@@ -30,7 +30,7 @@ export const DEFAULT_GATE_RULES: Record<GateRuleId, Required<Pick<GateRuleConfig
         maxCount: 0,
         scaleByLength: false,
         referenceChars: 3000,
-        patterns: [/<\/?blocking\b[^>]*>/gi, /\[SYSTEM\]/g, /<!--[\s\S]*?-->/g],
+        patterns: [/<\/?blocking\b[^>]*>/gi, /\[SYSTEM\]/g, /<!--[\s\S]*?(?:-->|$)/g],
         description: '正文内不得残留思维标签或系统注释'
     },
     negation_contrast: {

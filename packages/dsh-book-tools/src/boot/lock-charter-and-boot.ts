@@ -160,6 +160,8 @@ function toEntityProfile(compiled: CompiledEntity): EntityProfile {
 
     const irreversibleTrajectory: EntityEntry[] = compiled.irreversibleTrajectory.map((item) => ({
         storyDay: item.storyDay,
+        visibility: item.visibility,
+        owner: item.owner,
         chapter: 0,
         text: item.text,
         continuationLines: []
@@ -168,6 +170,8 @@ function toEntityProfile(compiled: CompiledEntity): EntityProfile {
     const recentBuffer: EntityEntry[] = compiled.recentBuffer.map((item) => {
         const entry: EntityEntry = {
             chapter: 0,
+            visibility: item.visibility,
+            owner: item.owner,
             text: item.text,
             continuationLines: []
         };

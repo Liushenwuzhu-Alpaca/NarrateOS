@@ -170,6 +170,7 @@ function buildPatchResultMessage(
 export class InMemoryDraftPatchSession {
     private paragraphs: string[];
     private readonly initialProse: string;
+    private prose: string;
     private editCount = 0;
     public readonly proseGateOptions: ProseGateOptions | undefined;
 
@@ -178,7 +179,7 @@ export class InMemoryDraftPatchSession {
             throw new TypeError('InMemoryDraftPatchSession 需要字符串类型的 draftText');
         }
         this.paragraphs = splitParagraphs(draftText);
-        this.initialProse = this.paragraphs.join('\n\n');
+        this.initialProse = this.prose = draftText;
         this.proseGateOptions = proseGateOptions;
     }
 
@@ -194,7 +195,7 @@ export class InMemoryDraftPatchSession {
 
     /** 返回当前拼接后的完整正文 */
     getProse(): string {
-        return this.paragraphs.join('\n\n');
+        return this.prose;
     }
 
     /** 返回累计已应用的编辑次数 */
@@ -254,6 +255,9 @@ export class InMemoryDraftPatchSession {
 
         const originalParagraph0 = this.paragraphs[0];
         const nextParagraphs = [...this.paragraphs];
+        const { ranges } = analyzeParagraphs(this.prose);
+        const eol = this.prose.includes('\r\n') ? '\r\n' : '\n';
+        let nextProse = this.prose;
         const sortedDesc = [...sortedAsc].reverse();
         const rangeByStart = new Map<number, PatchModifiedRange>();
 
@@ -264,6 +268,7 @@ export class InMemoryDraftPatchSession {
             }
             const deleteCount = edit.end_paragraph - edit.start_paragraph + 1;
             nextParagraphs.splice(edit.start_paragraph, deleteCount, ...normalizedReplacements);
+            nextProse = nextProse.slice(0, ranges[edit.start_paragraph]!.start) + normalizedReplacements.join(eol + eol).replace(/\r?\n/g, eol) + nextProse.slice(ranges[edit.end_paragraph]!.end);
             rangeByStart.set(edit.start_paragraph, {
                 start_paragraph: edit.start_paragraph,
                 end_paragraph: edit.end_paragraph,
@@ -277,6 +282,7 @@ export class InMemoryDraftPatchSession {
             const firstLine = originalParagraph0.split(/\r?\n/)[0] ?? '';
             if (nextParagraphs.length === 0 || !nextParagraphs[0]!.startsWith('# ')) {
                 nextParagraphs.unshift(firstLine);
+                nextProse = firstLine + eol + eol + nextProse;
                 titlePreserved = true;
                 preservedTitleLine = firstLine;
             }
@@ -291,6 +297,7 @@ export class InMemoryDraftPatchSession {
         const modifiedRanges = sortedAsc.map((edit) => rangeByStart.get(edit.start_paragraph)!);
 
         this.paragraphs = nextParagraphs;
+        this.prose = nextProse;
         this.editCount += parsed.edits.length;
 
         const report = this.evaluateGateReport();

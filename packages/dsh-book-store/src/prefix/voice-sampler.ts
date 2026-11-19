@@ -119,8 +119,8 @@ export function sampleVoiceLru(
     };
 
     const updatedPool: VoiceSamplePool = {
-        samples: pool.samples.map((item) =>
-            item.id === chosen.id ? updatedSample : { ...item }
+        samples: pool.samples.map((item, index) =>
+            index === candidates[0]!.index ? updatedSample : { ...item }
         )
     };
 

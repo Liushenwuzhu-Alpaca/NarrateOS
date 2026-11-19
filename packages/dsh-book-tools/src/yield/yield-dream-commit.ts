@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
     assertEntryTagsSafe,
+    assertForeignKeysReachable,
     BookDreamingConfigSchema,
     ForeignKeyError,
     InnateLockViolationError,
@@ -117,7 +118,8 @@ async function assertDreamPendingWritePathsSafe(
 
 async function validateStagedDreamEntities(
     bookRoot: string,
-    pendingWrites: ReadonlyMap<string, string>
+    pendingWrites: ReadonlyMap<string, string>,
+    reachableKeys: ReadonlySet<string>
 ): Promise<void> {
     for (const [relPath, stagedContent] of pendingWrites.entries()) {
         const entityMatch = ENTITY_PROFILE_PATH_RE.exec(relPath);
@@ -126,6 +128,7 @@ async function validateStagedDreamEntities(
         }
         const fileStem = entityMatch[1];
         const stagedProfile = parseEntityMarkdown(stagedContent);
+        assertForeignKeysReachable(fileStem, stagedProfile, reachableKeys);
         for (const sectionList of [
             stagedProfile.innateLocks,
             stagedProfile.acquiredState,
@@ -391,13 +394,18 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
             const record = await bookStore.withTxLock(async (): Promise<DreamCommitRecord> => {
                 // 0. 校验当前 WAL 相位允许执行 Dreaming（拒绝 DRAFTING 与 FEAT_COMMITTED）
                 const txState = await bookStore.assertDreamingPhaseSafe();
+                const chapterNumber = parsed.chapter_number ?? txState.last_committed_ch;
+                if (chapterNumber > txState.last_committed_ch) {
+                    throw new GateValidationError('yield_dream_commit', '整理水位不能超过已定稿章号');
+                }
                 const pendingWrites = store.staging.getPendingWrites(runId);
 
                 // 1. 校验暂存路径白名单，物理拒止 manuscripts/、只读世界保护集、current_arc_envelope.md 与越界路径
                 await assertDreamPendingWritePathsSafe(pendingWrites, fence);
 
                 // 2. 校验所有暂存实体档案（含 cold_archive 实体，跳过非实体文档如 warped_horizon.md）
-                await validateStagedDreamEntities(bookRoot, pendingWrites);
+                const reachableKeys = await buildDreamReachableKeys(bookRoot, pendingWrites);
+                await validateStagedDreamEntities(bookRoot, pendingWrites, reachableKeys);
 
                 // 3. 校验暂存 world/open_threads.md 的活跃伏笔上限与单次新增伏笔上限
                 await validateStagedOpenThreads(
@@ -418,8 +426,9 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 );
 
                 // 4. 1ms 跨文件外键可达性校验（char_* / item_* / ch_XXXX）
-                const reachableKeys = await buildDreamReachableKeys(bookRoot, pendingWrites);
                 for (const [relPath, content] of pendingWrites.entries()) {
+                    const entity = ENTITY_PROFILE_PATH_RE.exec(relPath)?.[1];
+                    if (entity && ENTITY_ID_PATTERN_RE.test(entity)) continue;
                     assertTextForeignKeys(relPath, content, reachableKeys);
                 }
                 for (const trigger of parsed.spotlight_triggers) {
@@ -447,8 +456,6 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                     pendingWrites,
                     normalizedStagedSignals
                 );
-
-                const chapterNumber = parsed.chapter_number ?? txState.last_committed_ch;
 
                 // 写入可选 Spotlight Trigger 信号（lstat 防软链 + 补齐既有文件尾换行 + 唯一 id 对齐 Q6）
                 await appendDreamSpotlightSignals(

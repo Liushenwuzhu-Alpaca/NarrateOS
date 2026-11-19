@@ -132,9 +132,18 @@ importers:
       '@deepseek-ai/dsh-agent-preset':
         specifier: ^0.2.2-rc.1
         version: 0.2.2-rc.1(@deepseek-ai/cordis-plugin-loader@1.1.0)(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-agent-preset-registry@0.2.2-rc.1(7137409e0258bf069afa9a47c7e154d1))
+      '@deepseek-ai/dsh-agent-preset-registry':
+        specifier: ^0.2.2-rc.1
+        version: 0.2.2-rc.1(7137409e0258bf069afa9a47c7e154d1)
       '@deepseek-ai/dsh-persona':
         specifier: ^0.2.2-rc.1
         version: 0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-system-prompt@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)))
+      '@deepseek-ai/dsh-tool-fs':
+        specifier: ^0.2.2-rc.1
+        version: 0.2.2-rc.1(ea545e22ebd14bd3a1be4f236eec064a)
+      '@deepseek-ai/dsh-tool-fs-search':
+        specifier: ^0.2.2-rc.1
+        version: 0.2.2-rc.1(3e2d69cc38dc46efeb47a023bce158f4)
       '@deepseek-ai/dsh-tool-web':
         specifier: ^0.2.2-rc.1
         version: 0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-system-prompt@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-scope@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)))(@deepseek-ai/dsh-tools@0.2.2-rc.1(71e9b8099add9aaf7bb42662f07c41a3))(@deepseek-ai/dsh-web@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-llm@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)))

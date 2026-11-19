@@ -219,8 +219,11 @@ export class StaticProseGate {
      */
     evaluate(text: string, options: ProseGateOptions = {}): ProseGateResult {
         const segmentation = analyzeParagraphs(text);
-        const lineMetas = segmentation.lines;
-        const charCount = text.replace(/\s+/g, '').length;
+        const first = segmentation.lines.find((line) => line.paragraphIndex >= 0);
+        const heading = first && /^#\s/.test(first.text.trimStart()) ? first : undefined;
+        const lineMetas = segmentation.lines.filter((line) => line !== heading);
+        const bodyIndices = new Set(lineMetas.filter((line) => line.paragraphIndex >= 0).map((line) => line.paragraphIndex));
+        const charCount = lineMetas.reduce((n, line) => n + line.text.replace(/\s+/g, '').length, 0);
         const maxPatchParagraphs = options.maxPatchParagraphs ?? 15;
         const maxPatchParagraphRatio = options.maxPatchParagraphRatio ?? 0.6;
 
@@ -254,21 +257,19 @@ export class StaticProseGate {
 
             const lastParagraphsOnly = overrideCfg?.lastParagraphsOnly ?? defaultDef?.lastParagraphsOnly;
             let hits: GateViolation[];
-            if (ruleId === 'tag_residue') {
-                hits = scanTagResidueHits(text, patterns, lineMetas);
-            } else {
-                const minParagraphIdx =
-                    lastParagraphsOnly !== undefined && lastParagraphsOnly > 0
-                        ? segmentation.paragraphs.length - lastParagraphsOnly
-                        : 0;
-                const targetLines =
-                    lastParagraphsOnly !== undefined && lastParagraphsOnly > 0
-                        ? lineMetas.filter(
-                              (line) => line.paragraphIndex >= minParagraphIdx && line.paragraphIndex >= 0
-                          )
-                        : lineMetas;
-                hits = scanLineRuleHits(ruleId, targetLines, patterns);
-            }
+            const minIndex = lastParagraphsOnly ? [...bodyIndices].at(-lastParagraphsOnly) ?? 0 : 0;
+            const firstTarget = lineMetas.findIndex((line) => line.paragraphIndex >= minIndex);
+            const target = lastParagraphsOnly ? lineMetas.slice(firstTarget < 0 ? lineMetas.length : firstTarget) : lineMetas;
+            if (ruleId === 'tag_residue') hits = scanTagResidueHits(target.map((l) => l.text).join('\n'), patterns, target);
+            else hits = scanLineRuleHits(ruleId, target, patterns);
+            const spans = new Set<string>();
+            hits = hits.filter((hit) => {
+                const key = `${hit.line}:${hit.column}:${hit.matchedText.length}`;
+                if (spans.has(key)) return false;
+                spans.add(key);
+                if (hit.paragraphIndex < 0) hit.paragraphIndex = resolveNonNegativeParagraphIndex(target, target.findIndex((line) => line.lineNumber === hit.line), hit.matchedText);
+                return true;
+            }).sort((a, b) => a.line - b.line || a.column - b.column);
 
             ruleCounts[ruleId] = hits.length;
 
@@ -314,7 +315,7 @@ export class StaticProseGate {
             new Set(violations.map((v) => v.paragraphIndex).filter((idx) => idx >= 0))
         ).sort((a, b) => a - b);
 
-        const totalParagraphCount = segmentation.paragraphs.length;
+        const totalParagraphCount = bodyIndices.size;
         const violatedParagraphCount = violatedParagraphIndices.length;
         const violatedParagraphRatio =
             totalParagraphCount > 0 ? violatedParagraphCount / totalParagraphCount : 0;

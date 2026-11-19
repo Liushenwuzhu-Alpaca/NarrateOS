@@ -3,7 +3,7 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { AgentHandle } from '@deepseek-ai/dsh-agent';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, lastAssistantStreamChunk } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
@@ -107,6 +107,8 @@ export interface RunCleanroomOptions {
     bookConfig?: BookConfig | undefined;
     chapterNumber?: number | undefined;
     request: Omit<CleanroomRequest, 'pool'> & { pool?: CleanroomRequest['pool'] | undefined };
+    /** 装配器计入预算的系统提示；配置在装配后变化时必须重新装配。 */
+    budgetedRolePrompt?: string;
     signal?: AbortSignal | undefined;
     onStageSession?: ((event: StageSessionEvent) => void) | undefined;
     onStageEvent?: ((event: StageStreamSseEvent) => void) | undefined;
@@ -341,7 +343,7 @@ export class RoleRunner {
         | (() => Record<string, RoleModelOverride>)
         | undefined;
     private readonly defaultOnStageEvent: ((event: StageStreamSseEvent) => void) | undefined;
-    private readonly activeHandles = new Set<AgentHandle>();
+    private readonly shutdown = new AbortController();
     private readonly activePromises = new Set<Promise<unknown>>();
     private readonly liveSessionDetails = new Map<
         string,
@@ -439,15 +441,19 @@ export class RoleRunner {
 
     /** 通知所有在途多轮 Agent 取消并等待全部运行句柄与清理流程完全排空 */
     async drainActiveRuns(): Promise<void> {
-        for (const handle of this.activeHandles) {
-            try {
-                handle.agent.cancel({ kind: 'disposed' });
-            } catch {
-                // 忽略已销毁句柄
-            }
-        }
-        if (this.activePromises.size > 0) {
-            await Promise.allSettled([...this.activePromises]);
+        this.shutdown.abort(new DOMException('角色运行器已卸载', 'AbortError'));
+        await Promise.allSettled(this.activePromises);
+    }
+
+    private async trackRun<T>(parent: AbortSignal | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+        const signal = parent ? AbortSignal.any([parent, this.shutdown.signal]) : this.shutdown.signal;
+        signal.throwIfAborted();
+        const execution = Promise.resolve().then(() => run(signal));
+        this.activePromises.add(execution);
+        try {
+            return await execution;
+        } finally {
+            this.activePromises.delete(execution);
         }
     }
 
@@ -455,13 +461,7 @@ export class RoleRunner {
     async runMultiTurn<TYield = unknown>(
         options: RunMultiTurnOptions
     ): Promise<RunMultiTurnResult<TYield>> {
-        const execPromise = this.runMultiTurnInner<TYield>(options);
-        this.activePromises.add(execPromise);
-        try {
-            return await execPromise;
-        } finally {
-            this.activePromises.delete(execPromise);
-        }
+        return this.trackRun(options.signal, signal => this.runMultiTurnInner<TYield>({ ...options, signal }));
     }
 
     private async runMultiTurnInner<TYield>(
@@ -607,6 +607,7 @@ export class RoleRunner {
                 emitter?.({
                     sessionId: sessionIdStr,
                     stage: params.stage,
+                    seq: fullItem.seq,
                     kind: fullItem.kind,
                     ...(fullItem.text !== undefined ? { text: fullItem.text } : {}),
                     ...(fullItem.toolName !== undefined ? { toolName: fullItem.toolName } : {}),
@@ -619,16 +620,18 @@ export class RoleRunner {
         };
 
         let lastAgentError: Error | undefined;
-        let latestAssistantText = '';
+        const textBlocks = new Map<number, string>();
+        let interrupted = false;
+        let yieldedBeforeShutdown = false;
         let currentTurnReasoningText = '';
         let latestReasoningText = '';
         let latestFinishReason: string | undefined;
         let malformedRetries = 0;
         const multiTurnUsage = createEmptyUsage();
 
+        // 未取得登记权的调用不得写入同一 runId 的日志或释放其暂存区。
+        this.storeService.beginRun(runId);
         try {
-            this.storeService.beginRun(runId);
-
             await this.ensurePoolRoutingReady?.();
             const activePoolRouting = this.resolvePoolRouting
                 ? this.resolvePoolRouting()
@@ -748,7 +751,15 @@ export class RoleRunner {
             if (typeof this.execCtx.on === 'function') {
                 disposeSessionEventListener = this.execCtx.on('session/event', (session, ev) => {
                     if (String(session.id) !== sessionIdStr) return;
+                    if (ev.type === 'turn/end' && ev.data.reason.kind === 'aborted') interrupted = true;
+                    if (ev.type === 'assistant/attempt') {
+                        const usage = lastAssistantStreamChunk(ev.data.stream, 'usage')?.usage;
+                        if (usage) addUsage(multiTurnUsage, {
+                            ...usage, cacheReadTokens: usage.cacheReadTokens ?? 0, cacheWriteTokens: usage.cacheWriteTokens ?? 0
+                        });
+                    }
                     if (ev.type === 'assistant/message') {
+                        if (ev.data.interrupted) interrupted = true;
                         const msgData = ev.data as
                             | {
                                   usage?: Partial<TokenUsage>;
@@ -884,7 +895,7 @@ export class RoleRunner {
 
                     // 透传外部化角色配置的采样温度，并在每次新发起 LLM 请求时重置当前轮次输出缓冲
                     agentCtx.on('agent/request', async (_payload, next) => {
-                        latestAssistantText = '';
+                        textBlocks.clear();
                         latestFinishReason = undefined;
                         currentTurnReasoningText = '';
                         if (isCleanroom) {
@@ -919,6 +930,12 @@ export class RoleRunner {
 
                     // 订阅实时思考/文本流与状态变更，透传给 SSE stage:event（工具调用统一由 observedTool 记录）
                     agentCtx.on('agent/assistant-stream', ({ frame }) => {
+                        if (frame.type === 'start') {
+                            textBlocks.clear();
+                            recordSessionEvent({ timestamp: new Date().toISOString(), kind: 'status', status: 'attempt-start' });
+                        } else if (frame.type === 'end' && (frame.outcome.kind === 'abandoned' || frame.outcome.eventType === 'assistant/attempt')) {
+                            recordSessionEvent({ timestamp: new Date().toISOString(), kind: 'status', status: 'attempt-discarded' });
+                        }
                         if (frame.type !== 'chunk') return;
                         const ts = new Date().toISOString();
                         if (frame.chunk.type === 'reasoning-delta') {
@@ -930,7 +947,8 @@ export class RoleRunner {
                                 text: frame.chunk.text
                             });
                         } else if (frame.chunk.type === 'text-delta') {
-                            latestAssistantText += frame.chunk.text;
+                            const { index, text } = frame.chunk;
+                            textBlocks.set(index, (textBlocks.get(index) ?? '') + text);
                             recordSessionEvent({
                                 timestamp: ts,
                                 kind: 'text',
@@ -938,11 +956,11 @@ export class RoleRunner {
                             });
                         } else if (
                             frame.chunk.type === 'block-end' &&
-                            latestAssistantText.length === 0 &&
+                            !textBlocks.has(frame.chunk.index) &&
                             frame.chunk.block.type === 'text' &&
                             frame.chunk.block.text.length > 0
                         ) {
-                            latestAssistantText = frame.chunk.block.text;
+                            textBlocks.set(frame.chunk.index, frame.chunk.block.text);
                             recordSessionEvent({
                                 timestamp: ts,
                                 kind: 'text',
@@ -988,19 +1006,20 @@ export class RoleRunner {
                 }
             });
 
-            this.activeHandles.add(handle);
-
             if (params.signal) {
                 const liveHandle = handle;
                 const onAbort = () => {
+                    const disposing = this.shutdown.signal.aborted && params.signal?.reason === this.shutdown.signal.reason;
+                    yieldedBeforeShutdown = disposing && Boolean(toolset?.hasYielded());
                     try {
-                        liveHandle.agent.cancel({ kind: 'parent' });
+                        liveHandle.agent.cancel({ kind: disposing ? 'disposed' : 'parent' });
                     } catch {
                         // 忽略已关闭句柄
                     }
                 };
                 if (params.signal.aborted) {
                     onAbort();
+                    params.signal.throwIfAborted();
                 } else {
                     params.signal.addEventListener('abort', onAbort, { once: true });
                     abortCleanup = () => params.signal?.removeEventListener('abort', onAbort);
@@ -1019,10 +1038,14 @@ export class RoleRunner {
 
             await handle.agent.whenIdle();
 
-            if (params.signal?.aborted) {
+            if (params.signal?.aborted && !yieldedBeforeShutdown) {
                 throw params.signal.reason instanceof Error
                     ? params.signal.reason
                     : new Error('Aborted');
+            }
+
+            if (!yieldedBeforeShutdown && (interrupted || latestFinishReason === 'aborted')) {
+                throw new DOMException('宿主取消了角色运行', 'AbortError');
             }
 
             if (lastAgentError && (isCleanroom || !roleCfg.yieldTool || !toolset?.hasYielded())) {
@@ -1042,6 +1065,7 @@ export class RoleRunner {
                 );
             }
 
+            const latestAssistantText = [...textBlocks.entries()].sort(([a], [b]) => a - b).map(([, text]) => text).join('');
             if (isCleanroom && !latestAssistantText.trim()) {
                 throw new Error(`净室工种 ${params.roleId} 未输出有效正文文本`);
             }
@@ -1117,9 +1141,8 @@ export class RoleRunner {
                 sessionDetail.thinkingChars = latestReasoningText.length;
                 await persistSessionLog(params.bookRoot, sessionIdStr, sessionDetail);
             }
-            this.liveSessionDetails.delete(sessionIdStr);
+            if (this.liveSessionDetails.get(sessionIdStr)?.detail === sessionDetail) this.liveSessionDetails.delete(sessionIdStr);
             if (handle) {
-                this.activeHandles.delete(handle);
                 await handle.dispose().catch(() => {});
             }
             toolset?.cleanup();
@@ -1134,7 +1157,11 @@ export class RoleRunner {
      *   agent-instructions 隔离与 MALFORMED_RESPONSE 重试），同时通过 generateTraced 写入 .ops/traces/<runId>/；
      * - 若运行环境未注入 ctx.agents.create（极简单元测试），安全回退到 DshLlmAdapter 直调。
      */
-    async runCleanroom(options: RunCleanroomOptions): Promise<{
+    runCleanroom(options: RunCleanroomOptions) {
+        return this.trackRun(options.signal, signal => this.runCleanroomInner({ ...options, signal }));
+    }
+
+    private async runCleanroomInner(options: RunCleanroomOptions): Promise<{
         response: CleanroomResponse;
         roleConfig: LoadedRoleConfig;
         runId?: string | undefined;
@@ -1142,6 +1169,10 @@ export class RoleRunner {
     }> {
         const roleId = options.roleId ?? 'writer';
         const roleCfg = await this.roleLoader.loadRoleConfig(roleId, options.bookRoot);
+        options.signal?.throwIfAborted();
+        if (options.budgetedRolePrompt !== undefined && options.budgetedRolePrompt !== roleCfg.promptText) {
+            throw new Error('角色提示词已在预算装配后变更，请重新执行');
+        }
         if (!roleCfg.cleanroom) {
             throw new Error(`工种 ${roleId} 配置为 cleanroom=false，禁止走净室单轮路径`);
         }
@@ -1179,9 +1210,11 @@ export class RoleRunner {
                             bookConfig: effectiveBookConfig
                         })
                 },
-                req,
+                { ...req, staticPrefixBlocks: [roleCfg.promptText, ...req.staticPrefixBlocks] },
                 options.signal
             );
+            options.signal?.throwIfAborted();
+            if (!response.text.trim()) throw new Error(`净室工种 ${roleId} 未输出有效正文文本`);
             return {
                 response,
                 roleConfig: roleCfg
@@ -1201,7 +1234,7 @@ export class RoleRunner {
         const response = await generateTraced(
             {
                 generate: async (_tracedReq, signal) => {
-                    const execPromise = this.runAgentSession<never>({
+                    const sessionRes = await this.runAgentSession<never>({
                         mode: 'cleanroom',
                         roleCfg,
                         roleId,
@@ -1220,20 +1253,13 @@ export class RoleRunner {
                         onStageSession: options.onStageSession,
                         onStageEvent: options.onStageEvent
                     });
-                    this.activePromises.add(execPromise);
-                    let sessionRes: Awaited<typeof execPromise>;
-                    try {
-                        sessionRes = await execPromise;
-                    } finally {
-                        this.activePromises.delete(execPromise);
-                    }
                     capturedRunId = sessionRes.runId;
                     capturedSessionId = sessionRes.sessionId;
                     if (
                         sessionRes.finishReason === 'max-tokens' ||
                         sessionRes.finishReason === 'length'
                     ) {
-                        void traceEvent('transport.truncated', {
+                        await traceEvent('transport.truncated', {
                             roleId,
                             stage: stageName,
                             finishReason: sessionRes.finishReason

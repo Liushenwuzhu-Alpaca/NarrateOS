@@ -66,6 +66,7 @@ function chapterDetail(bookRoot: string, chapterNumber: number): ChapterDetail {
     const content = manuscripts.get(manuscriptKey(bookRoot, chapterNumber));
     if (content === undefined) throw new Error(`测试章节不存在：${bookRoot}/${chapterNumber}`);
     return {
+        bookRoot,
         chapterNumber, content, dirty: false, sha256: `${bookRoot}-${chapterNumber}-sha`,
         diffFromHead: '', outlineText: null, outlineStatus: 'missing'
     };
@@ -97,7 +98,7 @@ function statusPayload(bookRoot: string): NarrateStatusPayload {
 }
 
 function saveResponse(chapterNumber: number): PutChapterResponse {
-    return { chapterNumber, sync: { status: 'SYNCED', dirtyChapters: [], downstreamConflicts: [] } };
+    return { chapterNumber, sha256: '已保存稿指纹', sync: { status: 'SYNCED', dirtyChapters: [], downstreamConflicts: [] } };
 }
 
 beforeEach(() => {
@@ -144,7 +145,8 @@ beforeEach(() => {
     vi.mocked(api.fetchViewSignals).mockResolvedValue({ kind: 'signals', signals: [], pending: [], pendingCount: 0 });
     vi.mocked(api.fetchViewHalt).mockResolvedValue({ kind: 'halt', safeHalt: null, quarantineReport: null });
     vi.mocked(api.fetchViewSyncConflicts).mockResolvedValue({
-        kind: 'sync_conflicts', syncConflicts: null, conflicts: [], dirtyChapters: [], stateDiffAdvisories: [], updatedAt: null
+        kind: 'sync_conflicts', bookSlug: 'a', reportRevision: null,
+        syncConflicts: null, conflicts: [], dirtyChapters: [], stateDiffAdvisories: [], updatedAt: null
     });
     vi.mocked(api.bootBook).mockResolvedValue({ status: 'BOOTED', bookRoot: '/books/new', result: {} });
     vi.mocked(api.stepChapter).mockResolvedValue({
@@ -246,6 +248,25 @@ async function emit(event: SseEventPayload): Promise<void> {
     await act(async () => { onEvent?.(event); });
 }
 
+it('Studio 只授权当前冲突卡展示的一项', async () => {
+    const selection = { bookSlug: 'a', reportRevision: 'a'.repeat(64), conflictIndex: 0 };
+    vi.mocked(api.fetchViewSyncConflicts).mockResolvedValue({
+        kind: 'sync_conflicts', bookSlug: selection.bookSlug, reportRevision: selection.reportRevision,
+        syncConflicts: null, dirtyChapters: [], stateDiffAdvisories: [], updatedAt: null,
+        conflicts: [
+            { dirtyChapter: 1, dirtyQuote: '柜门已锁。', chapterNumber: 2, quote: '柜门从未上锁。', description: '柜锁状态矛盾' },
+            { chapterNumber: 7, quote: '未展示引文', description: '另一项' }
+        ]
+    });
+    const root = await mountStudio();
+    const card = root.querySelector('[data-conflict-mode="sync_conflicts"]')!;
+    expect(card.textContent).toContain('柜门已锁。');
+    expect(card.textContent).toContain('柜门从未上锁。');
+    expect(card.textContent).not.toContain('未展示引文');
+    await click(buttonByText(card, '处理本条冲突（可能按作品限额回滚重跑）'));
+    expect(api.healConflicts).toHaveBeenCalledExactlyOnceWith({ selection });
+});
+
 describe('真实根组件的草稿身份与异步隔离', () => {
     it('真实 SSE 订阅接收停止等待与完成事件，状态不依赖完成后的 HTTP 可用性', async () => {
         const streams: EventTarget[] = [];
@@ -299,6 +320,17 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(editor(container).value).toBe('键盘切换页签也必须保留的草稿。');
     });
 
+    it('单步失败事件立即刷新并展示刚落盘的诊断证据', async () => {
+        const container = await mountStudio();
+        vi.mocked(api.fetchViewHalt).mockResolvedValue({
+            kind: 'halt', quarantineReport: null,
+            safeHalt: { reason: '本章设定冲突', chapterNumber: 3, stage: 'FACT_CHECK',
+                issues: [{ description: '与旧伤设定冲突', quote_source: '旧伤未愈', quote_draft: '伤口消失' }] }
+        });
+        await emit({ event: 'stage', data: { stage: 'FAILED', error: '失败事件' } });
+        expect(container.textContent).toContain('本章设定冲突');
+    });
+
     it('第 2 章 GET 在途时编辑仍属于第 1 章，迟到详情不清稿且保存写回第 1 章', async () => {
         const container = await mountStudio();
         const secondChapter = Promise.withResolvers<ChapterDetail>();
@@ -315,7 +347,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         });
         expect(editor(container).value).toBe('属于甲书第一章的新草稿。');
         await click(buttonByText(container, '保存并自动同步'));
-        expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ chapterNumber: 1, content: '属于甲书第一章的新草稿。' });
+        expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ bookRoot: '/books/a', baseSha256: '/books/a-1-sha', chapterNumber: 1, content: '属于甲书第一章的新草稿。' });
         expect(manuscripts.get(manuscriptKey('/books/a', 2))).toBe('甲书第二章服务器原稿。');
     });
 
@@ -341,7 +373,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(editor(container).value).toBe('乙书独有的未保存修订。');
         expect(api.fetchChapter).toHaveBeenCalledTimes(readsBeforeRelease);
         await click(buttonByText(container, '保存并自动同步'));
-        expect(writes).toEqual([{ bookRoot: '/books/b', chapterNumber: 1, content: '乙书独有的未保存修订。' }]);
+        expect(writes).toEqual([{ bookRoot: '/books/b', baseSha256: '/books/b-1-sha', chapterNumber: 1, content: '乙书独有的未保存修订。' }]);
     });
 
     it('保存 PUT 成功但详情 GET 失败，重新编辑仍以已保存正文为基线', async () => {
@@ -352,7 +384,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         vi.mocked(api.saveChapter).mockImplementationOnce(() => put.promise);
         vi.mocked(api.fetchChapter).mockRejectedValue(new Error('章节详情读取失败'));
         await click(buttonByText(container, '保存并自动同步'));
-        expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ chapterNumber: 1, content: saved });
+        expect(api.saveChapter).toHaveBeenCalledExactlyOnceWith({ bookRoot: '/books/a', baseSha256: '/books/a-1-sha', chapterNumber: 1, content: saved });
         await act(async () => {
             manuscripts.set(manuscriptKey('/books/a', 1), saved);
             put.resolve(saveResponse(1));
@@ -368,7 +400,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         typeDraft(container, `${saved}再次修订。`);
         await click(buttonByText(container, '保存并自动同步'));
         expect(api.saveChapter).toHaveBeenCalledTimes(2);
-        expect(api.saveChapter).toHaveBeenLastCalledWith({ chapterNumber: 1, content: `${saved}再次修订。` });
+        expect(api.saveChapter).toHaveBeenLastCalledWith({ bookRoot: '/books/a', baseSha256: '已保存稿指纹', chapterNumber: 1, content: `${saved}再次修订。` });
     });
 
     it('普通 PUT 在途点击跨章不能放行，拒绝后原稿保留且可以重试', async () => {
@@ -394,7 +426,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(buttonByText(container, '保存并自动同步').disabled).toBe(false);
         await click(buttonByText(container, '保存并自动同步'));
         expect(api.saveChapter).toHaveBeenCalledTimes(2);
-        expect(api.saveChapter).toHaveBeenLastCalledWith({ chapterNumber: 1, content: draft });
+        expect(api.saveChapter).toHaveBeenLastCalledWith({ bookRoot: '/books/a', baseSha256: '/books/a-1-sha', chapterNumber: 1, content: draft });
         expect(container.querySelector('.ns-prose')?.textContent).toContain(draft);
     });
 

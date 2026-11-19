@@ -49,7 +49,20 @@ export function attachYieldEnforcementHook(
         options.cleanupStaging?.();
     }
 
+    let exhausted = false;
+    async function exhaustOnce(): Promise<void> {
+        if (exhausted) return;
+        exhausted = true;
+        runCleanupOnce();
+        await options.onExhausted?.();
+    }
+
     const disposePreStep = agentCtx.on('agent/pre-step', async (_payload, next) => {
+        if (options.hasYielded()) return { kind: 'reject' };
+        if (stepsExecuted >= options.maxSteps) {
+            await exhaustOnce();
+            return { kind: 'reject' };
+        }
         const decision = await next();
         if (decision.kind === 'enter') {
             stepsExecuted += 1;
@@ -98,10 +111,7 @@ export function attachYieldEnforcementHook(
             return;
         }
 
-        runCleanupOnce();
-        if (options.onExhausted) {
-            await options.onExhausted();
-        }
+        await exhaustOnce();
     });
 
     const disposeAgentDisposed = agentCtx.on('agent/disposed', () => {

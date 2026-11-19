@@ -51,6 +51,8 @@
 | `ending_moralizing` | 末两段含 `他终于明白\|这一刻\|命运的齿轮\|等着(你\|他\|她)的回答` | **`0` 处** |
 | `cross_chapter_simile` | 近 `N` 章（默认 `5` 章）历史窗口内提取明喻短语（`像/如同/仿佛/好似 + 具象喻体`） | 历史窗口内至少有 `1` 章已出现且本章再次出现时报警（同一喻体跨章累计 `< 2` 章，首章零历史不误报） |
 
+书级覆盖写在 `world/book_config.yaml` 的 `prose_gate.rules.<规则标识>`，例如 `micro_anatomy: { max_count: 1 }`。只覆盖指定字段；阈值不会重新启用已关闭的规则。同一规则的多个模式命中同一位置和长度时只计一次。章标题不参与正文段落比例，修补工具仍使用原稿的段号。
+
 ---
 
 ## 3. 环境补集机制与外置文风插件切分
@@ -63,6 +65,7 @@
    - 静态基线 `world/static_base_and_voice.md` 仅承载零具象喻体的可执行句法纪律与叙述人称规范；动态标本池 `.ops/voice_samples.yaml` 支持 `0~N` 条多语域短句示范（标注来源 `author_sample` / `boot_seed` / `chapter_harvest`），装配时按 `LRU` 轮换抽样防过拟合。
    - **作者样章优先与启动短动作拐杖（`hybrid_rolling`）**：若作者提供样章，提取通过 `Static Prose Gate` 的多语域原句作为永久标本（`author_sample`）；若无预设样章，开书期允许生成 `3~4` 条分属不同语域标签、15-45 字含具体生活动作或口语交锋停顿的短临时种子（`boot_seed`），**严禁纯景物抒情空镜头**，保证首章即可多语域调度；
    - **前 `N` 章滚动真句置换与中盘代谢**：前 `voice_rolling_warmup_chapters`（默认 `3`）章每章定稿后，只要池内仍存在 `boot_seed` 临时种子，自动从刚定稿章节提取语域互补、脱专名且通过 `Static Prose Gate` 的真实好句（`chapter_harvest`）一对一替换掉 `boot_seed`（若池为空则按需触发 `Voice Harvest` 从 `ch_0001.md` 采集 3~5 句）；后续在周期 `Dreaming` 中结合退化遥测淘汰高频复读的陈旧口癖标本，换入近期章节的新鲜优质句式。
+   - 首章采收过滤后必须至少保留三条不同的定稿原文，且不超过 `target_voice_pool_size`；不足时不写池，可重新采收。滚动采收每章最多替换两条种子。样本与标签均不得含活跃或冷宫实体的主名、唯一别名。
 2. **导演自决戏剧聚焦（`focus_cast` / `background_cast`）与当场潜台词指导**：
    - 单场焦点人数由 `Planner` 按戏剧结构自决：`focus_cast` 挂载完整可见档案并以动作穿插推进对手戏，`background_cast` 压缩为单行环境态。
    - 面对高密度试探或双关交锋时，`Planner` 在 `outline_text` 中向写手提供**当场表演潜台词指导**（明确人物表面寒暄下的试探方向与视线焦点，隐去未揭谜底事实），保证净室写手在不知底牌的前提下依然写出机锋张力。
@@ -72,6 +75,8 @@
 ### 3.2 按书选装的外置认知插件（`craft_plugins`，默认关闭）
 
 以下认知脚手架全量外置为 `plugins/craft/*.yaml`（支持单书目录覆盖），默认为空数组 `[]` 不加载，仅在高心理博弈或强结构化作品中通过 `world/book_config.yaml` 的 `craft_plugins` 声明按单通道挂载至 `Planner` 上下文：
+
+同 ID 的单书定义覆盖预设；插件按 `applicable_roles` 独立注入 Planner、Writer、FactChecker。正文和声纹采收只叠加适用于 Writer 的门禁规则，再应用本书逐规则覆盖。
 
 - **`vad-bdi`（`vad-bdi.yaml`，三维情绪钳位与认知演算链）**：按效价（Valence）、唤醒度（Arousal）、支配度（Dominance）限制情绪突变，按 `信念 -> 欲望 -> 现实约束 -> 意图 -> 行动` 推演慢热关系。
 - **`dual-reaction`（`dual-reaction.yaml`，戏眼双反应择优）**：规划核心戏眼时显式排除最俗套的第一顺位反应，采用贴合角色私欲与执念的克制第二反应。

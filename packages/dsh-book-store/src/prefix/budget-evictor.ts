@@ -2,6 +2,7 @@ import type { RecallSlice } from '../recall/index-recall.js';
 import {
     CLEANROOM_ENTRY_RESTRICTED_RE,
     CLEANROOM_LORE_RESTRICTED_RE,
+    LORE_ALLOWED_INLINE_VIS,
     hasDisallowedInlineVis,
     hasUnknownVisibilityTag,
     isWarpedEntry,
@@ -196,7 +197,7 @@ export function renderRecallSlice(slice: RecallSlice, stripWarped: boolean): str
         ]
             .filter(Boolean)
             .join('\n');
-        if (CLEANROOM_LORE_RESTRICTED_RE.test(combined)) {
+        if (CLEANROOM_LORE_RESTRICTED_RE.test(combined) || hasDisallowedInlineVis(combined, LORE_ALLOWED_INLINE_VIS)) {
             return '';
         }
     }
@@ -223,6 +224,7 @@ export interface DynamicTailDraft {
     loreEntries: string[];
     previousChapter?: PreviousChapterContext | undefined;
     fallbackTailChars?: number | undefined;
+    requiredSlicesPerEntity?: number | undefined;
     stripWarped: boolean;
     cleanroomDisplay?: boolean | undefined;
 }
@@ -232,16 +234,16 @@ interface PartitionedRecallSlices {
     optionalIndices: number[];
 }
 
-function partitionRecallSlices(slices: RecallSlice[]): PartitionedRecallSlices {
+function partitionRecallSlices(slices: RecallSlice[], requiredPerEntity = 1): PartitionedRecallSlices {
     const guaranteedIndices = new Set<number>();
     const optionalIndices: number[] = [];
-    const seenRequiredEntities = new Set<string>();
+    const counts = new Map<string, number>();
 
     for (let i = 0; i < slices.length; i += 1) {
         const slice = slices[i]!;
         const reqId = slice.requiredEntityId?.trim();
-        if (reqId && !seenRequiredEntities.has(reqId)) {
-            seenRequiredEntities.add(reqId);
+        if (reqId && (counts.get(reqId) ?? 0) < requiredPerEntity) {
+            counts.set(reqId, (counts.get(reqId) ?? 0) + 1);
             guaranteedIndices.add(i);
         } else {
             optionalIndices.push(i);
@@ -447,7 +449,7 @@ export function evictDynamicTailToBudget(
     budget: number | null | undefined
 ): EvictionResult {
     const staticTokens = estimateTokens(staticPrefixBlocks.join('\n\n'), tokensPerChar);
-    const partitioned = partitionRecallSlices(draft.recallSlices);
+    const partitioned = partitionRecallSlices(draft.recallSlices, draft.requiredSlicesPerEntity);
     const state: RenderState = {
         useWindowForPrevChapter: false,
         compactBackgroundCast: false,

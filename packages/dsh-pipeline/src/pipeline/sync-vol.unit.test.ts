@@ -15,7 +15,7 @@ import {
     type SystemPort
 } from '@narrateos/dsh-book-store';
 import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RoleLoader } from '../roles/role-loader.js';
 import { DshLlmAdapter } from '../runner/dsh-llm-adapter.js';
 import { RoleRunner } from '../runner/role-runner.js';
@@ -58,6 +58,62 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
             await fn();
         }
         await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+    });
+
+    it('完结提交后第二个标签失败，重试在 HEAD 已前移时只补原提交上的标签', async () => {
+        const root = await createGitBookWorkspace(tempDirs, 'seal-recovery', { storyDay: 1, currentChapter: 1 });
+        class InterruptedTags extends NodeSystemAdapter {
+            override async createTag(path: string, name: string, message?: string, sha?: string) {
+                if (name === 'novel-completed') throw new Error('标签中断');
+                await super.createTag(path, name, message, sha);
+            }
+        }
+        const system = new InterruptedTags();
+        const store = new BookStore(root, system);
+        const { llm, requests } = createMockLlmPort((req) => JSON.stringify(req.traceStage === 'volume.style'
+            ? { merged_markdown: '风吹过码头。' } : { volume_summary: '第一行\n第二行', story_day_span: '1' }));
+        await expect(new VolumePipeline({ store, system, llm }).advanceVolume({ completeBook: true })).rejects.toThrow('标签中断');
+        const sealed = await system.currentRevision(root);
+        const calls = requests.length;
+        await writeFile(join(root, 'note.md'), '后续独立工作');
+        const next = await system.commitPaths(root, ['note.md'], 'test: unrelated revision');
+        const recovered = await new VolumePipeline({ store, system: new NodeSystemAdapter(), llm }).advanceVolume();
+        expect(recovered).toMatchObject({ completedBook: true, sealedVolume: 1, commitSha: sealed });
+        expect(await system.currentRevision(root, 'refs/tags/novel-completed')).toBe(sealed);
+        expect(await system.currentRevision(root)).toBe(next.sha);
+        expect(requests).toHaveLength(calls);
+        expect(await readFile(join(root, 'index/L0_sagas.md'), 'utf8')).toContain('第一行 第二行');
+    });
+
+    it('同书第六章 FEAT 未完成时 Sync 不得结束它，恢复后才可同步第五章', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'sync-ownership', {
+            currentChapter: 5, extraChapters: { 'ch_0005.md': '# 五\n\n旧稿。\n' }
+        });
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(bookRoot, system);
+        const { llm, requests } = createMockLlmPort(req => req.traceStage === 'sync.audit'
+            ? '{"conflicts":[]}'
+            : JSON.stringify({ entity_patches: [], story_day_delta: 0, plot_summary: '修订。',
+                appeared_entity_ids: [], prose_anchors: [], next_chapter_options: [] }));
+        const sync = new SyncPipeline({ store, llm, system });
+        await store.beginDraft(6);
+        const feat = await store.commitDraft(6, '# 六\n\n第六章正文。\n');
+        const path = join(bookRoot, 'manuscripts/ch_0005.md');
+        await writeFile(path, '# 五\n\n第五章新事实。\n');
+        const before = await store.readTxState();
+        await expect(sync.syncManuscripts()).rejects.toThrow(/FEAT_COMMITTED/);
+        expect(requests).toHaveLength(0);
+        expect(await system.currentRevision(bookRoot)).toBe(feat.sha);
+        expect(await store.readTxState()).toEqual(before);
+        expect(await readFile(path, 'utf8')).toContain('第五章新事实');
+        expect((await store.recoverWal()).activeChapter).toBe(6);
+        await store.applyStatePatch(6, []);
+        expect((await sync.syncManuscripts()).status).toBe('HISTORY_SYNCED_NO_CONFLICT');
+        expect(await store.detectDirtyChapters()).toEqual([]);
+        await writeFile(join(bookRoot, '.ops/tx_state.json'), '{');
+        expect((await sync.syncManuscripts()).status).toBe('CLEAN');
+        await rm(path);
+        await expect(sync.syncManuscripts()).rejects.toThrow(/ch_0005.*缺失/);
     });
 
     it('SyncPipeline 预检拒绝跳号 UNTRACKED 手稿与活跃 PARALLEL 窗口修改', async () => {
@@ -379,6 +435,7 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
         const ch3Before = await readFile(join(bookRoot, 'manuscripts/ch_0003.md'), 'utf8');
 
         let auditBatches = 0;
+        let failAudit = true;
         const { llm } = createMockLlmPort((req) => {
             if (req.traceStage === 'sync.history_extractor') {
                 return JSON.stringify({
@@ -391,6 +448,7 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
                 });
             }
             if (req.traceStage === 'sync.audit') {
+                if (failAudit) throw new Error('模拟扫描中断');
                 auditBatches += 1;
                 return JSON.stringify({
                     conflicts: [
@@ -427,7 +485,30 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
             return '{}';
         });
 
-        const sync = new SyncPipeline({ store, llm, system });
+        const sync = new SyncPipeline({ store, llm, system, retryOptions: { maxRetries: 0, backoffMs: [] } });
+        const head = await system.currentRevision(bookRoot);
+        await expect(sync.syncManuscripts()).rejects.toThrow();
+        expect(await system.currentRevision(bookRoot)).toBe(head);
+        expect((await store.detectDirtyChapters()).map(d => d.chapterNumber)).toEqual([1]);
+        failAudit = false;
+        const reportPath = join(bookRoot, '.ops/sync_conflicts.json');
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('提交中断'));
+        await expect(sync.syncManuscripts()).rejects.toThrow('提交中断');
+        await expect(stat(reportPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await system.currentRevision(bookRoot)).toBe(head);
+        // 报告发布失败，但指纹已提交：重启补发，不再调用模型。
+        await mkdir(reportPath);
+        await expect(sync.syncManuscripts()).rejects.toThrow();
+        expect(await system.currentRevision(bookRoot)).not.toBe(head);
+        const completedBatches = auditBatches;
+        await rm(reportPath, { recursive: true });
+        const restarted = new SyncPipeline({ store: new BookStore(bookRoot, system), llm, system });
+        await restarted.syncManuscripts();
+        expect(auditBatches).toBe(completedBatches);
+        const replayed = JSON.parse(await readFile(reportPath, 'utf8'));
+        expect(replayed.conflicts).toHaveLength(1);
+        // 再次手改，正常入口返回验真的冲突明细。
+        await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '# 第一章 码头重修\n\n沈默左臂缠着厚夹板，完全无法抬举。\n');
         const res = await sync.syncManuscripts();
 
         expect(auditBatches).toBeGreaterThanOrEqual(2);
@@ -877,6 +958,14 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
         });
 
         const sync = new SyncPipeline({ store, llm, system });
+        const authorPaths = ['manuscripts/ch_0002.md', 'manuscripts/ch_0003.md'];
+        const manuscripts = () => Promise.all(authorPaths.map(path => readFile(join(bookRoot, path), 'utf8')));
+        const authorInputs = await manuscripts();
+        vi.spyOn(system, 'commitPaths').mockRejectedValueOnce(new Error('提交中断'));
+        await expect(sync.syncManuscripts()).rejects.toThrow('提交中断');
+        await store.recoverWal();
+        expect(await manuscripts()).toEqual(authorInputs);
+        extractorCallIdx = 0;
         const res = await sync.syncManuscripts();
 
         expect(res.status).toBe('STATE_SYNCED');

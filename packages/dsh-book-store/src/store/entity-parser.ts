@@ -1,6 +1,7 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import {
     EntityEntry,
+    EntityEntrySchema,
     EntityMetadataSchema,
     EntityProfile,
     EntryStatus,
@@ -213,12 +214,23 @@ function parseEntryLine(lineContent: string): EntityEntry {
 function serializeEntry(entry: EntityEntry): string[] {
     assertEntryTagsSafe(entry);
 
-    if (entry.isNumericLedger) {
-        const pairs = Object.entries(entry.ledger ?? {}).map(([k, v]) => `${k}: ${v}`);
-        const line = pairs.length > 0
-            ? `- [Tracked Numeric Ledger] ${pairs.join(' | ')}`
-            : `- [Tracked Numeric Ledger] ${entry.text}`.trimEnd();
-        return [line, ...entry.continuationLines];
+    // 旧列表语法把换行、方括号前缀和缩进当作结构，不能无损表示这些值。
+    const ambiguousText = entry.text.trim() !== entry.text || /[\r\n\u2028\u2029]|^\[/.test(entry.text);
+    const ambiguousContinuation = entry.continuationLines.some((line) =>
+        !line.trim() || /[\r\n]/.test(line) || !/^(?:\s|>)/.test(line) || detectSectionKey(line) !== null
+    );
+    if (ambiguousText || ambiguousContinuation || entry.extraTags || entry.rawInvalidVisibility !== undefined ||
+        entry.owner?.trim() !== entry.owner || entry.slotKey?.trim() !== entry.slotKey) {
+        return [`+ ${JSON.stringify(entry)}`];
+    }
+
+    if (entry.isNumericLedger || entry.ledger !== undefined || entry.isNumericLedger === false) {
+        const fields = Object.entries(entry.ledger ?? {});
+        const body = fields.map(([k, v]) => `${k}: ${v}`).join(' | ');
+        const plainLedger = entry.isNumericLedger && entry.ledger !== undefined && entry.text === body &&
+            Object.keys(entry).every((k) => ['text', 'ledger', 'isNumericLedger', 'continuationLines'].includes(k)) &&
+            fields.every(([k, v]) => k && !k.includes(':') && k !== '__proto__' && k === k.trim() && v === v.trim());
+        return plainLedger ? [`- [Tracked Numeric Ledger] ${body}`.trimEnd(), ...entry.continuationLines] : [`+ ${JSON.stringify(entry)}`];
     }
 
     const tags: string[] = [];
@@ -230,12 +242,6 @@ function serializeEntry(entry: EntityEntry): string[] {
     }
     if (entry.visibility !== undefined) {
         tags.push(`vis: ${entry.visibility}`);
-    } else if (
-        entry.rawInvalidVisibility !== undefined &&
-        !entry.extraTags?.['vis'] &&
-        !entry.extraTags?.['visibility']
-    ) {
-        tags.push(`vis: ${entry.rawInvalidVisibility}`);
     }
     if (entry.owner !== undefined) {
         tags.push(`owner: ${entry.owner}`);
@@ -245,11 +251,6 @@ function serializeEntry(entry: EntityEntry): string[] {
     }
     if (entry.slotKey !== undefined) {
         tags.push(`slot: ${entry.slotKey}`);
-    }
-    if (entry.extraTags) {
-        for (const [k, v] of Object.entries(entry.extraTags)) {
-            tags.push(`${k}: ${v}`);
-        }
     }
 
     const prefix = tags.length > 0 ? `[${tags.join(' | ')}] ` : '';
@@ -299,8 +300,11 @@ export function parseEntityMarkdown(markdown: string): EntityProfile {
 
         if (!currentSection) continue;
 
-        if (line.startsWith('- ') || line.startsWith('* ')) {
-            const entry = parseEntryLine(line.slice(2));
+        if (line.startsWith('+ ') || line.startsWith('- ') || line.startsWith('* ') || line === '-') {
+            const entry = line.startsWith('+ ')
+                ? EntityEntrySchema.parse(JSON.parse(line.slice(2)))
+                : parseEntryLine(line.slice(2));
+            assertEntryTagsSafe(entry);
             profile[currentSection].push(entry);
             lastEntry = entry;
         } else if (lastEntry && line.trim().length > 0 && (/^\s+/.test(line) || /^>\s*/.test(line))) {

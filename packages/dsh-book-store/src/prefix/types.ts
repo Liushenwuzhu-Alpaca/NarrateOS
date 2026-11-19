@@ -83,6 +83,7 @@ export interface PlannerAssembleInput {
 
 /** Writer 净室请求装配输入 */
 export interface WriterAssembleInput {
+    rolePrompt?: string | undefined;
     config: BookConfig;
     staticPrefix: StaticPrefixInput;
     slicedView: SlicedView;

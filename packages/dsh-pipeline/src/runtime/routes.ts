@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { z } from 'zod';
@@ -27,6 +27,7 @@ import {
     readOptionalText,
     sha256Hex
 } from '../pipeline/helpers.js';
+import { conflictRevision } from './heal-report.js';
 import {
     SuspectedConflictSchema,
     type AdvanceVolumeOptions,
@@ -383,9 +384,12 @@ const HaltRequestSchema = z.object({
 });
 
 const HealRequestSchema = z.object({
+    selection: z.object({ bookSlug: z.string().min(1), reportRevision: z.string().regex(/^[a-f0-9]{64}$/), conflictIndex: z.number().int().nonnegative() }).strict().optional(),
+    resume: z.literal(true).optional(),
     conflicts: z.array(SuspectedConflictSchema).optional(),
     maxAutoRollbackChapters: z.number().int().nonnegative().optional()
-});
+}).strict().refine(body => [body.selection, body.resume, body.conflicts].filter(value => value !== undefined).length === 1,
+    '请选择一个冲突、提交明确的冲突清单或续跑已有计划');
 
 /** 为 safe_halt / quarantine_report 补齐向后兼容的 snake_case 与 camelCase 双向映射字段 */
 function normalizeHaltPayload(
@@ -832,6 +836,7 @@ export function registerNarrateRoutes(
                 const outline = await store.readChapterOutline(chNum);
 
                 sendJson(res, 200, {
+                    bookRoot,
                     chapterNumber: chNum,
                     content,
                     dirty,
@@ -865,14 +870,22 @@ export function registerNarrateRoutes(
             return;
         }
 
+        const bookRoot = body['bookRoot'];
+        const baseSha256 = body['baseSha256'];
+        if (typeof bookRoot !== 'string' || !bookRoot || typeof baseSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(baseSha256)) {
+            sendJson(res, 400, { error: '保存需要原作品 bookRoot 和原稿 baseSha256' });
+            return;
+        }
+
         try {
-            const syncRes = await controller.saveAndSyncChapter(chNum, content);
+            const syncRes = await controller.saveAndSyncChapter(bookRoot, chNum, baseSha256, content);
             if (syncRes === null) {
                 sendJson(res, 404, { error: '只能编辑已有章节，不能通过保存接口创建新章' });
                 return;
             }
             sendJson(res, 200, {
                 chapterNumber: chNum,
+                sha256: sha256Hex(content),
                 sync: syncRes
             });
         } catch (err) {
@@ -966,6 +979,8 @@ export function registerNarrateRoutes(
                     case 'conflicts':
                         sendJson(res, 200, {
                             kind: 'sync_conflicts',
+                            bookSlug: null,
+                            reportRevision: null,
                             syncConflicts: null,
                             conflicts: [],
                             dirtyChapters: [],
@@ -1040,6 +1055,8 @@ export function registerNarrateRoutes(
                     const parsed = safeParseJson(raw) as Record<string, unknown> | null;
                     sendJson(res, 200, {
                         kind: 'sync_conflicts',
+                        bookSlug: basename(bookRoot),
+                        reportRevision: raw === null ? null : conflictRevision(bookRoot, raw),
                         syncConflicts: parsed,
                         conflicts: Array.isArray(parsed?.['conflicts']) ? parsed['conflicts'] : [],
                         dirtyChapters: Array.isArray(parsed?.['dirtyChapters'])
@@ -1207,7 +1224,7 @@ export function registerNarrateRoutes(
             const result =
                 body.conflicts !== undefined
                     ? await controller.healCrossChapterConflicts(body.conflicts, healOptions)
-                    : await controller.healFromSyncConflicts(healOptions);
+                    : await controller.healFromSyncConflicts(healOptions, body.selection, body.resume);
             sendJson(res, 200, result);
         } catch (err) {
             sendErrorResponse(res, err);

@@ -47,8 +47,8 @@ function parseStepCommandArgs(rawInput: string): StepChapterInputOptions {
         if (token === '--day' || token.startsWith('--day=')) {
             const rawDay = token.startsWith('--day=') ? token.slice(6) : nextVal();
             const day = Number(rawDay);
-            if (!Number.isInteger(day) || day < 0) {
-                throw new Error(`--day 必须为非负整数，收到：${rawDay}`);
+            if (!rawDay.trim() || !Number.isSafeInteger(day)) {
+                throw new Error(`--day 必须为整数，收到：${rawDay}`);
             }
             options.targetDay = day;
             continue;

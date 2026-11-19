@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { appendFile, lstat, mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -38,6 +40,23 @@ const current = new AsyncLocalStorage<RunContext | undefined>();
 const stages = new AsyncLocalStorage<{ runId: string; stage: string; stageId: string }>();
 const calls = new AsyncLocalStorage<string>();
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const activeHere = new Set<string>();
+
+// Linux 进程启动 tick 与 boot_id 合用，可区分同 PID 的不同进程实例。
+async function processIdentity(pid: number): Promise<string | undefined> {
+    if (process.platform !== 'linux') {
+        if (process.platform === 'win32') return undefined;
+        try {
+            const { stdout } = await promisify(execFile)('ps', ['-p', String(pid), '-o', 'lstart='], { env: { ...process.env, LC_ALL: 'C' } });
+            return stdout.trim() || undefined;
+        } catch { return undefined; }
+    }
+    try {
+        const [stat, boot] = await Promise.all([readFile(`/proc/${pid}/stat`, 'utf8'), readFile('/proc/sys/kernel/random/boot_id', 'utf8')]);
+        const tick = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+        return tick ? `${boot.trim()}:${tick}` : undefined;
+    } catch { return undefined; }
+}
 
 function validateId(id: string): void {
     if (!idPattern.test(id)) throw new Error('追踪 ID 格式非法');
@@ -106,6 +125,11 @@ function enqueue(context: RunContext, action: () => Promise<void>): Promise<void
 export function traceEvent(type: string, data: Record<string, unknown> = {}): Promise<void> {
     const context = current.getStore();
     if (!context || context.disabled) return Promise.resolve();
+    if (context.info.level === 'metadata') {
+        // 异常、原因和进度消息都可能直接引用手稿，不能只脱敏认证字段。
+        const { error: _error, reason: _reason, message: _message, ...metadata } = data;
+        data = metadata;
+    }
     if (type === 'run.context') Object.assign(context.info.attributes, data);
     const scope = stages.getStore();
     const event: TraceEvent = {
@@ -150,10 +174,11 @@ export async function withTraceRun<T>(bookRoot: string, operation: string, attri
         const directory = join(traces, runId);
         await mkdir(directory, { mode: 0o700 });
         // 先登记所有者，再发布 manifest，避免清理器看到尚未标记活动的运行。
-        await writeFile(join(directory, 'active.json'), JSON.stringify({ pid: process.pid, host: hostname() }), { flag: 'wx', mode: 0o600 });
+        await writeFile(join(directory, 'active.json'), JSON.stringify({ pid: process.pid, host: hostname(), identity: await processIdentity(process.pid) }), { flag: 'wx', mode: 0o600 });
         const info: RunContext['info'] = { version: 1, run_id: runId, operation, started_at: new Date().toISOString(), level, attributes };
         await writeFile(join(directory, 'run.json'), JSON.stringify(info), { flag: 'wx', mode: 0o600 });
         context = { root, directory, info, sequence: 0, pending: Promise.resolve(), disabled: false };
+        activeHere.add(directory);
     } catch (error) {
         warn(error);
         return await current.run(undefined, work);
@@ -169,6 +194,7 @@ export async function withTraceRun<T>(bookRoot: string, operation: string, attri
             throw error;
         } finally {
             await context.pending;
+            activeHere.delete(context.directory);
             try { await rm(join(context.directory, 'active.json'), { force: true }); } catch (error) { warn(error); }
         }
     });
@@ -230,15 +256,24 @@ async function sizeOf(path: string): Promise<number> {
     if (info.isSymbolicLink()) throw new Error('追踪目录包含符号链接，拒绝读取或清理');
     if (!info.isDirectory()) return info.size;
     let bytes = 0;
-    for (const name of await readdir(path)) bytes += await sizeOf(join(path, name));
+    for (const name of await readdir(path)) {
+        try { bytes += await sizeOf(join(path, name)); }
+        catch (error) { if (!isMissing(error)) throw error; }
+    }
     return bytes;
 }
 async function ownerStatus(directory: string): Promise<'active' | 'unknown' | 'incomplete'> {
-    let owner: { pid: number; host: string };
+    let owner: { pid: number; host: string; identity?: string };
     try { owner = JSON.parse(await readRegular(join(directory, 'active.json'))) as typeof owner; }
     catch (error) { if (isMissing(error)) return 'incomplete'; return 'unknown'; }
-    if (owner.host !== hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return 'unknown';
-    try { process.kill(owner.pid, 0); return 'active'; }
+    if (!owner || owner.host !== hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return 'unknown';
+    if (owner.pid === process.pid && activeHere.has(directory)) return 'active';
+    try {
+        process.kill(owner.pid, 0);
+        const identity = await processIdentity(owner.pid);
+        if (!owner.identity || !identity) return 'unknown';
+        return identity === owner.identity ? 'active' : 'incomplete';
+    }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'incomplete' : 'unknown'; }
 }
 
@@ -262,7 +297,7 @@ export async function readTraceEvents(bookRoot: string, runId: string, offset = 
         if (end < 0) return { events: [], offset };
         const events = buffer.subarray(0, end).toString('utf8').split('\n').filter(Boolean).map((line) => {
             const event = JSON.parse(line) as TraceEvent;
-            if (event.version !== 1 || event.run_id !== runId || typeof event.type !== 'string') throw new Error('追踪事件格式损坏');
+            if (!event || event.version !== 1 || event.run_id !== runId || typeof event.type !== 'string' || !event.data || typeof event.data !== 'object') throw new SyntaxError('追踪事件格式损坏');
             return event;
         });
         return { events, offset: offset + end + 1 };
@@ -272,7 +307,7 @@ export async function readTraceEvents(bookRoot: string, runId: string, offset = 
 export async function inspectTraceRun(bookRoot: string, runId: string): Promise<TraceRunInfo> {
     const directory = await runDirectory(bookRoot, runId);
     const info = JSON.parse(await readRegular(join(directory, 'run.json'))) as TraceRunInfo;
-    if (info.version !== 1 || info.run_id !== runId || !['full', 'metadata'].includes(info.level)) throw new Error('运行记录格式损坏');
+    if (!info || info.version !== 1 || info.run_id !== runId || !info.attributes || typeof info.attributes !== 'object' || !['full', 'metadata'].includes(info.level)) throw new SyntaxError('运行记录格式损坏');
     const owner = await ownerStatus(directory);
     const { events } = await readTraceEvents(bookRoot, runId);
     for (const event of events) {
@@ -297,7 +332,7 @@ export async function listTraceRuns(bookRoot: string): Promise<{ runs: TraceRunI
         const name = entry.name;
         if (!entry.isDirectory() || !idPattern.test(name)) continue;
         try { runs.push(await inspectTraceRun(bookRoot, name)); }
-        catch (error) { if (!isMissing(error)) throw error; }
+        catch (error) { if (!isMissing(error) && !(error instanceof SyntaxError)) throw error; }
     }
     return { runs, bytes: await sizeOf(root) };
 }

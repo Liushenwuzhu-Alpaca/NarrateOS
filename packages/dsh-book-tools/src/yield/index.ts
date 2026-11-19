@@ -1,4 +1,5 @@
 export * from './schemas.js';
+export { extractActiveOpenThreadLines } from './shared.js';
 export * from './yield-context-pack.js';
 export * from './yield-outline.js';
 export * from './yield-verdict.js';

@@ -35,7 +35,9 @@
     "scripts": {
         "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/bundle-client.mjs",
         "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-        "test": "vitest run --root ../.. packages/dsh-client-ui-studio"
+        "test": "vitest run --root ../.. packages/dsh-client-ui-studio",
+        "prepack": "pnpm --filter @narrateos/dsh-client-ui-studio... run build",
+        "typecheck:built": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit"
     },
     "peerDependencies": {
         "@deepseek-ai/cordis": "~4.1.0"

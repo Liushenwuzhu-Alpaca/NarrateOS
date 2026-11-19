@@ -238,8 +238,8 @@ export function runDreaming(payload: DreamRequest = {}): Promise<DreamResponse> 
     });
 }
 
-/** 触发三级跨章连续性自愈（未传 conflicts 时自动读取 .ops/sync_conflicts.json） */
-export function healConflicts(payload: HealConflictsRequest = {}): Promise<HealConflictsResponse> {
+/** 仅提交已选择的冲突或显式清单。 */
+export function healConflicts(payload: HealConflictsRequest): Promise<HealConflictsResponse> {
     return requestJson<HealConflictsResponse>('/api/narrate/heal', {
         method: 'POST',
         body: payload

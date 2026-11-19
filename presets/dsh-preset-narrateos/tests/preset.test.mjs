@@ -87,14 +87,14 @@ test('package.json 与本地化清单符合 DSH Bundle 规范', () => {
     }
 });
 
-test('cordis.patch.yml 遵循宿主平面与预设作用域分层，无脆弱 !!js 与死 disabled 行', () => {
+test('cordis.patch.yml 遵循宿主平面与预设作用域分层，不动态查找包路径', async () => {
     const patchPath = path.join(PRESET_ROOT, 'cordis.patch.yml');
     const raw = fs.readFileSync(patchPath, 'utf8');
 
-    assert.ok(!raw.includes('!!js'), 'cordis.patch.yml 不应包含脆弱的 !!js 表达式');
     assert.ok(!raw.includes('createRequire(baseUrl)'), 'cordis.patch.yml 不应依赖 createRequire(baseUrl)');
 
-    const parsed = YAML.parse(raw);
+    const { loadOverlayPatches } = await importFromRoot('@deepseek-ai/dsh-app-boot');
+    const parsed = loadOverlayPatches('dsh', patchPath);
     assert.ok(Array.isArray(parsed) && parsed.length >= 1, 'cordis.patch.yml 应为有效补丁列表');
 
     const insertBlocks = parsed.filter((item) => Array.isArray(item?.insert));
@@ -239,7 +239,6 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
     const { composeEntries, loadOverlayPatches } = await importFromRoot('@deepseek-ai/dsh-app-boot');
     const { Context } = await importFromRoot('@deepseek-ai/cordis');
     const { default: Loader, Group } = await importFromRoot('@deepseek-ai/cordis-plugin-loader');
-    const { AgentPresetRegistry } = await importFromRoot('@deepseek-ai/dsh-agent-preset-registry');
     const { default: SystemPrompt } = await importFromRoot('@deepseek-ai/dsh-system-prompt');
 
     const basePatchPath = rootRequire.resolve('@deepseek-ai/dsh-base/cordis.patch.yml');
@@ -302,10 +301,7 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
             }
             if (specifier === '@narrateos/dsh-client-ui-studio') {
                 const studioDistPath = path.join(REPO_ROOT, 'packages/dsh-client-ui-studio/dist/index.js');
-                if (fs.existsSync(studioDistPath)) {
-                    return await import(pathToFileURL(studioDistPath).href);
-                }
-                return { name: 'narrateos-client-ui-studio', apply() {} };
+                return await import(pathToFileURL(studioDistPath).href);
             }
             return await importFromRoot(specifier);
         }
@@ -352,11 +348,18 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
     ctx.provide('llm', {});
     ctx.provide('sessions', {});
     await ctx.plugin(SystemPrompt);
-    await ctx.plugin(AgentPresetRegistry, { default: 'narrateos' });
 
     try {
         // 挂载完整宿主与预设行（包含全部 4 个核心插件）
         const insertRows = narratePatches[0].insert;
+        // 使用 web-app 自带的注册表时，不应实例化第二个注册表或修改宿主默认模式。
+        const webRegistry = composedWithWeb.find(row => row.id === 'agent-preset-registry');
+        await ctx.loader.root.update([webRegistry, insertRows.find(row => row.id === 'narrateos-headless-registry')]);
+        await ctx.loader.await();
+        assert.equal(ctx.loader.resolve('narrateos-headless-registry').disabled, true);
+        assert.equal(webRegistry.config.default, 'standard');
+        await ctx.loader.root.update([]);
+        await ctx.loader.await();
         await ctx.loader.root.update(insertRows);
         await ctx.loader.await();
 

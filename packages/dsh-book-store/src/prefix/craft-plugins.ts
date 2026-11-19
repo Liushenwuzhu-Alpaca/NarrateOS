@@ -16,8 +16,7 @@ export function resolveCraftPluginsSection(
     }
 
     const lines: string[] = ['## 已激活写作插件 (craft_plugins)'];
-    for (const rawId of pluginIds) {
-        const id = rawId.trim();
+    for (const id of new Set(pluginIds.map((rawId) => rawId.trim()))) {
         if (!id) continue;
         const def = customPlugins[id];
         if (!def) {

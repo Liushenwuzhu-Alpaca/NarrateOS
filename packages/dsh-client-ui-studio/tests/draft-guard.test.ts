@@ -12,7 +12,7 @@ import {
     type StashedDraftEntry
 } from '../src/client/draft-guard';
 
-const DRAFT: DraftLocation = { bookRoot: '/books/novel-a', chapterNumber: 3, content: '未保存的草稿文本' };
+const DRAFT: DraftLocation = { bookRoot: '/books/novel-a', chapterNumber: 3, baseSha256: 'sha-a3', content: '未保存的草稿文本' };
 
 describe('decideDraftNavigation - 未保存草稿的主动导航边界', () => {
     it('无脏草稿时任何导航直接放行', () => {
@@ -81,6 +81,7 @@ describe('内存草稿暂存表（按 bookRoot::chapterNumber 键控）', () => 
             bookRoot: '/books/beta',
             chapterNumber: 3,
             content: '乙书第三章未保存草稿',
+            baseSha256: 'sha-b3',
             updatedAt: 1_700_000_002_000
         };
 
@@ -99,6 +100,7 @@ describe('内存草稿暂存表（按 bookRoot::chapterNumber 键控）', () => 
             bookRoot: '/books/alpha',
             chapterNumber: 2,
             content: '旧草稿',
+            baseSha256: 'sha-old',
             updatedAt: 100
         };
         const updated: StashedDraftEntry = {
@@ -121,12 +123,14 @@ describe('内存草稿暂存表（按 bookRoot::chapterNumber 键控）', () => 
             bookRoot: '/books/alpha',
             chapterNumber: 1,
             content: '第一章草稿',
+            baseSha256: 'sha-a1',
             updatedAt: 100
         };
         const entryA2: StashedDraftEntry = {
             bookRoot: '/books/alpha',
             chapterNumber: 2,
             content: '第二章草稿',
+            baseSha256: 'sha-a2',
             updatedAt: 200
         };
         const stash = putStashedDraft(putStashedDraft({}, entryA1), entryA2);
@@ -148,6 +152,7 @@ describe('内存草稿暂存表（按 bookRoot::chapterNumber 键控）', () => 
             bookRoot: '/books/alpha',
             chapterNumber: 1,
             content: '草稿',
+            baseSha256: 'sha-a1',
             updatedAt: 100
         });
         expect(hasAnyUnsavedDraft(stash, false)).toBe(true);

@@ -1,7 +1,13 @@
 import { existsSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+    CraftPluginLoader,
+    withTraceRun,
+    type BookSnapshot,
+    type TokenUsage,
     generateStructuredJson,
     NodeSystemAdapter,
     StaticProseGate,
@@ -14,7 +20,8 @@ import {
 } from '@narrateos/dsh-book-store';
 import { NotFoundError, ValidationError } from '../errors.js';
 import { VoiceHarvestOutputSchema, type VoiceHarvestResult } from '../schemas.js';
-import { formatChapterKey, readOptionalText } from './helpers.js';
+import { collectEntityDisplayNames, formatChapterKey, readOptionalText } from './helpers.js';
+import { resolveWriterGateRules } from './craft-gate.js';
 
 export interface VoiceHarvestOptions {
     store: BookStore;
@@ -25,6 +32,9 @@ export interface VoiceHarvestOptions {
     chapterText?: string | undefined;
     currentPool?: VoiceSamplePool | undefined;
     entityNames?: readonly string[] | undefined;
+    snapshot?: BookSnapshot;
+    pluginSearchDirs?: string[];
+    onUsage?: (usage: TokenUsage) => void;
     rollingReplaceBootSeeds?: boolean | undefined;
     maxNewSamples?: number | undefined;
     writeToDisk?: boolean | undefined;
@@ -46,7 +56,7 @@ function cloneVoicePool(pool: VoiceSamplePool): VoiceSamplePool {
 function containsEntityProperNoun(text: string, entityNames: readonly string[]): boolean {
     for (const rawName of entityNames) {
         const name = rawName.trim();
-        if (name.length < 2) continue;
+        if (!name) continue;
         if (text.includes(name)) {
             return true;
         }
@@ -138,7 +148,12 @@ export async function harvestVoiceWithPool(
         backoffMs: config.structured_json_retry.backoff_ms
     };
     const gate = options.gate ?? new StaticProseGate();
-    const entityNames = options.entityNames ?? [];
+    const snapshot = options.snapshot ?? await options.store.loadSnapshot();
+    const cold = snapshot.coldArchiveIds.length ? await options.store.readColdArchivedEntities(snapshot.coldArchiveIds) : {};
+    const entityNames = [...(options.entityNames ?? []), ...collectEntityDisplayNames(snapshot.entities), ...collectEntityDisplayNames(cold)];
+    const loader = new CraftPluginLoader();
+    const plugins = await loader.loadForBook({ searchDirs: options.pluginSearchDirs ?? [fileURLToPath(new URL('../../../../plugins/craft', import.meta.url)), join(options.store.bookRoot, 'plugins')], enabledPluginIds: config.craft_plugins, onConflict: 'override' });
+    const rules = resolveWriterGateRules(loader, plugins, config);
 
     const existingRealTags = Array.from(
         new Set(
@@ -165,7 +180,11 @@ export async function harvestVoiceWithPool(
     });
 
     const res = await generateStructuredJson(
-        options.llm,
+        options.onUsage ? { generate: async (req, signal) => {
+            const result = await options.llm.generate(req, signal);
+            options.onUsage!(result.usage);
+            return result;
+        } } : options.llm,
         {
             pool: 'fast_retrieval',
             traceStage: 'voice.harvest',
@@ -195,10 +214,11 @@ export async function harvestVoiceWithPool(
         const text = item.text.trim();
         const tag = item.tag.trim();
         if (text.length === 0 || tag.length === 0) continue;
-        if (entityNames.length > 0 && containsEntityProperNoun(text, entityNames)) {
+        if (!chapterText.includes(text) || accepted.some((sample) => sample.text === text) || containsEntityProperNoun(`${text}\n${tag}`, entityNames)) {
             continue;
         }
         const gateRes = gate.evaluate(text, {
+            rules,
             enableAntiCliche: config.prose_gate.enable_anti_cliche,
             enableCrossChapterSimile: false,
             narrationSubjectivity: config.narration_subjectivity
@@ -216,8 +236,9 @@ export async function harvestVoiceWithPool(
         });
     }
 
-    if (accepted.length === 0) {
-        throw new ValidationError('Voice Harvest 采集到的候选标本均未通过 StaticProseGate 与脱专名校验');
+    const capacity = config.opening?.target_voice_pool_size ?? 4;
+    if ((!isRollingMode && Math.min(accepted.length, capacity) < 3) || accepted.length === 0) {
+        throw new ValidationError('Voice Harvest 有效原句不足：请检查原文、脱专名与门禁要求');
     }
 
     let nextPool: VoiceSamplePool;
@@ -226,6 +247,7 @@ export async function harvestVoiceWithPool(
 
     if (isRollingMode) {
         const maxReplace = Math.min(
+            2,
             bootSeedIndices.length,
             options.maxNewSamples ?? bootSeedIndices.length,
             accepted.length
@@ -248,8 +270,8 @@ export async function harvestVoiceWithPool(
         }
         nextPool = { samples: nextSamples };
     } else {
-        nextPool = { samples: accepted };
-        committedSamples.push(...accepted);
+        nextPool = { samples: accepted.slice(0, capacity) };
+        committedSamples.push(...nextPool.samples);
     }
 
     if (options.writeToDisk !== false) {
@@ -257,6 +279,9 @@ export async function harvestVoiceWithPool(
         const shouldCommitGit =
             options.system !== undefined || existsSync(join(options.store.bookRoot, '.git'));
         await options.store.runWithTxLock(async () => {
+            if (!isDeepStrictEqual(await options.store.readVoiceSamples(), basePool)) {
+                throw new ValidationError('采收期间声纹池已更新，请重新采收');
+            }
             if (shouldCommitGit) {
                 await options.store.recordPendingWrites(['.ops/voice_samples.yaml']);
             }
@@ -290,7 +315,7 @@ export async function harvestVoiceWithPool(
 export async function harvestVoiceFromChapter(
     options: VoiceHarvestOptions
 ): Promise<VoiceHarvestResult> {
-    const res = await harvestVoiceWithPool(options);
+    const res = await withTraceRun(options.store.bookRoot, 'voice-harvest', { chapter: options.chapterNumber ?? 1 }, () => harvestVoiceWithPool(options));
     return {
         harvestedCount: res.harvestedCount,
         skipped: res.skipped,

@@ -7,6 +7,7 @@
 /** 脏草稿快照（由编辑器边界上报；null 表示无未保存草稿）；content 供守卫保存使用 */
 export interface DraftLocation {
     bookRoot: string;
+    baseSha256: string;
     chapterNumber: number;
     content: string;
 }
@@ -58,12 +59,14 @@ export function resolveBackgroundCommitAction(
 }
 
 /** 内存暂存的单章草稿快照（按 bookRoot::chapterNumber 索引） */
-export interface StashedDraftEntry {
-    bookRoot: string;
-    chapterNumber: number;
-    content: string;
-    baseSha256?: string | undefined;
+export interface StashedDraftEntry extends DraftLocation {
     updatedAt: number;
+}
+
+/** 只允许在原作品、同章且磁盘稿未变化时直接恢复全文。 */
+export function canRestoreDraft(draft: DraftLocation, detail: { bookRoot: string; chapterNumber: number; sha256?: string | undefined } | null | undefined): boolean {
+    return !!detail && draft.bookRoot === detail.bookRoot && draft.chapterNumber === detail.chapterNumber &&
+        !!draft.baseSha256 && draft.baseSha256 === detail.sha256;
 }
 
 /** 不可变内存草稿暂存映射表 */

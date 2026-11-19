@@ -84,6 +84,32 @@ afterEach(async () => {
 });
 
 describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
+    it('工具构造失败不留暂存；已建会话不能换书，编辑优先级为本轮 > 分支 > 磁盘', async () => {
+        const { bookRoot, otherBook } = await createSampleBook();
+        const ctx = new Context();
+        const store = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => store.dispose());
+        const tools = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => tools.dispose());
+        const runId = 'branch-edit';
+        expect(() => ctx.narrateTools.buildRoleTools({ bookRoot, runId, maxReadCalls: -1 })).toThrow('maxReadCalls');
+        expect(ctx.narrateStore.staging.has(runId)).toBe(false);
+        const path = 'world/open_threads.md';
+        const stagingOverlay = new Map<string, string | null>([[path, '支线版本']]);
+        const roleSet = ctx.narrateTools.buildRoleTools({ bookRoot, runId, stagingOverlay });
+        registerCleanup(() => roleSet.cleanup());
+        expect(() => ctx.narrateTools.buildRoleTools({ bookRoot: otherBook, runId })).toThrow('不属于当前作品');
+        const edit = (target: string, replacement: string) => roleSet.toolMap.get('book_edit')!.execute(
+            { path, target_text: target, replacement_text: replacement }, createMockExec('book_edit', {}));
+        stagingOverlay.set(path, null);
+        await expect(edit('黄铜钥匙', '不应成功')).rejects.toThrow('不存在');
+        stagingOverlay.set(path, '支线版本');
+        await edit('支线', '本轮');
+        await edit('本轮', '再次');
+        expect(await ctx.narrateStore.staging.read(runId, path)).toBe('再次版本');
+        expect(await readFile(join(bookRoot, path), 'utf8')).toContain('黄铜钥匙');
+    });
+
     it('路径围栏 100% 拦截 ../、跨书路径、.ops/ 与 .git/', async () => {
         const { bookRoot } = await createSampleBook();
 

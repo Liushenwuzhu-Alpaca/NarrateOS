@@ -264,7 +264,7 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
         expect(JSON.parse(String(fetchCalls[1]?.init?.body))).toEqual({ windowId: 'win-dock' });
     });
 
-    it('healConflicts 支持空参数自动修补与显式冲突列表提交', async () => {
+    it('healConflicts 提交所见报告项或显式冲突列表', async () => {
         const healResPayload: HealConflictsResponse = {
             results: [
                 {
@@ -278,10 +278,11 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
             quarantineReport: null
         };
         mockFetchJson(200, healResPayload);
-        const autoRes = await healConflicts();
+        const selection = { bookSlug: 'demo', reportRevision: 'a'.repeat(64), conflictIndex: 0 };
+        const autoRes = await healConflicts({ selection });
         expect(autoRes).toEqual(healResPayload);
         expect(fetchCalls[0]?.url).toBe('/api/narrate/heal');
-        expect(JSON.parse(String(fetchCalls[0]?.init?.body))).toEqual({});
+        expect(JSON.parse(String(fetchCalls[0]?.init?.body))).toEqual({ selection });
 
         mockFetchJson(200, healResPayload);
         await healConflicts({
@@ -307,6 +308,7 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
     it('fetchViewSyncConflicts 查询 GET /api/narrate/views?kind=sync_conflicts', async () => {
         const payload: SyncConflictsViewPayload = {
             kind: 'sync_conflicts',
+            bookSlug: 'demo', reportRevision: 'a'.repeat(64),
             syncConflicts: { conflicts: [] },
             conflicts: [{ chapterNumber: 5, quote: '银钥匙', description: '物品归属冲突' }],
             dirtyChapters: [{ chapterNumber: 3 }],

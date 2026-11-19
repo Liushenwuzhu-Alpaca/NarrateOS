@@ -493,6 +493,26 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         await storeFiber.dispose();
     });
 
+    it('Dream 拒绝实体多行文本中换行后的悬空外键，不写盘', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const path = 'entities/char_001.md';
+        const original = await readFile(join(bookRoot, path), 'utf8');
+        const profile = bookStorePlugin.parseEntityMarkdown(original);
+        profile.recentBuffer.push({ text: '见过\nchar_missing', continuationLines: [] });
+        const ctx = new Context();
+        const store = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => store.dispose());
+        const tools = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => tools.dispose());
+        const run = ctx.narrateTools.buildRoleTools({ bookRoot, runId: 'dream-multiline', yieldTool: 'yield_dream_commit' });
+        registerCleanup(() => run.cleanup());
+        await run.toolMap.get('book_edit')!.execute({ path, target_text: original,
+            replacement_text: bookStorePlugin.serializeEntityMarkdown(profile) }, createSpyExec('book_edit', {}).exec);
+        await expect(run.toolMap.get('yield_dream_commit')!.execute({ summary: '整理履历' },
+            createSpyExec('yield_dream_commit', {}).exec)).rejects.toThrow(/char_missing/);
+        expect(await readFile(join(bookRoot, path), 'utf8')).toBe(original);
+    });
+
     it('yield_dream_commit 在门禁失败时磁盘零变动，全部通过后原子落盘、更新水位、commit 并 concludeTurn', async () => {
         const bookRoot = await createInitializedGitBook();
         const diskCharBefore = await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8');
@@ -816,6 +836,31 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         roleSet.cleanup();
         await toolsFiber.dispose();
         await storeFiber.dispose();
+    });
+
+    it('延迟提交验证整批补丁的最终实体；不能用无效槽位、账本或悬空引用交接', async () => {
+        const bookRoot = await createInitializedGitBook();
+        const ctx = new Context();
+        const store = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => store.dispose());
+        const tools = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => tools.dispose());
+        const role = ctx.narrateTools.buildRoleTools({ bookRoot, yieldTool: 'yield_state_patch', deferCommit: true });
+        registerCleanup(() => role.cleanup());
+        const patch = role.toolMap.get('yield_state_patch')!;
+        const id = 'char_new';
+        const execute = (ops: unknown[]) => patch.execute({ story_day_delta: 0, chapter_summary: '交回钥匙', entity_patches: [
+            { entity_id: id, canonical_name: '新客', acquired_state_ops: [
+                { op: 'upsert_slot', slot_key: 'location', entry: { text: '见过\nchar_missing' } }
+            ] },
+            { entity_id: id, acquired_state_ops: ops }
+        ] }, createSpyExec('yield_state_patch', {}).exec);
+        await expect(execute([])).rejects.toThrow(/char_missing/);
+        await expect(execute([{ op: 'upsert_slot', slot_key: 'location', entry: { slotKey: 'position', text: '离港' } }])).rejects.toThrow(/slot_key/);
+        await expect(execute([{ op: 'remove_slot', slot_key: 'a|b' }])).rejects.toThrow(/slotKey/);
+        await expect(execute([{ op: 'upsert_ledger', entries: { 银: '1|2' } }])).rejects.toThrow(/账本/);
+        await expect(execute([{ op: 'remove_slot', slot_key: 'location' }])).resolves.toMatchObject({ accepted: true });
+        expect(existsSync(join(bookRoot, 'entities', `${id}.md`))).toBe(false);
     });
 
     it('deferCommit 模式下 yield_state_patch 识别 visibleEntities 内存分支实体并保持 Innate Locks 防护与外键可达性', async () => {

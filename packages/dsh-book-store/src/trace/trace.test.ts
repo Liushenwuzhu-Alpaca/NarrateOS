@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -88,6 +88,32 @@ describe('作品运行追踪', () => {
             expect(files.some((file) => /\.(input|output)\.json$/.test(file))).toBe(false);
             expect(JSON.stringify((await readTraceEvents(root, result.runs[0]!.run_id)).events)).not.toContain('原始正文');
         }
+    });
+
+    it('metadata 不保存异常正文，单个破损运行不影响列表，其空间仍计入总量', async () => {
+        const root = await fixture('metadata');
+        await expect(withTraceRun(root, 'step', {}, () => withTraceStage('audit', async () => {
+            throw new Error('不可持久化的原文');
+        }))).rejects.toThrow('不可持久化的原文');
+        const before = await listTraceRuns(root);
+        const id = before.runs[0]!.run_id;
+        expect(JSON.stringify((await readTraceEvents(root, id)).events)).not.toContain('不可持久化的原文');
+        const broken = join(root, '.ops/traces/broken');
+        await mkdir(broken);
+        await writeFile(join(broken, 'run.json'), '{');
+        const after = await listTraceRuns(root);
+        expect(after.runs).toEqual(before.runs);
+        expect(after.bytes).toBe(before.bytes + 1);
+    });
+
+    it('旧运行记录的 PID 已复用时不显示为活跃', async () => {
+        const root = await fixture();
+        await withTraceRun(root, 'step', {}, async () => {});
+        const id = (await listTraceRuns(root)).runs[0]!.run_id;
+        const directory = join(root, '.ops/traces', id);
+        await writeFile(join(directory, 'active.json'), JSON.stringify({ pid: process.pid, host: hostname(), identity: 'old-instance' }));
+        await writeFile(join(directory, 'events.jsonl'), '');
+        expect((await inspectTraceRun(root, id)).status).toBe('incomplete');
     });
 
     it('记录目录不可用时报警但不改变模型结果或重复业务调用', async () => {

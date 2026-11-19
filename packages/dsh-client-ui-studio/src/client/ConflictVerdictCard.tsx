@@ -77,7 +77,7 @@ function renderHaltIssuesList(
 
 /**
  * 双模式设定冲突裁决卡（Q1 物理真源严格分流）：
- * - 已落盘跨章冲突（sync_conflicts / quarantineReport）：提供「自动修补这句冲突」+「我自己动手改稿」+「写条便签解释原因」
+ * - 已落盘跨章冲突：只处理本条报告项；仅有隔离报告时不能授权其他冲突。
  * - 未落盘新章拦截（safe_halt）：完整展示 issues 与 gateViolations 明细，提供「带上微调便签重写本章」与「先写便签调整走向」，绝不渲染会 404 的直接改稿或无效自愈按钮
  */
 export function ConflictVerdictCard({
@@ -152,7 +152,7 @@ export function ConflictVerdictCard({
                             onClick={onHealConflicts}
                         >
                             {StudioIcons.spark}
-                            <span>{healing ? '正在修补冲突…' : '自动修补这句冲突'}</span>
+                            <span>{healing ? '正在处理…' : '处理本条冲突（可能按作品限额回滚重跑）'}</span>
                         </button>
                         <button
                             type="button"

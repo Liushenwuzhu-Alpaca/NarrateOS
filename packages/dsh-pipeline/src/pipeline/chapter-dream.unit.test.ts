@@ -145,7 +145,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         const loader = new RoleLoader();
         const loaded = await loader.loadRoleConfig('fact-checker', bookRoot);
-        expect(loaded.pool).toBe('strong_creative');
+        expect(loaded.pool).toBe('audit');
 
         const dualPoolRouting = {
             strong_creative: { provider: 'openai', model: 'gpt-5-prose' },
@@ -164,13 +164,17 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             model: 'claude-sonnet-4-5'
         });
         expect(
-            resolveRoleRoute(dualPoolRouting, 'fact-checker', 'audit', {
+            resolveRoleRoute(dualPoolRouting, 'fact-checker', loaded.pool, {
                 model_routing: { audit: 'legacy-audit-model' }
             })
         ).toEqual({
             provider: 'openai',
             model: 'legacy-audit-model'
         });
+        const yamlPath = loaded.roleFilePath;
+        const yaml = await readFile(yamlPath, 'utf8');
+        await writeFile(yamlPath, yaml.replace('yieldTool: yield_verdict', ''));
+        await expect(loader.loadRoleConfig('fact-checker', bookRoot)).rejects.toThrow(/yieldTool/);
     });
 
     it('DshLlmAdapter 解析 provider:model 复合路由，RoleRunner 保证 beginRun 失败必落账、会话清理跨书隔离且透传真实 finishReason', async () => {
@@ -570,7 +574,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                 writerCalls += 1;
                 // 正文中提及"林远"(char_002)，但未入选 focus_cast / background_cast / appeared_entity_ids，检验 Q1 防幽灵在场污染
                 return textToStreamChunks(
-                    '# 验船茶馆\n\n沈默把旧船契摊在桌上，冷宫老友程三爷抬眼看了一眼，顺口提起林远昨晚值班。\n'
+                    '# 验船茶馆\n\n沈默把旧船契摊在桌上，冷宫老友程三爷抬眼看了一眼，顺口提起林远昨晚值班。茶壶嘴冒出的白气在冷风里散得极快，柜台木纹还留着盐渍。\n'
                 );
             }
         });
@@ -703,6 +707,8 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                 'ch_0003.md': '# 第三章\n\n沈默清点货物。\n'
             }
         });
+        const worldPath = join(bookRoot, 'world/world_state.md');
+        await writeFile(worldPath, (await readFile(worldPath, 'utf8')).replace('current_volume: 1', 'current_volume: 2'));
 
         await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
         await writeFile(
@@ -750,9 +756,12 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_dream_commit')) {
                     dreamerPromptSeen = taskPrompt;
+                    await expect(execTool('yield_dream_commit', {
+                        summary: '水位不能预支下一章', chapter_number: 4, accumulated_words: 0
+                    })).rejects.toThrow(/水位/);
                     await execTool('yield_dream_commit', {
                         summary: '完成 Dreaming 预扫描整理',
-                        chapter_number: 4,
+                        chapter_number: 3,
                         accumulated_words: 0
                     });
                 }
@@ -770,9 +779,13 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         expect(dreamRes.skipped).toBe(false);
         expect(dreamerPromptSeen).toContain('黑铜钥匙');
+        expect(dreamerPromptSeen).toContain('账册压着黑铜钥匙。');
         expect(dreamerPromptSeen).toContain('废弃的码头火灾路线');
         expect(dreamerPromptSeen).not.toContain('已折叠的历史废止线');
         expect(dreamerPromptSeen).not.toContain('长期退场候选实体');
+        await writeFile(join(bookRoot, 'world/future_horizon.md'), '');
+        await writeFile(join(bookRoot, 'world/open_threads.md'), '## 已解决\n- char_001 的旧账已结。\n');
+        expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);
     });
 
     it('ISS-034 / ISS-048 / ISS-050: Patch 剥离 author_charter 原文引文、FLASHBACK 屏蔽未来尾窗、FEAT_COMMITTED 崩溃恢复补全 L2 与信号游标', async () => {
@@ -794,6 +807,8 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                 type: 'DIRECTOR_NOTE',
                 created_at: '2026-11-18T00:00:00Z',
                 chapter: 2,
+                suggested_mode: 'FLASHBACK',
+                target_day: -1,
                 reason: '第二章插叙补充信号'
             }) + '\n',
             'utf8'
@@ -812,10 +827,15 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         let fcCalls = 0;
         let writerDynamicTail = '';
         let patchPromptSeen = '';
+        let extractorPrompt = '';
 
         await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_context_pack')) {
+                    await expect(execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'],
+                        recall_slices: [{ file: 'manuscripts/ch_0001.md', snippet: '第五天的码头已戒严。' }]
+                    })).rejects.toThrow();
                     await execTool('yield_context_pack', {
                         selected_entity_ids: ['char_001'],
                         recall_queries: [],
@@ -875,6 +895,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                     return;
                 }
                 if (tools.has('yield_state_patch')) {
+                    extractorPrompt = taskPrompt;
                     await execTool('yield_state_patch', {
                         entity_patches: [],
                         story_day_delta: 0,
@@ -896,12 +917,11 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         const ch2Res = await ctx.narratePipeline.stepChapter({
             chapterNumber: 2,
-            timelineMode: 'FLASHBACK',
-            targetDay: 1,
             chapterGoal: '插叙十年前旧船坞夜谈'
         });
 
         expect(ch2Res.status).toBe('COMMITTED');
+        expect((await ctx.narrateStore.openStore().readTxState()).chapter_context?.targetDay).toBe(-1);
         // FLASHBACK 物理屏蔽主线未来第 1 章的尾窗文本
         expect(writerDynamicTail).not.toContain('FUTURE_MAINLINE_TAIL_MARKER');
         // Patch 对 source_ref=world/author_charter.md 的问题剥离 quote_source
@@ -932,15 +952,20 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             type: 'DIRECTOR_NOTE',
             created_at: '2026-11-18T00:05:00Z',
             chapter: 3,
-            reason: '第三章崩溃恢复时应被消费并写游标的信号'
+            reason: '第三章正文提交后抵达，不应在恢复时被确认'
         };
+        await store.beginDraft(3);
+        await store.commitDraft(3, '# 灾后恢复\n\n沈默站在旧船坞木门外听风声。\n', {
+            timelineMode: 'MAINLINE', targetDay: 5, povCharIds: ['char_001'],
+            signalCursorUpdate: { consumedIds: ['original-note'], consumedLines: 1 }
+        });
+        const authorEdit = '# 灾后恢复\n\nAUTHOR_EDIT 木门。\n';
+        await writeFile(join(bookRoot, 'manuscripts/ch_0003.md'), authorEdit);
         await writeFile(
             join(bookRoot, '.ops/signals.jsonl'),
             `${JSON.stringify(ch3Signal)}\n`,
             'utf8'
         );
-        await store.beginDraft(3);
-        await store.commitDraft(3, '# 灾后恢复\n\n沈默站在旧船坞木门外听风声。\n');
 
         const recoveryRes = await ctx.narratePipeline.stepChapter({
             chapterNumber: 3,
@@ -950,7 +975,11 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(recoveryRes.outline?.chapter_title).toBe('灾后恢复');
         expect(recoveryRes.featCommitSha.length).toBeGreaterThan(0);
         const recoveryCursor = await readSignalsCursorState(bookRoot);
-        expect(recoveryCursor.consumedIds).toContain(resolveSignalId(ch3Signal));
+        expect(recoveryCursor.consumedIds).toEqual(['original-note']);
+        expect(recoveryCursor.consumedIds).not.toContain(resolveSignalId(ch3Signal));
+        expect(extractorPrompt).toContain('沈默站在旧船坞木门外听风声');
+        expect(extractorPrompt).not.toContain('AUTHOR_EDIT');
+        expect(await readFile(join(bookRoot, 'manuscripts/ch_0003.md'), 'utf8')).toBe(authorEdit);
         expect(recoveryCursor.consumedLines).toBe(1);
     });
 
@@ -1062,7 +1091,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             storyDay: 2,
             currentChapter: 2,
             extraChapters: {
-                'ch_0001.md': '# 第一章\n\n沈默左手拎着黄铜提灯。\n',
+                'ch_0001.md': '# 第一章\n\n沈默左手拎着黄铜提灯。煤油灯焰晃了一寸，铜钥匙在桌面划出一道细痕。窗外有风。船笛响了。\n',
                 'ch_0002.md': '# 第二章\n\n沈默右手握着铁扳手。\n'
             }
         });
@@ -1124,6 +1153,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                 generate: async () => ({
                     text: JSON.stringify({
                         samples: [
+                            { tag: '风声', text: '窗外有风。' }, { tag: '船声', text: '船笛响了。' },
                             {
                                 tag: '动作白描',
                                 text: '煤油灯焰晃了一寸，铜钥匙在桌面划出一道细痕。'
@@ -1135,7 +1165,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             },
             chapterNumber: 1
         });
-        expect(harvestOnlyRes.harvestedCount).toBe(1);
+        expect(harvestOnlyRes.harvestedCount).toBe(3);
         expect(existsSync(join(bookRoot, '.ops/pending_writes.json'))).toBe(false);
         expect(await isWorkingTreeClean(bookRoot)).toBe(true);
 

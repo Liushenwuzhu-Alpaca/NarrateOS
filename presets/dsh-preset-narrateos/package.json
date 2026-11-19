@@ -24,7 +24,8 @@
         }
     },
     "scripts": {
-        "test": "node --test tests/preset.test.mjs"
+        "test": "pnpm --filter @narrateos/dsh-preset-narrateos... run build && pnpm run test:built",
+        "test:built": "node --test tests/preset.test.mjs"
     },
     "peerDependencies": {
         "@deepseek-ai/dsh-agent-preset": "^0.2.2-rc.1",
@@ -35,6 +36,7 @@
         "@narrateos/dsh-book-store": "workspace:*",
         "@narrateos/dsh-book-tools": "workspace:*",
         "@narrateos/dsh-pipeline": "workspace:*",
-        "@narrateos/dsh-client-ui-studio": "workspace:*"
+        "@narrateos/dsh-client-ui-studio": "workspace:*",
+        "@deepseek-ai/dsh-agent-preset-registry": "^0.2.2-rc.1"
     }
 }

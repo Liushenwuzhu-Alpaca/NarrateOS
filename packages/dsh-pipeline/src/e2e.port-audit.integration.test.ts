@@ -378,15 +378,15 @@ describe('Phase 3 港口审计同源种子端到端集成测试 (无头真实 Gi
                             samples: [
                                 {
                                     tag: '白描动作',
-                                    text: '铁皮棚门推开半寸，冷风卷着雪末落在算盘木框上。'
+                                    text: '雪水顺着铁皮屋檐往下滴，砸在门前青石板上发出规律的轻响。'
                                 },
                                 {
                                     tag: '克制对白',
-                                    text: '「骑缝章歪了三分，昨夜到底是谁点过的货？」'
+                                    text: '停在十二月十七日那栏空白处。'
                                 },
                                 {
                                     tag: '感官节奏',
-                                    text: '煤油灯芯爆了个灯花，账页边缘的红墨印子渐渐显了出来。'
+                                    text: '指腹顺着骑缝编号逐行往下滑'
                                 }
                             ]
                         })
@@ -405,6 +405,7 @@ describe('Phase 3 港口审计同源种子端到端集成测试 (无头真实 Gi
                         JSON.stringify({
                             current_arc_envelope:
                                 '# 第 2 卷正向舞台\n\n外港锚地与缉私队交接全面展开。',
+                            arc_director_plan: '第一拍：锚地交接。',
                             future_horizon:
                                 '# 第 2 卷未来惯性\n\n- [event:evt_anchorage | day:3 | status:ACTIVE] 外港锚地封锁检查'
                         })

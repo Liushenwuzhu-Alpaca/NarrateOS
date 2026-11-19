@@ -1,11 +1,11 @@
 import { withTraceRun } from '../trace/trace.js';
 import { mkdir, readdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { upsertVolumeCardEntry } from '../recall/index-recall.js';
 import { SystemPort } from '../ports/system.js';
 import {
     assertForeignKeysReachable,
     collectReachableKeys,
-    formatChapterKey,
     isEnoentError
 } from '../store/bookstore.js';
 import {
@@ -94,6 +94,7 @@ export interface ParallelBranchDelta {
     patches: EntityPatch[];
     stagedAt: string;
     chapterNumbers?: number[];
+    nextChapterOptions?: string[];
     l2Cards?: ParallelL2CardEntry[] | undefined;
 }
 
@@ -111,6 +112,7 @@ export interface StageParallelDeltaInput {
     daySpan?: number | undefined;
     patches: EntityPatch[];
     chapterNumbers?: number[];
+    nextChapterOptions?: string[];
     l2Cards?: ParallelL2CardEntry[] | undefined;
 }
 
@@ -162,29 +164,8 @@ function formatBroadcastValue(value: unknown): string {
 }
 
 function upsertParallelL2CardContent(rawCardContent: string | null, entry: ParallelL2CardEntry): string {
-    const baseContent =
-        rawCardContent && rawCardContent.trim().length > 0
-            ? rawCardContent.replace(/\r\n/g, '\n')
-            : `# 第 ${entry.volumeNumber} 卷双轨章卡\n\n`;
-    const chKey = formatChapterKey(entry.chapterNumber);
-    const lines = [
-        `## ${chKey} (day:${entry.storyDay})`,
-        `- 主干剧情：${entry.plotSummary.trim()}`
-    ];
-    if (entry.proseAnchors && entry.proseAnchors.length > 0) {
-        lines.push(`- 异象锚点：${entry.proseAnchors.join('、')}`);
-    }
-    lines.push(`- 出场实体：${[...new Set(entry.appearanceEntityIds)].join(', ')}`);
-    const entryBlock = lines.join('\n');
-    const sectionRe = new RegExp(
-        `^##\\s+${chKey}\\b[^\\n]*\\n[\\s\\S]*?(?=^##\\s+ch_\\d{4}\\b|(?![\\s\\S]))`,
-        'm'
-    );
-    if (sectionRe.test(baseContent)) {
-        const replaced = baseContent.replace(sectionRe, `${entryBlock}\n\n`);
-        return `${replaced.trimEnd()}\n`;
-    }
-    return `${baseContent.trimEnd()}\n\n${entryBlock}\n`;
+    return upsertVolumeCardEntry(rawCardContent, entry.volumeNumber, entry.chapterNumber, entry.storyDay,
+        entry.plotSummary, entry.appearanceEntityIds, entry.proseAnchors);
 }
 
 function toParallelBroadcastEntries(
@@ -614,6 +595,23 @@ export class ParallelSandbox {
         return [...(target?.l2Cards ?? [])].sort((a, b) => a.chapterNumber - b.chapterNumber);
     }
 
+    async getBranchNextOptions(windowId: string, branchId: string): Promise<string[]> {
+        assertSafeId(branchId, 'branchId');
+        const meta = await this.getWindow(windowId);
+        if (meta.status !== 'OPEN') return [];
+        const delta = (await this.readBranchDeltas(windowId)).find((d) => d.branchId === branchId);
+        return delta?.nextChapterOptions ?? [];
+    }
+
+    /** 在新章生成前检查整个窗口的剩余容量；写入端仍会再次校验。 */
+    async assertChapterCapacity(windowId: string): Promise<void> {
+        const meta = await this.getWindow(windowId);
+        const used = (await this.readBranchDeltas(windowId)).reduce((sum, d) => sum + d.chaptersUsed, 0);
+        if (used + 1 > meta.maxChapters) {
+            throw new ParallelWindowExceededError(windowId, used + 1, meta.maxChapters);
+        }
+    }
+
     /** 分叉基线加本支线增量，其他支线实体与章节不进入生成上下文。 */
     async loadBranchSnapshot(snapshot: BookSnapshot, windowId: string, branchId: string): Promise<BookSnapshot> {
         assertSafeId(branchId, 'branchId');
@@ -791,7 +789,9 @@ export class ParallelSandbox {
                 (await this.loadBaseProfile(windowMeta.baseTag, patch.entity_id));
             const profile = mergeEntityProfilePatch(base, patch, false);
             profiles.set(patch.entity_id, profile);
-            assertForeignKeysReachable(patch.entity_id, serializeEntityMarkdown(profile), reachable);
+        }
+        for (const id of new Set(input.patches.map((patch) => patch.entity_id))) {
+            assertForeignKeysReachable(id, profiles.get(id)!, reachable);
         }
 
         const normalizedL2Cards =
@@ -808,6 +808,7 @@ export class ParallelSandbox {
             patches: input.patches,
             stagedAt: new Date().toISOString(),
             ...(input.chapterNumbers ? { chapterNumbers: input.chapterNumbers } : {}),
+            ...(input.nextChapterOptions ? { nextChapterOptions: input.nextChapterOptions } : {}),
             ...(normalizedL2Cards ? { l2Cards: normalizedL2Cards } : {})
         };
 
@@ -825,13 +826,15 @@ export class ParallelSandbox {
                 throw new Error(`PARALLEL 时间窗 ${options.windowId} 当前状态为 ${windowMeta.status}，无法重复合并`);
             }
 
-            const [config, worldState, deltas] = await Promise.all([
-                this.store.readBookConfig(),
+            if (options.restoreTimelineMode === 'PARALLEL') {
+                throw new Error('并行窗口合并后不能恢复为 PARALLEL');
+            }
+            const [worldState, deltas] = await Promise.all([
                 this.store.readWorldState(),
                 this.readBranchDeltas(options.windowId)
             ]);
 
-            const maxChapters = config.parallel_max_chapters ?? windowMeta.maxChapters;
+            const maxChapters = windowMeta.maxChapters;
             const totalChaptersUsed = deltas.reduce((acc, d) => acc + d.chaptersUsed, 0);
             if (totalChaptersUsed > maxChapters) {
                 throw new ParallelWindowExceededError(options.windowId, totalChaptersUsed, maxChapters);
@@ -871,8 +874,7 @@ export class ParallelSandbox {
                 pendingNewEntityIds
             );
             for (const [entityId, profile] of mergedProfiles.entries()) {
-                const serialized = serializeEntityMarkdown(profile);
-                assertForeignKeysReachable(entityId, serialized, reachableKeys);
+                assertForeignKeysReachable(entityId, profile, reachableKeys);
             }
 
             // 准备分支 L2 章卡合并映射

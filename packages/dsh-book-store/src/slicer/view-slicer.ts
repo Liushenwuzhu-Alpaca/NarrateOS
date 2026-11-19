@@ -90,13 +90,12 @@ type SectionKey = 'innateLocks' | 'acquiredState' | 'irreversibleTrajectory' | '
 
 const DEFAULT_WAKEUP_GAP_THRESHOLD = 30;
 const WARPED_TAG_RE = /\bWARPED\b/i;
-const WRITER_RESTRICTED_DIRECTIVE_RE = /\bWARPED\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 export const CLEANROOM_ENTRY_RESTRICTED_RE =
     /\b(?:WARPED|OMNISCIENT_SECRET)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 export const CLEANROOM_LORE_RESTRICTED_RE =
     /\b(?:WARPED|OMNISCIENT_SECRET|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 export const VALID_VISIBILITIES = new Set(['PUBLIC', 'SELF_ONLY', 'OMNISCIENT_SECRET', 'READER_KNOWN']);
-const LORE_ALLOWED_INLINE_VIS = new Set(['PUBLIC', 'READER_KNOWN']);
+export const LORE_ALLOWED_INLINE_VIS = new Set(['PUBLIC', 'READER_KNOWN']);
 const UNKNOWN_VIS_TAG_KEY_RE =
     /^(?:vis|visibility|unknown_vis|invalid_vis|raw_vis|rawinvalidvisibility|raw_invalid_visibility)$/i;
 const INLINE_VIS_TAG_RE = /(?:^|[\[\s|])(?:vis|visibility)\s*:\s*([^\s|\]]+)/gi;
@@ -231,7 +230,7 @@ export function stripWriterRestrictedDirectives(raw: string | null | undefined):
     if (raw === null || raw === undefined) {
         return null;
     }
-    return stripRestrictedMarkdownBlocks(raw, WRITER_RESTRICTED_DIRECTIVE_RE, false);
+    return sanitizeLoreForWriter(raw);
 }
 
 /** 面向 lore_library 文本的净室清洗：整条/整段剥离 OMNISCIENT_SECRET、SELF_ONLY、WARPED 与受限导演指令 */

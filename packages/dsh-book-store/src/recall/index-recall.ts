@@ -400,6 +400,26 @@ function extractFirstSentence(text: string): string {
     return (fallback ? fallback[0] : normalized).trim();
 }
 
+/** 主线和支线合卷共用写法；特殊锚点用 JSON 数组而非标点分隔。 */
+export function upsertVolumeCardEntry(
+    raw: string | null, volume: number, chapter: number, day: number, summary: string,
+    appeared: readonly string[], anchors: readonly string[] = []
+): string {
+    const base = raw?.trim() ? raw.replace(/\r\n/g, '\n') : `# 第 ${volume} 卷双轨章卡`;
+    const id = formatChapterId(chapter);
+    const unique = [...new Set(anchors.map((s) => s.trim()).filter(Boolean))];
+    const block = [
+        `## ${id} (day:${day})`,
+        /[\r\n\u2028\u2029]/.test(summary) ? `- 主干剧情(JSON)：${JSON.stringify(summary.trim())}` : `- 主干剧情：${summary.trim()}`,
+        unique.some((s) => /[,，、;；\r\n]/.test(s) || s === '无')
+            ? `- 异象锚点(JSON)：${JSON.stringify(unique)}`
+            : `- 异象锚点：${unique.join('、') || '无'}`,
+        `- 出场实体：${[...new Set(appeared.map((s) => s.trim()).filter(Boolean))].join(', ')}`
+    ].join('\n');
+    const section = new RegExp(`^##[ \\t]+${id}\\b[^\\n]*(?:\\n|$)[\\s\\S]*?(?=^##[ \\t]+ch_\\d{4}\\b|(?![\\s\\S]))`, 'm');
+    return section.test(base) ? `${base.replace(section, () => `${block}\n\n`).trimEnd()}\n` : `${base.trimEnd()}\n\n${block}\n`;
+}
+
 /** 解析 L2 卷级章卡为结构化单章列表，同时兼容中文全角与英文半角冒号 */
 export function parseL2CardSections(cardContent: string): {
     preamble: string;
@@ -439,22 +459,49 @@ export function parseL2CardSections(cardContent: string): {
         const dayMatch = /\(day\s*[:：]\s*([^)\s]+)\)/.exec(cur.headingLine);
         const dayLabel = dayMatch?.[1] ? `day:${dayMatch[1]}` : 'day:unknown';
 
-        const plotMatch = /^-\s*(?:主干剧情|主干)\s*[:：]\s*([^\n]*)/m.exec(rawSection);
-        const anchorMatch = /^-\s*(?:异象锚点|锚点)\s*[:：]\s*([^\n]*)/m.exec(rawSection);
-        const entityMatch = /^-\s*出场实体\s*[:：]\s*([^\n]*)/m.exec(rawSection);
+        const plotJson = /^-[ \t]*主干剧情\(JSON\)[ \t]*[:：][ \t]*([^\n]*)/m.exec(rawSection);
+        const anchorJson = /^-[ \t]*异象锚点\(JSON\)[ \t]*[:：][ \t]*([^\n]*)/m.exec(rawSection);
+        const plotMatch = /^-[ \t]*(?:主干剧情|主干)[ \t]*[:：][ \t]*([\s\S]*?)(?=^-[ \t]*(?:异象锚点(?:\(JSON\))?|锚点|出场实体)[ \t]*[:：]|(?![\s\S]))/m.exec(rawSection);
+        const anchorMatch = /^-[ \t]*(?:异象锚点|锚点)[ \t]*[:：][ \t]*([^\n]*)/m.exec(rawSection);
+        const entityMatch = /^-[ \t]*出场实体[ \t]*[:：][ \t]*([^\n]*)/m.exec(rawSection);
+        const plot: unknown = plotJson ? JSON.parse(plotJson[1]!) : plotMatch?.[1]?.trim() ?? '';
+        const anchors: unknown = anchorJson ? JSON.parse(anchorJson[1]!) : splitCommaField(anchorMatch?.[1]);
+        if (typeof plot !== 'string' || !Array.isArray(anchors) || !anchors.every((s) => typeof s === 'string')) {
+            throw new Error(`章卡 ${cur.headingLine} 摘要或锚点格式错误`);
+        }
 
         sections.push({
             chapterNumber: cur.chapterNumber,
             chapterId: formatChapterId(cur.chapterNumber),
             dayLabel,
-            plotSummary: plotMatch?.[1]?.trim() ?? '',
-            anomalyAnchors: splitCommaField(anchorMatch?.[1]),
+            plotSummary: plot,
+            anomalyAnchors: anchors,
             appearedEntityIds: [...new Set(splitListField(entityMatch?.[1]))],
             rawSection
         });
     }
 
     return { preamble, sections };
+}
+
+/** 读取所有卷的可见章卡，分支覆盖层优先于磁盘。 */
+export async function readBookL2Sections(bookRoot: string, options?: RecallReadOptions): Promise<L2CardSection[]> {
+    const dir = 'index/L2_cards';
+    const sections: L2CardSection[] = [];
+    for (const name of await listDirWithStaging(bookRoot, dir, VOLUME_CARD_FILE_RE, options)) {
+        const raw = await readTextWithStaging(bookRoot, `${dir}/${name}`, options);
+        if (raw) sections.push(...parseL2CardSections(raw).sections);
+    }
+    return sections;
+}
+
+export async function readChapterDays(bookRoot: string, options?: RecallReadOptions): Promise<Record<number, number>> {
+    const days: Record<number, number> = {};
+    for (const section of await readBookL2Sections(bookRoot, options)) {
+        const match = /^day:(-?\d+)$/.exec(section.dayLabel);
+        if (match) days[section.chapterNumber] = Number(match[1]);
+    }
+    return days;
 }
 
 function formatFoldedL2Line(section: L2CardSection): string {
@@ -868,7 +915,7 @@ function buildSnippetWithMaxChars(
     }
     const maxBodyChars = sliceMaxChars - envelope.length - 1;
     if (maxBodyChars <= 0) {
-        return fullSnippet.slice(0, sliceMaxChars);
+        return '';
     }
     const truncatedBody = truncateSliceBody(
         matchedText,
@@ -1212,7 +1259,7 @@ export class IndexRecall {
         const activeTitleRules = buildEffectiveRuleList(effectiveQuery).filter(
             (rule) => rule.title.length > 0 && isRuleActiveAtTarget(rule, effectiveQuery)
         );
-        const explicitDayMap = parseExplicitChapterDayMap(effectiveQuery.chapterDays);
+        const explicitDayMap = parseExplicitChapterDayMap(effectiveQuery.chapterDays ?? await readChapterDays(bookRoot, effectiveQuery));
         const focusSet = new Set<number>(
             (effectiveQuery.focusChapters ?? []).filter(
                 (ch) => Number.isInteger(ch) && ch > 0 && ch <= effectiveQuery.targetChapter
@@ -1423,6 +1470,8 @@ export class IndexRecall {
                 .slice(pIdx + 1, pIdx + 1 + contextParagraphs)
                 .map((p) => p.text);
 
+            const snippet = buildSnippetWithMaxChars(envelope, paragraph.text, contextBefore, contextAfter, matchedKeys, query.sliceMaxChars);
+            if (!snippet) continue;
             results.push({
                 score: computeScore(paragraph.text),
                 slice: {
@@ -1439,14 +1488,7 @@ export class IndexRecall {
                     contextBefore,
                     contextAfter,
                     matchedKeys,
-                    snippet: buildSnippetWithMaxChars(
-                        envelope,
-                        paragraph.text,
-                        contextBefore,
-                        contextAfter,
-                        matchedKeys,
-                        query.sliceMaxChars
-                    )
+                    snippet
                 }
             });
         }
@@ -1497,7 +1539,8 @@ export class IndexRecall {
             const lineNumber = lineIdx + 1;
             const contextBefore = chapterData.lines.slice(Math.max(0, lineIdx - 2), lineIdx);
             const contextAfter = chapterData.lines.slice(lineIdx + 1, lineIdx + 3);
-            const snippet = `${envelope}\n${[...contextBefore, lineText, ...contextAfter].join('\n')}`;
+            const snippet = buildSnippetWithMaxChars(envelope, lineText, contextBefore, contextAfter, matchedKeys, query.sliceMaxChars);
+            if (!snippet) continue;
             const containingParagraph = paragraphByLine.get(lineNumber);
 
             results.push({

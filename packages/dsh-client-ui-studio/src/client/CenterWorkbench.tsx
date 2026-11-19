@@ -14,7 +14,7 @@ import type {
     RuntimeTaskKind,
     StepChapterRequest
 } from './types';
-import type { StashedDraftEntry } from './draft-guard';
+import { canRestoreDraft, type DraftLocation, type StashedDraftEntry } from './draft-guard';
 import {
     formatChapterLabel,
     getAvatarToneIndex,
@@ -96,6 +96,7 @@ export interface ChapterSummaryItem {
 
 /** 单章详情数据 */
 export interface ChapterDetailData {
+    bookRoot: string;
     chapterNumber: number;
     title?: string | undefined;
     content: string;
@@ -258,7 +259,7 @@ export interface CenterWorkbenchProps {
     revealNonce?: number | undefined;
     stashedDraft?: StashedDraftEntry | null | undefined;
     onDraftDirtyChange?:
-        | ((dirty: { bookRoot: string; chapterNumber: number; content: string } | null) => void)
+        | ((dirty: DraftLocation | null) => void)
         | undefined;
     onDraftControlReady?: ((handle: CenterWorkbenchDraftHandle | null) => void) | undefined;
     onRestoreStashedDraft?: ((entry: StashedDraftEntry) => void) | undefined;
@@ -283,7 +284,7 @@ export interface CenterWorkbenchProps {
     onHealConflicts?: (() => Promise<void> | void) | undefined;
     onOpenAdvanceVolumeModal?: (() => void) | undefined;
     onOpenParallelModal?: (() => void) | undefined;
-    onSaveChapter?: ((chapterNumber: number, content: string) => Promise<void> | void) | undefined;
+    onSaveChapter?: ((draft: DraftLocation) => Promise<void> | void) | undefined;
     onSubmitSignal?: ((payload: SubmitSignalPayload) => Promise<void> | void) | undefined;
     onRefreshViews?: (() => Promise<void> | void) | undefined;
     onRetryChapterDetail?: (() => void) | undefined;
@@ -1588,7 +1589,7 @@ export function CenterWorkbench({
     const savingRef = useRef(false);
     const [syncingFromDiff, setSyncingFromDiff] = useState(false);
     const [healingConflict, setHealingConflict] = useState(false);
-    const [draftBaseline, setDraftBaseline] = useState<string | null>(null);
+    const [draftBaseline, setDraftBaseline] = useState<DraftLocation | null>(null);
     const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
 
     // 底部导演便签舱受控态
@@ -1627,21 +1628,15 @@ export function CenterWorkbench({
     }, [chapterDetail?.chapterNumber, chapterDetail?.content, currentBookRoot, isEditing]);
 
     const isDraftDirty =
-        isEditing && draftBaseline !== null && draftContent !== draftBaseline;
-    const draftDirtyLocation =
-        isDraftDirty && chapterDetail
-            ? {
-                  bookRoot: currentBookRoot ?? '',
-                  chapterNumber: chapterDetail.chapterNumber,
-                  content: draftContent
-              }
-            : null;
+        isEditing && draftBaseline !== null && draftContent !== draftBaseline.content;
+    const draftDirtyLocation = isDraftDirty ? { ...draftBaseline, content: draftContent } : null;
 
     useEffect(() => {
         onDraftDirtyChange?.(draftDirtyLocation);
     }, [
         onDraftDirtyChange,
         draftDirtyLocation?.bookRoot,
+        draftDirtyLocation?.baseSha256,
         draftDirtyLocation?.chapterNumber,
         draftDirtyLocation?.content
     ]);
@@ -1836,7 +1831,11 @@ export function CenterWorkbench({
     };
 
     const handleStartEditing = () => {
-        if (!chapterDetail) {
+        if (stashedDraft) {
+            showError('请先恢复暂存草稿，或复制所需内容后放弃暂存');
+            return;
+        }
+        if (!chapterDetail?.sha256 || chapterDetail.bookRoot !== currentBookRoot) {
             showError('章节详情尚未加载，暂不能改稿');
             return;
         }
@@ -1845,7 +1844,8 @@ export function CenterWorkbench({
         setChapterTab('prose');
         if (!isEditing) {
             setDraftContent(chapterDetail.content);
-            setDraftBaseline(chapterDetail.content);
+            setDraftBaseline({ bookRoot: chapterDetail.bookRoot, chapterNumber: chapterDetail.chapterNumber,
+                baseSha256: chapterDetail.sha256, content: chapterDetail.content });
         }
         setIsEditing(true);
     };
@@ -1862,30 +1862,29 @@ export function CenterWorkbench({
 
     const handleSaveEditedChapter = async () => {
         if (savingRef.current) return;
-        const targetChapterNumber = chapterDetail?.chapterNumber ?? activeChapterNumber;
-        if (!targetChapterNumber || targetChapterNumber <= 0) {
-            showError('当前没有可保存的有效章节号');
+        if (!draftBaseline || draftBaseline.bookRoot !== currentBookRoot || draftBaseline.chapterNumber !== chapterDetail?.chapterNumber) {
+            showError('作品或章号已改变，未保存手稿');
             return;
         }
         if (isBusy) {
             showError('引擎正在执行任务，暂时无法保存；草稿已保留，请待任务结束后重试');
             return;
         }
-        const contentToSave = draftContent;
+        const draft = { ...draftBaseline, content: draftContent };
         savingRef.current = true;
         setSavingEdit(true);
         try {
             if (onSaveChapter) {
-                await onSaveChapter(targetChapterNumber, contentToSave);
+                await onSaveChapter(draft);
             } else {
                 await sendJsonRequest('/api/narrate/chapter', '保存并同步失败', {
                     method: 'PUT',
-                    body: { chapterNumber: targetChapterNumber, content: contentToSave }
+                    body: { ...draft }
                 });
             }
-            setDraftBaseline(contentToSave);
+            setDraftBaseline(null);
             setIsEditing(false);
-            showFeedback(`已保存第 ${targetChapterNumber} 章并自动同步`);
+            showFeedback(`已保存第 ${draft.chapterNumber} 章并自动同步`);
         } catch (err) {
             showError(err);
         } finally {
@@ -2721,14 +2720,21 @@ export function CenterWorkbench({
                     <div className="ns-stash-restore-bar" role="status">
                         <span>检测到第 {stashedDraft.chapterNumber} 章有你刚才暂存的未保存手改草稿</span>
                         <div className="ns-header-right">
+                            {!canRestoreDraft(stashedDraft, chapterDetail) && (
+                                <label>原稿版本已变化或尚未载入；请复制暂存内容与当前正文比对。
+                                    <textarea readOnly value={stashedDraft.content} />
+                                </label>
+                            )}
                             <button
                                 type="button"
                                 className="ns-btn ns-btn-warn ns-btn-xs"
+                                disabled={!canRestoreDraft(stashedDraft, chapterDetail)}
                                 onClick={() => {
+                                    if (!chapterDetail || !canRestoreDraft(stashedDraft, chapterDetail)) return;
                                     setMainSurface('chapter');
                                     onCloseCodex?.();
                                     setChapterTab('prose');
-                                    setDraftBaseline(chapterDetail?.content ?? '');
+                                    setDraftBaseline({ ...stashedDraft, content: chapterDetail.content });
                                     setDraftContent(stashedDraft.content);
                                     setIsEditing(true);
                                     onRestoreStashedDraft?.(stashedDraft);
@@ -2760,12 +2766,12 @@ export function CenterWorkbench({
                         gateViolations={gateViolations}
                         isBusy={isBusy}
                         healing={healingConflict}
-                        onHealConflicts={() => {
+                        onHealConflicts={onHealConflicts && (() => {
                             setHealingConflict(true);
-                            void Promise.resolve(onHealConflicts?.()).finally(() => {
+                            void Promise.resolve(onHealConflicts()).finally(() => {
                                 setHealingConflict(false);
                             });
-                        }}
+                        })}
                         onEditChapter={handleStartEditing}
                         onRetryWithNote={(correctionText) => {
                             void handleSignalAction({

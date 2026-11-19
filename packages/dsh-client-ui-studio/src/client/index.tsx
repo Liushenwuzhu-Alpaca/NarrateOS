@@ -430,20 +430,20 @@ function mapSyncConflictDiagnostic(
             asString(rawConflict['leftRef']) ??
             asString(rawConflict['left_ref']) ??
             asString(rawConflict['source_ref']) ??
-            fields.leftRef,
-        leftLine: fields.leftLine,
+            fields.leftRef ?? (asNumber(rawConflict['dirtyChapter']) ? `第 ${rawConflict['dirtyChapter']} 章` : undefined),
+        leftLine: fields.leftLine ?? asNumber(rawConflict['dirtyLineNumber']),
         leftExcerpt:
             asString(rawConflict['leftExcerpt']) ??
             asString(rawConflict['quoteA']) ??
             asString(rawConflict['quote_a']) ??
-            asString(rawConflict['quote_source']),
-        rightRef: fields.rightRef,
-        rightLine: fields.rightLine,
+            asString(rawConflict['dirtyQuote']) ?? asString(rawConflict['quote_source']),
+        rightRef: fields.rightRef ?? asString(rawConflict['relativePath']),
+        rightLine: fields.rightLine ?? asNumber(rawConflict['lineNumber']),
         rightExcerpt:
             asString(rawConflict['rightExcerpt']) ??
             asString(rawConflict['quoteB']) ??
             asString(rawConflict['quote_b']) ??
-            asString(rawConflict['quote_draft']),
+            asString(rawConflict['quote']) ?? asString(rawConflict['quote_draft']),
         affectedChapters: fields.affectedChapters,
         affectedWords: fields.affectedWords,
         rollbackThreshold: fields.rollbackThreshold
@@ -465,17 +465,15 @@ function mapPendingSignals(signalsView: SignalsViewPayload | null): PendingSigna
     }));
 }
 
-function buildSignalPayload(payload: SubmitSignalPayload, chapter: number): PostSignalRequest {
+function buildSignalPayload(payload: SubmitSignalPayload): PostSignalRequest {
     const trimmed = payload.content.trim();
     const nowIso = new Date().toISOString();
-    const safeChapter = Math.max(0, chapter);
 
     if (payload.kind === 'RETCON' || payload.kind === 'Retcon') {
         return {
             type: 'RETCON',
             content: trimmed,
             reason: trimmed,
-            chapter: safeChapter,
             created_at: nowIso
         };
     }
@@ -485,7 +483,6 @@ function buildSignalPayload(payload: SubmitSignalPayload, chapter: number): Post
             type: 'SPOTLIGHT_TRIGGER',
             content: trimmed,
             reason: trimmed,
-            chapter: safeChapter,
             ...(payload.entityId ? { entity_id: payload.entityId } : {}),
             created_at: nowIso
         };
@@ -496,7 +493,6 @@ function buildSignalPayload(payload: SubmitSignalPayload, chapter: number): Post
             type: 'DIRECTOR_NOTE',
             content: trimmed,
             reason: trimmed,
-            chapter: safeChapter,
             suggested_mode: 'FLASHBACK',
             ...(payload.targetDay !== undefined ? { target_day: payload.targetDay } : {}),
             created_at: nowIso
@@ -508,7 +504,6 @@ function buildSignalPayload(payload: SubmitSignalPayload, chapter: number): Post
             type: 'DIRECTOR_NOTE',
             content: trimmed,
             reason: trimmed,
-            chapter: safeChapter,
             suggested_mode: 'PARALLEL',
             created_at: nowIso
         };
@@ -518,7 +513,6 @@ function buildSignalPayload(payload: SubmitSignalPayload, chapter: number): Post
         type: 'DIRECTOR_NOTE',
         content: trimmed,
         reason: trimmed,
-        chapter: safeChapter,
         suggested_mode: 'MAINLINE',
         created_at: nowIso
     };
@@ -1055,8 +1049,6 @@ export function NarrateStudioRoot({
     const chapterRequestSeqRef = useRef(0);
     const runsRequestSeqRef = useRef(0);
     const currentBookRootRef = useRef<string>('');
-    const chapterDetailRef = useRef<ChapterDetail | null>(null);
-    chapterDetailRef.current = chapterDetail;
 
     const loadRunsForChapter = useCallback(
         async (chapterNumber: number | null) => {
@@ -1108,10 +1100,7 @@ export function NarrateStudioRoot({
                 return false;
             }
             const entry: StashedDraftEntry = {
-                bookRoot: draft.bookRoot,
-                chapterNumber: draft.chapterNumber,
-                content: draft.content,
-                baseSha256: chapterDetailRef.current?.sha256,
+                ...draft,
                 updatedAt: Date.now()
             };
             const nextStash = putStashedDraft(draftStashRef.current, entry);
@@ -1153,6 +1142,7 @@ export function NarrateStudioRoot({
             try {
                 const detail = await fetchChapter(chapterNumber);
                 if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
+                if (detail.bookRoot !== currentBookRootRef.current || detail.chapterNumber !== chapterNumber) return;
                 const dirtyNow = draftLocationRef.current;
                 if (
                     dirtyNow &&
@@ -1398,6 +1388,7 @@ export function NarrateStudioRoot({
                 if (!sessionId) return;
                 const nextEv: StageSessionDetailEvent = {
                     kind,
+                    ...(typeof data['seq'] === 'number' ? { seq: data['seq'] } : {}),
                     ...(asString(data['text']) !== undefined ? { text: asString(data['text']) } : {}),
                     ...(asString(data['toolName']) !== undefined ? { toolName: asString(data['toolName']) } : {}),
                     ...(asString(data['callId']) !== undefined ? { callId: asString(data['callId']) } : {}),
@@ -1454,7 +1445,7 @@ export function NarrateStudioRoot({
                             : prev
                     );
                     showToast(errText, 'error');
-                    void loadStatus().catch(() => undefined);
+                    void Promise.allSettled([loadStatus(), loadViewsRef.current()]);
                     return;
                 }
 
@@ -2022,11 +2013,18 @@ export function NarrateStudioRoot({
                     ...(resolvedBranchId ? { parallelBranchId: resolvedBranchId } : {})
                 };
             }
-            const res = await stepChapter(nextOptions);
-            setRevealNonce((n) => n + 1);
-            await refreshAll(res.chapterNumber);
+            const epoch = workspaceEpochRef.current;
+            try {
+                const res = await stepChapter(nextOptions);
+                if (!isCurrentWorkspace(epoch)) return;
+                setRevealNonce((n) => n + 1);
+                await refreshAll(res.chapterNumber);
+            } catch (err) {
+                if (isCurrentWorkspace(epoch)) await Promise.allSettled([loadStatus(), loadViews()]);
+                throw err;
+            }
         },
-        [activeParallelBranchId, activeParallelWindowId, refreshAll, status?.worldState]
+        [activeParallelBranchId, activeParallelWindowId, isCurrentWorkspace, loadStatus, loadViews, refreshAll, status?.worldState]
     );
 
     const handleStartYolo = useCallback(
@@ -2071,15 +2069,17 @@ export function NarrateStudioRoot({
     }, [loadStatus, loadViews]);
 
     const handleHealConflicts = useCallback(async () => {
-        const res = await healConflicts({});
-        setRevealNonce((n) => n + 1);
-        showToast(
-            res.quarantined
-                ? '部分冲突已保留在人工裁决隔离区'
-                : '跨章冲突已自动修补并更新台账'
-        );
-        await refreshAll(selectedChapterRef.current);
-    }, [refreshAll, showToast]);
+        if (!syncConflictsView?.reportRevision || !syncConflictsView.conflicts[0]) return;
+        try {
+            const res = await healConflicts({ selection: { bookSlug: syncConflictsView.bookSlug, reportRevision: syncConflictsView.reportRevision, conflictIndex: 0 } });
+            setRevealNonce((n) => n + 1);
+            showToast(res.quarantined ? '本条冲突已保留，请人工裁决' : '本条冲突已处理');
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : String(err), 'error');
+        } finally {
+            await refreshAll(selectedChapterRef.current);
+        }
+    }, [refreshAll, showToast, syncConflictsView]);
 
     const handleHarvestVoice = useCallback(
         async (targetChapterArg?: number) => {
@@ -2149,15 +2149,16 @@ export function NarrateStudioRoot({
     );
 
     const handleSaveChapter = useCallback(
-        async (chapterNumber: number, content: string) => {
+        async (draft: DraftLocation) => {
             if (saveInFlightRef.current || switchingBookRef.current) {
                 throw new Error('正在保存或切换作品，请等待当前操作完成');
             }
-            const bookRoot = currentBookRootRef.current;
+            const { bookRoot, chapterNumber } = draft;
+            if (currentBookRootRef.current !== bookRoot) throw new Error('作品已改变，未保存手稿');
             const epoch = workspaceEpochRef.current;
             saveInFlightRef.current = true;
             try {
-                await saveChapter({ chapterNumber, content });
+                const saved = await saveChapter(draft);
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
                 // 保存成功后清除该章内存暂存草稿
                 const nextStash = removeStashedDraft(draftStashRef.current, bookRoot, chapterNumber);
@@ -2167,11 +2168,9 @@ export function NarrateStudioRoot({
                 workspaceEpochRef.current += 1;
                 chapterRequestSeqRef.current += 1;
                 setChapterLoading(false);
-                setChapterDetail((prev) =>
-                    currentBookRootRef.current === bookRoot && prev?.chapterNumber === chapterNumber
-                        ? { ...prev, content, dirty: false }
-                        : prev
-                );
+                setChapterDetail((prev) => prev?.bookRoot === bookRoot && prev.chapterNumber === chapterNumber
+                    ? { ...prev, content: draft.content, sha256: saved.sha256, dirty: false }
+                    : prev);
                 setRevealNonce((n) => n + 1);
                 void Promise.allSettled([
                     refreshAll(chapterNumber),
@@ -2186,8 +2185,7 @@ export function NarrateStudioRoot({
 
     const handleSubmitSignal = useCallback(
         async (payload: SubmitSignalPayload) => {
-            const currentCh = status?.worldState.current_chapter ?? status?.latestChapter ?? 0;
-            const req = buildSignalPayload(payload, currentCh);
+            const req = buildSignalPayload(payload);
             await postSignal(req);
             await Promise.all([loadViews(), loadStatus()]);
             if (payload.runAfter) {
@@ -2589,6 +2587,7 @@ export function NarrateStudioRoot({
         if (!chapterDetail) return null;
         const summary = chapters.find((c) => c.chapterNumber === chapterDetail.chapterNumber);
         return {
+            bookRoot: chapterDetail.bookRoot,
             chapterNumber: chapterDetail.chapterNumber,
             title: summary?.title,
             content: chapterDetail.content,
@@ -3003,7 +3002,7 @@ export function NarrateStudioRoot({
                 onSync={handleSync}
                 onDream={handleDream}
                 onHarvestVoice={handleHarvestVoice}
-                onHealConflicts={handleHealConflicts}
+                onHealConflicts={syncConflictsView?.conflicts[0] && syncConflictsView.reportRevision ? handleHealConflicts : undefined}
                 onOpenAdvanceVolumeModal={() => {
                     setVolumeError(null);
                     setVolumeModalOpen(true);

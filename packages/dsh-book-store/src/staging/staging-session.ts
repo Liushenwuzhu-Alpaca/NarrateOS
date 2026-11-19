@@ -274,6 +274,13 @@ export class StagingSessionManager {
         return this.sessions.has(runId);
     }
 
+    /** 检查复用的暂存会话是否属于本次选书。 */
+    assertBookRoot(runId: string, bookRoot: string): void {
+        if (this.requireSession(runId).bookRoot !== resolve(bookRoot)) {
+            throw new Error(`暂存会话 ${runId} 不属于当前作品`);
+        }
+    }
+
     /**
      * 读取作品内文件（优先命中本 runId 暂存覆盖层，否则回落磁盘只读）
      * 严禁跨越 bookRoot 或访问 .git/ 与引擎内部 .ops/ 元数据路径。
@@ -299,7 +306,8 @@ export class StagingSessionManager {
         runId: string,
         relPath: string,
         targetText: string,
-        replacementText: string
+        replacementText: string,
+        branchOverlay?: ReadonlyMap<string, string | null>
     ): Promise<string> {
         const session = this.requireSession(runId);
         const { normalized, absPath } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
@@ -308,7 +316,9 @@ export class StagingSessionManager {
         }
         await assertRealPathAllowed(session.bookRoot, absPath, relPath, true);
 
-        const current = await this.read(runId, normalized);
+        const base = session.overlay.get(normalized) ?? branchOverlay?.get(normalized);
+        if (base === null) throw new Error(`文件在当前分支视图中不存在或不可见: ${normalized}`);
+        const current = base ?? await this.read(runId, normalized);
         const firstIdx = current.indexOf(targetText);
         if (firstIdx === -1) {
             throw new Error(`在 ${normalized} 中未找到匹配的目标文本`);

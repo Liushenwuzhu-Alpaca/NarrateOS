@@ -11,10 +11,13 @@ import {
     BookSwitchConflictError,
     NodeSystemAdapter,
     normalizeLlmPool,
+    ParallelSandbox,
     parseL2CardSections,
     TxLockConflictError,
     TxLockPayloadSchema,
+    TxStateSchema,
     type ActiveLlmPool,
+    type LlmPool,
     type BookConfig,
     type BookSnapshot,
     type ForkParallelWindowOptions,
@@ -45,9 +48,9 @@ import {
 import { DreamingPipeline } from '../pipeline/dreaming-pipeline.js';
 import {
     appendJsonlLineSafe,
+    addUsage,
     CHAPTER_FILE_RE,
     clearHealPlan,
-    collectEntityDisplayNames,
     createEmptyUsage,
     formatChapterKey,
     formatVolumeCardRelPath,
@@ -70,6 +73,7 @@ import { RoleLoader } from '../roles/role-loader.js';
 import {
     DshLlmAdapter,
     parseProviderModelSpec,
+    resolveCompatibleReasoningEffort,
     resolveRoleReasoningEffort,
     resolveRoleRoute,
     resolveTierPool
@@ -81,7 +85,6 @@ import {
     type AdvanceVolumeOptions,
     type AdvanceVolumeResult,
     type AvailableModelItem,
-    type DownstreamConflictReport,
     type ExtendedRunRecord,
     type HealConflictsOptions,
     type HealConflictsResult,
@@ -107,6 +110,7 @@ import {
     type WriterAssemblyReport,
     type YoloRuntimeState
 } from '../schemas.js';
+import { acknowledgeConflict, conflictRevision, parseConflictReport, reportConflict, type SyncConflictSelection } from './heal-report.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_SYMLINK_DEPTH = 32;
@@ -479,6 +483,8 @@ export class NarrateRuntimeController {
     private globalRoleRouting: Record<string, RoleModelOverride> = {};
     private discoveredFallbackModel: LlmRouteTarget | null = null;
     private discoveredFallbackLoaded = false;
+    private catalogGeneration = 0;
+    private modelBroadcastGeneration = 0;
     private lastObservedAgentDefaultKey: string | null = null;
     private pendingSessionDefaultSelection: HostDefaultModelSelection | null = null;
     private activeTask: RuntimeTaskKind = 'IDLE';
@@ -866,6 +872,7 @@ export class NarrateRuntimeController {
         if (this.isAdmissionClosed) {
             return;
         }
+        this.catalogGeneration++;
         this.discoveredFallbackLoaded = false;
         this.discoveredFallbackModel = null;
         void this.trackBackgroundTask(this.broadcastDefaultModelChanged());
@@ -876,6 +883,7 @@ export class NarrateRuntimeController {
         if (this.isAdmissionClosed) {
             return;
         }
+        const generation = ++this.modelBroadcastGeneration;
         let bookCfg: Pick<BookConfig, 'model_routing' | 'role_routing'> | undefined;
         let activeRoot: string | undefined;
         if (this.bookRoot) {
@@ -886,11 +894,9 @@ export class NarrateRuntimeController {
                 bookCfg = undefined;
             }
         }
-        const [availableModels, roleDefinitions] = await Promise.all([
-            this.listAvailableModels(bookCfg),
-            this.resolveRoleDefinitions(bookCfg, activeRoot)
-        ]);
-        if (this.isAdmissionClosed) {
+        const availableModels = await this.listAvailableModels(bookCfg);
+        const roleDefinitions = await this.resolveRoleDefinitions(bookCfg, activeRoot);
+        if (this.isAdmissionClosed || generation !== this.modelBroadcastGeneration) {
             return;
         }
         this.emitEvent('default_model_changed', {
@@ -1339,29 +1345,29 @@ export class NarrateRuntimeController {
     /** 读取未显式提供目标时的默认/延续方向（优先衔接 .ops/next_chapter_options.json） */
     private async resolveEffectiveChapterGoal(
         store: BookStore,
-        rawGoal?: string
+        rawGoal?: string,
+        context?: StepChapterInputOptions
     ): Promise<string> {
         const trimmed = rawGoal?.trim() ?? '';
         if (trimmed.length > 0 && trimmed !== DEFAULT_YOLO_GOAL) {
             return trimmed;
         }
         try {
-            const [txState, nextOpts] = await Promise.all([
-                store.readTxState(),
-                readNextChapterOptions(store.bookRoot)
-            ]);
-            if (
-                nextOpts &&
-                nextOpts.options.length > 0 &&
-                (nextOpts.source_chapter === txState.last_committed_ch ||
-                    nextOpts.source_chapter === 0)
-            ) {
-                const primary = nextOpts.options[0]!;
-                if (nextOpts.options.length === 1) {
-                    return primary;
+            let directions: string[] | undefined;
+            if (context?.parallelWindowId && context.parallelBranchId && context.timelineMode !== 'MAINLINE' && context.timelineMode !== 'FLASHBACK') {
+                directions = await new ParallelSandbox(store, this.system).getBranchNextOptions(
+                    context.parallelWindowId, context.parallelBranchId
+                );
+            } else {
+                const [tx, next] = await Promise.all([store.readTxState(), readNextChapterOptions(store.bookRoot)]);
+                if (next && (next.source_chapter === tx.last_committed_ch || next.source_chapter === 0)) {
+                    directions = next.options;
                 }
-                const restText = nextOpts.options
-                    .slice(1)
+            }
+            if (directions?.length) {
+                const primary = directions[0]!;
+                if (directions.length === 1) return primary;
+                const restText = directions.slice(1)
                     .map((opt, idx) => `${idx + 2}. ${opt}`)
                     .join('\n');
                 return `${primary}\n\n[其余延续候选方向]\n${restText}`;
@@ -1395,7 +1401,7 @@ export class NarrateRuntimeController {
         const fromHeal = typeof context === 'object' && context.fromHeal === true;
 
         const runCore = async (signal: AbortSignal): Promise<StepChapterResult> => {
-            const effectiveGoal = await this.resolveEffectiveChapterGoal(store, options.chapterGoal);
+            const effectiveGoal = await this.resolveEffectiveChapterGoal(store, options.chapterGoal, options);
             this.activeStageSessions.clear();
             this.emitEvent('chapter:phase', {
                 phase: 'STARTING',
@@ -1589,6 +1595,8 @@ export class NarrateRuntimeController {
         }
 
         // 在任何 await 前同步预占锁并递增代数令牌，杜绝双击并发穿透与清理竞态
+        // 整段连跑登记为在途任务，包括各工种结束后、下一章启动前的空档。
+        const runId = this.storeService.beginRun();
         this.yoloGeneration += 1;
         const currentGen = this.yoloGeneration;
         this.haltRequested = false;
@@ -1602,6 +1610,7 @@ export class NarrateRuntimeController {
             await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止启动 YOLO 连跑');
             this.assertAdmissionOpen();
         } catch (err) {
+            this.storeService.endRun(runId);
             if (this.yoloGeneration === currentGen) {
                 this.yoloState.running = false;
                 this.yoloState.stopRequested = false;
@@ -1611,7 +1620,7 @@ export class NarrateRuntimeController {
             throw err;
         }
 
-        this.yoloState.loopPromise = this.runYoloLoop(targetChapters, defaultGoal, currentGen);
+        this.yoloState.loopPromise = this.runYoloLoop(targetChapters, defaultGoal, currentGen, runId);
 
         return {
             status: 'STARTED',
@@ -1623,7 +1632,8 @@ export class NarrateRuntimeController {
     private async runYoloLoop(
         targetChapters: number,
         defaultGoal: string,
-        currentGen: number
+        currentGen: number,
+        runId: string
     ): Promise<void> {
         try {
             while (
@@ -1697,6 +1707,7 @@ export class NarrateRuntimeController {
                 timestamp: new Date().toISOString()
             });
         } finally {
+            this.storeService.endRun(runId);
             if (this.yoloGeneration === currentGen) {
                 this.yoloState.running = false;
                 this.yoloState.currentStage = null;
@@ -1809,12 +1820,17 @@ export class NarrateRuntimeController {
 
     /** 保存手改章节（落 .ops/manual_edits/ 备份）并触发 Sync */
     async saveAndSyncChapter(
+        expectedBookRoot: string,
         chapterNumber: number,
+        baseSha256: string,
         content: string
     ): Promise<SyncManuscriptsResult | null> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
         const bookRoot = store.bookRoot;
+        if (bookRoot !== expectedBookRoot) {
+            throw new TaskConflictError('作品已切换，未保存手稿');
+        }
 
         if (!Number.isInteger(chapterNumber) || chapterNumber <= 0 || chapterNumber > 9999) {
             throw new PathValidationError('chapterNumber 必须为 1 到 9999 的整数');
@@ -1835,6 +1851,10 @@ export class NarrateRuntimeController {
                 const original = await readOptionalText(fullPath);
                 if (original === null) {
                     return null;
+                }
+
+                if (this.storeService.bookRoot !== expectedBookRoot || sha256Hex(original) !== baseSha256) {
+                    throw new TaskConflictError('作品或原稿版本已变更，未保存手稿；请比对当前正文');
                 }
 
                 const backupDir = join(bookRoot, '.ops/manual_edits');
@@ -1912,8 +1932,21 @@ export class NarrateRuntimeController {
         plan: HealPlan,
         effectiveSignal: AbortSignal
     ): Promise<void> {
-        const startChapter = plan.nextChapter;
-        const endChapter = Math.max(startChapter, plan.toChapter);
+        // 以 Git 已提交 WAL 为准，而不是可能在章节提交后尚未来得及推进的提示游标。
+        const committed = await this.system.readFileAtRef(store.bookRoot, 'HEAD', '.ops/tx_state.json');
+        if (!committed) throw new TaskConflictError('缺少已提交的自愈事务状态');
+        const wal = TxStateSchema.parse(JSON.parse(committed));
+        const startChapter = wal.last_committed_ch + 1;
+        const endChapter = plan.toChapter;
+        if (startChapter < plan.fromChapter || startChapter > endChapter + 1 ||
+            startChapter < plan.nextChapter || startChapter > plan.nextChapter + 1 ||
+            (wal.phase === 'FEAT_COMMITTED' && wal.active_chapter !== startChapter)) {
+            throw new TaskConflictError('自愈断点与已提交的章节不一致');
+        }
+        if (startChapter !== plan.nextChapter) {
+            // 先修复落后一章的断点，否则在下一章提交后再次崩溃会让差距累积。
+            await writeHealPlan(store.bookRoot, { ...plan, nextChapter: startChapter, updatedAt: new Date().toISOString() });
+        }
 
         for (let ch = startChapter; ch <= endChapter; ch += 1) {
             if (this.haltRequested || this.shuttingDown || effectiveSignal.aborted) {
@@ -1935,7 +1968,7 @@ export class NarrateRuntimeController {
 
             const baseGoal = await this.resolveEffectiveChapterGoal(store);
             const chapterGoal = `${baseGoal}\n\n[跨章自愈重跑约束 (${plan.conflictId})]\n${plan.constraint}`;
-            await this.stepChapter(
+            const result = await this.stepChapter(
                 {
                     chapterNumber: ch,
                     chapterGoal,
@@ -1943,6 +1976,7 @@ export class NarrateRuntimeController {
                 },
                 { fromHeal: true }
             );
+            if (result.chapterNumber !== ch) throw new TaskConflictError('重跑章节与自愈计划不符');
 
             await writeHealPlan(store.bookRoot, {
                 conflictId: plan.conflictId,
@@ -1953,28 +1987,8 @@ export class NarrateRuntimeController {
                 constraint: plan.constraint
             });
         }
-
-        await clearHealPlan(store.bookRoot);
     }
 
-    private async clearSyncConflictsFile(bookRoot: string): Promise<void> {
-        const filePath = join(bookRoot, '.ops/sync_conflicts.json');
-        const raw = await readOptionalText(filePath);
-        if (raw === null) return;
-        await writeFile(
-            filePath,
-            `${JSON.stringify(
-                {
-                    updatedAt: new Date().toISOString(),
-                    dirtyChapters: [],
-                    conflicts: []
-                },
-                null,
-                4
-            )}\n`,
-            'utf8'
-        );
-    }
 
     private async executeHealCrossChapterConflictsInTask(
         store: BookStore,
@@ -1993,16 +2007,10 @@ export class NarrateRuntimeController {
             ctx
         ) => {
             const diskPlan = await readHealPlan(store.bookRoot);
-            const effectivePlan: HealPlan = diskPlan ?? {
-                conflictId: ctx.conflict.conflictId,
-                backupTag: ctx.backupTag,
-                fromChapter: ctx.conflict.chapterB,
-                toChapter: ctx.conflict.chapterB,
-                nextChapter: ctx.conflict.chapterB,
-                constraint: ctx.constraint,
-                updatedAt: new Date().toISOString()
-            };
-            await this.rerunFromHealPlan(store, effectivePlan, effectiveSignal);
+            if (!diskPlan || diskPlan.conflictId !== ctx.conflict.conflictId || diskPlan.backupTag !== ctx.backupTag) {
+                throw new TaskConflictError('未找到本次自愈的持久化断点');
+            }
+            await this.rerunFromHealPlan(store, diskPlan, effectiveSignal);
             return { success: true, stillConflicting: false };
         };
 
@@ -2026,28 +2034,41 @@ export class NarrateRuntimeController {
     ): Promise<HealConflictsResult> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
-        return await this.runExclusiveTask('DREAMING', async (signal) =>
-            await this.executeHealCrossChapterConflictsInTask(store, conflicts, options, signal)
-        );
+        return await this.runExclusiveTask('DREAMING', async (signal) => {
+            if (await readHealPlan(store.bookRoot)) throw new TaskConflictError('请先续跑未完成的自愈计划');
+            return this.executeHealCrossChapterConflictsInTask(store, conflicts, options, signal);
+        });
     }
 
     /** 从 .ops/heal_plan.json 断点或 .ops/sync_conflicts.json 读取并执行三级跨章自愈 */
     async healFromSyncConflicts(
-        options: HealConflictsOptions = {}
+        options: HealConflictsOptions = {},
+        selection?: SyncConflictSelection,
+        resumeOnly = false
     ): Promise<HealConflictsResult> {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
         return await this.runExclusiveTask('DREAMING', async (signal) => {
             const effectiveSignal = options.signal ?? signal;
+            let raw = await readOptionalText(join(store.bookRoot, '.ops/sync_conflicts.json'));
+            const report = parseConflictReport(raw);
+            const revision = conflictRevision(store.bookRoot, raw);
+            if (selection && (selection.bookSlug !== basename(store.bookRoot) || selection.reportRevision !== revision ||
+                !Number.isSafeInteger(selection.conflictIndex) || selection.conflictIndex < 0 || selection.conflictIndex >= report.conflicts.length)) {
+                throw new TaskConflictError('作品或冲突清单已更新，请刷新后重新确认');
+            }
             const pendingPlan = await readHealPlan(store.bookRoot);
-            if (pendingPlan && pendingPlan.nextChapter <= pendingPlan.toChapter) {
+            if (pendingPlan) {
+                const idx = report.conflicts.findIndex((_, i) => `sync-${revision}-${i}` === pendingPlan.conflictId);
+                if (selection && idx !== selection.conflictIndex) throw new TaskConflictError('已有其他冲突的自愈断点');
                 this.emitEvent('heal:started', {
                     conflictCount: 1,
                     resumedFromPlan: true,
                     timestamp: new Date().toISOString()
                 });
                 await this.rerunFromHealPlan(store, pendingPlan, effectiveSignal);
-                await this.clearSyncConflictsFile(store.bookRoot);
+                if (idx >= 0 && raw !== null) await acknowledgeConflict(store, raw, idx);
+                await clearHealPlan(store.bookRoot);
                 const resumedRes: HealConflictsResult = {
                     results: [
                         {
@@ -2069,66 +2090,25 @@ export class NarrateRuntimeController {
                 return resumedRes;
             }
 
-            const raw = await readOptionalText(join(store.bookRoot, '.ops/sync_conflicts.json'));
-            let conflicts: SuspectedConflict[] = [];
-            let fromDiskFile = false;
-
-            if (raw !== null) {
-                try {
-                    const parsed = JSON.parse(raw) as {
-                        dirtyChapters?: unknown;
-                        conflicts?: unknown;
-                    };
-                    const dirtyList = Array.isArray(parsed.dirtyChapters)
-                        ? parsed.dirtyChapters.filter((n): n is number => typeof n === 'number' && n > 0)
-                        : [];
-                    if (Array.isArray(parsed.conflicts)) {
-                        fromDiskFile = true;
-                        conflicts = parsed.conflicts.flatMap((rawItem, idx) => {
-                            if (!rawItem || typeof rawItem !== 'object') return [];
-                            const item = rawItem as DownstreamConflictReport;
-                            if (
-                                typeof item.chapterNumber !== 'number' ||
-                                typeof item.quote !== 'string' ||
-                                typeof item.description !== 'string'
-                            ) {
-                                return [];
-                            }
-                            const chapterA =
-                                typeof item.dirtyChapter === 'number' && item.dirtyChapter > 0
-                                    ? item.dirtyChapter
-                                    : (dirtyList[0] ?? 1);
-                            const quoteA =
-                                typeof item.dirtyQuote === 'string' && item.dirtyQuote.trim().length > 0
-                                    ? item.dirtyQuote
-                                    : item.quote;
-                            return [
-                                {
-                                    conflictId: `sync-${chapterA}-ch${item.chapterNumber}-${idx + 1}`,
-                                    chapterA,
-                                    quoteA,
-                                    chapterB: item.chapterNumber,
-                                    quoteB: item.quote,
-                                    description: item.description
-                                }
-                            ];
-                        });
-                    }
-                } catch {
-                    throw new PathValidationError('.ops/sync_conflicts.json 格式损坏，无法解析冲突清单');
+            if (resumeOnly) throw new TaskConflictError('没有待续跑的自愈计划');
+            const aggregate: HealConflictsResult = { results: [], quarantined: false, quarantineReport: null, usage: createEmptyUsage() };
+            // 批处理入口也逐项核销，后续失败时不重做已完成的项。
+            const count = selection ? 1 : report.conflicts.length;
+            for (let i = 0; i < count && raw !== null; i++) {
+                const idx = selection?.conflictIndex ?? 0;
+                const conflict = reportConflict(parseConflictReport(raw), conflictRevision(store.bookRoot, raw), idx);
+                const res = await this.executeHealCrossChapterConflictsInTask(store, [conflict], { ...options, deferPlanCleanup: true }, signal);
+                aggregate.results.push(...res.results);
+                addUsage(aggregate.usage, res.usage);
+                if (res.quarantined) {
+                    aggregate.quarantined = true;
+                    aggregate.quarantineReport = res.quarantineReport;
+                    break;
                 }
+                raw = await acknowledgeConflict(store, raw, idx);
+                if (res.results[0]?.action === 'AUTO_ROLLED_BACK_AND_RERUN') await clearHealPlan(store.bookRoot);
             }
-
-            const res = await this.executeHealCrossChapterConflictsInTask(
-                store,
-                conflicts,
-                options,
-                signal
-            );
-            if (fromDiskFile && !res.quarantined && conflicts.length > 0) {
-                await this.clearSyncConflictsFile(store.bookRoot);
-            }
-            return res;
+            return aggregate;
         });
     }
 
@@ -2137,13 +2117,11 @@ export class NarrateRuntimeController {
         this.assertAdmissionOpen();
         const store = this.requireBookStore();
         return await this.runExclusiveTask('SYNCING', async (signal) => {
-            const snapshot = await store.loadSnapshot();
-            const entityNames = collectEntityDisplayNames(snapshot.entities);
             return await harvestVoiceFromChapter({
                 store,
                 llm: this.llmAdapter,
                 system: this.system,
-                entityNames,
+                pluginSearchDirs: [...new Set([...this.pluginSearchDirs, join(store.bookRoot, 'plugins')])],
                 chapterNumber,
                 signal
             });
@@ -2833,7 +2811,7 @@ export class NarrateRuntimeController {
         const definitions: RoleDefinitionItem[] = [];
 
         for (const roleId of CANONICAL_ROLE_IDS) {
-            let defaultPool: ActiveLlmPool = CANONICAL_ROLE_DEFAULT_POOLS[roleId];
+            let defaultPool: LlmPool = CANONICAL_ROLE_DEFAULT_POOLS[roleId];
             let defaultReasoningEffort: ReasoningEffortLevel | undefined;
 
             try {
@@ -2858,15 +2836,18 @@ export class NarrateRuntimeController {
                 defaultPool,
                 effectiveBookConfig
             );
-            const effectiveReasoningEffort = resolveRoleReasoningEffort(
+            const requestedEffort = resolveRoleReasoningEffort(
                 roleId,
                 defaultReasoningEffort,
                 effectiveBookConfig
             );
+            const effectiveReasoningEffort = await resolveCompatibleReasoningEffort(
+                this.ctx.llm, route.provider, route.model, requestedEffort
+            );
 
             definitions.push({
                 id: roleId,
-                defaultPool,
+                defaultPool: normalizeLlmPool(defaultPool),
                 ...(defaultReasoningEffort !== undefined ? { defaultReasoningEffort } : {}),
                 effectiveTier,
                 effectivePool,
@@ -2887,23 +2868,11 @@ export class NarrateRuntimeController {
         const hostDefault = this.getHostDefaultModel();
         const fallbackProvider = hostDefault?.provider ?? this.readFirstRegisteredProviderId() ?? '';
 
+        const generation = ++this.catalogGeneration;
         const addCandidate = (rawProvider: string, rawModel: string, label?: string): void => {
-            let provider = rawProvider.trim();
-            let model = rawModel.trim();
+            const provider = rawProvider.trim() || fallbackProvider;
+            const model = rawModel.trim();
             if (model.length === 0) return;
-
-            const colonIdx = model.indexOf(':');
-            if (colonIdx > 0 && colonIdx < model.length - 1) {
-                const parsedProvider = model.slice(0, colonIdx).trim();
-                const parsedModel = model.slice(colonIdx + 1).trim();
-                if (parsedProvider.length > 0 && parsedModel.length > 0) {
-                    provider = parsedProvider;
-                    model = parsedModel;
-                }
-            }
-            if (provider.length === 0) {
-                provider = fallbackProvider;
-            }
 
             const key = `${provider}\0${model}`;
             const existing = seen.get(key);
@@ -2917,6 +2886,10 @@ export class NarrateRuntimeController {
             } else if (!existing.label && cleanLabel && cleanLabel !== model) {
                 existing.label = cleanLabel;
             }
+        };
+        const addSpec = (fallback: string, spec: string): void => {
+            const route = parseProviderModelSpec(spec, fallback);
+            addCandidate(route.provider, route.model);
         };
 
         const llm = this.ctx.llm as unknown as {
@@ -2961,8 +2934,10 @@ export class NarrateRuntimeController {
                 // listProviders 异常静默降级
             }
         }
-        this.discoveredFallbackModel = firstDiscovered;
-        this.discoveredFallbackLoaded = true;
+        if (generation === this.catalogGeneration) {
+            this.discoveredFallbackModel = firstDiscovered;
+            this.discoveredFallbackLoaded = true;
+        }
 
         if (hostDefault) {
             addCandidate(hostDefault.provider, hostDefault.model);
@@ -2974,19 +2949,19 @@ export class NarrateRuntimeController {
             const ovModel = ov?.model?.trim() ?? '';
             if (ovModel.length > 0) {
                 const ovProvider = ov?.provider?.trim() || activePoolRouting[pool].provider;
-                addCandidate(ovProvider, ovModel);
+                addSpec(ovProvider, ovModel);
             }
         }
 
         for (const [poolKey, rawModel] of Object.entries(this.globalModelRouting)) {
             const pool = normalizeLlmPool(poolKey);
-            addCandidate(activePoolRouting[pool].provider, rawModel);
+            addSpec(activePoolRouting[pool].provider, rawModel);
         }
 
         if (bookConfig?.model_routing) {
             for (const [poolKey, rawModel] of Object.entries(bookConfig.model_routing)) {
                 const pool = normalizeLlmPool(poolKey);
-                addCandidate(activePoolRouting[pool].provider, rawModel);
+                addSpec(activePoolRouting[pool].provider, rawModel);
             }
         }
 
@@ -2997,7 +2972,7 @@ export class NarrateRuntimeController {
                 CANONICAL_ROLE_DEFAULT_POOLS[roleId as (typeof CANONICAL_ROLE_IDS)[number]] ??
                 'strong_creative';
             const effectivePool = normalizeLlmPool(resolveTierPool(override.tier, defaultPool));
-            addCandidate(activePoolRouting[effectivePool].provider, override.model);
+            addSpec(activePoolRouting[effectivePool].provider, override.model);
         }
 
         return Array.from(seen.values());
@@ -3054,9 +3029,6 @@ export class NarrateRuntimeController {
             const nextConfig: BookConfig = { ...currentConfig };
 
             if (input.model_routing !== undefined) {
-                for (const clearedPool of input.clearedPools ?? []) {
-                    delete this.globalModelRouting[clearedPool];
-                }
                 if (Object.keys(input.model_routing).length > 0) {
                     nextConfig.model_routing = input.model_routing;
                 } else {
@@ -3065,9 +3037,6 @@ export class NarrateRuntimeController {
             }
 
             if (input.role_routing !== undefined) {
-                for (const clearedRole of input.clearedRoles ?? []) {
-                    delete this.globalRoleRouting[clearedRole];
-                }
                 if (Object.keys(input.role_routing).length > 0) {
                     nextConfig.role_routing = input.role_routing;
                 } else {
@@ -3085,18 +3054,22 @@ export class NarrateRuntimeController {
 
             if (hasGitHead) {
                 await store.recordPendingWrites(['world/book_config.yaml']);
-                try {
-                    await store.writeBookConfig(nextConfig);
-                    await this.system.commitPaths(
-                        store.bookRoot,
-                        ['world/book_config.yaml'],
-                        'chore(config): update model routing'
-                    );
-                } finally {
-                    await rm(join(store.bookRoot, '.ops/pending_writes.json'), { force: true });
-                }
-            } else {
                 await store.writeBookConfig(nextConfig);
+                await this.system.commitPaths(
+                    store.bookRoot,
+                    ['world/book_config.yaml'],
+                    'chore(config): update model routing'
+                );
+                await rm(join(store.bookRoot, '.ops/pending_writes.json'), { force: true });
+            } else {
+                await store.assertNoPendingWrites();
+                await store.writeBookConfig(nextConfig);
+            }
+            if (input.model_routing !== undefined) {
+                for (const pool of input.clearedPools ?? []) delete this.globalModelRouting[pool];
+            }
+            if (input.role_routing !== undefined) {
+                for (const role of input.clearedRoles ?? []) delete this.globalRoleRouting[role];
             }
 
             const effectiveBookCfg = this.resolveEffectiveBookConfig(nextConfig);

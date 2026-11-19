@@ -47,6 +47,8 @@ export const CompiledEntitySchema = z.object({
         .array(
             z.object({
                 storyDay: z.number().int().default(0),
+                visibility: EntryVisibilitySchema.optional(),
+                owner: z.string().optional(),
                 text: z.string().min(1)
             })
         )
@@ -55,6 +57,8 @@ export const CompiledEntitySchema = z.object({
         .array(
             z.object({
                 storyDay: z.number().int().optional(),
+                visibility: EntryVisibilitySchema.optional(),
+                owner: z.string().optional(),
                 text: z.string().min(1)
             })
         )
@@ -71,7 +75,7 @@ export const CompiledLoreEntrySchema = z.object({
 });
 export type CompiledLoreEntry = z.infer<typeof CompiledLoreEntrySchema>;
 
-const CHINESE_CHAR_RE = /[\u4e00-\u9fa5]/;
+const CHINESE_CHAR_RE = /[\u4e00-\u9fff]/;
 
 /** 判断字符串是否包含至少一个中文字符 */
 export function hasChineseCharacter(value: string): boolean {
@@ -237,11 +241,11 @@ export const EntityPatchSchema = z.object({
 const ExtractorOutputRawSchema = z.object({
     entity_patches: z.array(EntityPatchSchema).default([]),
     story_day_delta: z.number().int().min(0).default(0),
-    plot_summary: z.string().min(1).optional(),
-    chapter_summary: z.string().min(1).optional(),
+    plot_summary: z.string().optional(),
+    chapter_summary: z.string().optional(),
     prose_anchors: z.array(z.string().min(1)).max(8).default([]),
     appeared_entity_ids: z.array(z.string().min(1)).default([]),
-    world_summary_markdown: z.string().optional(),
+    world_summary_markdown: z.string().optional().transform((text) => text?.trim() ? text : undefined),
     next_chapter_options: z.array(z.string().min(1)).default([])
 });
 
@@ -257,9 +261,10 @@ export const ExtractorOutputSchema = ExtractorOutputRawSchema.superRefine((data,
         });
     }
 }).transform((data) => {
-    const summary = (data.plot_summary ?? data.chapter_summary)!.trim();
+    const summary = data.plot_summary?.trim() || data.chapter_summary?.trim() || '';
     return {
         ...data,
+        world_summary_markdown: data.world_summary_markdown?.trim() ? data.world_summary_markdown : undefined,
         plot_summary: summary,
         chapter_summary: data.chapter_summary?.trim() || summary
     };

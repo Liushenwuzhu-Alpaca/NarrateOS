@@ -92,6 +92,7 @@ export interface StageSessionEventItem {
 export interface StageStreamSseEvent {
     sessionId: string;
     stage: string;
+    seq?: number | undefined;
     kind: StageSessionEventItem['kind'];
     text?: string | undefined;
     toolName?: string | undefined;
@@ -352,13 +353,13 @@ export const VolumeSealOutputSchema = z.object({
 
 /** 换卷 Step 3: 风格修订合并输出 Schema */
 export const StyleMergeOutputSchema = z.object({
-    merged_markdown: z.string().min(1)
+    merged_markdown: z.string().trim().min(1)
 });
 
 /** 换卷 Step 4: 新卷包络、导演底牌与未来惯性输出 Schema */
 export const NextVolumeEnvelopeOutputSchema = z.object({
     current_arc_envelope: z.string().min(1),
-    arc_director_plan: z.string().optional(),
+    arc_director_plan: z.string().trim().min(1),
     future_horizon: z.string().min(1)
 });
 
@@ -390,6 +391,7 @@ export const OpsSignalSchema = z.object({
     chapter_a: z.number().int().positive().optional(),
     chapter_b: z.number().int().positive().optional(),
     suggested_mode: z.enum(['MAINLINE', 'PARALLEL', 'FLASHBACK']).optional(),
+    target_day: z.number().int().optional(),
     reason: z.string().min(1)
 });
 export type OpsSignal = z.infer<typeof OpsSignalSchema>;
@@ -486,6 +488,8 @@ export interface AutoRerunContext {
 
 /** healCrossChapterConflicts() 执行选项 */
 export interface HealConflictsOptions {
+    /** 从同步报告启动时，先核销该项再清除断点。 */
+    deferPlanCleanup?: boolean;
     maxAutoRollbackChapters?: number | undefined;
     onAutoRerun?:
         | ((ctx: AutoRerunContext) => Promise<{ success: boolean; stillConflicting?: boolean | undefined }>)

@@ -21,6 +21,7 @@ import * as bookToolsPlugin from '@narrateos/dsh-book-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as pipelinePlugin from './index.js';
 import { AdmissionClosedError, registerPresetBootSkill } from './index.js';
+import type { SyncManuscriptsResult } from './schemas.js';
 import {
     createGitBookWorkspace,
     createHeadlessMockServices,
@@ -797,10 +798,16 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         const runPromise = ctx.narratePipeline.roleRunner.runMultiTurn({
             roleId: 'librarian',
             stage: 'LIBRARIAN',
+            runId: 'draining-librarian',
             bookRoot,
             taskPrompt: '排空顺序测试'
         });
         await runnerEntered.promise;
+        await expect(ctx.narratePipeline.roleRunner.runMultiTurn({
+            roleId: 'librarian', stage: 'LIBRARIAN', bookRoot, taskPrompt: '重复提交', runId: 'draining-librarian'
+        })).rejects.toThrow(/已处于活跃状态/);
+        expect(ctx.narrateStore.hasActiveRuns()).toBe(true);
+        expect(ctx.narratePipeline.roleRunner.getLiveSessionDetail('narrate-librarian-draining-librarian', bookRoot)).toBeDefined();
 
         // 卸载过程中挂起的 skills.get 仍未完成，且 RoleRunner 仍处于活跃态
         const disposePromise = pipeFiber.dispose();
@@ -1234,6 +1241,20 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             ).statusCode
         ).toBe(400);
 
+        // 崩溃的章节事务仍拥有写集；保存配置不得替换或清除它。
+        const store = ctx.narrateStore.openStore(bookRoot);
+        await store.recordPendingWrites(['entities/char_001.md']);
+        const pending = join(bookRoot, '.ops/pending_writes.json');
+        const journal = await readFile(pending, 'utf8');
+        const config = await store.readBookConfig();
+        const rejected = await web.invoke('PUT', '/api/narrate/model-routing', {
+            model_routing: { strong_creative: 'not-saved' }
+        });
+        expect(rejected.statusCode).toBe(409);
+        expect(await readFile(pending, 'utf8')).toBe(journal);
+        expect(await store.readBookConfig()).toEqual(config);
+        await store.recoverWal();
+
         // 3. PUT /api/narrate/model-routing 支持空值清洗与落盘读写 -> 200
         const putRes = await web.invoke('PUT', '/api/narrate/model-routing', {
             model_routing: {
@@ -1380,12 +1401,13 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
                             samples: [
                                 {
                                     tag: '白描动作',
-                                    text: '煤油灯焰矮了一截，灯罩内壁蒙着薄灰，照得账页发黄。'
+                                    text: '油灯照亮页码。'
                                 },
                                 {
                                     tag: '克制对白',
-                                    text: '「账页是今早才沾的水，昨夜值班簿上可没这一笔。」'
-                                }
+                                    text: '把账册推到油灯下。'
+                                },
+                                { tag: '声响', text: '窗外拖轮鸣了两声短笛。' }
                             ]
                         })
                     );
@@ -1448,16 +1470,16 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             (await web.invoke('POST', '/api/narrate/voice-harvest', { chapterNumber: '1' })).statusCode
         ).toBe(400);
 
-        // 3. 首次调用 POST /api/narrate/voice-harvest 应成功采集 2 条样本
+        // 3. 首次调用按首章最低配额采集三条原句
         const harvestRes = await web.invoke('POST', '/api/narrate/voice-harvest', {
             chapterNumber: 1
         });
         expect(harvestRes.statusCode).toBe(200);
         expect(harvestRes.json).toMatchObject({
-            harvestedCount: 2,
+            harvestedCount: 3,
             skipped: false
         });
-        expect((harvestRes.json['samples'] as unknown[]).length).toBe(2);
+        expect((harvestRes.json['samples'] as unknown[]).length).toBe(3);
 
         // 4. 重复调用应返回 skipped: true
         const skippedRes = await web.invoke('POST', '/api/narrate/voice-harvest', {});
@@ -1714,6 +1736,30 @@ describe('Wave 3B 收口回归集成测试', () => {
 
         return { bookRoot, booksRoot, ctx, web, cmds, mockState };
     }
+
+    it('章节 PUT 必须同时匹配原作品、章号与工作树版本，拒绝时不备份也不启动 Sync', async () => {
+        const { bookRoot, ctx, web } = await setupWave3bWorkspace('edit-origin');
+        const other = await createGitBookWorkspace(tempDirs, 'edit-other');
+        const rel = 'manuscripts/ch_0001.md';
+        for (const root of [bookRoot, other]) await writeFile(join(root, rel), '两本书的相同原文。\n');
+        const detail = await web.invoke('GET', '/api/narrate/chapter?ch=1');
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json['bookRoot']).toBe(bookRoot);
+        const draft = { bookRoot, chapterNumber: 1, baseSha256: detail.json['sha256'], content: '编辑稿。' };
+        const sse = await web.openSse();
+        registerCleanup(() => sse.close());
+        const put = (payload: Record<string, unknown>) => web.invoke('PUT', '/api/narrate/chapter', payload);
+        expect((await put({ chapterNumber: 1, content: draft.content })).statusCode).toBe(400);
+        await ctx.narratePipeline.switchBook(other);
+        expect((await put(draft)).statusCode).toBe(409);
+        expect(await readFile(join(other, rel), 'utf8')).toBe('两本书的相同原文。\n');
+        await ctx.narratePipeline.switchBook(bookRoot);
+        await writeFile(join(bookRoot, rel), '其他编辑器的新原文。\n');
+        expect((await put(draft)).statusCode).toBe(409);
+        expect(await readFile(join(bookRoot, rel), 'utf8')).toBe('其他编辑器的新原文。\n');
+        for (const root of [bookRoot, other]) await expect(stat(join(root, '.ops/manual_edits'))).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(sse.events.some((evt) => evt.event === 'sync:started')).toBe(false);
+    });
 
     it('ISS-027 & ISS-068: service 默认从包目录解析 craft 插件（不依赖 process.cwd），并托管启动 ensureDefaultBookSelected 以便立即卸载排空', async () => {
         const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-cwd-craft-books-'));
@@ -2212,13 +2258,13 @@ describe('Wave 3B 收口回归集成测试', () => {
         await store.commitDraft(2, '第 2 章正文：他翻开完好的蓝皮账本核对页码。\n');
         await store.applyStatePatch(2, []);
 
-        await writeFile(
-            join(bookA, 'manuscripts/ch_0001.md'),
-            '第 1 章正文：他把蓝皮账本扔进炉膛烧成灰烬。\n',
-            'utf8'
-        );
-
-        const syncRes = await ctx.narratePipeline.syncManuscripts();
+        const loaded = await web.invoke('GET', '/api/narrate/chapter?ch=1');
+        const saved = await web.invoke('PUT', '/api/narrate/chapter', {
+            bookRoot: loaded.json['bookRoot'], chapterNumber: 1, baseSha256: loaded.json['sha256'],
+            content: '第 1 章正文：他把蓝皮账本扔进炉膛烧成灰烬。\n'
+        });
+        expect(saved.statusCode).toBe(200);
+        const syncRes = saved.json['sync'] as SyncManuscriptsResult;
         expect(syncRes.downstreamConflicts).toHaveLength(1);
         expect(syncRes.stateDiffAdvisories?.length).toBeGreaterThanOrEqual(1);
         expect(syncRes.stateDiffAdvisories![0]).toContain('char_001');
@@ -2301,26 +2347,25 @@ describe('Wave 3B 收口回归集成测试', () => {
         // 2. 通过 POST /api/narrate/heal 触发 Tier 3 回滚自动重跑（chapterA=1, chapterB=2 => 回滚至 ch1 并自动重跑 ch2）
         const sse = await web.openSse();
         registerCleanup(() => sse.close());
-        const healRouteRes = await web.invoke('POST', '/api/narrate/heal', {
-            maxAutoRollbackChapters: 3,
-            conflicts: [
-                {
-                    conflictId: 'c-tier3-1',
-                    chapterA: 1,
-                    quoteA: '第一夜，他把蓝皮账本锁进抽屉，屋檐外风声紧得像拉满的弓。',
-                    chapterB: 2,
-                    quoteB: '次日正午，他翻开完好的蓝皮账本核对页码，纸页干爽平整。',
-                    description: '第 2 章出现冲突道具',
-                    severityHint: 'CASCADING_HARD'
-                }
-            ]
-        });
+        const reportPath = join(bookRoot, '.ops/sync_conflicts.json');
+        const selected = { dirtyChapter: 1, dirtyQuote: '第一夜，他把蓝皮账本锁进抽屉，屋檐外风声紧得像拉满的弓。',
+            chapterNumber: 2, quote: '次日正午，他翻开完好的蓝皮账本核对页码，纸页干爽平整。', description: '第 2 章出现冲突道具' };
+        const other = { ...selected, description: '作者没有确认的另一条冲突' };
+        await writeFile(reportPath, JSON.stringify({ conflicts: [selected, other], dirtyChapters: [1], stateDiffAdvisories: ['保留'] }));
+        const view = await web.invoke('GET', '/api/narrate/views?kind=sync_conflicts');
+        const selection = { bookSlug: view.json['bookSlug'], reportRevision: view.json['reportRevision'], conflictIndex: 0 };
+        expect((await web.invoke('POST', '/api/narrate/heal', {})).statusCode).toBe(400);
+        expect((await web.invoke('POST', '/api/narrate/heal', { selection: { ...selection, bookSlug: 'other' } })).statusCode).toBe(409);
+        const healRouteRes = await web.invoke('POST', '/api/narrate/heal', { selection, maxAutoRollbackChapters: 1 });
         expect(healRouteRes.statusCode).toBe(200);
         expect(healRouteRes.json['quarantined']).toBe(false);
         const healDone = await sse.waitForEvent((e) => e.event === 'heal:completed');
         expect(healDone.data['quarantined']).toBe(false);
         expect(writerCount).toBe(3); // Ch.01 + Ch.02 + 自愈重跑 Ch.02
-        expect(capturedPlanners[capturedPlanners.length - 1]).toContain('c-tier3-1');
+        expect(capturedPlanners.at(-1)).toContain(`sync-${selection.reportRevision}-0`);
+        expect(JSON.parse(await readFile(reportPath, 'utf8'))).toMatchObject({ conflicts: [other], stateDiffAdvisories: ['保留'] });
+        expect((await web.invoke('POST', '/api/narrate/heal', { selection })).statusCode).toBe(409);
+        expect(writerCount).toBe(3);
 
         // heal_plan.json 应已清理
         await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
@@ -2463,6 +2508,8 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(raceResults.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
         expect(raceResults.filter((r) => r.status === 'rejected')).toHaveLength(1);
         expect(ctx.narratePipeline.runtimeStatus.yolo.running).toBe(true);
+        // 直接使用开书回调所走的 Store 入口，尚未进入 Writer 时也不可切书。
+        await expect(ctx.narrateStore.switchBook(join(bookRoot, '..', 'other'))).rejects.toThrow(BookSwitchConflictError);
 
         // 等待第 1 章进入 WRITER 后发出默认软停机 (force=false)
         await writerEntered.promise;
@@ -2576,6 +2623,7 @@ describe('Wave 3B 收口回归集成测试', () => {
 
         // 1. 写入已提交章节 manuscripts/ch_0001.md 验证 GET /api/narrate/chapters 批量 git log 解析
         await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '第一章正文内容。\n', 'utf8');
+        await ctx.narrateStore.openStore(bookRoot).initializeWalFromDisk();
         await execFileAsync('git', ['-C', bookRoot, 'add', '.']);
         await execFileAsync('git', ['-C', bookRoot, 'commit', '-m', 'add ch1 for batch log']);
 
@@ -2782,12 +2830,22 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(planMidRaw).toMatchObject({ nextChapter: 3, toChapter: 3 });
         expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(2);
 
-        // 5. 空闲后无参调用 POST /api/narrate/heal，验证从 heal_plan.json 自动续跑第 3 章并清理断点
-        const resumedHealRes = await web.invoke('POST', '/api/narrate/heal', {});
+        // 模拟 ch2 已提交但游标还没写回时崩溃，只允许再生成 ch3。
+        await writeFile(join(bookRoot, '.ops/heal_plan.json'), JSON.stringify({ ...planMidRaw, nextChapter: 2 }));
+        const beforeResume = writerSeq;
+        const resumedHealRes = await web.invoke('POST', '/api/narrate/heal', { resume: true });
         expect(resumedHealRes.statusCode).toBe(200);
         expect(resumedHealRes.json['quarantined']).toBe(false);
+        expect(writerSeq - beforeResume).toBe(1);
         expect((await ctx.narrateStore.openStore().readTxState()).last_committed_ch).toBe(3);
         await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
+        // 最后一章已提交但核销中断：游标落在末章或末章后一位都只能收尾。
+        for (const nextChapter of [3, 4]) {
+            await writeFile(join(bookRoot, '.ops/heal_plan.json'), JSON.stringify({ ...planMidRaw, nextChapter }));
+            expect((await web.invoke('POST', '/api/narrate/heal', { resume: true })).statusCode).toBe(200);
+            expect(writerSeq - beforeResume).toBe(1);
+            await expect(stat(join(bookRoot, '.ops/heal_plan.json'))).rejects.toThrow();
+        }
     });
 
     it('Wave 4D: 动态继承 agentDefaultModel、剔除假模型污染、SSE default_model_changed 与无书态 200', async () => {
@@ -3047,5 +3105,21 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(statusRes.json['defaultModel']).toBeNull();
         expect(statusRes.json['poolOverrides']).toEqual({});
         expect(statusRes.json['availableModels']).toEqual([]);
+
+        const slow = createDeferred<Array<{ id: string }>>();
+        let first = true;
+        Object.assign(ctx.llm, {
+            listProviders: () => [{ id: 'local' }],
+            listModels: () => {
+                if (!first) return Promise.resolve([{ id: 'model:new' }]);
+                first = false;
+                return slow.promise;
+            }
+        });
+        const oldRefresh = ctx.narratePipeline.refreshDiscoveredDefaultModel();
+        expect(await ctx.narratePipeline.listAvailableModels()).toContainEqual({ provider: 'local', model: 'model:new' });
+        slow.resolve([{ id: 'model:old' }]);
+        await oldRefresh;
+        expect(ctx.narratePipeline.poolRouting.strong_creative).toEqual({ provider: 'local', model: 'model:new' });
     });
 });

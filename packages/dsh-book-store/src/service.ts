@@ -210,7 +210,12 @@ export class NarrateStoreService {
                 store
             };
             for (const listener of [...this.bookSwitchedListeners]) {
-                await listener(event);
+                try {
+                    await listener(event);
+                } catch (err) {
+                    // 切换已提交；观察者失败不改变结果，也不能跳过其余观察者。
+                    console.warn('切书成功，但切书监听器执行失败', err);
+                }
             }
             return store;
         });

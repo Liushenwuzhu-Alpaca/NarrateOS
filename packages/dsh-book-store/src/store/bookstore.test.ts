@@ -182,6 +182,27 @@ describe('BookStore', () => {
         expect(await readFile(lockPath, 'utf8')).toBe(oldLiveLock);
     });
 
+    it('工作树 WAL 截断时以已验证的 HEAD 和原写集恢复，基线也损坏时不动现场', async () => {
+        const { bookRoot, system, store } = await createTempBookRepo();
+        await store.commitDraft(2, '已提交正文');
+        const wal = join(bookRoot, '.ops/tx_state.json');
+        const world = join(bookRoot, 'world/world_state.md');
+        const original = await readFile(world, 'utf8');
+        await store.recordPendingWrites(['world/world_state.md']);
+        await writeFile(world, '中断的派生状态');
+        await writeFile(wal, '{');
+        const pending = join(bookRoot, '.ops/pending_writes.json');
+        const journal = await readFile(pending, 'utf8');
+        vi.spyOn(system, 'readFileAtRef').mockResolvedValueOnce('{');
+        await expect(store.recoverWal()).rejects.toThrow();
+        expect(await readFile(pending, 'utf8')).toBe(journal);
+        expect(await readFile(wal, 'utf8')).toBe('{');
+        expect(await store.recoverWal()).toMatchObject({ action: 'NEEDS_STATE_EXTRACTION', activeChapter: 2 });
+        expect(await readFile(world, 'utf8')).toBe(original);
+        expect(await readFile(wal, 'utf8')).toBe(await system.readFileAtRef(bookRoot, 'HEAD', '.ops/tx_state.json'));
+        await expect(access(pending)).rejects.toThrow();
+    });
+
     it('正文提交失败后从 Git 已提交相位恢复，不继续抽取未提交正文', async () => {
         const { bookRoot, system, store } = await createTempBookRepo();
         await store.beginDraft(2);

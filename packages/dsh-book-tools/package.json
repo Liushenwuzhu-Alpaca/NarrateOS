@@ -21,8 +21,11 @@
     ],
     "scripts": {
         "build": "tsc -p tsconfig.json",
-        "typecheck": "tsc -p tsconfig.json --noEmit",
-        "test": "vitest run --root ../.. packages/dsh-book-tools"
+        "typecheck": "pnpm --filter @narrateos/dsh-book-tools^... run build && pnpm run typecheck:built",
+        "test": "pnpm --filter @narrateos/dsh-book-tools... run build && pnpm run test:built",
+        "prepack": "pnpm --filter @narrateos/dsh-book-tools... run build",
+        "test:built": "vitest run --root ../.. packages/dsh-book-tools",
+        "typecheck:built": "tsc -p tsconfig.json --noEmit"
     },
     "dependencies": {
         "@deepseek-ai/schemastery": "~3.19.0",

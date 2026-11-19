@@ -65,6 +65,19 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         expect(ctx.get('narrateStore')).toBeUndefined();
     });
 
+    it('监听器失败不能让已完成的切书报错或跳过其他监听器', async () => {
+        const book = await createBookWorkspace('observer');
+        const service = new NarrateStoreService();
+        registerCleanup(() => service.dispose());
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        service.onBookSwitched(async () => { throw new Error('监听器不可用'); });
+        const notified = vi.fn();
+        service.onBookSwitched(notified);
+        expect((await service.switchBook(book)).bookRoot).toBe(book);
+        expect(service.bookRoot).toBe(book);
+        expect(notified).toHaveBeenCalledOnce();
+    });
+
     it('在途 runId 未结束或 .ops/tx.lock 仍被持有时 switchBook 返回 409 BookSwitchConflictError', async () => {
         const bookA = await createBookWorkspace('book-a');
         const bookB = await createBookWorkspace('book-b');

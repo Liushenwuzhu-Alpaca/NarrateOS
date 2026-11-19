@@ -202,12 +202,6 @@ export class NarrateToolsService {
         }
         const runId = options.runId ?? randomUUID();
 
-        const createdStaging =
-            !isPureInMemoryPatch && bookRoot !== undefined && !this.narrateStore.staging.has(runId);
-        if (createdStaging && bookRoot !== undefined) {
-            this.narrateStore.staging.begin(runId, bookRoot);
-        }
-
         const fence =
             !isPureInMemoryPatch && bookRoot !== undefined
                 ? new PathFence(bookRoot, {
@@ -263,7 +257,8 @@ export class NarrateToolsService {
                     createBookEditTool({
                         store: this.narrateStore,
                         runId,
-                        fence: fence!
+                        fence: fence!,
+                        stagingOverlay: options.stagingOverlay
                     })
                 );
             } else if (toolName === 'patch_paragraphs') {
@@ -366,6 +361,12 @@ export class NarrateToolsService {
         const toolMap = new Map<string, ToolDefinition>();
         for (const tool of toolList) {
             toolMap.set(tool.name, tool);
+        }
+
+        const createdStaging = !isPureInMemoryPatch && bookRoot !== undefined && !this.narrateStore.staging.has(runId);
+        if (!isPureInMemoryPatch && bookRoot !== undefined) {
+            if (createdStaging) this.narrateStore.staging.begin(runId, bookRoot);
+            else this.narrateStore.staging.assertBookRoot(runId, bookRoot);
         }
 
         return {

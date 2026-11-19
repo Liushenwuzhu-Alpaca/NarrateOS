@@ -55,7 +55,7 @@ export class CraftPluginConflictError extends Error {
 function compilePatternEntry(entry: ExtraGateRulePattern, filePath: string, ruleId: string): RegExp {
     try {
         if (typeof entry === 'string') {
-            const slashMatch = /^\/(.+)\/([gimsuvy]*)$/.exec(entry);
+            const slashMatch = /^\/(.*)\/([^/]*)$/.exec(entry);
             if (slashMatch) {
                 const source = slashMatch[1] ?? '';
                 const flags = slashMatch[2] ?? '';
@@ -80,9 +80,8 @@ function compileGateRules(
 
     const compiled: Partial<Record<GateRuleId, GateRuleConfig>> = {};
     for (const [ruleId, ruleDef] of Object.entries(extraRules)) {
-        const config: GateRuleConfig = {
-            enabled: ruleDef.enabled
-        };
+        const config: GateRuleConfig = {};
+        if (ruleDef.enabled !== undefined) config.enabled = ruleDef.enabled;
 
         if (ruleDef.max_count !== undefined) {
             config.maxCount = ruleDef.max_count;
@@ -241,7 +240,7 @@ export class CraftPluginLoader {
             }
             for (const [ruleId, ruleConfig] of Object.entries(item.compiledGateRules)) {
                 if (ruleConfig !== undefined) {
-                    merged[ruleId as GateRuleId] = ruleConfig;
+                    merged[ruleId as GateRuleId] = { ...merged[ruleId as GateRuleId], ...ruleConfig };
                 }
             }
         }

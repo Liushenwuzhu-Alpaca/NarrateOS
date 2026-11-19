@@ -22,7 +22,9 @@
     "scripts": {
         "build": "tsc -p tsconfig.json",
         "typecheck": "tsc -p tsconfig.json --noEmit",
-        "test": "vitest run --root ../.. packages/dsh-book-store"
+        "test": "vitest run --root ../.. packages/dsh-book-store",
+        "prepack": "pnpm --filter @narrateos/dsh-book-store... run build",
+        "typecheck:built": "tsc -p tsconfig.json --noEmit"
     },
     "dependencies": {
         "yaml": "^2.7.0",

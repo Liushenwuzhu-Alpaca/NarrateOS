@@ -1,4 +1,6 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import { link, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
     generateStructuredJson,
@@ -34,6 +36,10 @@ const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const LIST_ITEM_START_RE = /^\s*(?:[-*+]|\d+\.)\s/;
 const TOP_LEVEL_LIST_ITEM_RE = /^(?:[-*+]|\d+\.)\s/;
 const LIST_CONTINUATION_RE = /^(?:\s+\S|>)/;
+const SEAL_RECEIPT = 'index/volume_seal.json';
+const SealReceipt = z.object({ id: z.string().uuid(), sealedVolume: z.number().int().positive(), nextVolume: z.number().int().positive(), archivedEntities: z.array(z.string()), completedBook: z.boolean() });
+const RESOLVED_SECTION = /^##\s+.*(?:Resolved|Archive|已回收|已解决|已兑现|归档)/i;
+const CLOSED_THREAD = /(?:status:\s*(?:OPEN_ENDING|RESOLVED|ARCHIVED)|\[(?:RESOLVED|ARCHIVED)\]|^\s*-\s+\[x\])/i;
 
 export interface VolumePipelineDeps {
     store: BookStore;
@@ -47,7 +53,7 @@ function markOpenThreadsAsOpenEnding(markdown: string): string {
     const lines = markdown.split(/\r?\n/);
     let inResolvedSection = false;
     const out = lines.map((line) => {
-        if (/^##\s+.*(Resolved Archive|已回收伏笔)/i.test(line)) {
+        if (RESOLVED_SECTION.test(line.trim())) {
             inResolvedSection = true;
             return line;
         }
@@ -58,6 +64,7 @@ function markOpenThreadsAsOpenEnding(markdown: string): string {
         if (inResolvedSection) {
             return line;
         }
+        if (CLOSED_THREAD.test(line)) return line;
         if (/status:\s*ACTIVE/i.test(line)) {
             return line.replace(/status:\s*ACTIVE/gi, 'status: OPEN_ENDING');
         }
@@ -76,7 +83,7 @@ function countActiveThreads(markdown: string): number {
     let count = 0;
     for (const rawLine of markdown.split(/\r?\n/)) {
         const line = rawLine.trim();
-        if (/^##\s+.*(Resolved Archive|已回收|已解决|已兑现)/i.test(line)) {
+        if (RESOLVED_SECTION.test(line)) {
             inResolved = true;
             continue;
         }
@@ -84,7 +91,7 @@ function countActiveThreads(markdown: string): number {
             inResolved = false;
             continue;
         }
-        if (!inResolved && line.startsWith('- ') && !/status:\s*RESOLVED/i.test(line)) {
+        if (!inResolved && line.startsWith('- ') && !CLOSED_THREAD.test(line)) {
             count += 1;
         }
     }
@@ -220,7 +227,7 @@ function appendEpochFoldToL0Sagas(params: {
         return `${baseL0}\n`;
     }
 
-    const sectionRe = /^##\s+第\s*(\d+)\s*卷[^\n]*\n([\s\S]*?)(?=^##\s+|$)/gm;
+    const sectionRe = /^##\s+第\s*(\d+)\s*卷[^\n]*\n([\s\S]*?)(?=^##\s+|(?![\s\S]))/gm;
     const volumeBullets: string[] = [];
     let match: RegExpExecArray | null = sectionRe.exec(updatedL1);
     while (match !== null) {
@@ -269,6 +276,15 @@ export class VolumePipeline {
         return await withTraceRun(this.store.bookRoot, 'advance-volume', {}, () =>
             this.store.withTxLock(async () => {
                 await this.store.assertDreamingPhaseSafe();
+                const previous = await this.system.readFileAtRef(this.store.bookRoot, 'HEAD', SEAL_RECEIPT);
+                if (previous !== null) {
+                    const receipt = SealReceipt.parse(JSON.parse(previous));
+                    const sha = await this.system.currentRevision(this.store.bookRoot, `HEAD^{/Seal-ID: ${receipt.id}}`);
+                    if (await this.publishSeal(receipt, sha)) {
+                        const { id: _, ...result } = receipt;
+                        return { ...result, tagName: `arc-seal-vol-${String(result.sealedVolume).padStart(2, '0')}`, commitSha: sha };
+                    }
+                }
                 const completeBook = Boolean(options.completeBook);
                 const config = await this.store.readBookConfig();
                 const retryOptions: StructuredRetryOptions = this.retryOptions ?? {
@@ -439,20 +455,15 @@ export class VolumePipeline {
                         envelopeRes.data.current_arc_envelope,
                         nextVolume
                     );
-                    if (
-                        envelopeRes.data.arc_director_plan &&
-                        envelopeRes.data.arc_director_plan.trim().length > 0
-                    ) {
-                        nextDirectorPlanText = `${envelopeRes.data.arc_director_plan.trimEnd()}\n`;
-                    }
+                    nextDirectorPlanText = `${envelopeRes.data.arc_director_plan}\n`;
                     nextFutureHorizonText = `${envelopeRes.data.future_horizon.trimEnd()}\n`;
                 }
 
                 // =========================================================================
                 // 阶段 B：WAL 写前登记 -> 磁盘写入 -> 显式受控路径 Git 提交 -> 后置打 Tag
                 // =========================================================================
-                const pendingPaths: string[] = [l1RelPath];
-                const commitPaths: string[] = [l1RelPath];
+                const pendingPaths: string[] = [l1RelPath, SEAL_RECEIPT];
+                const commitPaths: string[] = [l1RelPath, SEAL_RECEIPT];
 
                 if (updatedL0Text !== null) {
                     pendingPaths.push(l0RelPath);
@@ -524,10 +535,11 @@ export class VolumePipeline {
                 if (entitiesToArchive.length > 0) {
                     await mkdir(coldArchiveDir, { recursive: true });
                     for (const item of entitiesToArchive) {
-                        await rename(
+                        await link(
                             join(entitiesDir, item.fileName),
                             join(coldArchiveDir, item.fileName)
                         );
+                        await rm(join(entitiesDir, item.fileName));
                         archivedEntities.push(item.entityId);
                     }
                 }
@@ -573,29 +585,19 @@ export class VolumePipeline {
                     await this.store.writeWorldState(worldState);
                 }
 
+                const receipt = { id: randomUUID(), sealedVolume, nextVolume, archivedEntities, completedBook: completeBook };
+                await writeFile(join(this.store.bookRoot, SEAL_RECEIPT), JSON.stringify(receipt), 'utf8');
                 const commitMsg = completeBook
                     ? 'chore(volume): complete book'
                     : `chore(volume): advance to vol_${nextVolPad}`;
                 const { sha: commitSha } = await this.system.commitPaths(
                     this.store.bookRoot,
                     [...new Set(commitPaths)],
-                    commitMsg
+                    `${commitMsg}\n\nSeal-ID: ${receipt.id}`
                 );
                 await rm(join(this.store.bookRoot, '.ops/pending_writes.json'), { force: true });
 
-                // 先提交后打 Tag：确保封卷 Tag 指向真实的换卷提交而非换卷前旧提交
-                await this.system.createTag(
-                    this.store.bookRoot,
-                    tagName,
-                    `Seal volume ${sealedVolume}`
-                );
-                if (completeBook) {
-                    await this.system.createTag(
-                        this.store.bookRoot,
-                        'novel-completed',
-                        'Novel completed'
-                    );
-                }
+                await this.publishSeal(receipt, commitSha);
 
                 return {
                     sealedVolume,
@@ -607,6 +609,25 @@ export class VolumePipeline {
                 };
             })
         );
+    }
+
+    /** 标签不能覆写；若两个完结标签仅写出一个，重试只补缺失的一个。 */
+    private async publishSeal(receipt: z.infer<typeof SealReceipt>, sha: string): Promise<boolean> {
+        const root = this.store.bookRoot;
+        const tags = [[`arc-seal-vol-${String(receipt.sealedVolume).padStart(2, '0')}`, `Seal volume ${receipt.sealedVolume}`]] as Array<[string, string]>;
+        if (receipt.completedBook) tags.push(['novel-completed', 'Novel completed']);
+        let repaired = false;
+        for (const [name, message] of tags) {
+            let target: string;
+            try { target = await this.system.currentRevision(root, `refs/tags/${name}`); }
+            catch {
+                await this.system.createTag(root, name, message, sha);
+                repaired = true;
+                continue;
+            }
+            if (target !== sha) throw new ValidationError(`封卷标签 ${name} 已指向不同提交`);
+        }
+        return repaired;
     }
 
     private async planColdArchiveEntities(
@@ -636,6 +657,9 @@ export class VolumePipeline {
             const charMatch = CHAR_ENTITY_FILE_RE.exec(fileName);
             if (charMatch?.[1] && !keepSet.has(charMatch[1])) {
                 const entityId = charMatch[1];
+                if ((await readOptionalText(join(entitiesDir, 'cold_archive', fileName))) !== null) {
+                    throw new ValidationError(`冷宫已存在同名档案: ${fileName}`);
+                }
                 const raw = await readFile(join(entitiesDir, fileName), 'utf8');
                 parseEntityMarkdown(raw);
                 const trackedInHead =

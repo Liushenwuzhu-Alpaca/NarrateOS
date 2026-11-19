@@ -4,14 +4,16 @@
     "version": "0.1.0",
     "type": "module",
     "scripts": {
-        "test": "vitest run && pnpm --filter @narrateos/dsh-preset-narrateos test",
-        "test:watch": "vitest",
+        "test": "pnpm run build && pnpm run test:built",
+        "test:watch": "pnpm run build && vitest",
         "build": "pnpm -r --if-present build",
-        "typecheck": "pnpm -r --if-present typecheck",
+        "typecheck": "pnpm run build && pnpm run typecheck:built",
         "lint": "node scripts/lint-repo.mjs",
-        "check": "pnpm run build && pnpm run typecheck && pnpm run lint && pnpm test",
+        "check": "pnpm run build && pnpm run typecheck:built && pnpm run lint && pnpm run test:built",
         "dev:sandbox": "bash scripts/dev-sandbox.sh",
-        "prepare": "git config core.hooksPath .githooks || true"
+        "prepare": "git config core.hooksPath .githooks || true",
+        "test:built": "vitest run && pnpm --filter @narrateos/dsh-preset-narrateos test:built && node --test scripts/dev-sandbox.test.mjs scripts/release-gates.test.mjs",
+        "typecheck:built": "pnpm -r --if-present typecheck:built"
     },
     "devDependencies": {
         "@deepseek-ai/cordis": "^4.1.0",
@@ -19,5 +21,6 @@
         "@types/node": "^24.0.0",
         "typescript": "^5.8.0",
         "vitest": "^3.1.0"
-    }
+    },
+    "packageManager": "pnpm@10.33.0"
 }

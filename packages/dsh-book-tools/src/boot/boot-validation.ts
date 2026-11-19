@@ -166,10 +166,13 @@ function validateBootEntities(
                 `实体 ${entity.entityId} 必须提供包含中文字符的标准名称 canonicalName`
             );
         } else {
-            canonicalNames.push(entity.canonicalName.trim());
+            canonicalNames.push(entity.canonicalName.trim(), ...(entity.uniqueAliases ?? []).map((name) => name.trim()));
         }
 
         for (const lockItem of entity.innateLocks) {
+            if (lockItem.visibility === 'READER_KNOWN') {
+                issues.push(`第 1 区 innateLocks (${entity.entityId}) 仅允许 PUBLIC 或 SELF_ONLY`);
+            }
             if (hasOmniscientSecretMarker(lockItem)) {
                 issues.push(
                     `第 1 区 innateLocks (${entity.entityId}) 严禁包含 OMNISCIENT_SECRET，请改放第 2 区 acquiredState 并绑定 slotKey`
@@ -177,6 +180,7 @@ function validateBootEntities(
             }
         }
 
+        const slots = new Set<string>();
         for (const item of entity.acquiredState) {
             if (item.storyDay > 0) {
                 issues.push(
@@ -195,6 +199,10 @@ function validateBootEntities(
             }
             if (item.slotKey !== undefined) {
                 pushSafeEntityTagIssue('slotKey', item.slotKey, issues);
+                if (!item.slotKey.trim() || slots.has(item.slotKey.trim())) {
+                    issues.push(`实体 ${entity.entityId} 的 acquiredState.slotKey 为空或重复: ${item.slotKey}`);
+                }
+                slots.add(item.slotKey.trim());
             }
             if (item.owner !== undefined) {
                 pushSafeEntityTagIssue('owner', item.owner, issues);
@@ -230,6 +238,12 @@ function validateBootEntityAndCollectionRefs(
     issues: string[]
 ): void {
     for (const entity of payload.entities) {
+        for (const item of [...entity.irreversibleTrajectory, ...entity.recentBuffer]) {
+            if (item.owner !== undefined) {
+                pushSafeEntityTagIssue('owner', item.owner, issues);
+                if (!entityIds.has(item.owner)) issues.push(`实体 ${entity.entityId} 的 owner (${item.owner}) 在 entities 中不存在`);
+            }
+        }
         for (const item of entity.acquiredState) {
             if (item.owner !== undefined && !entityIds.has(item.owner)) {
                 issues.push(
@@ -355,6 +369,7 @@ function validateBootVoiceSamples(
         const res = proseGate.evaluate(sample.sample, {
             narrationSubjectivity: options.narrationSubjectivity
         });
+        const properName = canonicalNames.find((name) => name && (sample.sample.includes(name) || sample.tag.includes(name)));
 
         if (sample.source === 'boot_seed') {
             const nonSpaceLen = sample.sample.replace(/\s+/g, '').length;
@@ -371,13 +386,9 @@ function validateBootVoiceSamples(
                 );
                 seedValid = false;
             }
-            for (const name of canonicalNames) {
-                if (name.length > 0 && sample.sample.includes(name)) {
-                    issues.push(
-                        `boot_seed 声纹样本 (${sample.tag}) 禁止包含初始角色专名「${name}」`
-                    );
-                    seedValid = false;
-                }
+            if (properName) {
+                issues.push(`boot_seed 声纹样本 (${sample.tag}) 禁止包含初始角色专名「${properName}」`);
+                seedValid = false;
             }
             if (seedValid) {
                 cleanVoiceSamples.push(sample);
@@ -387,11 +398,12 @@ function validateBootVoiceSamples(
             continue;
         }
 
-        if (res.passed) {
+        if (res.passed && !properName) {
             cleanVoiceSamples.push(sample);
         } else {
             filteredVoiceSampleCount += 1;
             if (options.voiceSampleMode === 'strict') {
+                if (properName) issues.push(`声纹样本禁止包含初始角色专名「${properName}」`);
                 issues.push(
                     `StaticProseGate 未通过 (voice_sample:${sample.tag}): ${res.violations.map((v) => v.message).join('; ')}`
                 );

@@ -1,7 +1,6 @@
 import { access, lstat, readFile, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeLlmPool, type ActiveLlmPool } from '@narrateos/dsh-book-store';
 import type { ControlledBookToolName, YieldToolName } from '@narrateos/dsh-book-tools';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
@@ -9,9 +8,7 @@ import { z } from 'zod';
 const ROLE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 /** 支持的模型池标识（兼容旧书配置中可能残留的 'audit' 并无损回退至 strong_creative） */
-export const RolePoolSchema = z
-    .enum(['strong_creative', 'fast_retrieval', 'audit'])
-    .transform((pool): ActiveLlmPool => normalizeLlmPool(pool));
+export const RolePoolSchema = z.enum(['strong_creative', 'fast_retrieval', 'audit']);
 export type RolePool = z.infer<typeof RolePoolSchema>;
 
 /** 支持的受控读写工具名 */
@@ -49,6 +46,8 @@ export const RoleConfigSchema = z.object({
     allowedOpsWrite: z.array(z.string().min(1)).default([]),
     blockedReadPaths: z.array(z.string().min(1)).default([]),
     yieldTool: YieldToolNameSchema.nullable().default(null)
+}).refine((cfg) => cfg.cleanroom || cfg.yieldTool !== null, {
+    path: ['yieldTool'], message: '多轮工种必须配置终态门禁工具 yieldTool'
 });
 
 export type RoleConfig = z.infer<typeof RoleConfigSchema>;
@@ -151,9 +150,9 @@ export function resolvePresetRoot(explicitPresetRoot?: string): string {
         const resolvedUrl = import.meta.resolve('@narrateos/dsh-preset-narrateos/package.json');
         return dirname(fileURLToPath(resolvedUrl));
     } catch {
-        // 兜底：当作为源码直接运行且尚未构建链接时回退至仓库相对位置
+        // 仅安装后端时使用构建时随本包分发的资产。
         const currentDir = dirname(fileURLToPath(import.meta.url));
-        return resolve(currentDir, '../../../../presets/dsh-preset-narrateos');
+        return resolve(currentDir, '../../dist/assets');
     }
 }
 

@@ -6,6 +6,7 @@ export interface BookEditToolOptions {
     store: NarrateStoreService;
     runId: string;
     fence: PathFence;
+    stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
 }
 
 /** 创建隔离暂存编辑工具 book_edit（仅写入 runId 独占 StagingSession，严禁修改 manuscripts/ 与磁盘文件） */
@@ -78,7 +79,8 @@ export function createBookEditTool(options: BookEditToolOptions): ToolDefinition
                     runId,
                     normalized,
                     args.target_text,
-                    args.replacement_text
+                    args.replacement_text,
+                    options.stagingOverlay
                 );
             }
 

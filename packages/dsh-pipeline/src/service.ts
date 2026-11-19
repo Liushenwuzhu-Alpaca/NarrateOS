@@ -153,20 +153,20 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
 
     const resolvedPluginSearchDirs = resolvePluginSearchDirs(config);
 
-    const controller = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, {
-        bookRoot: config.bookRoot,
-        booksRoot: config.booksRoot,
-        presetRoot: config.presetRoot,
-        pluginSearchDirs: resolvedPluginSearchDirs,
-        poolRoutingOverrides: resolvedOverrides,
-        heartbeatIntervalMs: config.heartbeatIntervalMs,
-        shutdownTimeoutMs: config.shutdownTimeoutMs
-    });
-
     ctx.effect(function* () {
-        yield ctx.provide('narratePipeline', controller);
-        void controller.trackBackgroundTask(controller.ensureDefaultBookSelected());
-        void controller.trackBackgroundTask(controller.refreshDiscoveredDefaultModel());
+        const controller = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, {
+            bookRoot: config.bookRoot,
+            booksRoot: config.booksRoot,
+            presetRoot: config.presetRoot,
+            pluginSearchDirs: resolvedPluginSearchDirs,
+            poolRoutingOverrides: resolvedOverrides,
+            heartbeatIntervalMs: config.heartbeatIntervalMs,
+            shutdownTimeoutMs: config.shutdownTimeoutMs
+        });
+        // 构造器已持有切书监听和心跳，即使后续装配失败也必须收回。
+        let draining: Promise<void> | undefined;
+        const shutdown = () => draining ??= controller.shutdown();
+        yield shutdown;
 
         yield ctx.on('session/event', (session, event) => {
             if (controller.isAdmissionClosed) return;
@@ -257,7 +257,10 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
         });
         yield skillFiber.dispose;
 
+        yield ctx.provide('narratePipeline', controller);
         // 最后一个 yield 在 Cordis 反转卸载时最先执行：关闭准入、安全点收束并等待排空后再释放各子作用域
-        yield () => controller.shutdown();
+        yield shutdown;
+        void controller.trackBackgroundTask(controller.ensureDefaultBookSelected());
+        void controller.trackBackgroundTask(controller.refreshDiscoveredDefaultModel());
     }, 'narrateos-pipeline');
 }

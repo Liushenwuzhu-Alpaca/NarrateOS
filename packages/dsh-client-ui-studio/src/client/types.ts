@@ -274,6 +274,7 @@ export type ChapterOutlineStatus = 'available' | 'missing' | 'error';
 
 /** 单章详情与 Diff（对应 GET /api/narrate/chapter?ch=...） */
 export interface ChapterDetail {
+    bookRoot: string;
     chapterNumber: number;
     content: string;
     dirty: boolean;
@@ -511,6 +512,8 @@ export interface HaltViewPayload {
 /** 手改下游同步冲突视图响应载荷（对应 GET /api/narrate/views?kind=sync_conflicts） */
 export interface SyncConflictsViewPayload {
     kind: 'sync_conflicts';
+    bookSlug: string;
+    reportRevision: string | null;
     syncConflicts: Record<string, unknown> | null;
     conflicts: Array<Record<string, unknown>>;
     dirtyChapters: Array<Record<string, unknown>>;
@@ -582,6 +585,8 @@ export interface StepChapterResponse {
 
 /** 保存章节并触发同步请求 */
 export interface PutChapterRequest {
+    bookRoot: string;
+    baseSha256: string;
     chapterNumber: number;
     content: string;
 }
@@ -597,6 +602,7 @@ export interface SyncResponse {
 /** 保存章节响应 */
 export interface PutChapterResponse {
     chapterNumber: number;
+    sha256: string;
     sync: SyncResponse;
 }
 
@@ -743,6 +749,7 @@ export interface SuspectedConflictInput {
 
 /** 跨章自愈请求（对应 POST /api/narrate/heal） */
 export interface HealConflictsRequest {
+    selection?: { bookSlug: string; reportRevision: string; conflictIndex: number };
     conflicts?: SuspectedConflictInput[] | undefined;
     maxAutoRollbackChapters?: number | undefined;
 }
@@ -769,6 +776,7 @@ export interface HealConflictsResponse {
 export interface StageStreamSsePayload {
     sessionId: string;
     stage: string;
+    seq?: number | undefined;
     kind: 'thinking' | 'text' | 'tool-call' | 'tool-result' | 'status' | 'error';
     text?: string | undefined;
     toolName?: string | undefined;

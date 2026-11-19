@@ -35,6 +35,14 @@ presets/dsh-preset-narrateos/
 2. **工具隔离与净室**：`preset-narrateos.config.plugins` 仅保留会话级插件（零根作用域服务泄露），并在预设作用域内显式挂载严格只读的 `@deepseek-ai/dsh-tool-fs`（`read: true, readImage: false, write: false, edit: false, applyPatch: false`）与 `@deepseek-ai/dsh-tool-fs-search`（`sampleOverCapGlobResults: false`），同时在顶层补丁显式禁用 `dsh-base` 宿主层的 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、`tool-jobs`、`tool-todo`、`tool-goal`、`plan-mode` 全部 8 项编码/终端向宿主行，使 `dsh-base` 与 `dsh-web-app` 双场景都统一获得严格只读的 `read` / `glob` / `grep` 能力且不泄露全局写工具；写手（`writer`）保持 `cleanroom: true`、`tools: []` 单轮净室，且提示词仅陈述正向目标状态。
 3. **单书覆盖**：各作品可在 `books/<slug>/world/roles/` 放置同名 YAML 或 `prompts/*.md` 覆盖本预设包的默认参数与提示词，无需重新编译。
 
+## 沙盒与分发
+
+先在仓库根目录运行 `pnpm install --frozen-lockfile` 和 `pnpm build`，再用 `pnpm dev:sandbox --init-only` 校验入口。去掉 `--init-only` 启动宿主。`NARRATEOS_SANDBOX_DIR` 可用绝对路径或相对于调用目录的路径；已导出的变量优先于仓库 `.env`。已有 profile 清单和补丁不会重写，请在 GUI 修改，或用新的目录重新初始化。
+
+沙盒不复制宿主凭据或保存启动日志。可使用环境变量，或在沙盒的模型设置中单独保存凭据；DSH 自身的沙盒托管凭据优先于环境变量。自定义模型需先在对应提供方注册，`NARRATEOS_SANDBOX_AGENT_MODEL=provider:model` 只选择路由，不声明模型能力。
+
+仅安装三个后端包时，默认角色、开书技能与内建文风插件随 pipeline 包分发。使用本预设且没有 web-app 注册表时，预设提供注册表；与 web-app 组合时保留宿主选择。各包的 `pnpm pack` 会生成包含入口和声明的本地安装包。
+
 ## 运行测试
 
 ```bash

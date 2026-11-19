@@ -146,6 +146,11 @@ export const BookConfigSchema = z.object({
     craft_plugins: z.array(z.string()).default([]),
     prose_gate: z
         .object({
+            rules: z.record(z.string(), z.object({
+                enabled: z.boolean().optional(), max_count: z.number().int().nonnegative().optional(),
+                scale_by_length: z.boolean().optional(), reference_chars: z.number().int().positive().optional(),
+                last_paragraphs_only: z.number().int().positive().optional()
+            })).optional(),
             enable_anti_cliche: z.boolean().default(true),
             enable_cross_chapter_simile: z.boolean().default(true),
             cross_chapter_simile_window: z.number().int().positive().default(5)
@@ -259,20 +264,21 @@ export const EntityMetadataSchema = z.object({
 export type EntityMetadata = z.infer<typeof EntityMetadataSchema>;
 
 /** 实体区内的单行条目 */
-export interface EntityEntry {
-    storyDay?: number | undefined;
-    chapter?: number | undefined;
-    visibility?: EntryVisibility | undefined;
-    rawInvalidVisibility?: string | undefined;
-    owner?: string | undefined;
-    status?: EntryStatus | undefined;
-    slotKey?: string | undefined;
-    extraTags?: Record<string, string> | undefined;
-    isNumericLedger?: boolean | undefined;
-    ledger?: Record<string, string> | undefined;
-    text: string;
-    continuationLines: string[];
-}
+export const EntityEntrySchema = z.object({
+    storyDay: z.number().int().optional(),
+    chapter: z.number().int().nonnegative().optional(),
+    visibility: EntryVisibilitySchema.optional(),
+    rawInvalidVisibility: z.string().optional(),
+    owner: z.string().optional(),
+    status: EntryStatusSchema.optional(),
+    slotKey: z.string().optional(),
+    extraTags: z.record(z.string(), z.string()).optional(),
+    isNumericLedger: z.boolean().optional(),
+    ledger: z.record(z.string(), z.string()).optional(),
+    text: z.string(),
+    continuationLines: z.array(z.string())
+});
+export type EntityEntry = z.infer<typeof EntityEntrySchema>;
 
 /** 四段式实体档案完整模型 */
 export interface EntityProfile {
@@ -335,10 +341,15 @@ export const TxStateSchema = z.object({
     active_chapter: z.number().int().positive().nullable(),
     last_committed_ch: z.number().int().nonnegative(),
     chapter_hashes: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)),
+    last_sync_id: z.string().uuid().optional(),
     chapter_context: z.object({
         timelineMode: TimelineModeSchema,
         targetDay: z.number().int(),
         povCharIds: z.array(z.string()),
+        signalCursorUpdate: z.object({
+            consumedLines: z.number().int().nonnegative(),
+            consumedIds: z.array(z.string())
+        }).optional(),
         parallelWindowId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
         parallelBranchId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional()
     }).optional(),

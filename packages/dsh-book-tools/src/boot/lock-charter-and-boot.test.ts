@@ -97,6 +97,30 @@ afterEach(async () => {
 });
 
 describe('lock_charter_and_boot 开书建库与门禁停机', () => {
+    it('开书后的全量快照保留多行私密履历及缓冲的归属', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const input = buildMinimalValidBootInput();
+        const record = { storyDay: 0, text: '放下船契\n转身离港', visibility: 'SELF_ONLY' as const, owner: 'char_shen' };
+        const entity = input.entities[0]!;
+        entity.irreversibleTrajectory = [record];
+        entity.recentBuffer = [record];
+        const boot = await lockCharterAndBoot(input, { booksRoot });
+        const snapshot = await new bookStorePlugin.BookStore(boot.bookRoot, new NodeSystemAdapter()).loadSnapshot();
+        expect(snapshot.entities.char_shen?.irreversibleTrajectory[0]).toMatchObject(record);
+        expect(snapshot.entities.char_shen?.recentBuffer[0]).toMatchObject(record);
+    });
+
+    it('拒绝不可唯一翻转的开书槽位和第一区的读者已知字段', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const input = buildMinimalValidBootInput();
+        const entity = input.entities[0]!;
+        entity.innateLocks = [{ text: '记得那场大雪', visibility: 'READER_KNOWN' }];
+        await expect(lockCharterAndBoot(input, { booksRoot })).rejects.toThrow(/PUBLIC.*SELF_ONLY/);
+        entity.innateLocks = [];
+        entity.acquiredState = ['船契', '钥匙'].map(text => ({ text, slotKey: 'secret', storyDay: 0, visibility: 'OMNISCIENT_SECRET' }));
+        await expect(lockCharterAndBoot(input, { booksRoot })).rejects.toThrow(/slotKey.*重复/);
+    });
+
     it('支持单卷 (>=1)、0 条 OMNISCIENT_SECRET、0 条声纹起步，落盘 author_charter 与 arc_director_plan 并原地停机不写 ch_0001.md', async () => {
         const booksRoot = await makeTempBooksRoot();
         let bootedCallbackCount = 0;

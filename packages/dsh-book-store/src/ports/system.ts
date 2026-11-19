@@ -24,7 +24,7 @@ export interface RipgrepMatch {
 export interface SystemPort {
     initRepo(bookRoot: string): Promise<void>;
     commitPaths(bookRoot: string, paths: string[], message: string): Promise<GitCommitResult>;
-    createTag(bookRoot: string, tagName: string, message?: string): Promise<void>;
+    createTag(bookRoot: string, tagName: string, message?: string, revision?: string): Promise<void>;
     readFileAtRef(bookRoot: string, ref: string, relativePath: string): Promise<string | null>;
     diffFile(bookRoot: string, refA: string, refB: string, relativePath: string): Promise<string>;
     resetHard(bookRoot: string, ref: string): Promise<void>;
@@ -80,8 +80,9 @@ export class NodeSystemAdapter implements SystemPort {
         return { sha: shaOut.trim() };
     }
 
-    async createTag(bookRoot: string, tagName: string, message?: string): Promise<void> {
+    async createTag(bookRoot: string, tagName: string, message?: string, revision?: string): Promise<void> {
         const args = message ? ['tag', '-a', tagName, '-m', message] : ['tag', tagName];
+        if (revision) args.push(revision);
         await this.runGit(bookRoot, args);
     }
 
