@@ -84,6 +84,48 @@ afterEach(async () => {
 });
 
 describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
+    it('退役设定退出目录、检索和选页，暂存状态优先且显式读取仍可查档', async () => {
+        const { bookRoot } = await createSampleBook();
+        const retiredPath = 'lore_library/lore_a_retired.md';
+        const activePath = 'lore_library/lore_z_active.md';
+        const retired = '---\ntitle: 旧地图\nkind: lore\nvolume: 1\nregion: 北城\nstatus: WARPED\n---\n# 旧地图\n共同检索词：旧规则\n';
+        const active = '# 新地图\n共同检索词：新规则\n';
+        await writeFile(join(bookRoot, retiredPath), retired, 'utf8');
+        await writeFile(join(bookRoot, activePath), active, 'utf8');
+        const ctx = new Context();
+        const store = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => store.dispose());
+        const tools = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => tools.dispose());
+        const overlay = new Map<string, string | null>();
+        const roleSet = ctx.narrateTools.buildRoleTools({ bookRoot, runId: 'retired-lore', maxReadCalls: 10,
+            yieldTool: 'yield_context_pack', targetChapter: 1, stagingOverlay: overlay });
+        registerCleanup(() => roleSet.cleanup());
+        const grep = roleSet.toolMap.get('book_grep')!;
+        const search = async () => await grep.execute({ pattern: '共同检索词', path: 'lore_library', max_matches: 1 },
+            createMockExec('book_grep', {})) as { matches: Array<{ file: string; text: string }>; truncated: boolean };
+        expect(await search()).toMatchObject({ matches: [{ file: activePath, text: '共同检索词：新规则' }], truncated: false });
+        const recall = new bookStorePlugin.IndexRecall(new bookStorePlugin.NodeSystemAdapter());
+        const catalog = await recall.buildLibrarianCatalog(bookRoot, { currentVolume: 1 });
+        expect(catalog.staticPrefix).not.toContain('lore_a_retired.md');
+        expect(catalog.staticPrefix).toContain('lore_z_active.md');
+        const read = await roleSet.toolMap.get('book_read')!.execute({ path: retiredPath }, createMockExec('book_read', {})) as { content: string };
+        expect(read.content).toContain('共同检索词：旧规则');
+        const yieldPack = roleSet.toolMap.get('yield_context_pack')!;
+        await expect(yieldPack.execute({ selected_entity_ids: [], selected_lore_files: [retiredPath] }, createMockExec('yield_context_pack', {}))).rejects.toThrow('退役');
+        expect(roleSet.getYieldResult()).toBeUndefined();
+
+        overlay.set(retiredPath, '# 重新启用\n共同检索词：复用规则\n');
+        overlay.set(activePath, '[status: WARPED]\n共同检索词：暂存退役\n');
+        expect(await search()).toMatchObject({ matches: [{ file: retiredPath, text: '共同检索词：复用规则' }], truncated: false });
+        const stagedCatalog = await recall.buildLibrarianCatalog(bookRoot, { currentVolume: 1, stagingOverlay: overlay });
+        expect(stagedCatalog.staticPrefix).toContain('lore_a_retired.md');
+        expect(stagedCatalog.staticPrefix).not.toContain('lore_z_active.md');
+        await expect(yieldPack.execute({ selected_entity_ids: [], selected_lore_files: [activePath] }, createMockExec('yield_context_pack', {}))).rejects.toThrow('退役');
+        await yieldPack.execute({ selected_entity_ids: [], selected_lore_files: [retiredPath] }, createMockExec('yield_context_pack', {}));
+        expect(roleSet.getYieldResult()).toMatchObject({ selectedLoreEntries: ['# 重新启用\n共同检索词：复用规则\n'] });
+    });
+
     it('工具构造失败不留暂存；已建会话不能换书，编辑优先级为本轮 > 分支 > 磁盘', async () => {
         const { bookRoot, otherBook } = await createSampleBook();
         const ctx = new Context();

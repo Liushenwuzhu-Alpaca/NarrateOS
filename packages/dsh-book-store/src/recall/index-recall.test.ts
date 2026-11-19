@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { NodeSystemAdapter } from '../ports/index.js';
 import { EntityProfile, EntryStatus } from '../store/schemas.js';
-import { IndexRecall, parseL2CardSections } from './index.js';
+import { IndexRecall, isRetiredLore, parseL2CardSections } from './index.js';
 
 const FIXTURE_BOOK_DIR = resolve(import.meta.dirname, '../../../../fixtures/sample-book');
 const tempDirs: string[] = [];
@@ -50,6 +50,15 @@ function createSampleProfile(overrides: Partial<EntityProfile> = {}): EntityProf
 }
 
 describe('IndexRecall', () => {
+    it.each([
+        ['# 旧副本\n\n\n\n[status: WARPED]\n正文', true],
+        ['# 当前副本\n\n\n\n正文\n[status: WARPED]', false],
+        ['\uFEFF---\r\ntitle: 旧副本\r\na: 1\r\nb: 2\r\nc: 3\r\nstatus: "warped"\r\n---\r\n正文', true],
+        ['---\ntitle: 当前副本\nstatus: ACTIVE\n---\n\n历史条目 [status: WARPED]', false]
+    ])('整卡退役只读取前五行及完整 YAML 头部 %#', (content, retired) => {
+        expect(isRetiredLore(content)).toBe(retired);
+    });
+
     it('通用职务称谓仅在 L2 出场白名单内召回，未知出场集合不全书放行', async () => {
         const bookRoot = await createTempBookDir();
         await writeFile(join(bookRoot, 'manuscripts/ch_0001.md'), '风纪委员长推开门。', 'utf8');

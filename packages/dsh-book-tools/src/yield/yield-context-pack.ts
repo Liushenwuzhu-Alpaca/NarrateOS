@@ -5,6 +5,7 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
     BookRetrievalConfigSchema,
     IndexRecall,
+    isRetiredLore,
     parseEntityMarkdown,
     readChapterDays,
     splitFrontmatter,
@@ -311,6 +312,12 @@ async function validateSelectedLoreFiles(
             throw new GateValidationError(
                 'yield_context_pack',
                 `selected_lore_files 引用了不存在的世界书词条: ${loreFile}`
+            );
+        }
+        if (isRetiredLore(loreContent)) {
+            throw new GateValidationError(
+                'yield_context_pack',
+                `selected_lore_files 引用了已退役的世界书词条，请移除该选页: ${loreFile}`
             );
         }
         entries.set(verifiedLore.normalized, loreContent);

@@ -12,6 +12,14 @@ const LORE_FILE_RE = /^lore_.*\.md$/;
 const DEFAULT_L2_FULL_UNFROZEN_THRESHOLD = 40;
 const DEFAULT_L2_FREEZE_BLOCK_CHAPTERS = 20;
 
+/** 退役标记只在卡头前五行或完整 YAML 头部生效，正文历史描述不改变整卡状态。 */
+export function isRetiredLore(content: string): boolean {
+    const retiredStatus = /\bstatus\s*:\s*['"]?WARPED\b/i;
+    if (retiredStatus.test(content.split(/\r?\n/, 5).join('\n'))) return true;
+    const frontmatter = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
+    return frontmatter !== null && retiredStatus.test(frontmatter[1]!);
+}
+
 /** 暂存区只读回调：返回 string 表示覆盖内容，null 表示暂存删除，undefined 表示回落磁盘 */
 export type StagingReadFn = (
     relativePath: string
@@ -1035,7 +1043,7 @@ export class IndexRecall {
             const loreSummaries: string[] = ['## Lore Library Index'];
             for (const fileName of loreFiles) {
                 const content = await readTextWithStaging(bookRoot, `lore_library/${fileName}`, options);
-                if (content !== null) {
+                if (content !== null && !isRetiredLore(content)) {
                     loreSummaries.push(extractLoreSummary(fileName, content));
                 }
             }

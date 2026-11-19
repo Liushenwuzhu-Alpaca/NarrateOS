@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
-import { lstat } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { BookRetrievalConfigSchema, type NarrateStoreService } from '@narrateos/dsh-book-store';
+import { BookRetrievalConfigSchema, isRetiredLore, type NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
 import {
@@ -360,9 +360,21 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
             // 合并分支覆盖层与当前 runId 暂存覆盖层，保障 Read-Your-Own-Writes 与支线视角一致
             const mergedOverlay = buildCombinedStagingOverlay(store, runId, stagingOverlay);
 
-            const filteredDisk = diskMatches.filter(
-                (m) => !mergedOverlay.has(m.file) && fence.isReadPathAllowed(m.file)
-            );
+            const filteredDisk: GrepMatchItem[] = [];
+            const retiredLore = new Map<string, boolean>();
+            for (const match of diskMatches) {
+                if (mergedOverlay.has(match.file) || !fence.isReadPathAllowed(match.file)) continue;
+                if (match.file.startsWith('lore_library/')) {
+                    let retired = retiredLore.get(match.file);
+                    if (retired === undefined) {
+                        const verified = await fence.assertReadFile(match.file);
+                        retired = isRetiredLore(await readFile(verified.absPath, 'utf8'));
+                        retiredLore.set(match.file, retired);
+                    }
+                    if (retired) continue;
+                }
+                filteredDisk.push(match);
+            }
             const stagedMatches: GrepMatchItem[] = [];
             for (const [relPath, content] of mergedOverlay.entries()) {
                 if (content === null) {
@@ -371,6 +383,7 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 if (!matchesAnyPathPrefix(relPath, scope.allowedDirs) || !fence.isReadPathAllowed(relPath)) {
                     continue;
                 }
+                if (relPath.startsWith('lore_library/') && isRetiredLore(content)) continue;
                 stagedMatches.push(
                     ...await runRipgrepSearch({ pattern: args.pattern, targets: [], fence,
                         fixedStrings, contextLines, maxMatches, signal: exec.signal, input: { file: relPath, content } })
