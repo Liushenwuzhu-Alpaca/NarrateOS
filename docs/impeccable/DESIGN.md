@@ -1,280 +1,252 @@
 ---
-name: "NarrateOS Operator Studio"
-description: "面向长篇小说多智能体创作的去框化清样校勘与总控调度设计系统"
+name: "NarrateOS 宋椠朱批 · 碑拓夜读"
+description: "面向长篇小说多智能体创作的东方古籍品牌视觉系统：日间宋刻本，夜间碑拓，工种印谱与朱批校勘"
 colors:
-  cobalt-action: "#4c7cf0"
-  cobalt-fill: "#3762cc"
-  cobalt-fill-hover: "#436fd9"
-  cobalt-ink: "#96b6ff"
-  cinnabar-seal: "#df6447"
-  jade-done: "#46c978"
-  amber-gloss: "#eba434"
-  coral-halt: "#e86565"
-  ink-outer: "#0c0d0f"
-  ink-host: "#121316"
-  ink-side: "#16171a"
-  ink-stage: "#1a1b1e"
-  ink-sheet: "#1f2024"
-  ink-elevated: "#26282d"
-  paper-side: "#f2efe7"
-  paper-stage: "#f8f5ee"
-  paper-sheet: "#fcfbf7"
-  ink-primary: "#f3f2ee"
-  ink-secondary: "#c8c6bf"
-  ink-muted: "#98968f"
-  ink-prose: "#e6e2d8"
-  galley-numeral: "#575853"
-  hairline-subtle: "rgba(255, 255, 255, 0.068)"
-  hairline-default: "rgba(255, 255, 255, 0.125)"
-  scrim-backdrop: "rgba(0, 0, 0, 0.44)"
+  # 日间 · 宋刻本
+  desk-paper: "#e4dac6"
+  side-paper: "#ece3d1"
+  sheet-paper: "#f7f1e3"
+  sheet-paper-2: "#efe6d2"
+  ink-song: "#1e1914"
+  ink-song-2: "#574d42"
+  ink-song-3: "#8a7e6d"
+  rule-paper: "rgba(30, 25, 20, 0.12)"
+  rule-paper-strong: "rgba(30, 25, 20, 0.26)"
+  frame-paper: "#2a231c"
+  # 夜间 · 碑拓
+  desk-stele: "#0c0b0a"
+  side-stele: "#11100f"
+  sheet-stele: "#171513"
+  sheet-stele-2: "#1d1b18"
+  ink-rubbing: "#e8e2d3"
+  ink-rubbing-2: "#b6ae9f"
+  ink-rubbing-3: "#948d80"
+  rule-stele: "rgba(232, 226, 211, 0.085)"
+  rule-stele-strong: "rgba(232, 226, 211, 0.2)"
+  frame-stele: "#cdc5b3"
+  # 印泥与语义
+  cinnabar: "#b5372a"
+  cinnabar-night: "#cf513b"
+  cinnabar-soft: "rgba(181, 55, 42, 0.09)"
+  malachite-done: "#3e6e61"
+  malachite-done-night: "#79b3a1"
+  gamboge-warn: "#a8730f"
+  gamboge-warn-night: "#d9a441"
+  rouge-halt: "#a13256"
+  rouge-halt-night: "#e0708f"
 typography:
-  display:
-    fontFamily: "Inter, 'PingFang SC', system-ui, sans-serif"
-    fontSize: "4.25rem"
-    fontWeight: 200
-    lineHeight: 0.86
-    letterSpacing: "-0.04em"
-  headline:
-    fontFamily: "'Source Han Serif SC', 'Noto Serif CJK SC', 'Songti SC', Georgia, serif"
-    fontSize: "26px"
-    fontWeight: 600
-    lineHeight: 1.38
-    letterSpacing: "0.02em"
-  subheadline:
-    fontFamily: "Inter, 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif"
-    fontSize: "20px"
-    fontWeight: 600
-    lineHeight: 1.4
-  title:
-    fontFamily: "Inter, 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif"
-    fontSize: "14px"
-    fontWeight: 600
-    lineHeight: 1.4
-    letterSpacing: "-0.005em"
+  kantou:
+    fontFamily: "'Source Han Serif SC', 'Noto Serif CJK SC', 'Songti SC', serif"
+    fontSize: "34px"
+    fontWeight: 900
+    letterSpacing: "0.32em"
+    writingMode: "vertical-rl"
   prose:
-    fontFamily: "'Source Han Serif SC', 'Noto Serif CJK SC', 'Songti SC', Georgia, serif"
+    fontFamily: "'Source Han Serif SC', 'Noto Serif CJK SC', 'Songti SC', serif"
     fontSize: "17px"
     fontWeight: 400
-    lineHeight: 1.98
-    letterSpacing: "0.012em"
-  body:
-    fontFamily: "Inter, 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif"
-    fontSize: "13px"
+    lineHeight: 2
+    letterSpacing: "0.02em"
+  heading:
+    fontFamily: "'Source Han Serif SC', 'Noto Serif CJK SC', 'Songti SC', serif"
+    fontSize: "13px-18px"
+    fontWeight: 700
+    letterSpacing: "0.06em-0.2em"
+  marginalia:
+    fontFamily: "'FandolKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif"
+    fontSize: "12px-13.5px"
+    lineHeight: 1.75
+  control:
+    fontFamily: "'Source Han Sans CN', 'Noto Sans CJK SC', 'PingFang SC', system-ui, sans-serif"
+    fontSize: "12px-13px"
     fontWeight: 400
-    lineHeight: 1.5
-  label:
-    fontFamily: "Inter, 'PingFang SC', 'Noto Sans CJK SC', system-ui, sans-serif"
-    fontSize: "12px"
-    fontWeight: 500
-    lineHeight: 1.4
   mono:
-    fontFamily: "'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace"
-    fontSize: "11px"
-    fontWeight: 400
-    lineHeight: 1.45
+    fontFamily: "'Maple Mono NF CN', 'JetBrains Mono', ui-monospace, monospace"
+    fontSize: "10px-11px"
 rounded:
-  xs: "5px"
-  sm: "7px"
-  md: "9px"
-  lg: "11px"
-  sheet: "12px"
-  pill: "999px"
+  seal: "4px"
+  sheet: "2px"
+  control: "3px"
+  host-card: "12px"
 spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  lg: "16px"
-  xl: "24px"
-  sheet-y: "36px"
-  sheet-x: "44px"
+  base: "4px"
+  sheet-inner: "14px"
+  prose: "38px 30px 40px 46px"
+  column: "690px"
 components:
-  button-primary:
-    backgroundColor: "{colors.cobalt-fill}"
-    textColor: "#ffffff"
-    typography: "{typography.label}"
-    rounded: "{rounded.sm}"
-    padding: "0 12px"
-    height: "30px"
-  button-primary-hover:
-    backgroundColor: "{colors.cobalt-fill-hover}"
-    textColor: "#ffffff"
-    typography: "{typography.label}"
-    rounded: "{rounded.sm}"
-    padding: "0 12px"
-    height: "30px"
-  button-outline:
-    backgroundColor: "{colors.ink-sheet}"
-    textColor: "{colors.ink-primary}"
-    typography: "{typography.label}"
-    rounded: "{rounded.sm}"
-    padding: "0 11px"
-    height: "30px"
-  manuscript-sheet:
-    backgroundColor: "{colors.ink-sheet}"
-    textColor: "{colors.ink-prose}"
-    typography: "{typography.prose}"
-    rounded: "{rounded.sheet}"
-    padding: "36px 44px 44px"
-    width: "672px"
-  pipeline-card:
-    backgroundColor: "{colors.ink-side}"
-    textColor: "{colors.ink-primary}"
-    typography: "{typography.label}"
-    rounded: "{rounded.md}"
-    padding: "9px 11px"
-  director-note-dock:
-    backgroundColor: "{colors.ink-sheet}"
-    textColor: "{colors.ink-primary}"
-    typography: "{typography.body}"
-    rounded: "{rounded.lg}"
-    padding: "6px 8px 6px 10px"
-    width: "672px"
-  seal-stamp:
-    backgroundColor: "rgba(223, 100, 71, 0.11)"
-    textColor: "{colors.cinnabar-seal}"
-    typography: "{typography.title}"
-    rounded: "{rounded.sm}"
-    size: "48px"
+  cta-ink-block:
+    backgroundColor: "{colors.ink-song}"
+    textColor: "{colors.sheet-paper}"
+    rounded: "{rounded.control}"
+    height: "32px"
+    shadow: "2px 2px 0 {colors.cinnabar}"
+  seal-baiwen:
+    backgroundColor: "{colors.cinnabar}"
+    textColor: "{colors.sheet-paper}"
+    rounded: "{rounded.seal}"
+  seal-zhuwen:
+    backgroundColor: "{colors.cinnabar-soft}"
+    textColor: "{colors.cinnabar}"
+    border: "inset 2.5px {colors.cinnabar}"
+  manuscript-frame:
+    border: "2px outer + 0.5px inner at 6px"
+    columns: "prose | 76px kantou | 30px banxin"
 ---
 
-# Design System: NarrateOS Operator Studio
+# Design System: NarrateOS 宋椠朱批 · 碑拓夜读
 
 ## Overview
 
-**Creative North Star: "东方清样校勘室 (The Literary Galley Desk)"**
+**Creative North Star: 「宋椠朱批 · 碑拓夜读」**
 
-NarrateOS Operator Studio 同时服务高频后台管线操控（`Operate`）与数小时沉浸式长篇小说审阅（`Read`）。设计系统遵循 **85% 隐形工具骨架 + 15% 文学清样签名触点** 的克制配比：顶栏、章节目录、检查器与两层模型路由严格承袭 `@deepseek-ai/dsh` 宿主的冷静家族秩序，做到零装饰干扰；视觉张力集中投放在中央 `672px` 独立书稿舞台与 `3x2` 工序灯阵之上，让每一次章节落盘都具备文学清样盖印封存的呼吸感与确信感。
+NarrateOS 的视觉系统追求一眼可辨、过目难忘的品牌感：日间是一页宋刻本，夜间是一方碑拓。签名不来自装饰，而来自与产品机制一一对应的古籍语汇：
 
-界面彻底摒弃传统后台「外框套卡片再套小方框」的机械表格感，改由深墨/暖纸微色阶层叠与极淡 `1px` 分割线组织空间。工程术语（如 `WAL`、`WARPED`、`MATTR-500`）在界面层全部转译为作者直白中文，同时保留干练的英文工种名（`1. Librarian` 至 `6. Dreamer`）与真实模型标识（`provider:model`）。明确排斥的视觉反模式包括：赛博霓虹发光、单侧 `3px` 粗彩条（`side-tab`）、标题上方生硬的小号眉题（eyebrow kicker）、多层嵌套描边卡片，以及无状态因果意义的纯炫技循环动画。
+- 6 个后台工种各执一方闲章，`3x2` 工序矩阵即一页**印谱**；
+- 未揭底牌与禁区内容以古籍缺字标记**墨钉**呈现（夜间为碑面**泐痕**）；
+- 修补与核查意见以**朱批**挂在页边，正文对应字句加朱色**着重号**；
+- 章节定稿以**钤印**收束。
+
+明暗切换不是换色，而是介质切换：刻本（墨字落于宣纸）与拓片（白字显于墨石）。
+
+设计投放遵循 **The Calm Prose Rule**：大胆风格集中在边框、页边、印谱、刊头与转场时刻；正文阅读区本身保持安静，对比度、行宽、行距服从连续数小时阅读。
+
+原版 DSH 宿主界面执行保守改造（见 The Conservative Host Rule），全力美化的对象是 Operator Studio。
+
+视觉原型：`tmp/theme-prototype/galley-stele.html`（本地一次性样张，不入库）。
 
 **Key Characteristics:**
-- **双模式同台分工**：周边 `Operate` 控制面保持高扫描效率与低存在感，中央 `Read` 书稿纸面拥有衬线排版、宽裕页边距与清样仪式感。
-- **去框化色阶分层**：以五级微温差中性表面替代密集矩形线框，全屏仅保留「`写下一章`」唯一高饱和实心主行动点。
-- **清样校勘品牌签名**：大号超细章节序号刊头（`02 | 标题`）、悬停浮现页边段号（`P01`）、刊头润色校勘签与章末微倾 `-4deg` 宣纸印泥质感「`定稿`」朱印。
-- **因果可追溯实时流**：`3x2` 工序与模型矩阵承载呼吸态进度体感，点击任意工种卡片通过原生共享元素过渡直达右栏实时思考链。
+- **介质双态**：日间宋刻本（宣纸纤维底纹 + 松烟墨），夜间碑拓（墨石颗粒底纹 + 拓白字轻微晕散）。
+- **刻本版式**：书稿纸面四周双边（外粗内细），右侧竖排刊头与乌丝栏，最右书口条带上下鱼尾与页码。
+- **印章语汇**：白文实印 = 已完成，朱文呼吸印 = 运行中，淡色印痕 = 待命，裂印 = 冲突。
+- **墨块主行动**：全屏唯一实心主按钮是一块墨（日间墨黑、夜间拓白），以 `2px` 朱砂错位投影为签名。
 
 ## Colors
 
-色板围绕「深墨夜读（Ink & Night Paper）」与「暖纸日间（Warm Rag Paper）」两套精心调校的温润中性色阶构建，在长时间阅读中消除纯黑冷白刺眼眩光，并以极低剂量的钴蓝与朱砂分别锚定操作主行动点与文学定稿签名。
+### Media（介质色阶）
+- **宋刻本（日间）**：书案 `desk-paper` -> 侧栏 `side-paper` -> 书稿 `sheet-paper`，书口与次级面 `sheet-paper-2`；三级墨阶 `ink-song` / `ink-song-2` / `ink-song-3`。所有纸面叠加极淡宣纸纤维噪点（SVG `feTurbulence`，不透明度不超过 0.09）。
+- **碑拓（夜间）**：书案 `desk-stele` -> 侧栏 `side-stele` -> 书稿 `sheet-stele`；三级拓白 `ink-rubbing` / `ink-rubbing-2` / `ink-rubbing-3`。纸面叠加墨石颗粒噪点；正文与刊头加 `0 0 0.6px` 拓白晕散，不得降低可读对比度。
+- **版框与栏线**：`frame-*` 仅用于书稿双边、刊头与书口分隔；`rule-*` 用于分组发丝线与乌丝栏。
 
-### Primary
-- **Cobalt Dispatch (`cobalt-action` / `cobalt-fill`)**: 唯一操作主强调色，专用于顶栏实心主按钮「`写下一章 | YOLO`」、底部便签发送钮、当前激活工序灯与键盘焦点环（`2px` 实线外轮廓），严禁用于静态背景装饰。
-- **Cobalt Ink (`cobalt-ink`)**: 暗色表面上的高可读交互墨色，用于「`直接写 ->`」快捷动作与已单独覆盖模型的工种高亮文本。
+### Cinnabar（朱砂）
+朱砂是品牌主色，承担：印章（工种印谱、定稿钤印、品牌印）、朱批与着重号、当前章与当前页签的小朱点、墨块主按钮的错位投影、浮签签头。朱砂不用于大面积背景，不用于报错。
 
-### Secondary
-- **Cinnabar Galley Seal (`cinnabar-seal`)**: 品牌专属朱砂印泥色，仅用于章末「`定稿`」方印与书页顶部 `2px` 极细滚动阅读进度丝带，绝不与报错告警混用。
-
-### Tertiary
-- **Jade Settled (`jade-done`)**: 工序已完成状态灯、文风体检通过徽标与改动对比新增行底纹。
-- **Amber Gloss (`amber-gloss`)**: 手改未同步提示（「`同步修改`」按钮）、润色校勘签、隐藏底牌隔离标注与回忆时间线提示。
-- **Coral Halt (`coral-halt`)**: 设定冲突暂停（`SAFE_HALT`）状态灯、冲突裁决卡顶栏与正文冲突原句定位高亮。
-
-### Neutral
-- **Obsidian Host & Side Rails (`ink-outer` / `ink-host` / `ink-side`)**: 暗色模式下从宿主导航轨到左右辅助栏的冷墨底座，自动退居视觉二线。
-- **Galley Stage & Editorial Sheet (`ink-stage` / `ink-sheet` 与亮色 `paper-stage` / `paper-sheet`)**: 中央阅读舞台与独立书稿画布，暗色带微暖炭墨底调，亮色呈未漂白棉浆纸感，确保正文对比度稳定高于 `11:1`（远超 WCAG AA `4.5:1`）。
-- **Warm Ivory & Carbon Inks (`ink-primary` / `ink-prose` / `ink-secondary` / `ink-muted`)**: 四级带微暖纸色倾向的文字墨阶，连输入框占位符均保证 `>= 4.5:1` 可读对比度；`galley-numeral` 专用于刊头巨型弱对比章节序号。
+### Semantic（语义）
+- **石绿 `malachite-done`**：已完成状态文字。
+- **藤黄 `gamboge-warn`**：手改未同步、润色校勘提示。
+- **胭脂 `rouge-halt`**：设定冲突暂停（`SAFE_HALT`）与破坏性操作，必须配裂印形态与明确中文标签，与朱砂严格区分。
 
 ### Named Rules
-**The Single Solid CTA Rule.** 同一视口内仅允许「`写下一章`」（或冲突裁决卡的首选修复动作）使用实心 `cobalt-fill` 填充；其余次要操作一律退回微底色或描边态，确保视线在 0.5 秒内锁定主推进入口。
+**The Ink-Is-Action Rule.** 同一视口内只有一个实心墨块主按钮（「写下一章 / 写完本章暂停」或冲突裁决卡的首选动作）；其余操作退回描边或纯文字。
 
-**The Seal-Is-Not-Danger Rule.** 朱砂色 `cinnabar-seal` 永远代表「文学清样核验封存」的正向仪式感，任何错误、阻断或破坏性操作必须使用语义红 `coral-halt` 并搭配明确文字标签。
-
-**The Dual-Cue Status Rule.** 6 步工序灯与章节状态绝不仅仅依赖红绿颜色区分：必须同步提供光晕形态（常亮实心圆、呼吸脉冲环、警示描边）与直白中文状态词（「已完成 / 生成中 / 有冲突 / 待命」）。
+**The Dual-Cue Status Rule.** 工序与章节状态必须同时具备印章形态（白文 / 朱文呼吸 / 印痕 / 裂印）与直白中文状态词（已完成 / 生成中 / 待命 / 有冲突），不只依赖颜色。
 
 ## Typography
 
-**Display Font:** Inter (200 ExtraLight, tabular-nums, fallback system-ui)
-**Body Font:** Inter, "PingFang SC", "Noto Sans CJK SC"（控制面 UI）；"Source Han Serif SC", "Noto Serif CJK SC", "Songti SC"（书稿正文与章节标题）
-**Label/Mono Font:** "JetBrains Mono", "SF Mono", ui-monospace（模型标识 `provider:model`、Token 计量、段号 `P01` 与 Git SHA）
+- **宋体（思源宋体 / Noto Serif CJK SC）**：书稿正文、章节刊头、印文、Studio 各级标题与页签。
+- **楷体（FandolKai / 楷体系统字体）**：朱批、卷次眉注、设定集分组名等"手写批语"层，仅用于短文本。
+- **黑体（思源黑体 / Noto Sans CJK SC）**：高密度控件、按钮内次要文字、表单与原版 DSH 界面。
+- **等宽（Maple Mono NF CN / JetBrains Mono）**：`provider:model`、Git SHA、时间戳、Token 计量。
 
-**Character:** 无衬线控制面保持如精密排字尺般的干练紧凑（固定 `px/rem` 阶梯，不用流体 `clamp`），而一旦视线落入书页画布，思源宋体/宋体的温润笔锋与 `1.98` 舒展行高立即接管，形成「外冷内温」的阅读沉浸切换。
+字体全部使用系统已安装字体栈，不随插件打包网络字体。
 
 ### Hierarchy
-- **Display** (`200`, `4.25rem` / `68px`, `line-height: 0.86`, `letter-spacing: -0.04em`): 专用于书稿刊头左侧的巨型双位章节序号（如 `02`），以低对比墨色充当视觉锚点而非喧宾夺主。
-- **Headline** (`600`, `1.625rem` / `26px`, `line-height: 1.38`, 衬线): 章节主标题与全书设定集书名页标题。
-- **Title** (`600`, `0.875rem` / `14px`, `line-height: 1.4`): 顶栏当前书名切换器、面板分组标题与冲突裁决卡主标题。
-- **Prose** (`400`, `1.0625rem` / `17px`, `line-height: 1.98`, 首行缩进 `2em`, 行宽上限 `672px` 约 `36-38` 汉字): 章节正文唯一阅读字阶，兼顾长篇连读舒适度与校勘扫视效率。
-- **Body** (`400`, `0.8125rem` / `13px`, `line-height: 1.5`): 左右侧栏列表、导演便签输入与设定档案正文。
-- **Label** (`500`, `0.75rem` / `12px`, `line-height: 1.4`): 按钮、分段页签、胶囊徽标与表单字段说明。
-- **Mono** (`400`, `0.71875rem` / `11.5px`, `tabular-nums`): 英文模型路由名、Git 提交哈希、页边段号与遥测数值，绝不把等宽字体当作普通中文标签的装饰皮肤。
+- **Kantou 竖排刊头**（`900`, `34px`, `letter-spacing: 0.32em`, `writing-mode: vertical-rl`）：章节标题，位于书稿纸面右侧刊头栏，上方为「第X章」小字，下方为楷体朱色状态（如「执笔初稿」）。
+- **Prose**（`400`, `17px`, `line-height: 2`, 首行缩进 `2em`）：章节正文唯一字阶。
+- **Heading**（`700`, `13px-18px`, 宽字距）：卷名、面板标题、工种名。
+- **Marginalia**（楷体, `12px-13.5px`, `line-height: 1.75`）：朱批与眉注。
+- **Control / Mono**：控件与遥测，数字一律 `tabular-nums`。
 
 ### Named Rules
-**The Serif Boundary Rule.** 衬线体仅出现在书稿纸面内部（章节标题、正文段落与朱砂「定稿」印文）；顶栏、侧栏、按钮与抽屉一律使用无衬线体，严守工具区与作品区的心理边界。
-
-**The Tabular Telemetry Rule.** 所有章节号、字数、故事日、Token 预算与百分比必须启用 `font-variant-numeric: tabular-nums`，保证连写跳数时界面零横向抖动。
+**The Script Layer Rule.** 宋体承载"书"，楷体承载"批"，黑体承载"器"，等宽承载"数"。四层不得混用：按钮主文案用宋体宽字距，批语不用黑体，模型标识不用宋体。
 
 ## Layout
 
-整体采用嵌套在 `@deepseek-ai/dsh` 宿主 `'main'` 槽位内的**容器感知三栏工作台**。由于宿主自身左侧栏可在收起（`56px`）与展开（`264px`）之间动态伸缩，Studio 所有响应式断点一律基于 `.ns-studio-shell` 自身的 `ResizeObserver` 实测容器宽度计算，绝不依赖 `window.innerWidth`：
+Studio 嵌在 DSH 宿主 `main` 槽位内，保留容器感知三栏工作台与既有 `ResizeObserver` 断点：
 
-- **宽屏三栏常驻态（容器宽 `>= 1200px`）**：`224px` 左栏（卷信息 + 正文目录 + 底部「全书设定集」独立入口） | `minmax(0, 1fr)` 中央书稿舞台 | `340px` 右栏（`思考过程 | 运行状态 | 模型分配`，支持一键收起为 `0px`）。
-- **中等宽度自适应态（`820px <= 容器宽 < 1200px`）**：自动收起常驻左栏，将其无损收纳进顶栏左侧的「`第 X 章 · 目录与设定集 ▾`」浮层菜单，优先保全中央书稿阅读宽度与右侧面板同时可见。
-- **紧凑抽屉态（容器宽 `< 820px`）**：右侧栏转为带半透明遮罩的浮层抽屉，确保中央书稿绝不被挤压变形。
+- **左栏 · 古籍目录**：卷次眉注（楷体朱色）+ 卷名宽字距 + 遥测行；章节列表以「第X章」汉字序号起首，当前章以页边小朱点与极淡朱砂渐隐底标记（禁止侧边粗彩条）；底部「全书设定集」三入口以六角括号〔〕包裹。
+- **中栏 · 刻本舞台**：页签、工序印谱、书稿纸面、浮签共用 `690px` 版心；版心左侧保留批语栏（约 `150px`），用于挂朱批。
+- **右栏 · 书签页签**：`思考过程 | 运行状态 | 模型分配`，激活页签为宋体加粗 + 底部墨线；轨迹列表为竖向时间线，运行中节点为朱砂呼吸点。
 
-中央舞台内部严格执行**单轴光学对齐**：顶部分段工具栏、`3x2` 展开式工序矩阵、设定冲突裁决卡、独立书稿纸面（最大宽 `672px`，内边距 `36px 44px 44px`）以及底部的「下一章走向建议」与「导演便签舱」共享同一居中轴线与 `672px` 版心宽度，彻底消除控件贴墙散落的撕裂感。间距采用 `4px` 基础模数：组内紧凑关联用 `4px-8px`，同级模块间隔用 `12px-16px`，书稿纸面内外留白跃升至 `24px-44px` 形成鲜明疏密节奏。
+### Manuscript Leaf（书稿版式）
+```
+┌═══════════════════════════════════════┬──────┬───┐
+│  正文（prose）                          │ 竖排 │书 │
+│                                         │ 刊头 │口 │
+│                                         │ 乌丝 │鱼 │
+│                              定稿钤印   │ 栏   │尾 │
+└═══════════════════════════════════════┴──────┴───┘
+```
+- 外框 `2px` + 内框 `0.5px`（内缩 `6px`），纸面圆角仅 `2px`。
+- 刊头栏 `76px`，背景为间距 `38px` 的竖向乌丝栏；书口条 `30px`，自上而下为书名、上鱼尾、卷次、下鱼尾、页码。
+- 段号以汉字「〇一」竖排，悬停段落时于左页边浮现。
 
 ## Elevation & Depth
 
-系统采用 **微色阶表面分层为主、定向环境柔影为辅（Tonal Layering + Purposeful Float）** 的混合深度模型。静止侧栏与检查器完全平铺（零阴影），依靠从外到内逐级提亮的表面明度（暗色 `#121316 -> #16171a -> #1a1b1e -> #1f2024`；亮色 `#ece8df -> #f2efe7 -> #f8f5ee -> #fcfbf7`）建立自然景深。
-
-### Shadow Vocabulary
-- **Manuscript Rest (`0 6px 24px rgba(0, 0, 0, 0.12)`)**: 赋予中央独立书页轻微离开桌面底板的纸张厚度感。
-- **Director Dock (`0 10px 30px rgba(0, 0, 0, 0.34)` / 亮色 `0 8px 26px rgba(36, 30, 20, 0.08)`)**: 托起底部一体式导演便签舱，表达其作为常驻操作坞的前景层级。
-- **Floating Popover (`0 16px 40px rgba(0, 0, 0, 0.44), 0 2px 8px rgba(0, 0, 0, 0.24)`)**: 专用于作品切换、停止二级菜单、便签类型下拉与窄屏目录浮层，且浮层必须逃逸局部滚动裁剪容器。
-
-### Named Rules
-**The De-Boxed Inspector Rule.** 侧栏与运行状态面板内部禁止卡片套卡片或四面描边盒子；分组之间仅通过 `14px` 垂直留白与单条 `1px` `hairline-subtle` 极淡横线分隔。
+以纸张层叠而非卡片阴影组织深度：书案底纹 -> 侧栏 -> 书稿纸面。仅书稿纸面与浮签有投影（日间暖褐柔影，夜间深黑长影）；侧栏、印谱面板零阴影，靠发丝线与纸色区分。
 
 ## Shapes
 
-圆角尺度随构件体量递进：内嵌行内输入框与小徽标为 `5px-7px`（`xs`/`sm`），工序卡片与模型池组为 `9px`（`md`），底部导演便签舱为 `11px`（`lg`），中央独立书稿画布为温润的 `12px`（`sheet`），状态胶囊统一为全圆角 `999px`（`pill`）。
-
-状态告警卡（如冲突裁决卡）采用整周 `1px` 低透语义描边配合顶栏同色系柔光底条，严禁在卡片左侧或右侧加粗 `3px-4px` 彩色竖条。章末「`定稿`」朱印采用 `48px x 48px`、`7px` 微圆角方印，以 `-4deg` 手工钤印倾角叠合内联 SVG `feTurbulence` 宣纸印泥微斑驳滤镜，形成不可复制的东方出版物器物感。
+- **印章**：近方形，`4px` 微圆角，经 SVG 位移滤镜形成不规则印泥边缘与斑驳；定稿印与品牌印 `-4deg` 钤印倾角。
+- **控件**：`3px` 圆角，硬朗如裁切纸签。
+- **书稿**：`2px` 圆角，几乎直角。
+- **原版 DSH 浮动主舞台**：沿用宿主 `12px` 圆角。
 
 ## Components
 
-### Buttons
-- **Shape:** 统一 `30px` 紧凑高度与 `7px` 圆角（`rounded.sm`），主推进与停止动作采用左侧主动作 + 右侧 `▾` 下拉的组合分体按钮（Split Action）。
-- **Primary:** `cobalt-fill` 实心底配纯白字，全屏仅主行动点使用；运行态自动切换为琥珀色 `写完本章暂停 | ▾`（下拉收纳破坏性的 `立即中断并撤回半截草稿`）。
-- **Hover / Focus:** `140ms` 背景平滑提亮；`:focus-visible` 呈现 `2px` `cobalt-action` 外轮廓（`2px` 偏移）。
-- **Secondary / Ghost / Subtle:** 默认透明或 `rgba(255,255,255,0.048)` 微底色，悬停显现边界，绝不与主按钮争抢视觉权重。
+### 工序印谱（Pipeline Seal Catalog）
+六方闲章：「典籍」Librarian、「谋篇」Planner、「执笔」Writer、「勘误」Fact-checker、「录事」Extractor、「入梦」Dreamer。印文为两字竖排宋体加粗（宋体印式）。
+- 已完成：白文实印（朱底拓白字）。
+- 运行中：朱文印（朱字朱框浅朱底）+ `2.2s` 呼吸。
+- 待命：淡色印痕（发丝框 + 弱墨字，无滤镜）。
+- 冲突：裂印（对角裂纹）+ 胭脂色「有冲突」。
+- 状态从运行中转为已完成时播放一次钤印动画（放大落下、轻微回弹，`620ms`）。
+- 点击任一印章进入右栏该工种的思考轨迹。
 
-### Chips
-- **Style:** `20px` 高全圆角轻徽标（`rounded.pill`），采用 `12%-14%` 低透明度语义柔底配高可读同色系墨色文字，无外描边。
-- **State:** 待消费导演便签胶囊附可点击 `×` 撤回热区；多尝试会话胶囊支持选中态切换。
+### 墨钉 / 泐痕（Mo-ding）
+- 日间为实心墨块，夜间为碑面泐痕（浅色风化斑块）；悬停揭示原文，并以楷体注明来源（如「未揭底牌 · 第十二章揭底」）。
+- **The Mo-ding Truth Rule.** 墨钉只覆盖后端明确标记为隐藏的数据（`OMNISCIENT_SECRET`、非当前 POV `SELF_ONLY`、禁区）；不得凭前端推测制造墨钉。
 
-### Cards / Containers
-- **Corner Style:** 书稿纸面 `12px`，`3x2` 工序面板外框 `11px`、内部单步工种卡 `9px`。
-- **Background:** 书稿纸面恒用最亮一级表面（`ink-sheet` / `paper-sheet`）；工序单步卡用退后半阶的 `ink-side` 以衬托选中态。
-- **Shadow Strategy:** 仅书稿纸面保留轻纸感底影，侧栏分组容器零阴影。
-- **Border:** `1px` `hairline-subtle` 极淡描边；连写运行中的当前激活工序卡通过 CSS `@property` 驱动柔和钴蓝呼吸光边以传达实时推进体感。
-- **Internal Padding:** 书稿纸面 `36px 44px 44px`；工序单步卡紧凑 `9px 11px`。
+### 朱批与圈点（Marginalia）
+- 楷体朱字挂在版心左侧批语栏，以虚线引线指向正文；正文对应字句加朱色着重号（CSS `text-emphasis: filled dot`）。
+- **The Marginalia Truth Rule.** 朱批只渲染后端已持久化且带定位的意见（如 Patch 段落号、门禁违规行号）；无定位的意见进入右栏，不在正文伪造圈点。
 
-### Inputs / Fields
-- **Style:** 底部导演便签舱采用无框一体式设计——去除原生灰底 `<select>`，左侧便签类型切换（`剧情微调 ▾`）为圆润轻标签，选择「`插入回忆`」或「`切换视角`」时同行平滑展开天数或人物选择胶囊，右侧紧接无边框透明输入区。
-- **Focus:** 整舱 `:focus-within` 平滑点亮 `cobalt-action` 半透明描边并改变光标色（`caret-color`），无需局部输入框再套双层焦点框。
-- **Error / Disabled:** 忙碌运行态下模型路由保存与冲突动作按钮置灰禁用并给出明确原因提示。
+### 定稿钤印
+已定稿且无手改的章节，章末右下落 `56px` 白文「定稿」印，左侧等宽落款为真实 Git Commit SHA 与时间。
 
-### Navigation
-- **左栏双层结构**：上半区为可滚动的章节状态目录（展示章号、标题与字数/`已改`/`冲突`徽标），底部固定收口为跨章「**全书设定集**」三入口（`人物与物品档案` · `未解伏笔清单` · `剧情预案与废案`），点击后通过原生 `View Transitions` 在主画布切换为独立设定集纸面，右上角配醒目的 `<- 返回第 X 章正文`。
-- **右栏三页签**：精简为 `思考过程 | 运行状态 | 模型分配`，与展开态 `3x2` 工序矩阵建立点击直达联动（共享状态指示灯变形飞入右栏顶栏）。
+### 墨块主按钮（Ink Block CTA）
+日间墨黑底宣纸字、夜间拓白底墨字，`3px` 圆角，`2px 2px 0` 朱砂错位投影；主文案宋体加粗宽字距；右侧 `▾` 分体下拉收纳次级与破坏性动作。焦点环为 `2px` 墨色实线外轮廓（`2px` 偏移）。
 
-### Editorial Galley Sheet & Cinnabar Seal
-- **章节刊头与页边标号**：纸面顶部以双栏网格并列 `68px` 超细章节序号与衬线主标题（副信息置于标题下方），正文每段左侧页边预留 `P01` 等宽标号，鼠标悬停段落时以 `150ms` 柔和浮现供精准校勘定位；若本章经过 `Patch` 自动润色，在刊头下方展示可点击校勘签直达润色会话。
-- **阅读进度丝带与定稿钤印**：书稿纸面顶边内嵌 `2px` 朱砂阅读进度丝带，由纯 CSS `animation-timeline: scroll()` 零脚本驱动；新章或润色段落初现时经 `Web Animations API` 渐进遮罩如墨迹落纸般显影（支持快速切章随时中断与 `prefers-reduced-motion` 无感瞬显）；已定稿无手改章节末尾居中落 `-4deg` 宣纸纤维质感「`定稿`」朱印及真实 Git Commit SHA 落款。
+### 浮签（Director Note Dock）
+左端竖排朱底「浮签」签头，随后为楷体便签类型切换与宋体输入区，右端墨块「贴签」按钮；整体如一张夹在书页间的纸签。
+
+### 原版 DSH（保守改造）
+- 品牌位：白文「叙事」方印 + `NarrateOS` 黑体字样 + 楷体「叙事引擎」。
+- 配色：通过 `ctx.theme.overrideTokens` 换为宋刻本 / 碑拓色阶。
+- 中栏：浮动主舞台内侧一圈 `0.5px` 极淡版框发丝线。
+- 对话：助手回复正文改宋体舒展行距（代码、表格、工具卡片保持黑体与等宽）；引用块为浅朱底色块（无侧边竖条）。
+
+**The Conservative Host Rule.** 原版 DSH 只允许三类改动：颜色变量、公开 `data-*` 属性挂钩、少数无公开钩子区域的精确哈希类名（必须由单测从已安装 DSH 包源码断言存在）。禁止 `[class*=...]` 子串匹配；设置弹窗、插件管理、工具卡片、diff、终端只换色不改结构。
+
+## Motion
+
+- **水墨晕开（日间）**：新章或切章时段落依次由模糊到清晰（`1.1s`，逐段错开 `140ms`）。
+- **拓印显影（夜间）**：段落由暗到亮显出。
+- **钤印**：印章放大落下并回弹。
+- **呼吸**：运行中的印章与轨迹节点。
+- 所有动画提供 `prefers-reduced-motion: reduce` 瞬显降级，快速切章可随时中断。
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** 保持「单章手稿页签（`本章正文 | 本章细纲 | 改动对比`）」与左栏底部跨章「全书设定集」彻底物理分离，绝不混排在同一组 Tab 中。
-- **Do** 让中央工具栏、`3x2` 工序矩阵、冲突裁决卡、书稿纸面与底部导演便签舱严格遵守 `672px` 版心光学同宽对齐。
-- **Do** 基于 `.ns-studio-shell` 自身 `ResizeObserver` 实测容器宽度触发 `1200px`（收左栏）与 `820px`（右栏转抽屉）断点，无缝兼容 DSH 宿主侧栏伸缩与明暗主题切换。
-- **Do** 根据真实后端物理状态分流冲突裁决卡操作（已落盘跨章冲突提供自动修补与直接改稿；未落盘新章拦截提供带便签重写与走向调整，绝不渲染会报 `404` 的假改稿按钮）。
-- **Do** 为所有 `View Transitions`、`scroll()` 进度条与 `WAAPI` 墨迹显影提供 `@supports` 渐进增强兜底及 `@media (prefers-reduced-motion: reduce)` 降级路径。
+- **Do** 让每个古籍语汇对应一个真实产品机制（印谱 = 工种，墨钉 = 隐藏数据，朱批 = 带定位的校勘意见，钤印 = 定稿）。
+- **Do** 保持正文区安静：签名元素只出现在页边、刊头、书口、印谱与转场。
+- **Do** 日夜两态同时验收，夜间拓白晕散不得降低正文可读性。
+- **Do** 保持单章页签（`本章正文 | 本章细纲 | 改动对比`）与跨章「全书设定集」物理分离。
 
 ### Don't:
-- **Don't** 在卡片、提示条或列表项单侧使用超过 `1px` 的彩色粗边条（严禁 `border-left: 3px solid ...` 等 `side-tab` AI 模板痕迹）。
-- **Don't** 在章节主标题或卡片主标题正上方堆叠小号大写眉题（eyebrow / kicker label）；元数据一律置于主标题下方或同行右侧。
-- **Don't** 在界面文案中裸露 `WAL`、`WARPED`、`Kontoyiannis H_K`、`MATTR-500`、`force: false` 等底层工程黑话，也不要捏造后端未持久化的句级润色偏移高亮。
-- **Don't** 用打断式弹窗阻断切书或外部 `book_switched` 事件；未保存手改草稿一律按 `bookRoot + chapterNumber` 自动暂存并在切回时温和恢复。
-- **Don't** 用 Emoji 或字符符号充当界面图标；所有操作图标统一采用 `1.5px` 描边的内联矢量 SVG。
+- **Don't** 使用单侧粗彩条（`border-left: 3px solid ...` 等 side-tab）；当前项用小朱点或渐隐底标记。
+- **Don't** 用朱砂表达错误或危险；冲突与破坏性操作一律用胭脂色 + 裂印 + 中文标签。
+- **Don't** 堆砌与产品机制无关的古风装饰（祥云、回纹边框、毛笔字标题、仿古按钮）。
+- **Don't** 在界面文案中裸露 `WAL`、`WARPED`、`MATTR-500` 等工程术语。
+- **Don't** 用 Emoji 或字符充当图标；操作图标统一为 `1.5px` 描边内联 SVG。
+- **Don't** 用打断式弹窗阻断切书或外部 `book_switched` 事件。
