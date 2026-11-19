@@ -4,10 +4,12 @@ import { link, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path';
 import {
     generateStructuredJson,
+    isWarpedEntry,
     parseEntityMarkdown,
     sanitizeLoreForWriter,
     withTraceRun,
     type BookStore,
+    type EntityProfile,
     type LlmPort,
     type StructuredRetryOptions,
     type SystemPort
@@ -29,7 +31,7 @@ import {
 
 const DEFAULT_STATIC_BASE_MAX_CHARS = 1500;
 const DEFAULT_SAGA_FOLD_VOLUME_INTERVAL = 10;
-const CHAR_ENTITY_FILE_RE = /^(char_[a-zA-Z0-9_]+)\.md$/;
+const ENTITY_FILE_RE = /^((?:char|item)_[a-zA-Z0-9_]+)\.md$/;
 const NEGATIVE_PROHIBITION_RE =
     /(?:禁止|严禁|禁用|不要|不得|切忌|绝不|决不|不能|不可|切勿|莫要)/;
 const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+)$/;
@@ -40,6 +42,30 @@ const SEAL_RECEIPT = 'index/volume_seal.json';
 const SealReceipt = z.object({ id: z.string().uuid(), sealedVolume: z.number().int().positive(), nextVolume: z.number().int().positive(), archivedEntities: z.array(z.string()), completedBook: z.boolean() });
 const RESOLVED_SECTION = /^##\s+.*(?:Resolved|Archive|已回收|已解决|已兑现|归档)/i;
 const CLOSED_THREAD = /(?:status:\s*(?:OPEN_ENDING|RESOLVED|ARCHIVED)|\[(?:RESOLVED|ARCHIVED)\]|^\s*-\s+\[x\])/i;
+
+/** 按顶层条目保留原文与续行，标题只控制其后的归档区语义。 */
+function ledgerBlocks(markdown: string): Array<{ text: string; isEntry: boolean; archived: boolean }> {
+    let archivedLevel: number | null = null;
+    return markdown.split(/(?=^(?:#{1,6}\s|(?:[-*+]|\d+\.)\s))/m).map((text) => {
+        const heading = /^(#{1,6})\s+([^\n]*)/.exec(text);
+        if (heading) {
+            const level = heading[1]!.length;
+            if (archivedLevel !== null && level <= archivedLevel) archivedLevel = null;
+            if (/(?:Resolved|Archive|WARPED|已回收|已解决|已兑现|归档)/i.test(heading[2]!)) {
+                archivedLevel ??= level;
+            }
+        }
+        return { text, isEntry: /^(?:[-*+]|\d+\.)\s/.test(text), archived: archivedLevel !== null };
+    });
+}
+
+/** 只让未结、未作废条目参与下一卷实体保留，续行与父条目同进退。 */
+function activeLedgerText(markdown: string): string {
+    return ledgerBlocks(markdown)
+        .filter((block) => block.isEntry && !block.archived &&
+            !CLOSED_THREAD.test(block.text) && !/\bWARPED\b/i.test(block.text))
+        .map((block) => block.text).join('\n');
+}
 
 export interface VolumePipelineDeps {
     store: BookStore;
@@ -322,6 +348,9 @@ export class VolumePipeline {
                     formatVolumeCardRelPath(sealedVolume)
                 );
                 const sealedCardsText = (await readOptionalText(sealedCardsPath)) ?? '';
+                const threadsRelPath = 'world/open_threads.md';
+                const openThreadsText =
+                    (await readOptionalText(join(this.store.bookRoot, threadsRelPath))) ?? '';
 
                 // Step 1: 封存旧卷 -> 编纂 L1_volumes.md 摘要，按周期或完结折叠 L0_sagas.md
                 const sealRes = await generateStructuredJson(
@@ -335,7 +364,8 @@ export class VolumePipeline {
                         dynamicTail: [
                             `## 当前卷号\n第 ${sealedVolume} 卷 (当前 story_day: ${worldState.frontmatter.story_day})`,
                             `## index/L1_volumes.md\n${l1Current}`,
-                            `## ${formatVolumeCardRelPath(sealedVolume)}\n${sealedCardsText || '(暂无章卡记录)'}`
+                            `## ${formatVolumeCardRelPath(sealedVolume)}\n${sealedCardsText || '(暂无章卡记录)'}`,
+                            `## world/open_threads.md\n${openThreadsText || '(暂无)'}`
                         ].join('\n\n')
                     },
                     VolumeSealOutputSchema,
@@ -347,22 +377,30 @@ export class VolumePipeline {
                     `## 第 ${sealedVolume} 卷封存摘要 (vol_${sealedVolPad}) [story_day: ${sealRes.data.story_day_span}]`,
                     sealRes.data.volume_summary.trim()
                 ].join('\n');
-                const updatedL1Text = `${l1Current.trimEnd()}\n\n${sealBlock}\n`;
+                let updatedL1Text = `${l1Current.trimEnd()}\n\n${sealBlock}\n`;
 
                 const nextCardsRelPath = formatVolumeCardRelPath(nextVolume);
                 const shouldCreateNextCards =
                     !completeBook &&
                     (await readOptionalText(join(this.store.bookRoot, nextCardsRelPath))) === null;
 
-                // Step 2: 规划冷宫归档非伴随角色（保持单文件迁移，不拆 *_saga_XX.md）
-                const keepSet = new Set<string>([
+                // 编译前只读完整活跃档案，新卷因果确定后才计算冷归档集合。
+                const companionIds = new Set<string>([
                     worldState.frontmatter.pov_character,
                     ...(options.companionEntityIds ?? [])
                 ]);
                 const entitiesDir = join(this.store.bookRoot, 'entities');
                 const coldArchiveDir = join(entitiesDir, 'cold_archive');
-                const { entitiesToArchive, survivingEntityFiles } =
-                    await this.planColdArchiveEntities(entitiesDir, keepSet);
+                const entityDocuments: Array<{ fileName: string; profile: EntityProfile; raw: string }> = [];
+                const entityFiles = await readdir(entitiesDir).catch((err: unknown) => {
+                    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return [];
+                    throw err;
+                });
+                for (const fileName of entityFiles.sort()) {
+                    if (!ENTITY_FILE_RE.test(fileName)) continue;
+                    const raw = await readFile(join(entitiesDir, fileName), 'utf8');
+                    entityDocuments.push({ fileName, raw, profile: parseEntityMarkdown(raw) });
+                }
 
                 // Step 3: 提炼风格修订 -> 合入 static_base_and_voice.md (<= static_base_max_chars)，禁止暴力硬截断
                 const opsStyleRelPath = '.ops/style_amendments.md';
@@ -388,13 +426,10 @@ export class VolumePipeline {
                     : null;
 
                 // Step 4: 纪元折叠 & 完结封笔 vs 新卷双文件包络编译
-                const threadsRelPath = 'world/open_threads.md';
-                const openThreadsText =
-                    (await readOptionalText(join(this.store.bookRoot, threadsRelPath))) ?? '';
                 const currentL0Text = (await readOptionalText(l0Path)) ?? '';
                 const shouldFoldSaga =
                     sealedVolume % sagaFoldInterval === 0 || completeBook;
-                const updatedL0Text = shouldFoldSaga
+                let updatedL0Text = shouldFoldSaga
                     ? appendEpochFoldToL0Sagas({
                           currentL0: currentL0Text,
                           updatedL1: updatedL1Text,
@@ -421,19 +456,13 @@ export class VolumePipeline {
                     const currentDirectorPlan = (await this.store.readArcDirectorPlan()) ?? '';
                     const currentHorizon = (await this.store.readFutureHorizon()) ?? '';
 
-                    const survivingParts: string[] = [];
-                    for (const fileName of survivingEntityFiles) {
-                        const raw = await readOptionalText(join(entitiesDir, fileName));
-                        if (raw) survivingParts.push(raw.trim());
-                    }
-
                     const envelopeRes = await generateStructuredJson(
                         this.llm,
                         {
                             pool: 'strong_creative',
                             traceStage: 'volume.envelope',
                             staticPrefixBlocks: [
-                                '你是长篇小说卷级大纲编译器。请基于《作者契约》、L0 纪元总表、L1 卷级总表、当前导演计划、存活角色档案与未解伏笔，编译下一卷：\n1) current_arc_envelope（仅含对写手安全的正向舞台常态与主冲突，严禁包含 Stage Ceiling、否定禁令词、WARPED 或未揭底牌）；\n2) arc_director_plan（承载阶段天花板 Stage Ceiling、未揭拐点与下一卷开篇节拍）；\n3) future_horizon（下一卷世界默认惯性事件），输出 JSON。'
+                                '你是长篇小说卷级大纲编译器。请基于《作者契约》、L0 纪元总表、L1 卷级总表、当前导演计划、角色与道具档案及完整伏笔备忘录（含本卷已结案记录），编译下一卷：\n1) current_arc_envelope（仅含对写手安全的正向舞台常态与主冲突，严禁包含 Stage Ceiling、否定禁令词、WARPED 或未揭底牌）；\n2) arc_director_plan（承载阶段天花板 Stage Ceiling、未揭拐点与下一卷开篇节拍）；\n3) future_horizon（下一卷世界默认惯性事件，每条注明可证伪的 premise 成立前提），输出 JSON。'
                             ],
                             dynamicTail: [
                                 `## 目标卷号\n第 ${nextVolume} 卷`,
@@ -441,7 +470,7 @@ export class VolumePipeline {
                                 `## index/L0_sagas.md\n${effectiveL0Text || '(暂无)'}`,
                                 `## index/L1_volumes.md\n${updatedL1Text}`,
                                 `## 当前 world/arc_director_plan.md\n${currentDirectorPlan || '(暂无)'}`,
-                                `## 存活角色与道具档案\n${survivingParts.join('\n\n') || '(暂无)'}`,
+                                `## 当前角色与道具档案\n${entityDocuments.map((doc) => doc.raw.trim()).join('\n\n') || '(暂无)'}`,
                                 `## world/open_threads.md\n${openThreadsText || '(暂无)'}`,
                                 `## 当前 world/future_horizon.md\n${currentHorizon || '(暂无)'}`
                             ].join('\n\n')
@@ -457,7 +486,36 @@ export class VolumePipeline {
                     );
                     nextDirectorPlanText = `${envelopeRes.data.arc_director_plan}\n`;
                     nextFutureHorizonText = `${envelopeRes.data.future_horizon.trimEnd()}\n`;
+
+                    const activeBlocks: string[] = [];
+                    const resolvedBlocks: string[] = [];
+                    for (const block of ledgerBlocks(openThreadsText)) {
+                        const resolved = block.isEntry && /\bstatus\s*:\s*RESOLVED\b/i.test(block.text);
+                        (resolved ? resolvedBlocks : activeBlocks).push(block.text);
+                    }
+                    if (resolvedBlocks.length > 0) {
+                        sealedThreadsText = activeBlocks.join('');
+                        updatedL1Text += `\n### 本卷已结伏笔\n\n${resolvedBlocks.join('')}`;
+                        if (shouldFoldSaga) {
+                            updatedL0Text = appendEpochFoldToL0Sagas({
+                                currentL0: currentL0Text,
+                                updatedL1: updatedL1Text,
+                                openThreadsText: sealedThreadsText,
+                                sealedVolume,
+                                sagaInterval: sagaFoldInterval,
+                                completeBook,
+                                fallbackSummary: sealRes.data.volume_summary
+                            });
+                        }
+                    }
                 }
+
+                const entitiesToArchive = await this.planColdArchiveEntities(
+                    entityDocuments,
+                    companionIds,
+                    activeLedgerText(sealedThreadsText ?? openThreadsText),
+                    activeLedgerText(nextFutureHorizonText ?? (await this.store.readFutureHorizon()) ?? '')
+                );
 
                 // =========================================================================
                 // 阶段 B：WAL 写前登记 -> 磁盘写入 -> 显式受控路径 Git 提交 -> 后置打 Tag
@@ -631,49 +689,66 @@ export class VolumePipeline {
     }
 
     private async planColdArchiveEntities(
-        entitiesDir: string,
-        keepSet: ReadonlySet<string>
-    ): Promise<{
-        entitiesToArchive: Array<{ entityId: string; fileName: string; trackedInHead: boolean }>;
-        survivingEntityFiles: string[];
-    }> {
-        let entityFiles: string[] = [];
-        try {
-            entityFiles = await readdir(entitiesDir);
-        } catch (err: unknown) {
-            if ((err as { code?: string }).code !== 'ENOENT') {
-                throw err;
+        documents: ReadonlyArray<{ fileName: string; profile: EntityProfile }>,
+        companionIds: ReadonlySet<string>,
+        activeThreads: string,
+        activeHorizon: string
+    ): Promise<Array<{ entityId: string; fileName: string; trackedInHead: boolean }>> {
+        const coldDir = join(this.store.bookRoot, 'entities/cold_archive');
+        const coldFiles = await readdir(coldDir).catch((err: unknown) => {
+            if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return [];
+            throw err;
+        });
+        const nameOwners = new Map<string, string | null>();
+        const profiles = documents.map((doc) => doc.profile);
+        for (const fileName of coldFiles) {
+            if (!ENTITY_FILE_RE.test(fileName)) continue;
+            profiles.push(parseEntityMarkdown(await readFile(join(coldDir, fileName), 'utf8')));
+        }
+        for (const profile of profiles) {
+            const id = profile.metadata.entity_id;
+            for (const name of new Set([profile.metadata.canonical_name, ...profile.metadata.unique_aliases])) {
+                if (name.length < 2) continue;
+                const prior = nameOwners.get(name);
+                nameOwners.set(name, prior === undefined || prior === id ? id : null);
             }
         }
 
-        const entitiesToArchive: Array<{
-            entityId: string;
-            fileName: string;
-            trackedInHead: boolean;
-        }> = [];
-        const survivingEntityFiles: string[] = [];
-        for (const fileName of entityFiles.sort()) {
-            if (!fileName.endsWith('.md')) continue;
-            const charMatch = CHAR_ENTITY_FILE_RE.exec(fileName);
-            if (charMatch?.[1] && !keepSet.has(charMatch[1])) {
-                const entityId = charMatch[1];
-                if ((await readOptionalText(join(entitiesDir, 'cold_archive', fileName))) !== null) {
-                    throw new ValidationError(`冷宫已存在同名档案: ${fileName}`);
-                }
-                const raw = await readFile(join(entitiesDir, fileName), 'utf8');
-                parseEntityMarkdown(raw);
-                const trackedInHead =
-                    (await this.system.readFileAtRef(
-                        this.store.bookRoot,
-                        'HEAD',
-                        `entities/${fileName}`
-                    )) !== null;
-                entitiesToArchive.push({ entityId, fileName, trackedInHead });
-                continue;
-            }
-            survivingEntityFiles.push(fileName);
+        const causalText = `${activeThreads}\n${activeHorizon}`;
+        const keepSet = new Set(companionIds);
+        const activeCompanionIds = new Set(documents
+            .map((doc) => doc.profile.metadata.entity_id)
+            .filter((id) => id.startsWith('char_') && companionIds.has(id)));
+        for (const match of causalText.matchAll(/\b(?:char|item)_[a-zA-Z0-9_]+\b/g)) keepSet.add(match[0]);
+        const holderNames: string[] = [];
+        for (const [name, id] of nameOwners) {
+            if (id === null) continue;
+            if (causalText.includes(name)) keepSet.add(id);
+            if (activeCompanionIds.has(id)) holderNames.push(name);
         }
-        return { entitiesToArchive, survivingEntityFiles };
+
+        const coldFileSet = new Set(coldFiles);
+        const entitiesToArchive: Array<{ entityId: string; fileName: string; trackedInHead: boolean }> = [];
+        for (const { fileName, profile } of documents) {
+            const entityId = profile.metadata.entity_id;
+            if (keepSet.has(entityId)) continue;
+            if (entityId.startsWith('item_') && profile.acquiredState.some((entry) => {
+                if (isWarpedEntry(entry)) return false;
+                const text = [entry.text, ...entry.continuationLines, ...Object.values(entry.ledger ?? {})].join('\n');
+                for (const match of text.matchAll(/\bchar_[a-zA-Z0-9_]+\b/g)) {
+                    if (activeCompanionIds.has(match[0])) return true;
+                }
+                return holderNames.some((name) => text.includes(name));
+            })) continue;
+            if (coldFileSet.has(fileName)) {
+                throw new ValidationError(`冷宫已存在同名档案: ${fileName}`);
+            }
+            const trackedInHead = (await this.system.readFileAtRef(
+                this.store.bookRoot, 'HEAD', `entities/${fileName}`
+            )) !== null;
+            entitiesToArchive.push({ entityId, fileName, trackedInHead });
+        }
+        return entitiesToArchive;
     }
 
     private async refineStyleAmendments(

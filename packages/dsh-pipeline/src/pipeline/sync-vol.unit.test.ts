@@ -630,6 +630,83 @@ describe('SyncPipeline & VolumePipeline 单元测试', () => {
         expect(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8')).toContain('四号旧仓库');
     });
 
+    it('换卷先编译完整伏笔，再原样封存已结条目并按新卷因果与持有状态归档角色和道具', async () => {
+        const entity = (id: string, name: string, state = '', aliases: string[] = []) => [
+            '---', `entity_id: ${id}`, `canonical_name: ${name}`,
+            `unique_aliases: ${JSON.stringify(aliases)}`, 'contextual_titles: []',
+            'historical_anchors: []', 'last_seen_ch: 8', '---',
+            '## 1. Innate Locks', '- [vis: PUBLIC] 旧伤未愈',
+            '## 2. Acquired State & Numeric Ledger', state,
+            '## 3. Irreversible Trajectory', '- [day:0 | ch:1] 永久离开旧港',
+            '## 4. Recent Sliding Buffer & Voice', ''
+        ].join('\n');
+        const root = await createGitBookWorkspace(tempDirs, 'vol-causal-archive', {
+            currentChapter: 10,
+            extraEntities: {
+                char_thread: entity('char_thread', '旧账房', '', ['账房先生']),
+                char_future: entity('char_future', '新船长'),
+                char_gone: entity('char_gone', '旧舵工'),
+                char_warped: entity('char_warped', '旧报人'),
+                char_prefix: entity('char_prefix', '旧守卫'),
+                char_ambig: entity('char_ambig', '李掌柜', '', ['掌柜先生']),
+                char_one: entity('char_one', '王'),
+                item_comp: entity('item_comp', '伴随印章'),
+                item_cold: entity('item_cold', '旧包裹', '- [status: ACTIVE] char_other 随身持有'),
+                item_held: entity('item_held', '随身钥匙', '- [status: ACTIVE] char_002 随身持有'),
+                item_old: entity('item_old', '旧钥匙', '- [status: WARPED] char_002 曾随身持有'),
+                item_orphan: entity('item_orphan', '旧账簿'),
+                item_future: entity('item_future', '新船票')
+            }
+        });
+        const system = new NodeSystemAdapter();
+        const store = new BookStore(root, system);
+        const world = await store.readWorldState();
+        world.frontmatter.current_volume = 10;
+        await store.writeWorldState(world);
+        await writeFile(join(root, 'entities/cold_archive/char_other.md'), entity('char_other', '陈掌柜', '', ['掌柜先生']));
+        const resolved = '- [thread_done | status: RESOLVED | ch:10] char_gone 的旧案已结\n  关键证词原样留存。\n> 同一条目的补充引文。\n\n';
+        const active = '- [thread_open | status: ACTIVE] 账房先生仍欠一份口供\n';
+        const threads = `# 伏笔\n\n## 活跃\n${resolved}${active}\n## 已回收伏笔归档\n`;
+        await writeFile(join(root, 'world/open_threads.md'), threads);
+        await system.commitPaths(root, ['world/world_state.md', 'world/open_threads.md', 'entities/cold_archive/char_other.md'], 'test: prepare causal archive');
+        const { llm, requests } = createMockLlmPort((req) => {
+            if (req.traceStage === 'volume.seal') {
+                return JSON.stringify({ volume_summary: '旧港清账。', story_day_span: '0 ~ 10' });
+            }
+            return JSON.stringify({
+                current_arc_envelope: '# 新港\n新船开始进港。',
+                arc_director_plan: '# 新卷计划\n逐步公开新港冲突。',
+                future_horizon: [
+                    '# 新卷未来事件',
+                    '- [status: ACTIVE] 新船长持 item_future 登船，前提：新航线开放。',
+                    '- [status: ACTIVE] char_prefix_suffix 与掌柜先生商议王朝旧账。',
+                    '- [status: WARPED] 旧报人原定进港。',
+                    '  char_gone 原定同行。',
+                    '## Archived WARPED',
+                    '### 旧船计划',
+                    '- char_prefix 与 item_orphan 已退场。'
+                ].join('\n')
+            });
+        });
+        const result = await new VolumePipeline({ store, system, llm }).advanceVolume({ companionEntityIds: ['char_002', 'item_comp', 'char_other'] });
+        for (const stage of ['volume.seal', 'volume.envelope']) {
+            expect(requests.find((req) => req.traceStage === stage)?.dynamicTail).toContain(threads);
+        }
+        const remaining = await readFile(join(root, 'world/open_threads.md'), 'utf8');
+        expect(remaining).toContain(active);
+        expect(remaining).not.toContain('thread_done');
+        expect(remaining).not.toContain('关键证词');
+        expect(await readFile(join(root, 'index/L1_volumes.md'), 'utf8')).toContain(resolved);
+        expect(await readFile(join(root, 'index/L0_sagas.md'), 'utf8')).toContain('关键证词原样留存');
+        expect(result.archivedEntities).toEqual(['char_ambig', 'char_gone', 'char_one', 'char_prefix', 'char_warped', 'item_cold', 'item_old', 'item_orphan']);
+        const snapshot = await store.loadSnapshot();
+        for (const id of ['char_001', 'char_002', 'char_thread', 'char_future', 'item_comp', 'item_held', 'item_future']) {
+            expect(snapshot.entities[id]?.metadata.entity_id).toBe(id);
+        }
+        expect(await readFile(join(root, 'entities/cold_archive/char_gone.md'), 'utf8')).toBe(entity('char_gone', '旧舵工'));
+        expect(await system.readFileAtRef(root, result.commitSha, 'world/open_threads.md')).toBe(remaining);
+    });
+
     it('VolumePipeline 废除 git add .、先提交后打 Tag、注入 author_charter 拆离导演计划并折叠 L0_sagas.md', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'vol-advance-isolation', {
             storyDay: 20,
