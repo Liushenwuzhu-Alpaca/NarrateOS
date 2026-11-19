@@ -9,8 +9,8 @@
    - `narration_subjectivity`：叙述人称主观度枚举，仅允许 `'objective_third'`（默认，第三人称客观限知镜头）或 `'subjective_first'`（强主观第一人称）；
    - `excluded_cliches`：显式排除的廉价套路清单（仅存契约，对写手物理屏蔽）；
    - `t0_anchor`：作者原话逐字锁定的 `T0` 开局现场（时间、地点、在场人物、持有物与初始困境）。
-2. **授权与预算边界（写入 `world/book_config.yaml`）**：
-   - `authorization_boundary`：运行期授权边界说明；
+   - `authorization_boundary`：运行期授权边界说明，同样写入作者契约。
+2. **运行预算（写入 `world/book_config.yaml`）**：
    - `max_auto_rollback_chapters`：整数 `>= 0`（`0` 表示关闭自动回滚全由人工确认，默认 `3`）；
    - `writer_token_budget`：写手窗口 Token 预算（`null` 或正整数）；
    - `craft_plugins`：启用的外置认知插件名列表（默认 `[]`）。
@@ -36,4 +36,4 @@
 
 - `static_base_and_voice` 必须精炼在 **1,500 字以内**，仅承载：世界常驻底层规则、主要空间拓扑、人称主观度基线、可执行句法纪律（长篇设定切分至 `lore_entries`）；
 - `world_summary`、`static_base_and_voice`、`current_arc_envelope` 均须通过 `StaticProseGate`：写具体物象、地形、规程与动作结果，不使用思维标签/`<!-- -->`、空泛修饰或人体微距套话、不作说教式结尾；
-- `voice_samples`：作者提供原文样章时整理为 `{ tag, sample }`（每条须通过 `StaticProseGate`）；**未提供样章时必须传 `[]`**，待第 1 章定稿校准后再经 `Voice Harvest` 采集 3-5 句脱敏表达标本。
+- `voice_samples`：作者提供样章时提取脱敏的 `author_sample`；无样章可传 `[]`，或提交 3-4 条通过静态门禁的 `boot_seed`（15-45 字，不含角色专名，包含硬动作或对话）。

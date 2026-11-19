@@ -123,8 +123,10 @@ async function validateStagedDreamEntities(
 ): Promise<void> {
     for (const [relPath, stagedContent] of pendingWrites.entries()) {
         const entityMatch = ENTITY_PROFILE_PATH_RE.exec(relPath);
-        if (!entityMatch?.[1] || !ENTITY_ID_PATTERN_RE.test(entityMatch[1])) {
-            continue;
+        if (!entityMatch?.[1]) continue;
+        if (!ENTITY_ID_PATTERN_RE.test(entityMatch[1])) {
+            if (relPath.startsWith('entities/cold_archive/')) continue;
+            throw new GateValidationError('yield_dream_commit', `非法活跃实体文件名: ${relPath}`);
         }
         const fileStem = entityMatch[1];
         const stagedProfile = parseEntityMarkdown(stagedContent);
@@ -233,7 +235,6 @@ function normalizeStagedSignalsJsonl(stagedSignalsRaw: string | undefined): stri
         return undefined;
     }
     const lines = stagedSignalsRaw.replace(/\r\n/g, '\n').split('\n');
-    const validLines: string[] = [];
     for (let idx = 0; idx < lines.length; idx += 1) {
         const trimmed = lines[idx]!.trim();
         if (!trimmed) continue;
@@ -245,9 +246,8 @@ function normalizeStagedSignalsJsonl(stagedSignalsRaw: string | undefined): stri
                 `.ops/signals.jsonl 第 ${idx + 1} 行不是合法 JSON`
             );
         }
-        validLines.push(trimmed);
     }
-    return validLines.length > 0 ? `${validLines.join('\n')}\n` : '';
+    return stagedSignalsRaw && !stagedSignalsRaw.endsWith('\n') ? `${stagedSignalsRaw}\n` : stagedSignalsRaw;
 }
 
 async function writeStagedDreamFiles(
@@ -424,6 +424,13 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 const normalizedStagedSignals = normalizeStagedSignalsJsonl(
                     pendingWrites.get('.ops/signals.jsonl')
                 );
+                if (normalizedStagedSignals !== undefined) {
+                    const previous = await readDiskOptional(join(bookRoot, '.ops/signals.jsonl')) ?? '';
+                    const prefix = previous && !previous.endsWith('\n') ? `${previous}\n` : previous;
+                    if (!normalizedStagedSignals.startsWith(prefix)) {
+                        throw new GateValidationError('yield_dream_commit', '.ops/signals.jsonl 只允许追加，已有记录不可修改');
+                    }
+                }
 
                 // 4. 1ms 跨文件外键可达性校验（char_* / item_* / ch_XXXX）
                 for (const [relPath, content] of pendingWrites.entries()) {
@@ -432,7 +439,7 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                     assertTextForeignKeys(relPath, content, reachableKeys);
                 }
                 for (const trigger of parsed.spotlight_triggers) {
-                    if (!reachableKeys.has(trigger.entity_id)) {
+                    if (!ENTITY_ID_PATTERN_RE.test(trigger.entity_id) || !reachableKeys.has(trigger.entity_id)) {
                         throw new ForeignKeyError([trigger.entity_id], 'spotlight_triggers');
                     }
                 }

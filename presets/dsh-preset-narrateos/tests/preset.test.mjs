@@ -524,10 +524,8 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
     for (const marker of [
         '已由管线预注入',
         'manuscripts/ch_0001.md',
-        '1-6 个自然段',
-        '<= 35%',
-        '7+ 段',
-        '> 35%',
+        '本书任务给出的上限',
+        '本书占比上限',
         'quote_draft',
         'source_ref',
         'quote_source'

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, open, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
@@ -483,20 +483,6 @@ async function writeBootBookArtifacts(
     };
 }
 
-async function rollbackFailedBootDirectory(bookRoot: string, bookRootExistedBefore: boolean): Promise<void> {
-    if (!bookRootExistedBefore) {
-        await rm(bookRoot, { recursive: true, force: true }).catch(() => undefined);
-        return;
-    }
-    try {
-        const entries = await readdir(bookRoot);
-        await Promise.all(
-            entries.map((entry) => rm(join(bookRoot, entry), { recursive: true, force: true }))
-        );
-    } catch {
-        // 保留原始建库失败原因，忽略回滚清理次生异常
-    }
-}
 
 /**
  * 锁定《作者契约》并原子初始化作品独立 Git 仓库，随后原地停机（永不自动触发第 1 章）。
@@ -521,88 +507,44 @@ export async function lockCharterAndBoot(
     );
 
     await mkdir(resolvedBooksRoot, { recursive: true });
-    const bootLockPath = join(resolvedBooksRoot, `.boot-lock-${parsed.book_slug}.lock`);
-    try {
-        const handle = await open(bootLockPath, 'wx');
-        await handle.close();
-    } catch (err: unknown) {
-        if ((err as { code?: string }).code === 'EEXIST') {
-            throw new Error(`开书正在进行中，禁止并发建库覆盖同一作品: ${parsed.book_slug}`);
-        }
-        throw err;
+    if (existsSync(bookRoot) && (await readdir(bookRoot)).length > 0) {
+        throw new Error(`开书目标目录非空，禁止覆盖已有作品: ${bookRoot}`);
     }
 
-    let bookRootExistedBefore = false;
+    // 在同一文件系统内独立建库；rename 只能替换空目录，同 slug 并发发布只有一方成功。
+    // 崩溃遗留的临时目录不占用目标 slug，也不会成为下一次开书的回滚对象。
+    const pending = await mkdtemp(join(resolvedBooksRoot, `.boot-${parsed.book_slug}-`));
+    let result: LockCharterAndBootResult;
     try {
-        bookRootExistedBefore = existsSync(bookRoot);
-        if (bookRootExistedBefore && (await readdir(bookRoot)).length > 0) {
-            throw new Error(`开书目标目录非空，禁止覆盖已有作品: ${bookRoot}`);
-        }
-
-        if (!bookRootExistedBefore) {
-            await mkdir(bookRoot);
-        }
-
-        try {
-            const bootCommitPaths = await prepareBootDirectorySkeleton(
-                bookRoot,
-                parsed.lore_entries.length > 0
-            );
-            const system = options.system ?? new NodeSystemAdapter();
-            const store = new BookStore(bookRoot, system);
-
-            const { entityIds, loreIds, voiceSampleCount } = await writeBootBookArtifacts(
-                bookRoot,
-                store,
-                parsed,
-                cleanVoiceSamples,
-                bootCommitPaths
-            );
-
-            // 初始化 .ops/tx_state.json (last_committed_ch = 0) 并使用显式受控路径执行初始 Git 提交
-            await store.initializeWalFromDisk();
-            bootCommitPaths.push('.ops/tx_state.json');
-
-            await system.initRepo(bookRoot);
-            const { sha } = await system.commitPaths(
-                bookRoot,
-                bootCommitPaths,
-                `chore(boot): initialize ${parsed.book_slug}`
-            );
-
-            const result: LockCharterAndBootResult = {
-                bookRoot,
-                bookSlug: parsed.book_slug,
-                commitSha: sha,
-                entityIds,
-                loreIds,
-                voiceSampleCount,
-                filteredVoiceSampleCount,
-                halted: true
-            };
-
-            if (options.onBookBooted) {
-                const switchOutcome = await options.onBookBooted(result);
-                if (switchOutcome && typeof switchOutcome === 'object') {
-                    result.switchedBook = switchOutcome.switchedBook;
-                    if (switchOutcome.switchConflictReason !== undefined) {
-                        result.switchConflictReason = switchOutcome.switchConflictReason;
-                    }
-                }
-            }
-
-            return result;
-        } catch (err: unknown) {
-            await rollbackFailedBootDirectory(bookRoot, bookRootExistedBefore);
-            throw err;
-        }
-    } finally {
-        await rm(bootLockPath, { force: true }).catch(() => undefined);
+        const paths = await prepareBootDirectorySkeleton(pending, parsed.lore_entries.length > 0);
+        const system = options.system ?? new NodeSystemAdapter();
+        const store = new BookStore(pending, system);
+        const assets = await writeBootBookArtifacts(pending, store, parsed, cleanVoiceSamples, paths);
+        await store.initializeWalFromDisk();
+        paths.push('.ops/tx_state.json');
+        await system.initRepo(pending);
+        const { sha } = await system.commitPaths(pending, paths, `chore(boot): initialize ${parsed.book_slug}`);
+        await rename(pending, bookRoot);
+        result = { bookRoot, bookSlug: parsed.book_slug, commitSha: sha, ...assets, filteredVoiceSampleCount, halted: true };
+    } catch (error) {
+        await rm(pending, { recursive: true, force: true });
+        throw error;
     }
+
+    // 通知不是建库事务的一部分。回调失败不得清理已发布的仓库。
+    const outcome = await options.onBookBooted?.(result);
+    if (outcome) {
+        result.switchedBook = outcome.switchedBook;
+        result.switchConflictReason = outcome.switchConflictReason;
+    }
+    return result;
 }
 
 /** 创建主对话开书建库工具 lock_charter_and_boot */
-export function createLockCharterAndBootTool(options: LockCharterAndBootOptions): ToolDefinition {
+export function createLockCharterAndBootTool(
+    options: LockCharterAndBootOptions,
+    boot: typeof lockCharterAndBoot = lockCharterAndBoot
+): ToolDefinition {
     return defineTool({
         name: 'lock_charter_and_boot',
         description:
@@ -671,7 +613,7 @@ export function createLockCharterAndBootTool(options: LockCharterAndBootOptions)
                 enum: ['objective_third', 'subjective_first'],
                 description: '叙述人称主观度（objective_third | subjective_first，默认 objective_third）'
             },
-            writer_token_budget: { type: 'integer', description: '写手窗口 Token 预算上限' },
+            writer_token_budget: { oneOf: [{ type: 'integer' }, { type: 'null' }], description: '写手窗口 Token 预算上限（正整数；null 表示无上限）' },
             max_auto_rollback_chapters: { type: 'integer', description: '最大自动回滚章数（>=0，0 表示关闭自动回滚，默认 3）' },
             craft_plugins: { type: 'array', items: { type: 'string' }, description: '启用的认知插件列表' },
             model_routing: { type: 'json', description: '单书模型路由覆盖表' }
@@ -713,7 +655,7 @@ export function createLockCharterAndBootTool(options: LockCharterAndBootOptions)
         isConcurrencySafe: () => false,
         async execute(args, exec) {
             exec.signal.throwIfAborted();
-            const res = await lockCharterAndBoot(args as LockCharterAndBootInput, options);
+            const res = await boot(args as LockCharterAndBootInput, options);
             return {
                 bookRoot: res.bookRoot,
                 bookSlug: res.bookSlug,

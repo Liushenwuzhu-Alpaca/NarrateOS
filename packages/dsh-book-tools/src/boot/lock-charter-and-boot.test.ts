@@ -121,6 +121,32 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         await expect(lockCharterAndBoot(input, { booksRoot })).rejects.toThrow(/slotKey.*重复/);
     });
 
+    it('通知抛错后，已提交的作品仍存在且不能被重建覆盖', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const input = buildMinimalValidBootInput();
+        await expect(lockCharterAndBoot(input, { booksRoot, onBookBooted() { throw new Error('notify failed'); } })).rejects.toThrow('notify failed');
+        expect(existsSync(join(booksRoot, input.book_slug, '.git/HEAD'))).toBe(true);
+        await expect(lockCharterAndBoot(input, { booksRoot })).rejects.toThrow('禁止覆盖');
+    });
+
+    it('同名并发开书只发布一个完整仓库，未发布的临时目录不占用 slug', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const input = buildMinimalValidBootInput();
+        await mkdir(join(booksRoot, `.boot-${input.book_slug}-orphan`), { recursive: true });
+        const results = await Promise.allSettled([lockCharterAndBoot(input, { booksRoot }), lockCharterAndBoot(input, { booksRoot })]);
+        expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+        expect(existsSync(join(booksRoot, input.book_slug, '.git/HEAD'))).toBe(true);
+    });
+
+    it('开书的公开文风与卷环境都拒绝直接披露未揭秘拐点', async () => {
+        const booksRoot = await makeTempBooksRoot();
+        const pivot = '真正的港口守门人已经在六年前调换了钥匙';
+        for (const field of ['current_arc_envelope', 'static_base_and_voice']) {
+            const input = buildMinimalValidBootInput({ [field]: pivot, unrevealed_pivots: [pivot] });
+            await expect(lockCharterAndBoot(input, { booksRoot })).rejects.toThrow(BootGateError);
+        }
+    });
+
     it('支持单卷 (>=1)、0 条 OMNISCIENT_SECRET、0 条声纹起步，落盘 author_charter 与 arc_director_plan 并原地停机不写 ch_0001.md', async () => {
         const booksRoot = await makeTempBooksRoot();
         let bootedCallbackCount = 0;
@@ -329,7 +355,20 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         expect(ctx.narrateTools.booksRoot).toBe(booksRoot);
         const toolsService = ctx.narrateTools;
 
-        await toolsFiber.dispose();
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        const boot = toolsService.lockCharterAndBoot(buildMinimalValidBootInput(), {
+            onBookBooted: async () => { entered(); await gate; }
+        });
+        await started;
+        let disposed = false;
+        const disposal = toolsFiber.dispose().then(() => { disposed = true; });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        try { expect(disposed).toBe(false); } finally { release(); }
+        await boot;
+        await disposal;
         await expect(
             toolsService.lockCharterAndBoot(buildMinimalValidBootInput({ book_slug: 'after-dispose' }))
         ).rejects.toThrow('已卸载');

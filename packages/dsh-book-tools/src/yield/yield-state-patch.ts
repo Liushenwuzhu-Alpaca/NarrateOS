@@ -391,10 +391,7 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             }
 
             let effectiveWorldUpdate = applyOptions?.worldStateUpdate;
-            if (
-                effectiveWorldUpdate === undefined &&
-                (parsed.story_day_delta > 0 || parsed.world_summary_markdown !== undefined)
-            ) {
+            if (effectiveWorldUpdate === undefined) {
                 const currentWorld = await bookStore.readWorldState();
                 effectiveWorldUpdate = {
                     story_day: currentWorld.frontmatter.story_day + parsed.story_day_delta,

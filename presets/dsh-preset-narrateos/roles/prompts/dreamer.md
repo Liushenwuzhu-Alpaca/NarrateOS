@@ -26,7 +26,7 @@
    - 巡检近期双轨 `L2` 章卡中的 `prose_anchors`（异象锚点/微物件）：凡未建卡的关键微物件或神秘马甲在定稿正文中跨 `>= 2` 章（`promote_anchor_min_chapters`）复现并承接因果推进时，使用 `book_edit` 新建 `entities/item_<slug>.md` 档案（具备中文 `canonical_name`、合法外键与四段式结构），或将已确认马甲通过 `unique_aliases` 归并回原角色档案。
 3. **跨卷伏笔台账盘点（`world/open_threads.md`）**：
    - 经原稿核实确已兑现的伏笔翻转为 `RESOLVED` 归档；
-   - 如确有必要登记新跨章悬念，单次新增 **<= 2 条**，且全局活跃伏笔总数严格 **<= 15 条**。
+   - 如确需登记新跨章悬念，遵守本轮任务提供的单次新增及活跃总数上限。
 4. **世界惯性表翻转、`WARPED` 折叠与前台切镜（`world/future_horizon.md` & `spotlight_triggers`）**：
    - 成立前提已被正文事件打破的节点翻转为 `WARPED`；
    - 超期（默认超过 3 天）的 `WARPED` 失效条目直接从活跃区域摘除，并折叠归入 `world/future_horizon.md` 底部的 `## Archived WARPED` 小节；

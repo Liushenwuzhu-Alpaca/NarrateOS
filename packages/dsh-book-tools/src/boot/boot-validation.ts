@@ -1,4 +1,5 @@
 import {
+    normalizeForQuoteMatch,
     assertSafeEntityTagValue,
     BookContextAssemblyConfigSchema,
     BookDreamingConfigSchema,
@@ -12,6 +13,7 @@ import {
     type CompiledLoreEntry
 } from '../yield/schemas.js';
 import { collectEntityRefs, hasOmniscientSecretMarker } from '../yield/shared.js';
+import { extractSubstantiveNormalizedClauses } from '../yield/restricted-clauses.js';
 
 const DEFAULT_STATIC_BASE_MAX_CHARS = BookContextAssemblyConfigSchema.parse({}).static_base_max_chars;
 const DEFAULT_MAX_ACTIVE_OPEN_THREADS = BookDreamingConfigSchema.parse({}).max_active_open_threads;
@@ -54,6 +56,8 @@ export interface BootValidationPayload {
     world_summary: string;
     static_base_and_voice: string;
     current_arc_envelope: string;
+    stage_ceiling?: string;
+    unrevealed_pivots?: readonly string[];
     voice_samples: ReadonlyArray<BootVoiceSampleInput>;
 }
 
@@ -127,10 +131,21 @@ function validateCleanroomNarrativeFields(
         );
     }
 
+    const restricted = [payload.stage_ceiling ?? '', ...(payload.unrevealed_pivots ?? [])];
+    for (const entity of payload.entities) {
+        for (const entry of [...entity.innateLocks, ...entity.acquiredState]) {
+            if (entry.visibility === 'OMNISCIENT_SECRET' || entry.visibility === 'SELF_ONLY') restricted.push(entry.text);
+        }
+    }
+    const clauses = restricted.flatMap(extractSubstantiveNormalizedClauses);
     for (const cleanroomDoc of [
         { label: 'static_base_and_voice', text: payload.static_base_and_voice },
         { label: 'current_arc_envelope', text: payload.current_arc_envelope }
     ]) {
+        const normalized = normalizeForQuoteMatch(cleanroomDoc.text);
+        if (clauses.some(clause => normalized.includes(clause))) {
+            issues.push(`${cleanroomDoc.label} 含有导演禁区或非公开实体原文`);
+        }
         const negMatch = NEGATIVE_PROHIBITION_RE.exec(cleanroomDoc.text);
         if (negMatch) {
             issues.push(

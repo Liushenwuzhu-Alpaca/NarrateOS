@@ -18,13 +18,12 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
         description:
             'Boot Compiler 终态交接门禁。校验开书编译产物（>=1 卷、>=1 实体、允许 0 条 OMNISCIENT_SECRET 与 0 条声纹样本、无 T0 未来泄露、通过静态文风门禁）。',
         parameters: {
-            world_summary: { type: 'string', required: true, description: '世界观与开局核心局势总结' },
-            static_base_and_voice: { type: 'string', required: true, description: '世界底层法则与抽象句法纪律' },
-            current_arc_envelope: { type: 'string', required: true, description: '正向当前卷舞台常态与主冲突' },
-            stage_ceiling: { type: 'string', required: true, description: '本卷阶段天花板禁区' },
+            world_summary: { type: 'string', description: '成功编译必填：世界观与开局核心局势总结' },
+            static_base_and_voice: { type: 'string', description: '成功编译必填：世界底层法则与抽象句法纪律' },
+            current_arc_envelope: { type: 'string', description: '成功编译必填：正向当前卷舞台常态与主冲突' },
+            stage_ceiling: { type: 'string', description: '成功编译必填：本卷阶段天花板禁区' },
             opening_sequence_beats: {
                 type: 'array',
-                required: true,
                 items: {
                     type: 'object',
                     additionalProperties: false,
@@ -43,7 +42,7 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
                 description: '未揭秘三幕拐点'
             },
             l0_sagas_markdown: { type: 'string', description: 'L0 纪元折叠总表' },
-            l1_volumes_markdown: { type: 'string', required: true, description: 'L1 活跃卷级总表（>=1 卷）' },
+            l1_volumes_markdown: { type: 'string', description: '成功编译必填：L1 活跃卷级总表（>=1 卷）' },
             voice_samples: {
                 type: 'array',
                 items: {
@@ -95,7 +94,6 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
             },
             entities: {
                 type: 'array',
-                required: true,
                 items: { type: 'json' },
                 description: '初始实体档案列表（>=1 个，允许 0 条 OMNISCIENT_SECRET）'
             },
@@ -138,13 +136,13 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
             exec.signal.throwIfAborted();
             const parsed = BootBundleOutputSchema.parse(args);
 
-            if (parsed.contract_conflicts.length > 0) {
+            if (!('entities' in parsed)) {
                 onYield?.(parsed);
                 exec.concludeTurn();
                 return {
                     accepted: true,
-                    entityCount: parsed.entities.length,
-                    loreCount: parsed.lore_entries.length,
+                    entityCount: 0,
+                    loreCount: 0,
                     conflictCount: parsed.contract_conflicts.length
                 };
             }

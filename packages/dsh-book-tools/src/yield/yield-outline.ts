@@ -28,27 +28,7 @@ export interface YieldOutlineOptions {
     onYield?: ((outline: PlannerOutline) => void) | undefined;
 }
 
-const MIN_SECRET_CLAUSE_NORM_LEN = 10;
-
-function extractSubstantiveNormalizedClauses(text: string): string[] {
-    const clauses: string[] = [];
-    for (const rawClause of text.split(/[。！？；，,;\n]/)) {
-        const trimmed = rawClause.trim();
-        if (!trimmed) continue;
-        const candidates = [trimmed];
-        const colonIdx = trimmed.search(/[:：]/);
-        if (colonIdx > 0 && colonIdx < trimmed.length - 1) {
-            candidates.push(trimmed.slice(colonIdx + 1).trim());
-        }
-        for (const candidate of candidates) {
-            const norm = normalizeForQuoteMatch(candidate);
-            if (norm.length >= MIN_SECRET_CLAUSE_NORM_LEN) {
-                clauses.push(norm);
-            }
-        }
-    }
-    return clauses;
-}
+import { extractSubstantiveNormalizedClauses } from './restricted-clauses.js';
 
 async function loadKnownEntityProfiles(
     bookRoot: string | undefined,
@@ -86,22 +66,23 @@ function assertOutlineCleanroomIsolation(
     outline: PlannerOutline,
     knownProfiles: ReadonlyMap<string, EntityProfile>
 ): void {
+    const publicText = [outline.chapter_title, outline.ending_beat, outline.chapter_turn, outline.outline_text].join('\n');
     const rationaleTrimmed = outline.director_rationale.trim();
-    if (rationaleTrimmed.length >= 20 && outline.outline_text.includes(rationaleTrimmed)) {
+    if (rationaleTrimmed.length >= 20 && publicText.includes(rationaleTrimmed)) {
         throw new GateValidationError(
             'yield_outline',
             '里表分流校验失败：outline_text 不得直接包含 director_rationale 全知内参原文'
         );
     }
 
-    const spoilerHit = OUTLINE_RESTRICTED_RE.exec(outline.outline_text);
+    const spoilerHit = OUTLINE_RESTRICTED_RE.exec(publicText);
     if (spoilerHit) {
         throw new GateValidationError(
             'yield_outline',
             `outline_text 禁止包含全知或导演禁区标签「${spoilerHit[0]}」`
         );
     }
-    const negativeHit = OUTLINE_NEGATIVE_PROHIBITION_RE.exec(outline.outline_text);
+    const negativeHit = OUTLINE_NEGATIVE_PROHIBITION_RE.exec(publicText);
     if (negativeHit) {
         throw new GateValidationError(
             'yield_outline',
@@ -109,7 +90,7 @@ function assertOutlineCleanroomIsolation(
         );
     }
 
-    const normalizedOutline = normalizeForQuoteMatch(outline.outline_text);
+    const normalizedOutline = normalizeForQuoteMatch(publicText);
     if (normalizedOutline.length === 0) {
         return;
     }

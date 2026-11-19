@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
     analyzeParagraphs,
+    BookDreamingConfigSchema,
     generateStructuredJson,
     normalizeForQuoteMatch,
     readBookL2Sections,
@@ -405,9 +406,11 @@ export class DreamingPipeline {
                 .sort((a, b) => a.chapterNumber - b.chapterNumber)
                 .map((section) => section.rawSection).join('\n\n') || '(水位以来暂无新增章卡)';
 
+            const threadLimits = dreamingCfg ?? BookDreamingConfigSchema.parse({});
             const taskPrompt = [
                 `## 本轮睡眠整理任务 (${formatChapterKey(options.currentChapter)} | story_day=${currentStoryDay})`,
                 `- 上次 Dreaming 水位章号: ${watermarkCh}`,
+                `- 本书伏笔上限：本次新增不超过 ${threadLimits.max_new_threads_per_dream} 条，活跃总数不超过 ${threadLimits.max_active_open_threads} 条。`,
                 `- 水位以来累计新增字数: ${recentWordDelta}`,
                 `- 建议校验/整理的脏实体范围（其余未出场干净实体严禁读取或修改）:`,
                 ...(dirtyEntityNotes.length > 0

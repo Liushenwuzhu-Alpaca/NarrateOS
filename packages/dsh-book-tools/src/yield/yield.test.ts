@@ -250,6 +250,14 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             )
         ).rejects.toThrow(GateValidationError);
         expect(badSpy.concludedCount()).toBe(0);
+        for (const field of ['chapter_title', 'chapter_turn', 'ending_beat']) {
+            await expect(yieldOutline.execute({
+                chapter_title: '货仓', target_word_count: 2500, focus_cast: ['char_001'],
+                chapter_turn: '账本少了一页', director_rationale: secretRationale,
+                scene_plan: [{ scene_index: 1, location: '旧货仓', summary: '核对装箱单' }],
+                outline_text: '沈默提灯照向货柜夹缝。', [field]: secretRationale
+            }, createSpyExec('yield_outline', {}).exec)).rejects.toThrow(field === 'ending_beat' ? /ending_beat/ : GateValidationError);
+        }
 
         const goodSpy = createSpyExec('yield_outline', {});
         await yieldOutline.execute(
@@ -475,7 +483,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
                         ]
                     }
                 ],
-                story_day_delta: 1,
+                story_day_delta: 0,
                 chapter_summary: '沈默与林舟接头。',
                 next_chapter_options: ['继续追踪钥匙']
             },
@@ -487,6 +495,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         expect(okRes.updatedEntities).toEqual(['char_002']);
         expect(okSpy.concludedCount()).toBe(1);
         expect((await store.readTxState()).phase).toBe('STATE_COMMITTED');
+        expect((await store.readWorldState()).frontmatter.current_chapter).toBe(2);
 
         roleSet.cleanup();
         await toolsFiber.dispose();
@@ -638,6 +647,9 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             yieldTool: 'yield_dream_commit'
         });
         registerCleanup(() => roleSetOk.cleanup());
+        await expect(roleSetOk.toolMap.get('yield_dream_commit')!.execute({
+            summary: '无效实体键', spotlight_triggers: [{ entity_id: 'ch_0001', reason: '核对', suggested_mode: 'MAINLINE' }]
+        }, createSpyExec('yield_dream_commit', {}).exec)).rejects.toThrow(ForeignKeyError);
         await roleSetOk.toolMap.get('book_edit')!.execute(
             {
                 path: 'world/open_threads.md',
@@ -775,6 +787,10 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         });
         registerCleanup(() => roleSet.cleanup());
         const yieldBoot = roleSet.toolMap.get('yield_boot_bundle')!;
+        const conflict = { contract_conflicts: ['同一开局事件同时发生在两地'] };
+        await expect(yieldBoot.execute(conflict, createSpyExec('yield_boot_bundle', {}).exec))
+            .resolves.toMatchObject({ conflictCount: 1, entityCount: 0 });
+        expect(roleSet.getYieldResult()).toEqual(conflict);
 
         const validBundle = {
             world_summary: '冬夜港口停工，货仓外只留一盏风灯。',
@@ -1070,10 +1086,14 @@ describe('yield_* 终态门禁工具确定性校验', () => {
             yieldTool: 'yield_context_pack',
             targetChapter: 3,
             targetDay: 3,
+            stagingOverlay: new Map([['lore_library/lore_harbor.md', '支线潮汐条例']]),
             allowedChapterFiles: ['ch_0001.md']
         });
         registerCleanup(() => roleSet.cleanup());
         const yieldPack = roleSet.toolMap.get('yield_context_pack')!;
+        await expect(yieldPack.execute({ selected_entity_ids: ['char_001'], selected_lore_files: [],
+            recall_slices: [{ entity_id: 'char_001', file: 'manuscripts/ch_0001.md', snippet: '手里攥着那把黄铜钥匙' }]
+        }, createSpyExec('yield_context_pack', {}).exec)).rejects.toThrow(/缺少实体/);
 
         // 1. 挂载 selected_lore_files 不得再绕过 recall_slices.entity_id 校验
         await expect(
@@ -1130,6 +1150,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         expect(okRes.recalledSliceCount).toBeGreaterThanOrEqual(1);
         const yieldedPack = roleSet.getYieldResult<{ recalledSlices: Array<{ requiredEntityId?: string; deltaChapters: number }> }>();
         expect(yieldedPack?.recalledSlices[0]?.requiredEntityId).toBe('item_001');
+        expect(roleSet.getYieldResult()).toMatchObject({ selectedLoreEntries: ['支线潮汐条例'] });
         expect(yieldedPack?.recalledSlices[0]?.deltaChapters).toBe(2);
     });
 
@@ -1302,6 +1323,10 @@ describe('yield_* 终态门禁工具确定性校验', () => {
         });
         registerCleanup(() => roleSet2.cleanup());
         const verdict2 = roleSet2.toolMap.get('yield_verdict')!;
+        await expect(verdict2.execute({ passed: false, issues: [{ severity: 'LOCAL_PATCH',
+            paragraph_index: 0, description: '核实错误段落', quote_draft: '沈默站在旧码头边',
+            quote_source: '位于旧码头', source_ref: 'entities/char_001.md'
+        }] }, createSpyExec('yield_verdict', {}).exec)).rejects.toThrow(GateValidationError);
 
         // 1. 省略 source_ref / quote_source 必须拒绝
         await expect(

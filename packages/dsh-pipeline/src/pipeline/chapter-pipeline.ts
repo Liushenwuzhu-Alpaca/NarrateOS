@@ -675,7 +675,7 @@ export class ChapterPipeline {
 
         // Step 1: Librarian (多轮受控探查 -> yield_context_pack)
         emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
-        const { librarianOut, recallSlices } = await this.runLibrarian(
+        const { payload: librarianOut, recalledSlices: recallSlices, selectedLoreEntries } = await this.runLibrarian(
             snapshot,
             chapterNumber,
             targetDay,
@@ -686,9 +686,6 @@ export class ChapterPipeline {
             options,
             allowedChapterFiles,
             branchStagingOverlay
-        );
-        const selectedLoreEntries = await this.loadSelectedLoreEntries(
-            librarianOut.selected_lore_files
         );
 
         const spotlightEntityIds = activeSignals
@@ -1395,7 +1392,7 @@ export class ChapterPipeline {
         options: StepChapterOptions,
         allowedChapterFiles?: string[] | undefined,
         stagingOverlay?: ReadonlyMap<string, string | null> | undefined
-    ): Promise<{ librarianOut: YieldContextPackResult['payload']; recallSlices: RecallSlice[] }> {
+    ): Promise<YieldContextPackResult> {
         const retrievalCfg = snapshot.config.retrieval;
         const catalog = await this.recall.buildLibrarianCatalog(this.store.bookRoot, {
             currentVolume: snapshot.worldState.frontmatter.current_volume,
@@ -1511,37 +1508,7 @@ export class ChapterPipeline {
         });
         addUsage(totalUsage, runRes.usage);
 
-        const pack = runRes.yieldResult;
-        const mergedSlices: RecallSlice[] = [...pack.recalledSlices];
-
-        for (const rawSlice of pack.payload.recall_slices) {
-            if (!mergedSlices.some((s) => s.snippet === rawSlice.snippet)) {
-                const chNum = rawSlice.chapter_number ?? 0;
-                const chId = chNum > 0 ? formatChapterKey(chNum) : 'ch_0000';
-                mergedSlices.push({
-                    ...(rawSlice.entity_id ? { requiredEntityId: rawSlice.entity_id } : {}),
-                    file: rawSlice.file ?? '',
-                    chapterId: chId,
-                    chapterNumber: chNum,
-                    chapterDay: null,
-                    targetChapter: chapterNumber,
-                    targetDay,
-                    deltaChapters: Math.max(0, chapterNumber - chNum),
-                    deltaDays: null,
-                    line: 1,
-                    text: rawSlice.snippet,
-                    contextBefore: [],
-                    contextAfter: [],
-                    matchedKeys: rawSlice.entity_id ? [rawSlice.entity_id] : [],
-                    snippet: rawSlice.snippet
-                });
-            }
-        }
-
-        return {
-            librarianOut: pack.payload,
-            recallSlices: mergedSlices
-        };
+        return runRes.yieldResult;
     }
 
     /** 执行 Step 2: Planner / REPLAN 多轮受控点查 -> yield_outline */
@@ -2009,8 +1976,10 @@ export class ChapterPipeline {
             .map((p, idx) => `[P${idx}] ${p}`)
             .join('\n\n');
 
+        const limits = snapshot.config.repair_loop ?? DEFAULT_REPAIR_LOOP_CFG;
         const taskPrompt = [
             pluginPrompt,
+            `本书 LOCAL_PATCH 门限：最多 ${limits.fact_max_patch_paragraphs} 段，多段时占比不超过 ${limits.fact_max_patch_ratio * 100}%。`,
             authorCharter
                 ? `## 作者契约 (world/author_charter.md)\n${authorCharter.trim()}`
                 : '',
@@ -2527,29 +2496,6 @@ export class ChapterPipeline {
         return combined;
     }
 
-    private async loadSelectedLoreEntries(selectedFiles: string[]): Promise<string[]> {
-        const entries: string[] = [];
-        const seen = new Set<string>();
-        for (const rawName of selectedFiles) {
-            const trimmed = rawName.trim();
-            if (!trimmed) continue;
-            const normalizedName = trimmed.replace(/^lore_library\//, '');
-            const fileName = normalizedName.endsWith('.md')
-                ? normalizedName
-                : `${normalizedName}.md`;
-            if (!/^lore_[a-zA-Z0-9_-]+\.md$/.test(fileName) || seen.has(fileName)) {
-                continue;
-            }
-            seen.add(fileName);
-            const content = await readOptionalText(
-                join(this.store.bookRoot, 'lore_library', fileName)
-            );
-            if (content && content.trim().length > 0) {
-                entries.push(content.trim());
-            }
-        }
-        return entries;
-    }
 
     private async loadHistoricalChapters(
         currentCh: number,

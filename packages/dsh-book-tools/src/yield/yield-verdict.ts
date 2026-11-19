@@ -60,7 +60,7 @@ function validateLocalPatchIndices(
     issueNumber: number,
     draftParagraphCount: number,
     limits: { factMaxPatchParagraphs: number; factMaxPatchRatio: number }
-): void {
+): number[] {
     const rawIndices: number[] = [];
     if (issue.paragraph_index !== undefined) {
         rawIndices.push(issue.paragraph_index);
@@ -99,6 +99,7 @@ function validateLocalPatchIndices(
             `第 ${issueNumber} 条 LOCAL_PATCH 涉及段落占比 (${uniqueIndices.length}/${draftParagraphCount}) 超过上限 ${limits.factMaxPatchRatio}，请改判为 MULTI_REWRITE`
         );
     }
+    return uniqueIndices;
 }
 
 /** 创建 Fact Checker 终态门禁工具 yield_verdict（强制双侧原句去标点存在性验真与 LOCAL_PATCH 索引边界校验） */
@@ -217,9 +218,9 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                     );
                 }
 
-                if (issue.severity === 'LOCAL_PATCH') {
-                    validateLocalPatchIndices(issue, issueNumber, draftParagraphs.length, limits);
-                }
+                const targets = issue.severity === 'LOCAL_PATCH'
+                    ? validateLocalPatchIndices(issue, issueNumber, draftParagraphs.length, limits)
+                    : undefined;
 
                 let sourceText: string;
                 try {
@@ -231,7 +232,9 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                     );
                 }
                 const dual = verifyDualQuotes(draftQuote, resolvedDraft, sourceQuote, sourceText);
-                if (!dual.sideA.matched) {
+                if (!dual.sideA.matched || (targets && !targets.some(idx =>
+                    verifyDualQuotes(draftQuote, draftParagraphs[idx]!, sourceQuote, sourceText).sideA.matched
+                ))) {
                     throw new GateValidationError(
                         'yield_verdict',
                         `第 ${issueNumber} 条问题的 quote_draft 未在草稿正文中命中（疑似捏造或改写引文），请重新读取草稿逐字核查`

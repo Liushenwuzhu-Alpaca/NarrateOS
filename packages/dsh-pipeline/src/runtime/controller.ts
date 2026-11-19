@@ -2324,7 +2324,7 @@ export class NarrateRuntimeController {
                     });
 
                     const bundle = runRes.yieldResult;
-                    if (bundle.contract_conflicts.length > 0) {
+                    if (!('entities' in bundle) || bundle.contract_conflicts.length > 0) {
                         throw new Error(
                             `开书契约存在矛盾需作者裁决: ${bundle.contract_conflicts.join('; ')}`
                         );

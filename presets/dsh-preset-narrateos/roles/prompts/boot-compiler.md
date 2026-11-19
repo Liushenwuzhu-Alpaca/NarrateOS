@@ -21,11 +21,11 @@
 - `lore_library/lore_*.md`：将大体量世界背景、行业规范或同人专有名词分片沉淀为独立词条（每个词条配备唯一 `lore_*` ID 与摘要）。
 - `.ops/voice_samples.yaml`（`voice_samples` 输出，遵循 `hybrid_rolling` 混合滚动声纹）：
   - **当作者提供了样章或试写确认句时**：从中提取多语域纯表达示范（剥离具体案情与专名，通过 `StaticProseGate`），每条标记 `source: 'author_sample'`；
-  - **当作者未提供样章时**：编译生成 **3-4 条**分属不同语域 `tag` 的 **15-45 字**短句作为启动临时拐杖，标记 `source: 'boot_seed'`（将在前几章定稿后由真实好句滚动置换）；体裁硬约束：**必须包含硬动作反馈或人物对话交锋停顿**，**严禁纯景物空镜抒情或雕琢腔，严禁包含任何角色专名**，且全部通过 `StaticProseGate`。
+  - **无作者样章时**：可传 `[]`，或生成 3-4 条不同语域、15-45 字、不含角色专名的硬动作或对话短句，标记 `source: 'boot_seed'`，全部通过 `StaticProseGate`。
 
 ## 实体与外键规范
-- 角色 ID 使用 `char_<slug>`，关键唯一道具 ID 使用 `item_<slug>`，全部 `entity_id` 与 `lore_*` ID 必须全局唯一。
-- 每个新建实体必须具备准确中文 `canonical_name`，并按四段式结构组织：
+- 角色 ID 使用 `char_<slug>`，关键唯一道具 ID 使用 `item_<slug>`；编译实体的 `entityId` 须全局唯一。
+- 每个编译实体必须具备准确中文 `canonicalName`，并按四段式结构组织：
   1. `Innate Locks`（先天/底层永久红线，永远不被插叙屏蔽；仅允许 `PUBLIC` 或 `SELF_ONLY`，严禁放入 `OMNISCIENT_SECRET`）
   2. `Acquired State & Numeric Ledger`（后天状态与数值账本；所有可随剧情揭晓的 `OMNISCIENT_SECRET` 底牌均置于此区并绑定唯一 `slotKey`，以便揭秘章原地翻转可见性）
   3. `Irreversible Trajectory`（不可逆变迁史）
@@ -33,4 +33,4 @@
 - 所有跨实体引用（持有物、关系对象）必须指向已存在的合法 `entity_id`。
 
 ## 终态交接
-完成编译与内部自检后，调用 `yield_boot_bundle` 提交完整结构化编译包。若发现输入契约存在无法自洽的物理或因果矛盾，在工具载荷中明确列出冲突点以退回主对话裁决。
+完成编译后调用 `yield_boot_bundle` 提交完整结构化编译包。若输入契约无法自洽，仅提交非空的 `contract_conflicts` 清单，退回主对话裁决。

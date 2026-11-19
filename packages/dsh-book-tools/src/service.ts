@@ -155,6 +155,7 @@ export class NarrateToolsService {
     public readonly defaultBookRoot: string | null;
     public readonly booksRoot: string;
     private disposed = false;
+    private readonly activeBoots = new Set<Promise<LockCharterAndBootResult>>();
 
     constructor(
         public readonly narrateStore: NarrateStoreService,
@@ -395,7 +396,7 @@ export class NarrateToolsService {
             throw new Error('NarrateToolsService 已卸载，拒绝执行开书编译');
         }
         const defaultOnBookBooted = createAutoSwitchBookCallback(this.narrateStore);
-        return await lockCharterAndBoot(input, {
+        const boot = lockCharterAndBoot(input, {
             booksRoot: overrides?.booksRoot ?? this.booksRoot,
             system: overrides?.system ?? this.narrateStore.system,
             onBookBooted:
@@ -403,6 +404,12 @@ export class NarrateToolsService {
                     ? overrides.onBookBooted
                     : defaultOnBookBooted
         });
+        this.activeBoots.add(boot);
+        try {
+            return await boot;
+        } finally {
+            this.activeBoots.delete(boot);
+        }
     }
 
     /** 为子代理上下文挂载 'agent/turn-stopping' 防逃逸 Hook */
@@ -410,8 +417,9 @@ export class NarrateToolsService {
         return attachYieldEnforcementHook(agentCtx, options);
     }
 
-    dispose(): void {
+    async dispose(): Promise<void> {
         this.disposed = true;
+        await Promise.allSettled(this.activeBoots);
     }
 }
 
@@ -447,20 +455,14 @@ export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
     const service = new NarrateToolsService(ctx.narrateStore, config);
 
     ctx.effect(function* () {
-        yield () => {
-            service.dispose();
-        };
         yield ctx.provide('narrateTools', service);
+        yield () => service.dispose();
     }, 'narrateos-book-tools');
 
     ctx.inject(['tools'], (toolCtx) => {
         toolCtx.effect(() => {
             const disposeBootTool = toolCtx.tools.register(
-                createLockCharterAndBootTool({
-                    booksRoot: service.booksRoot,
-                    system: ctx.narrateStore.system,
-                    onBookBooted: createAutoSwitchBookCallback(ctx.narrateStore)
-                })
+                createLockCharterAndBootTool({ booksRoot: service.booksRoot }, input => service.lockCharterAndBoot(input))
             );
             const disposeGuard = registerMainSessionWriteGuard(
                 toolCtx.tools,

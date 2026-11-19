@@ -297,7 +297,7 @@ export interface DreamCommitRecord {
 }
 
 /** Boot Compiler 结构化编译输出 Schema (yield_boot_bundle) */
-export const BootBundleOutputSchema = z.object({
+const SuccessfulBootBundleSchema = z.object({
     world_summary: z.string().min(1),
     static_base_and_voice: z.string().min(1),
     current_arc_envelope: z.string().min(1),
@@ -343,6 +343,10 @@ export const BootBundleOutputSchema = z.object({
     entities: z.array(CompiledEntitySchema).min(1),
     contract_conflicts: z.array(z.string().min(1)).default([])
 });
+export const BootBundleOutputSchema = z.union([
+    z.object({ contract_conflicts: z.array(z.string().trim().min(1)).nonempty() }),
+    SuccessfulBootBundleSchema
+]);
 export type BootBundleOutput = z.infer<typeof BootBundleOutputSchema>;
 
 /** Patch 局部修补终态提交输入 Schema (yield_patched_draft) */

@@ -172,7 +172,7 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
         expect(res2.titlePreserved).toBe(true);
         expect(session.getParagraphs()[0]).toBe('# 第一章 寒潮夜泊');
 
-        // 3. 若显式替换成另一个 # 标题，则尊重更新后的标题且 titlePreserved=false
+        // 显式替换成另一标题也不能突破修补范围。
         const replaceHeadingArgs = {
             edits: [
                 {
@@ -182,13 +182,9 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
                 }
             ]
         };
-        const res3 = (await tool.execute(
-            replaceHeadingArgs,
-            createMockExec('patch_paragraphs', replaceHeadingArgs)
-        )) as PatchParagraphsResult;
-
-        expect(res3.titlePreserved).toBe(false);
-        expect(session.getParagraphs()[0]).toBe('# 第一章 新拟标题');
+        await expect(tool.execute(replaceHeadingArgs, createMockExec('patch_paragraphs', replaceHeadingArgs)))
+            .rejects.toThrow(/保留原标题/);
+        expect(session.getParagraphs()[0]).toBe('# 第一章 寒潮夜泊');
     });
 
     it('配置 proseGateOptions 时每次编辑实时运行 StaticProseGate 并返回违规明细、带 [index] 正文与通过提示', async () => {

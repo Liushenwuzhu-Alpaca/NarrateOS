@@ -285,6 +285,8 @@ export class InMemoryDraftPatchSession {
                 nextProse = firstLine + eol + eol + nextProse;
                 titlePreserved = true;
                 preservedTitleLine = firstLine;
+            } else if (nextParagraphs[0]!.split(/\r?\n/, 1)[0] !== firstLine) {
+                throw new Error('段落修补必须保留原标题');
             }
         }
 

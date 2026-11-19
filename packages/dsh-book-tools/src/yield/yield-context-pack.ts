@@ -31,6 +31,7 @@ import { readOptionalWithOverlay } from './shared.js';
 export interface YieldContextPackResult {
     payload: LibrarianOutput;
     recalledSlices: RecallSlice[];
+    selectedLoreEntries: string[];
 }
 
 export interface YieldContextPackOptions {
@@ -285,7 +286,8 @@ async function validateSelectedLoreFiles(
     fence: PathFence,
     combinedOverlay: ReadonlyMap<string, string | null>,
     selectedLoreFiles: readonly string[]
-): Promise<void> {
+): Promise<string[]> {
+    const entries = new Map<string, string>();
     for (const loreFile of selectedLoreFiles) {
         const normalizedInput = loreFile.replace(/\\/g, '/').trim();
         const relLorePath = normalizedInput.includes('/')
@@ -298,6 +300,7 @@ async function validateSelectedLoreFiles(
             );
         }
         const verifiedLore = await fence.assertReadFile(relLorePath);
+        if (entries.has(verifiedLore.normalized)) continue;
         const loreContent = await readOptionalWithOverlay(
             bookRoot,
             combinedOverlay,
@@ -309,12 +312,13 @@ async function validateSelectedLoreFiles(
                 `selected_lore_files 引用了不存在的世界书词条: ${loreFile}`
             );
         }
+        entries.set(verifiedLore.normalized, loreContent);
     }
+    return [...entries.values()];
 }
 
 async function loadEntityProfileWithOverlay(
     bookRoot: string,
-    bookStore: ReturnType<NarrateStoreService['openStore']>,
     combinedOverlay: ReadonlyMap<string, string | null>,
     cache: Map<string, EntityProfile>,
     entityId: string
@@ -340,11 +344,6 @@ async function loadEntityProfileWithOverlay(
         return parsedProfile;
     }
 
-    const coldDiskProfile = await bookStore.readColdArchivedEntity(entityId);
-    if (coldDiskProfile !== null) {
-        cache.set(entityId, coldDiskProfile);
-        return coldDiskProfile;
-    }
     return null;
 }
 
@@ -447,6 +446,7 @@ async function verifyAndEnvelopeManualSlices(params: {
     accessiblePastChapterNums: ReadonlySet<number>;
     sliceMaxChars: number;
     sliceCountByEntity: Map<string, number>;
+    entityProfiles: ReadonlyMap<string, EntityProfile>;
 }): Promise<TaggedRecallSlice[]> {
     const {
         bookRoot,
@@ -525,6 +525,12 @@ async function verifyAndEnvelopeManualSlices(params: {
 
         const chapterDay = params.chapterDays[realChapterNumber] ?? extractChapterStoryDay(chapterText);
         const truncatedSnippet = truncateSliceText(rawSlice.snippet, sliceMaxChars);
+        const profile = rawSlice.entity_id ? params.entityProfiles.get(rawSlice.entity_id) : undefined;
+        const matchedKeys = profile ? [profile.metadata.entity_id, profile.metadata.canonical_name, ...profile.metadata.unique_aliases]
+            .filter(key => key.length > 0 && truncatedSnippet.includes(key)) : [];
+        if (rawSlice.entity_id && matchedKeys.length === 0) {
+            throw new GateValidationError('yield_context_pack', `手填切片缺少实体 ${rawSlice.entity_id} 的身份依据，请使用 recall_queries 核验`);
+        }
         const envelopedSlice: RecallSlice = {
             file: verified.normalized,
             chapterId: `ch_${String(realChapterNumber).padStart(4, '0')}`,
@@ -538,7 +544,7 @@ async function verifyAndEnvelopeManualSlices(params: {
             text: truncatedSnippet,
             contextBefore: [],
             contextAfter: [],
-            matchedKeys: rawSlice.entity_id ? [rawSlice.entity_id] : [],
+            matchedKeys,
             snippet: truncatedSnippet
         };
         manualSlices.push({ slice: envelopedSlice, entityId: rawSlice.entity_id });
@@ -677,7 +683,6 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 options.allowedChapterFiles
             );
 
-            const bookStore = store.openStore(bookRoot);
             const {
                 effectiveTargetChapter,
                 effectiveTargetDay,
@@ -697,7 +702,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             assertRecallEntityPairing(parsed, validPackEntityIds);
 
             // 2. 校验 selected_lore_files 合法可达（支持 lore_xxx.md 或 lore_library/lore_xxx.md）
-            await validateSelectedLoreFiles(
+            const selectedLoreEntries = await validateSelectedLoreFiles(
                 bookRoot,
                 fence,
                 combinedOverlay,
@@ -709,7 +714,6 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             for (const entityId of selectedSet) {
                 const profile = await loadEntityProfileWithOverlay(
                     bookRoot,
-                    bookStore,
                     combinedOverlay,
                     entityProfiles,
                     entityId
@@ -724,7 +728,6 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             for (const wakeupId of wakeupSet) {
                 const profile = await loadEntityProfileWithOverlay(
                     bookRoot,
-                    bookStore,
                     combinedOverlay,
                     entityProfiles,
                     wakeupId
@@ -756,6 +759,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                 fence,
                 combinedOverlay,
                 rawSlices: parsed.recall_slices,
+                entityProfiles,
                 effectiveTargetChapter,
                 effectiveTargetDay,
                 chapterDays,
@@ -771,7 +775,6 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             for (const query of parsed.recall_queries) {
                 const profile = await loadEntityProfileWithOverlay(
                     bookRoot,
-                    bookStore,
                     combinedOverlay,
                     entityProfiles,
                     query.entity_id
@@ -786,7 +789,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                     profile,
                     targetChapter: effectiveTargetChapter,
                     targetDay: effectiveTargetDay,
-                    chapterFiles: accessibleChapterFiles,
+                    chapterFiles: accessibleChapterFiles.filter(file => accessiblePastChapterNums.has(parseChapterNumberFromName(file) ?? 0)),
                     chapterDays,
                     stagingOverlay: combinedOverlay,
                     chapterHashes,
@@ -826,6 +829,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
 
             onYield?.({
                 payload: parsed,
+                selectedLoreEntries,
                 recalledSlices
             });
 

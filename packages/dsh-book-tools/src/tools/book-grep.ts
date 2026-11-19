@@ -8,7 +8,6 @@ import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
 import {
     buildCombinedStagingOverlay,
-    escapeRegExp,
     isEnoentError,
     matchesAnyPathPrefix,
     readOptionalBookConfig
@@ -38,51 +37,6 @@ interface GrepMatchItem {
     contextAfter: string[];
 }
 
-function compileSearchRegExp(pattern: string, fixedStrings: boolean): RegExp {
-    try {
-        return fixedStrings ? new RegExp(escapeRegExp(pattern)) : new RegExp(pattern);
-    } catch (err: unknown) {
-        if (err instanceof SyntaxError) {
-            throw new Error(
-                `book_grep 正则表达式参数无效 (${pattern}): ${err.message}。若需按字面量匹配请设置 fixed_strings=true`
-            );
-        }
-        throw err;
-    }
-}
-
-function grepTextInMemory(
-    relPath: string,
-    content: string,
-    pattern: string,
-    fixedStrings: boolean,
-    contextLines: number,
-    maxPerFile: number
-): GrepMatchItem[] {
-    const lines = content.split(/\r?\n/);
-    const matcher = compileSearchRegExp(pattern, fixedStrings);
-    const matches: GrepMatchItem[] = [];
-
-    for (let i = 0; i < lines.length; i += 1) {
-        const lineText = lines[i] ?? '';
-        if (!matcher.test(lineText)) {
-            continue;
-        }
-        const start = Math.max(0, i - contextLines);
-        const end = Math.min(lines.length, i + contextLines + 1);
-        matches.push({
-            file: relPath,
-            line: i + 1,
-            text: lineText,
-            contextBefore: lines.slice(start, i),
-            contextAfter: lines.slice(i + 1, end)
-        });
-        if (matches.length >= maxPerFile) {
-            break;
-        }
-    }
-    return matches;
-}
 
 function estimateMatchChars(match: GrepMatchItem): number {
     const contextChars =
@@ -146,19 +100,27 @@ async function collectExistingGrepTargets(
     return existingTargets;
 }
 
-function parseRipgrepJsonOutput(stdout: string): GrepMatchItem[] {
+function parseRipgrepJsonOutput(stdout: string, contextLines: number): GrepMatchItem[] {
     if (stdout.length === 0) {
         return [];
     }
     const matches: GrepMatchItem[] = [];
-    let pendingBefore: string[] = [];
-    let activeMatch: GrepMatchItem | null = null;
-
-    function flushActiveMatch(): void {
-        if (activeMatch) {
-            matches.push(activeMatch);
-            activeMatch = null;
+    const lines = new Map<number, string>();
+    let fileStart = 0;
+    function finishFile(): void {
+        for (let i = fileStart; i < matches.length; i++) {
+            const match = matches[i]!;
+            for (let n = match.line - contextLines; n < match.line; n++) {
+                const text = lines.get(n);
+                if (text !== undefined) match.contextBefore.push(text);
+            }
+            for (let n = match.line + 1; n <= match.line + contextLines; n++) {
+                const text = lines.get(n);
+                if (text !== undefined) match.contextAfter.push(text);
+            }
         }
+        fileStart = matches.length;
+        lines.clear();
     }
 
     for (const rawLine of stdout.split('\n')) {
@@ -172,30 +134,19 @@ function parseRipgrepJsonOutput(stdout: string): GrepMatchItem[] {
             };
         };
         if (evt.type === 'begin' || evt.type === 'end') {
-            flushActiveMatch();
-            pendingBefore = [];
+            finishFile();
             continue;
         }
         const lineText = (evt.data?.lines?.text ?? '').replace(/\r?\n$/, '');
-        if (evt.type === 'context') {
-            if (activeMatch) {
-                activeMatch.contextAfter.push(lineText);
-            } else {
-                pendingBefore.push(lineText);
-            }
-        } else if (evt.type === 'match') {
-            flushActiveMatch();
-            activeMatch = {
-                file: (evt.data?.path?.text ?? '').replace(/\\/g, '/'),
-                line: evt.data?.line_number ?? 0,
-                text: lineText,
-                contextBefore: pendingBefore,
-                contextAfter: []
-            };
-            pendingBefore = [];
+        const line = evt.data?.line_number;
+        if (line === undefined) continue;
+        lines.set(line, lineText);
+        if (evt.type === 'match') {
+            matches.push({ file: (evt.data?.path?.text ?? '').replace(/\\/g, '/'), line,
+                text: lineText, contextBefore: [], contextAfter: [] });
         }
     }
-    flushActiveMatch();
+    finishFile();
     return matches;
 }
 
@@ -207,11 +158,11 @@ async function runRipgrepSearch(params: {
     contextLines: number;
     maxMatches: number;
     signal: AbortSignal;
+    input?: { file: string; content: string };
 }): Promise<GrepMatchItem[]> {
     const { pattern, targets, fence, fixedStrings, contextLines, maxMatches, signal } = params;
-    if (targets.length === 0) {
-        return [];
-    }
+    // 无磁盘候选时也经同一正则引擎验证语法，以空 stdin 代替默认的工作目录搜索。
+    const useStdin = params.input !== undefined || targets.length === 0;
 
     const rgArgs = [
         '--json',
@@ -229,17 +180,21 @@ async function runRipgrepSearch(params: {
     if (fixedStrings) {
         rgArgs.push('-F');
     }
-    rgArgs.push('--', pattern, ...targets);
+    rgArgs.push('--', pattern, ...(useStdin ? ['-'] : targets));
 
     let stdout = '';
     try {
-        const res = await execFileAsync('rg', rgArgs, {
+        const search = execFileAsync('rg', rgArgs, {
             cwd: fence.bookRoot,
             encoding: 'utf8',
             maxBuffer: 16 * 1024 * 1024,
             signal
         });
-        stdout = res.stdout;
+        if (useStdin) {
+            // --max-count 或语法错误可使 rg 在管道写完前退出，错误由进程状态报告。
+            search.child.stdin?.on('error', () => {}).end(params.input?.content ?? '');
+        }
+        stdout = (await search).stdout;
     } catch (err: unknown) {
         const execErr = err as { code?: number | string; stderr?: string };
         if (execErr.code === 2) {
@@ -256,7 +211,9 @@ async function runRipgrepSearch(params: {
         }
     }
 
-    return parseRipgrepJsonOutput(stdout);
+    const matches = parseRipgrepJsonOutput(stdout, contextLines);
+    if (params.input) for (const match of matches) match.file = params.input.file;
+    return matches;
 }
 
 function applyGrepOutputBudget(
@@ -353,7 +310,7 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                     return [{ type: 'text', text: '未找到匹配内容 (0 matches)' }];
                 }
                 const formatted = value.matches
-                    .map((m) => `${m.file}:${m.line}: ${m.text}`)
+                    .map(m => [...m.contextBefore, `${m.file}:${m.line}: ${m.text}`, ...m.contextAfter].join('\n'))
                     .join('\n');
                 const suffix = value.truncated
                     ? `\n${value.hint ?? '结果已达上限被截断，请通过 path 限定目录或使用更精确的 pattern 缩小检索范围。'}`
@@ -372,8 +329,6 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 throw new Error(`book_grep 的 context_lines 必须在 0..10 之间，收到: ${contextLines}`);
             }
             const fixedStrings = args.fixed_strings ?? false;
-            // 入口首行无条件预校验正则表达式合法性，避免无磁盘文件时吞掉 SyntaxError
-            compileSearchRegExp(args.pattern, fixedStrings);
 
             if (args.max_matches !== undefined && args.max_matches < 1) {
                 throw new Error(`book_grep 的 max_matches 必须 >= 1，收到: ${args.max_matches}`);
@@ -417,14 +372,8 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                     continue;
                 }
                 stagedMatches.push(
-                    ...grepTextInMemory(
-                        relPath,
-                        content,
-                        args.pattern,
-                        fixedStrings,
-                        contextLines,
-                        maxMatches + 1
-                    )
+                    ...await runRipgrepSearch({ pattern: args.pattern, targets: [], fence,
+                        fixedStrings, contextLines, maxMatches, signal: exec.signal, input: { file: relPath, content } })
                 );
             }
 
