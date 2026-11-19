@@ -1,93 +1,87 @@
 # NarrateOS
 
-**Deterministic Multi-Agent Long-Form Fiction Engine Built on the `@deepseek-ai/dsh` Plugin Ecosystem**
+**Turn AI into Your Dedicated Long-Form Fiction Writers' Room — From a One-Line Premise to a Million-Word Serial Without Plot Holes, Leaked Twists, or Robotic Prose**
 
 [简体中文](./README.md) | [English](./README.en.md)
 
 ---
 
-## Overview
+## Why Does Writing a Novel in a Single AI Chat Fall Apart by Chapter 10?
 
-**NarrateOS** is a general-purpose multi-agent novel-writing engine built on top of `@deepseek-ai/dsh` (Cordis plugin architecture). It addresses the four fundamental failure modes of million-word serialized fiction generation:
+Anyone who has tried writing a long-form novel in a standard AI chat window hits the same three walls within a dozen chapters:
 
-1. **Cross-Volume Causality & State Drift**: Entity profiles are partitioned into four deterministic sections (`Innate Locks`, `Acquired State & Numeric Ledger`, `Irreversible Trajectory`, and `Current Volume Unconsolidated Buffer`), governed by a tri-state timeline filter (`MAINLINE` / `FLASHBACK` / `PARALLEL`) and a two-phase Git-backed WAL state machine (`DRAFTING -> FEAT_COMMITTED -> STATE_COMMITTED -> [DREAM_COMMITTED]`).
-2. **POV Violations & Omniscient Spoiler Leakage**: A strict filesystem fence (`PathFence`) and dual-track scene outlines physically strip omniscient secrets (`OMNISCIENT_SECRET`), the Author Charter (`world/author_charter.md`), and the Arc Director Plan (`world/arc_director_plan.md`) from the cleanroom `Writer` and in-memory `Patch` roles.
-3. **Negative Prompt Backfire (Pink Elephant Effect)**: The cleanroom `Writer` runs as a zero-tool, single-turn invocation receiving only positive, concrete camera-and-action directives. Gate feedback and rewrite prompts state only the target positive state rather than `"do not write X"` prohibitions.
-4. **AI Cliche Accumulation & Voice Degradation**: A deterministic `StaticProseGate` enforces lexical blacklists, structural rhythm bounds, paragraph length caps, and cross-chapter simile deduplication, paired with an in-memory paragraph patching loop (`InMemoryDraftPatchSession`) and a hybrid rolling voice sample pool (`.ops/voice_samples.yaml`).
+1. **Amnesia & Continuity Drift**: The protagonist loses his left arm in Chapter 3, then casually draws a sword with his left hand in Chapter 8. By Chapter 50, early clues and side characters are buried under a mountain of chat history.
+2. **Premature Spoiler Leaks**: You plan a slow-burn twist where the student council vice president secretly locked the fourth-floor music room three years ago — a reveal saved for Chapter 45. The moment you feed that lore into the prompt, the AI blurts it out in an internal monologue in Chapter 2. Even if you beg it *"DO NOT SPOIL THIS"*, it fixates on the prohibition and drops heavy-handed hints in every line of dialogue.
+3. **Robotic Cliches & The Domino Effect of Edits**: Characters gradually lose their distinct voices and start sounding like the same generic AI narrator. Worse, if you manually rewrite a key line in Chapter 12, the next twenty chapters crash like dominoes.
 
-> **Strict Separation of Engine and Books**: This root repository contains only generic plugin source code, preset configurations, and test fixtures. Every novel lives in its own isolated Git repository under `books/<slug>/`.
+**The root cause is simple: you are asking a single AI prompt to be the omniscient showrunner, the scene writer, and the continuity archivist all at once.**
 
----
+Built on `@deepseek-ai/dsh`, **NarrateOS** replaces that single overloaded prompt with a **compartmentalized Writers' Room**: one specialist pulls the files, one directs the scene and locks away future twists, one writes the prose blindfolded to spoilers, and one audits every factual claim verbatim against your past chapters.
 
-## Architecture
-
-### 1. Dual-Surface Human-AI Collaboration
-- **DSH Main Conversation (Author & Showrunner Entry)**: Exposes a single top-level preset mode (`NarrateOS Creative Mode`, `id: narrateos`). Authors collaborate with the Showrunner to align on premise, lock the Author Charter, compile initial book assets (`lock_charter_and_boot`), and orchestrate chapters via slash commands (`/narrate-step`, `/narrate-yolo [n]`, `/narrate-halt`, `/narrate-dream`, `/narrate-sync`, `/narrate-signal <text>`).
-- **Operator Studio (`/studio` Browser Workbench)**: Delivered by `@narrateos/dsh-client-ui-studio`, providing a three-pane editorial control room:
-  - Live 6-stage pipeline visualization with single-step and continuous (`YOLO`) execution controls;
-  - Manuscript reader/editor, dual-track chapter outlines, diff inspection, and full Codex browser (Entities & Items, Open Threads, Horizon & Scrapped Plans);
-  - Deep stage-session drill-down (reasoning traces, tool calls, attempt switchers) and quantitative prose telemetry (MATTR-500, Kontoyiannis entropy, sentence-length CV, cache hit ratio);
-  - Per-book model routing across `strong_creative` / `fast_retrieval` pools and fine-grained per-role model overrides.
-
-### 2. Deterministic 6-Stage Chapter Pipeline & Periodic Dreaming
-
-```text
-[1. Librarian] ---> [2. Planner] ---> [3. Writer (Cleanroom)] ---> [4. ProseGate / LocalPatch (In-Memory)]
-                                                                             |
-[WAL & Git Commit] <--- [6. Extractor (Sync)] <--- [5. FactChecker (Dual-Quote Verbatim Audit)]
-        |
-        +---> (Watermark Trigger) ---> [Dreamer (Multi-Turn Memory Consolidation & Voice Rolling)]
-```
-
-| Role | Role ID | Default Pool | Cleanroom | Core Responsibility & Terminal Yield Gate |
-|---|---|---|---|---|
-| **Boot Compiler** | `boot-compiler` | `strong_creative` | No | Compile the Author Charter, T0 anchor, initial entities, lore, and voice seeds (`yield_boot_bundle` / `lock_charter_and_boot`) |
-| **Librarian** | `librarian` | `fast_retrieval` | No | Recall timeline-filtered entities, lore entries, and L3 manuscript slices with paired co-mounting checks (`yield_context_pack`) |
-| **Planner** | `planner` | `strong_creative` | No | Produce internal `director_rationale` and cleanroom-safe positive `outline_text` (`yield_outline`) |
-| **Writer** | `writer` | `strong_creative` | **Yes** | Zero-tool single-turn cleanroom prose drafting from visible entity slices, voice specimens, and positive scene beats |
-| **Local Patch** | `patch` | `strong_creative` | **Yes** | Pure in-memory 0-based paragraph replacement (`patch_paragraphs`) to resolve `StaticProseGate` or local fact issues (`yield_patched_draft`) |
-| **Fact Checker** | `fact-checker` | `strong_creative` | No | Zero-aesthetic factual audit of `Innate Locks`, POV boundaries, ledgers, and `Stage Ceiling` with punctuation-stripped dual-quote verification and confirmation of fulfilled beats/threads (`yield_verdict`) |
-| **Extractor** | `extractor` | `fast_retrieval` | No | Extract incremental entity slot patches, dual-track L2 chapter cards, and next-chapter options for two-phase Git commit and idempotent beat/thread settlement (`yield_state_patch`) |
-| **Dreamer** | `dreamer` | `strong_creative` | No | Offline multi-turn buffer consolidation, cold-storage archiving, cross-chapter open-thread audit, and rolling voice pool curation (`book_edit` + `yield_dream_commit`) |
-
----
-
-## Repository Layout
-
-```text
-.
-├── design/                      # SSoT formal models: C4 architecture views (structure/), requirements (requirements.md), VDM-SL contracts (contract/), and Quint behavior wiring (behavior/)
-├── packages/
-│   ├── dsh-book-store/          # @narrateos/dsh-book-store: 4-section entity parser, tri-state timeline filter, L0-L3 recall, StaticProseGate, WAL & Git transactions
-│   ├── dsh-book-tools/          # @narrateos/dsh-book-tools: PathFence, ReadQuotaCounter, StagingSession, controlled read/edit/patch tools, and 7 yield_* gates
-│   ├── dsh-pipeline/            # @narrateos/dsh-pipeline: chapter pipeline, Dreaming loop, cascading rollback, slash commands, and HTTP/SSE controller
-│   └── dsh-client-ui-studio/    # @narrateos/dsh-client-ui-studio: Operator Studio browser UI and DSH Web Workbench integration
-├── presets/
-│   └── dsh-preset-narrateos/    # @narrateos/dsh-preset-narrateos: top-level DSH preset, externalized roles/*.yml, prompts/*.md, and narrate-boot skill
-├── plugins/
-│   └── craft/                   # Optional per-book cognitive craft plugins (vad-bdi / dual-reaction / scene-act / dialogue-subtext / sensory-grounding)
-├── scripts/
-│   ├── dev-sandbox.sh           # Isolated sandbox initializer and launcher (defaults to /tmp/narrateos-sandbox)
-│   └── lint-repo.mjs            # Deterministic repository gate (ASCII hyphen enforcement, no hardcoded private models, read-only fixture check)
-├── docs/
-│   ├── ARCHITECTURE.md          # Domain workflows, data contracts, POV isolation, chapter pipeline, WAL state machine, and invariant/variable matrix
-│   ├── WRITING-CRAFT.md         # Prose craft discipline, narration subjectivity, voice specimens, and static gate lexicon
-│   ├── DEVELOPMENT-PLAN.md      # DSH plugin architecture, Cordis service contracts, role schemas, and Phase 5 roadmap
-│   ├── RESEARCH.md              # Long-form evaluation benchmarks and @deepseek-ai/dsh runtime notes
-│   ├── impeccable/              # Product boundaries (PRODUCT.md), visual system (DESIGN.md), and Studio frontend brief
-│   └── adr/                     # Architecture Decision Records (ADR-0004)
-├── ROADMAP.md                   # Domain Glossary
-└── CODING_STANDARDS.md          # Engineering gates and code review invariants
+```mermaid
+flowchart LR
+    A["1. Archivist<br/>Pulls active character dossiers & past manuscript quotes"] --> B["2. Chapter Director<br/>Plans the scene & locks unrevealed twists back in the drawer"]
+    B --> C["3. Blindfolded Writer<br/>Drafts the scene with zero spoilers & zero negative bans"]
+    C --> D["4. Style Sieve & Paragraph Patcher<br/>Swaps out cliched paragraphs in place without re-rolling the chapter"]
+    D --> E["5. Continuity Auditor<br/>Verifies injuries, items & who-knows-what against verbatim quotes"]
+    E --> F["6. Bookkeeper & Nightly Consolidator<br/>Updates dossiers, retires invalidated plans & archives volume history"]
 ```
 
 ---
 
-## Quick Start
+## How a Novel Is Born and Survived in the Writers' Room
+
+Imagine you want to write a long-form mystery: *"Three years ago, the student council vice president secretly locked the fourth-floor music room. In Chapter 1, the protagonist finds the brass key on a rainy afternoon — and the truth behind that locked door must stay hidden until Chapter 45."*
+
+### Act I · The Pilot Episode: Don't Fill Out a 20-Page Questionnaire — Shoot Chapter 1 First
+You walk into the main chat room with that single sentence. The **Showrunner** won't interrogate you with an endless worldbuilding form. Instead, like a TV series creator, they help you nail down the opening camera shot (who is standing where in minute one, and what is in their hand), give each character a private agenda and a plausible misjudgment, and break the opening arc into a handful of flexible story beats.
+
+Once the book repository is initialized, the room shoots **Chapter 1 as your Pilot Episode** and pauses for your review:
+- Does the dialogue sound right? Is the pacing too rushed?
+- If you tweak a few lines of dialogue directly in the manuscript, the room harvests your favorite turns of phrase into a rolling voice pool so future chapters naturally adopt your cadence. If the opening angle feels off, tell the Showrunner and reshoot the pilot on the spot.
+
+### Act II · Blindfolding the Writer: Making Spoiler Leaks Physically Impossible
+By Chapter 15, the protagonist brings the brass key to the student council room to probe the vice president. How do you get razor-sharp subtext without the AI accidentally confessing the three-year-old secret?
+- First, the **Archivist** pulls the history of the brass key and the exact lines from their previous encounters.
+- Next, the **Chapter Director** consults the master blueprint behind closed doors, maps out the scene, and **locks the three-year-old secret back in the drawer**. The Director hands the Writer only an actionable performance sheet: *"Show the vice president's knuckles whitening around her teacup when she spots the key on the desk, then using school regulations to change the subject."*
+- Finally, the **Writer** drafts the prose inside a cleanroom with zero access to the secret blueprint and zero *"do not mention X"* instructions. **Because the Writer literally does not know the answer to the mystery, it cannot spill the secret** — pouring all of its attention into the teacup, the eye contact, and the verbal sparring.
+
+### Act III · Verbatim Fact-Checking & Rewriting Old Chapters Without Fear
+As soon as the draft is finished, it passes through a deterministic **Style Sieve**. If two paragraphs slip into repetitive AI cliches, the **Paragraph Patcher** surgically replaces just those two paragraphs in memory rather than throwing away the whole chapter.
+
+Then the **Continuity Auditor** steps in. The Auditor never judges literary taste; it only enforces hard facts — and every single objection must cite **both the exact quote in the new draft and the exact quote in your past chapters or dossiers** (hallucinated accusations are rejected on the spot):
+- *The dossier states she is terrified of the dark — how is she calmly standing alone in a windowless room after the power cut?* -> Sent back for patching!
+- *Only the protagonist and his best friend know about the brass key — why is a newly introduced freshman mentioning it?* -> Sent back for patching!
+
+And what if, at Chapter 40, you suddenly open **Chapter 12** by hand and change *"he locked the key in the iron cabinet"* to *"he handed the key to his best friend"*? Click **Sync**, and the room won't overwrite your later chapters. Instead, it scans Chapters 13 through 40, pinpoints the exact scenes that still mention prying open the iron cabinet, and lets you decide whether to patch those paragraphs in place or re-run the affected chapters under your supervision.
+
+### Act IV · Crossing 100 Chapters Without Amnesia or Context Bloat
+How does a novel reach a million words without drowning in its own history?
+- **Shared Secrets Stay Alive Across Cards**: Long-term private alliances (such as *"the best friend learned the protagonist's secret in Chapter 10"*) are stored in a single place of truth. Even if the protagonist is completely absent in Chapter 30 and the chapter is written from the best friend's perspective, the room automatically projects that shared memory into the best friend's view.
+- **Butterfly-Effect Rescheduling**: If the protagonist blows up the villain's hideout ahead of schedule or skips ahead three years, the Director flags the disrupted future events. At the end of the chapter, the **Nightly Consolidator** wakes up, crosses off the invalidated schemes, and writes the villain's next counter-move into the schedule.
+- **Traveling Light Between Volumes**: When a volume wraps up and the story moves to a new stage, resolved plot threads are sealed into the volume ledger, while retired characters and idle items move into dormant storage so they don't clutter the new volume. When that retired janitor pushes open the door again in Chapter 200, a one-line dormant card lets the Archivist wake him right back up with every scar and memory intact.
+
+---
+
+## Your Two Seats in the Writers' Room
+
+You can switch between two workspaces at any point in the creative process:
+
+| Workspace | What You Do Here | Everyday Actions |
+| :--- | :--- | :--- |
+| **DSH Main Chat**<br/>(Showrunner's Office) | Brainstorm a new premise, calibrate your Chapter 1 pilot, make major mid-volume course corrections, or drive the room via slash commands | Switch to **NarrateOS Creative Mode** and talk to the Showrunner; or run `/narrate-step`, `/narrate-yolo 5`, `/narrate-sync`, `/narrate-signal <note>` |
+| **Operator Studio**<br/>(`/studio` Browser Workbench) | Three-pane visual control room: watch the 6-stage pipeline and reasoning traces on the left, read or hand-edit manuscripts in the center, and browse live character cards, open threads, and schedules on the right | Click **Write Next Chapter / YOLO** in the top bar; switch to **Edit Manuscript -> Save & Sync** in the center pane; or drop a sticky note at the bottom (e.g., *"Stop the rain next chapter and bring in the night watchman early"*) |
+
+> **Strict Separation of Engine and Books**: This repository contains only the generic writers' room engine and role presets. Every novel you create lives in its own standalone Git repository under `books/<book-slug>/`, giving every settled chapter and dossier update a clean version history.
+
+---
+
+## Quick Start in 3 Steps
 
 ### Prerequisites
 - **Node.js**: `>= 22` (Node 24 recommended)
 - **pnpm**: `10.33.0+`
-- **Git**: Required for per-book transactional state commits and chapter rollbacks
+- **Git**: Required for per-book chapter commits, state ledgers, and rollback recovery
 
 ### 1. Install & Build
 
@@ -96,61 +90,80 @@ pnpm install --frozen-lockfile
 pnpm run build
 ```
 
-### 2. Launch the Isolated Sandbox (Operator Studio + DSH Web Workbench)
+### 2. Launch the Isolated Sandbox (Main Chat + Operator Studio)
 
-Configure your model routing via environment variables or a gitignored `.env` file in the repo root, then launch the isolated sandbox:
+Configure your model credentials via environment variables or a gitignored `.env` file in the repository root, then start the sandbox server:
 
 ```bash
-# Initialize and validate the sandbox directory only (defaults to /tmp/narrateos-sandbox)
+# Initialize and verify the sandbox directory only (defaults to /tmp/narrateos-sandbox)
 pnpm run dev:sandbox -- --init-only
 
-# Start the sandbox server (optionally specify PORT, e.g. PORT=42893)
+# Start the sandbox server (optionally set PORT, e.g. PORT=42893)
 PORT=42893 pnpm run dev:sandbox
 ```
 
-Once started, open the authenticated localhost URL printed in the terminal:
-- **DSH Main Chat Workbench**: Switch to **NarrateOS Creative Mode** (`narrateos`) to brainstorm a new book with the Showrunner or run `/narrate-step` and `/narrate-yolo` commands.
-- **Operator Studio**: Click the **NarrateOS Studio** icon in the activity bar (or open the `/studio` view) to drive chapters, inspect the Codex, view stage reasoning sessions, and configure per-role model routing.
+Open the authenticated local URL printed in your terminal:
+1. In the **Main Chat Workbench**, switch to **NarrateOS Creative Mode** (`narrateos`) and pitch a one-line story idea to start a new book.
+2. Click the **NarrateOS Studio** icon in the left activity bar (or open `/studio`) to enter the visual control room, step through chapters, hand-edit prose, inspect the Codex, or tune per-role model routing.
 
-### 3. Run Verification Gates & Tests
+### 3. Run Verification Gates & Tests (For Developers)
 
-Before committing or shipping changes, run the unified verification suite (builds all packages, runs TypeScript typechecking, enforces repository lint gates, validates preset constraints, and runs all Vitest suites):
+Before committing engine changes, run the unified verification command (chaining package builds, TypeScript typechecking, repository lint gates, preset validation, and all unit test suites):
 
 ```bash
 pnpm run check
 ```
 
-Individual & formal verification commands:
+Individual developer commands:
 
 ```bash
 pnpm run build        # Build all 4 workspace packages and bundle Studio client modules
 pnpm run typecheck    # Build and run TypeScript typechecking across all packages
-pnpm run lint         # Run scripts/lint-repo.mjs deterministic repository checks
+pnpm run lint         # Run deterministic repository lint checks
 pnpm test             # Run unit tests, preset tests, and release gate checks
-ssot check design     # Run SSoT formal structure, VDM-SL contract, and Quint behavior replay checks
-ssot serve design     # Launch interactive live-reloading architecture and contract diagram viewer
+ssot check design     # Verify formal C4 architecture, VDM-SL contracts, and Quint recovery models
 ```
 
 ---
 
-## Per-Book Sub-Repository Overview (`books/<slug>/`)
+## Repository & Book Map (Developer Quick Reference)
 
-Each book compiled by `lock_charter_and_boot` is initialized as a standalone Git repository partitioned into five top-level areas (for the complete file tree, access matrix, and schemas, see [`docs/ARCHITECTURE.md` §2](./docs/ARCHITECTURE.md#2-作品工作区纯文本数据库结构与原子事务协议)):
+### Engine Repository Layout
 
-- `world/`: Book configuration (`book_config.yaml`), read-only Author Charter (`author_charter.md`), Arc Director Plan & Opening Sequence Beats (`arc_director_plan.md`), public volume envelope, static prose baseline, world state, active foreshadowing ledger (`open_threads.md`), future horizon events, and on-demand lore (`lore_library/`).
-- `entities/`: Four-section character and key item profiles (`char_*.md`, `item_*.md`) plus archived dormant profiles (`cold_archive/`).
-- `index/`: `L0` saga overview, `L1` active volume outline, and `L2_cards/vol_XX_cards.md` dual-track chapter cards.
-- `manuscripts/`: Settled chapter manuscripts (`ch_XXXX.md`, 4-digit zero-padded chapter numbers, authoritative WAL source of truth).
-- `.ops/`: Operational runtime ledger (transaction state & pending write recovery lists, rolling voice samples, steering signals & cursor, sync conflict reports, heal checkpoints, session logs, and prose telemetry).
+```text
+.
+├── packages/
+│   ├── dsh-book-store/          # Plain-text book database: dossier parser, POV & timeline slicing, manuscript recall, style sieve & Git transactions
+│   ├── dsh-book-tools/          # Controlled toolbelt: filesystem fences, read quotas, in-memory paragraph patching, staging sessions & handoff gates
+│   ├── dsh-pipeline/            # Production pipeline: 6-stage chapter orchestration, post-chapter consolidation, manuscript sync, self-healing & slash commands
+│   └── dsh-client-ui-studio/    # Operator Studio three-pane browser workbench UI
+├── presets/
+│   └── dsh-preset-narrateos/    # Top-level DSH mode preset, 8 externalized role configs (roles/*.yml & prompts/*.md), and narrate-boot skill
+├── plugins/craft/               # Optional per-book narrative craft plugins (subtext, sensory grounding, scene beats, emotional motivation)
+├── design/                      # SSoT formal architecture (C4), invariants, port contracts (VDM-SL), and crash-recovery wiring (Quint)
+└── docs/                        # Deep-dive architecture specs, prose craft lexicon, visual design system, and roadmap
+```
+
+### Inside a Book Repository (`books/<slug>/`)
+
+Every novel is a human-readable plain-text (`Markdown` / `YAML` / `JSONL`) Git repository that you can inspect or edit in any text editor:
+- `manuscripts/`: Settled chapter manuscripts (`ch_0001.md` onward — the ultimate source of truth for everything that has happened in the story).
+- `world/`: The Author Charter, the Director's stage plan and opening beats, the writer-facing volume envelope, prose baseline, current world state, active foreshadowing ledger, and default future event schedule.
+- `lore_library/`: On-demand worldbuilding encyclopedia entries (with support for tucking unrevealed high-level secrets at the bottom of an entry, automatically hidden from the Writer).
+- `entities/`: Four-section character and key item dossiers (innate red lines, current state & ledgers, life-changing milestones, and recent memory buffer + dialogue voice), plus dormant cross-volume dossiers (`cold_archive/`).
+- `index/`: Saga summaries, volume ledgers (including archived resolved plot threads), and per-volume chapter summary cards.
+- `.ops/`: Runtime operational ledger (transaction locks, rolling voice sample pool, author steering notes, manuscript sync conflict reports, and per-chapter prose health metrics).
 
 ---
 
-## Documentation Index
+## Deep-Dive Documentation Index
 
-- **Formal Architecture, Contracts & Behavior Wiring (SSoT)**: [design/](./design/)
-- **Domain Glossary**: [ROADMAP.md](./ROADMAP.md)
-- **Workflows, Data Contracts & Invariant/Variable Matrix**: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
-- **Writing Craft & Static Gate Lexicon**: [docs/WRITING-CRAFT.md](./docs/WRITING-CRAFT.md)
-- **DSH Plugin Architecture & Phase 5 Roadmap**: [docs/DEVELOPMENT-PLAN.md](./docs/DEVELOPMENT-PLAN.md)
-- **Product Boundaries & Visual Design System**: [docs/impeccable/PRODUCT.md](./docs/impeccable/PRODUCT.md), [docs/impeccable/DESIGN.md](./docs/impeccable/DESIGN.md)
-- **Coding Standards & Review Invariants**: [CODING_STANDARDS.md](./CODING_STANDARDS.md)
+For the formal contracts, isolation boundaries, and engineering invariants behind the Writers' Room:
+
+- **Workflows, Data Contracts & the "3+1" Narrative Cognitive System**: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+- **Prose Craft Discipline, Voice Rolling & Static Gate Lexicon**: [docs/WRITING-CRAFT.md](./docs/WRITING-CRAFT.md)
+- **Domain Glossary (16 Core Terms)**: [ROADMAP.md](./ROADMAP.md)
+- **DSH Plugin Contracts, Role Schemas & Phase 5 Roadmap**: [docs/DEVELOPMENT-PLAN.md](./docs/DEVELOPMENT-PLAN.md)
+- **Product Boundaries & Operator Studio Visual System**: [docs/impeccable/PRODUCT.md](./docs/impeccable/PRODUCT.md), [docs/impeccable/DESIGN.md](./docs/impeccable/DESIGN.md)
+- **Formal Architecture & Recovery Models (SSoT)**: [design/](./design/)
+- **Coding Standards & Code Review Invariants**: [CODING_STANDARDS.md](./CODING_STANDARDS.md)
