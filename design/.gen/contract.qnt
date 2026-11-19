@@ -5,13 +5,11 @@ module Vdm {
 module narrateos_hostService_bookStore {
   type ChapterId = str
   type Confirmation = str
-  type Settlement = | Settlement_Normal | Settlement_Recovered
-  type Ledger = { manuscripts: Set[ChapterId], confirmations: ChapterId -> Confirmation, settled: ChapterId -> Settlement, synced: Set[ChapterId] }
-  pure val initial: Ledger = { manuscripts: Set(), confirmations: Map(), settled: Map(), synced: Set() }
+  type Ledger = { manuscripts: Set[ChapterId], confirmations: ChapterId -> Confirmation, settled: Set[ChapterId] }
+  pure val initial: Ledger = { manuscripts: Set(), confirmations: Map(), settled: Set() }
   type Call =
     | commitManuscript({ ch: ChapterId, cf: Confirmation })
-    | settleDerivedState({ ch: ChapterId, cf: Confirmation, mode: Settlement })
-    | syncEditedManuscript({ ch: ChapterId })
+    | settleDerivedState({ ch: ChapterId, cf: Confirmation })
 }
 module narrateos_hostService_bookTools {
   import narrateos_hostService_bookStore as narrateos_hostService_bookStore

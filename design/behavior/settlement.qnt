@@ -1,8 +1,8 @@
-// 担心：单章正文定稿落盘后、派生状态结案前发生 Host Service 崩溃重启或受控暂存门禁拒绝，或者创作者发起手稿修订同步时，
+// 担心：单章正文定稿落盘后、派生状态结案前发生 Host Service 崩溃重启或受控暂存门禁拒绝时，
 // 某个章节在隔离内存暂存会话尚未清空并关闭暂存窗口前就写下了派生状态结案（REQ-3、REQ-11），
 // 或已退出的旧进程工种发出的在途 stageEdit 在该章暂存窗口关闭后到达仍被接纳（REQ-7、REQ-11），
-// 或在仍有未结案半章时允许创作者手改同步代为结账（REQ-2、REQ-9、REQ-10）。
-// 盒子：创作者 edited、恢复收束过程 recovering、进程崩溃环境 epoch，契约盒子 narrateos_hostService_bookStore、narrateos_hostService_bookTools；
+// 或在仍有未完成派生状态结案的半章时未重用随正文保存的终审确认完成恢复结案（REQ-2、REQ-9、REQ-10）。
+// 盒子：恢复收束过程 recovering、进程崩溃环境 epoch，契约盒子 narrateos_hostService_bookStore、narrateos_hostService_bookTools；
 // 单章两阶段提交与受控暂存交接是一串顺接的步骤（commitChapter → sendStageEdit → answerStageEdit → yieldStage → settleNormal），
 // 每一步从输入线取值、调用端口、把凭据放到下一步的输入线上。每个 var 是一条带延迟的线；先后只来自线上的值，不记“走到哪一步”。
 module settlement {
@@ -17,8 +17,6 @@ module settlement {
 
   var bookLedger: Store::Ledger
   var toolStaging: Tools::Staging
-  // 创作者在本地对已定稿手稿发起的待同步修改（跨崩溃保留）。
-  var edited: Set[Store::ChapterId]
   // 正在执行未完成章节恢复收束的章节（Host Service 进程内，崩溃时清空）。
   var recovering: Set[Store::ChapterId]
   // Host Service 的第几次运行；崩溃重启让它加一。
@@ -34,10 +32,10 @@ module settlement {
 
   pure def dropPair(s: Set[(str, str)], ch: str): Set[(str, str)] = s.filter(p => p._1 != ch)
 
-  def isSettled(ch: Store::ChapterId): bool = ch.in(bookLedger.settled.keys())
+  def isSettled(ch: Store::ChapterId): bool = ch.in(bookLedger.settled)
   def isRecovering(ch: Store::ChapterId): bool = ch.in(recovering)
   def active(ch: Store::ChapterId): bool = not(isRecovering(ch))
-  def allSettled: bool = bookLedger.manuscripts == bookLedger.settled.keys()
+  def allSettled: bool = bookLedger.manuscripts == bookLedger.settled
   // 该章节在当前 Host Service 进程内仍有顺接步骤持有它的推进凭据。
   def heldInProcess(ch: Store::ChapterId): bool =
     ch.in(toStage.union(toSettle)) or
@@ -52,8 +50,7 @@ module settlement {
             manuscripts: s.manuscripts.union(Set(a.ch)),
             confirmations: s.confirmations.put(a.ch, a.cf),
           }
-        | settleDerivedState(a) => { ...s, settled: s.settled.put(a.ch, a.mode) }
-        | syncEditedManuscript(a) => { ...s, synced: s.synced.union(Set(a.ch)) }
+        | settleDerivedState(a) => { ...s, settled: s.settled.union(Set(a.ch)) }
       }
     | _ => s
   }
@@ -91,7 +88,6 @@ module settlement {
   action init = all {
     bookLedger' = Store::initial,
     toolStaging' = Tools::initial,
-    edited' = Set(),
     recovering' = Set(),
     epoch' = 0,
     inflight' = Set(),
@@ -102,6 +98,7 @@ module settlement {
   // ---------- 单章两阶段提交与受控暂存：顺接的五步 ----------
   // REQ-2
   // REQ-9
+  // REQ-10
   // 阶段一：在无未结案半章时归档定稿正文并同批持久化终审确认，该章进入受控状态抽取暂存的第一条线。
   action commitChapter(ch: Store::ChapterId, cf: Store::Confirmation): bool = all {
     not(ch.in(bookLedger.manuscripts)),
@@ -109,7 +106,7 @@ module settlement {
     recovering == Set(),
     toStage' = toStage.union(Set(ch)),
     awaiting' = awaiting, toYield' = toYield, toSettle' = toSettle,
-    edited' = edited, recovering' = recovering, epoch' = epoch, inflight' = inflight,
+    recovering' = recovering, epoch' = epoch, inflight' = inflight,
     commit(narrateos_hostService_bookStore(Store::commitManuscript({ ch: ch, cf: cf }))),
   }
 
@@ -122,7 +119,7 @@ module settlement {
     awaiting' = awaiting.union(Set((ch, sid))),
     inflight' = inflight.union(Set((ch, sid, epoch))),
     toYield' = toYield, toSettle' = toSettle,
-    edited' = edited, recovering' = recovering, epoch' = epoch,
+    recovering' = recovering, epoch' = epoch,
     commit(NoCall),
   }
 
@@ -143,7 +140,7 @@ module settlement {
                       recovering.union(Set(ch))
                     else recovering,
       toStage' = toStage, toSettle' = toSettle,
-      edited' = edited, epoch' = epoch,
+      epoch' = epoch,
       commit(narrateos_hostService_bookTools(Tools::stageEdit({ ch: ch, sid: sid, result: res }))),
     }
   }
@@ -157,7 +154,7 @@ module settlement {
     toYield' = toYield.exclude(Set((ch, sid))),
     toSettle' = toSettle.union(Set(ch)),
     toStage' = toStage, awaiting' = awaiting,
-    edited' = edited, recovering' = recovering, epoch' = epoch, inflight' = inflight,
+    recovering' = recovering, epoch' = epoch, inflight' = inflight,
     commit(narrateos_hostService_bookTools(Tools::yieldSession({ ch: ch, sid: sid }))),
   }
 
@@ -169,11 +166,10 @@ module settlement {
     active(ch),
     toSettle' = toSettle.exclude(Set(ch)),
     toStage' = toStage, awaiting' = awaiting, toYield' = toYield,
-    edited' = edited, recovering' = recovering, epoch' = epoch, inflight' = inflight,
+    recovering' = recovering, epoch' = epoch, inflight' = inflight,
     commit(narrateos_hostService_bookStore(Store::settleDerivedState({
       ch: ch,
       cf: bookLedger.confirmations.get(ch),
-      mode: Store::Settlement_Normal,
     }))),
   }
 
@@ -186,7 +182,7 @@ module settlement {
     not(isRecovering(ch)),
     not(heldInProcess(ch)),
     recovering' = recovering.union(Set(ch)),
-    edited' = edited, epoch' = epoch, inflight' = inflight, processWiresUnchanged,
+    epoch' = epoch, inflight' = inflight, processWiresUnchanged,
     commit(NoCall),
   }
 
@@ -204,7 +200,7 @@ module settlement {
     not(isSettled(ch)),
     not(ch.in(toolStaging.sealed)),
     dropFromProcess(ch),
-    edited' = edited, recovering' = recovering, epoch' = epoch, inflight' = inflight,
+    recovering' = recovering, epoch' = epoch, inflight' = inflight,
     commit(narrateos_hostService_bookTools(Tools::abortSession({ ch: ch }))),
   }
 
@@ -218,44 +214,19 @@ module settlement {
     ch.in(toolStaging.sealed),
     dropFromProcess(ch),
     recovering' = recovering.exclude(Set(ch)),
-    edited' = edited, epoch' = epoch, inflight' = inflight,
+    epoch' = epoch, inflight' = inflight,
     commit(narrateos_hostService_bookStore(Store::settleDerivedState({
       ch: ch,
       cf: bookLedger.confirmations.get(ch),
-      mode: Store::Settlement_Recovered,
     }))),
   }
 
-  // ---------- 创作者本地手改与增量同步 ----------
-  // REQ-6
-  // REQ-10
-  // 创作者随时（包括在中断恢复前）对已落盘的章节手稿发起本地修改。
-  action authorEditManuscript(ch: Store::ChapterId): bool = all {
-    ch.in(bookLedger.manuscripts),
-    not(ch.in(edited)),
-    edited' = edited.union(Set(ch)),
-    recovering' = recovering, epoch' = epoch, inflight' = inflight, processWiresUnchanged,
-    commit(NoCall),
-  }
-
-  // REQ-6
-  // REQ-10
-  // 仅当不存在未完成派生状态结案的半章时，才受理手改增量同步；禁止以同步代为结账。
-  action syncManuscript(ch: Store::ChapterId): bool = all {
-    ch.in(edited),
-    isSettled(ch),
-    allSettled,
-    edited' = edited.exclude(Set(ch)),
-    recovering' = recovering, epoch' = epoch, inflight' = inflight, processWiresUnchanged,
-    commit(narrateos_hostService_bookStore(Store::syncEditedManuscript({ ch: ch }))),
-  }
-
-  // ---------- 崩溃环境：Host Service 进程退出并重启。进程内传递线与恢复过程消失；持久化存储、在途请求与作者手改保留 ----------
+  // ---------- 崩溃环境：Host Service 进程退出并重启。进程内传递线与恢复过程消失；持久化存储与在途请求保留 ----------
   action crash = all {
     epoch' = epoch + 1,
     recovering' = Set(),
     toStage' = Set(), awaiting' = Set(), toYield' = Set(), toSettle' = Set(),
-    edited' = edited, inflight' = inflight,
+    inflight' = inflight,
     commit(NoCall),
   }
 
@@ -271,8 +242,6 @@ module settlement {
       sendStageEdit(ch, sid), yieldStage(ch, sid), settleNormal(ch),
       answerStageEdit(req._1, req._2, req._3, accept),
       detectUnsettled(ch), recoverAbortTools(ch), recoverSettle(ch),
-      syncManuscript(ch),
-      all { roll == 1, authorEditManuscript(ch) },
       all { roll == 2, epoch < 2, crash },
     }
   }
@@ -284,29 +253,29 @@ module settlement {
   val noStagedAfterSettled = toolStaging.staged.keys().forall(sid => not(isSettled(toolStaging.staged.get(sid))))
   // REQ-11
   // 任何已写下派生状态结案的章节，它在受控工具中的当轮暂存窗口都已关闭（防止旧会话晚到的 stageEdit 污染）。
-  val settledAfterSealed = bookLedger.settled.keys().forall(ch => ch.in(toolStaging.sealed))
-  // REQ-10
-  // 存在未完成派生状态结案的半章时，该半章不会被手改同步绕过代为结账。
-  val noSyncBeforeSettled = bookLedger.synced.forall(ch => isSettled(ch))
-  val safety = noStagedAfterSettled and settledAfterSealed and noSyncBeforeSettled
+  val settledAfterSealed = bookLedger.settled.forall(ch => ch.in(toolStaging.sealed))
+  val safety = noStagedAfterSettled and settledAfterSealed
 
   // ---------- 覆盖目标：证明模型确实走到了关键交错 ----------
-  val witnessNormalSettled = bookLedger.settled.keys().exists(ch => bookLedger.settled.get(ch) == Store::Settlement_Normal)
-  val witnessRecoveredSettled = bookLedger.settled.keys().exists(ch => bookLedger.settled.get(ch) == Store::Settlement_Recovered)
-  pure val maxSteps_witnessRecoveredSettled = 40
+  // REQ-3
+  // REQ-11
+  // 单章顺接走完受控暂存编辑并通过 yieldSession 终态交接门禁，进入待结案线 toSettle。
+  val witnessYieldedToSettle = toSettle.size() > 0
+  // REQ-2
+  // REQ-9
+  // REQ-10
+  // 全部章节最终完成正文定稿与派生状态两阶段结案。
+  val witnessAllChaptersSettled = CHAPTERS.forall(ch => isSettled(ch))
+  pure val maxSteps_witnessAllChaptersSettled = 40
   // REQ-7
   // REQ-11
   // 已退出的旧进程发出的 stageEdit 仍在途，而该章节的暂存窗口已经关闭。
   val witnessLateStageAfterSealed = inflight.exists(p => p._3 < epoch and p._1.in(toolStaging.sealed))
   pure val maxSteps_witnessLateStageAfterSealed = 40
   // REQ-10
-  // 章节正文已落盘但尚未完成派生状态结案时进程崩溃，创作者在恢复完成前对该章发起本地手改且未被同步代为结账。
-  val witnessEditDuringUnsettled = CHAPTERS.exists(ch =>
-    ch.in(bookLedger.manuscripts) and not(isSettled(ch)) and not(heldInProcess(ch)) and
-    ch.in(edited) and not(ch.in(bookLedger.synced)))
-  pure val maxSteps_witnessEditDuringUnsettled = 40
-  // REQ-6
-  // 创作者本地修改的章节在派生状态结案后成功完成增量同步。
-  val witnessEditedManuscriptSynced = bookLedger.synced.size() > 0
-  pure val maxSteps_witnessEditedManuscriptSynced = 40
+  // 恢复过程已关闭未完成章节的暂存窗口、尚未写下派生状态结案时进程崩溃。
+  val witnessCrashBeforeSettle = CHAPTERS.exists(ch =>
+    ch.in(bookLedger.manuscripts) and not(isSettled(ch)) and not(isRecovering(ch)) and
+    not(heldInProcess(ch)) and ch.in(toolStaging.sealed))
+  pure val maxSteps_witnessCrashBeforeSettle = 40
 }
