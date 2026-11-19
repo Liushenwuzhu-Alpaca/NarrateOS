@@ -78,20 +78,28 @@
       "kind": "component",
       "parent": "narrateos.hostService",
       "children": [],
-      "tags": [],
+      "tags": [
+        "contract"
+      ],
       "group": null,
       "business": false,
-      "contract": null
+      "contract": {
+        "module": "narrateos_hostService_bookStore"
+      }
     },
     {
       "fqn": "narrateos.hostService.bookTools",
       "kind": "component",
       "parent": "narrateos.hostService",
       "children": [],
-      "tags": [],
+      "tags": [
+        "contract"
+      ],
       "group": null,
       "business": false,
-      "contract": null
+      "contract": {
+        "module": "narrateos_hostService_bookTools"
+      }
     },
     {
       "fqn": "narrateos.hostService.pipeline",

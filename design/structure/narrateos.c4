@@ -49,10 +49,12 @@ model {
       }
 
       bookTools = component 'Controlled Book Toolset' {
+        #contract
         description '向创作与审校环节提供受权限约束的作品检索、草稿段落修订、新书建库与阶段结果核验的工具组件'
       }
 
       bookStore = component 'Book & State Store Engine' {
+        #contract
         description '统一管理作品资产与运行状态读写、创作上下文装配、文本合规校验及事务持久化的数据存储组件'
       }
     }
