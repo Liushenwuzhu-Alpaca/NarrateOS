@@ -2,9 +2,10 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
-import { readContentWithStagingPriority } from './shared.js';
+import { isEnoentError, readContentWithStagingPriority, readOptionalBookConfig } from './shared.js';
 
 const MAX_BATCH_READ_PATHS = 8;
+const DEFAULT_MAX_OUTPUT_CHARS = 24000;
 
 export interface BookReadItem {
     path: string;
@@ -13,6 +14,9 @@ export interface BookReadItem {
     startLine: number;
     endLine: number;
     fromStaging: boolean;
+    nextOffset?: number;
+    nextCharOffset?: number;
+    hint?: string;
 }
 
 export interface BookReadToolOptions {
@@ -20,106 +24,85 @@ export interface BookReadToolOptions {
     runId: string;
     fence: PathFence;
     quota: ReadQuotaCounter;
-    /** 可选内存分支覆盖层（如 PARALLEL 分支视角）；优先读本 runId 暂存，其次读该覆盖层 */
+    /** 可选内存分支覆盖层；优先读本 runId 暂存，其次读该覆盖层。 */
     stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
+    /** 仅包含本次上下文中未经任何裁剪的全文路径。 */
+    preInjectedFullPaths?: ReadonlySet<string> | undefined;
+    /** 单次输出字符预算，缺省读取 BookConfig.retrieval.read_max_output_chars。 */
+    maxOutputChars?: number | undefined;
 }
 
-/** 保序去重路径列表 */
-function dedupeStringsPreserveOrder(values: readonly string[]): string[] {
-    const seen = new Set<string>();
-    const result: string[] = [];
-    for (const value of values) {
-        if (!seen.has(value)) {
-            seen.add(value);
-            result.push(value);
-        }
-    }
-    return result;
-}
-
-function sliceLinesByOffsetLimit(
+/** 普通文件停在整行边界；单行自身超限时显式给出字符续读游标。 */
+function sliceWithinBudget(
     rawText: string,
-    offset?: number,
-    limit?: number
-): { content: string; totalLines: number; startLine: number; endLine: number } {
-    const allLines = rawText.split(/\r?\n/);
-    const totalLines = allLines.length;
-    const startLine = offset ?? 1;
-
-    if (offset === undefined && limit === undefined) {
-        return {
-            content: rawText,
-            totalLines,
-            startLine,
-            endLine: Math.max(startLine - 1, totalLines)
-        };
-    }
-
-    const sliceEnd = limit !== undefined ? startLine - 1 + limit : undefined;
-    const endLine = Math.min(totalLines, startLine - 1 + (limit ?? totalLines));
-    return {
-        content: allLines.slice(startLine - 1, sliceEnd).join('\n'),
-        totalLines,
-        startLine,
-        endLine: Math.max(startLine - 1, endLine)
-    };
-}
-
-/** 读取单个已通过 PathFence 校验的目标文件并按 offset/limit 切片 */
-async function readSingleTarget(
-    store: NarrateStoreService,
-    runId: string,
-    target: { normalized: string; absPath: string },
-    offset?: number,
+    path: string,
+    budget: number,
+    maxOutputChars: number,
+    offset = 1,
     limit?: number,
-    stagingOverlay?: ReadonlyMap<string, string | null>
-): Promise<BookReadItem> {
-    const { content: rawText, fromStaging } = await readContentWithStagingPriority({
-        store,
-        runId,
-        normalizedPath: target.normalized,
-        absPath: target.absPath,
-        stagingOverlay,
-        missingInOverlayMessage: `文件在当前分支视图中不存在或不可见: ${target.normalized}`
-    });
-    const sliced = sliceLinesByOffsetLimit(rawText, offset, limit);
-
+    charOffset = 0
+): Omit<BookReadItem, 'fromStaging'> {
+    const lines = rawText.split(/\r?\n/);
+    const startIndex = offset - 1;
+    const requestedEnd = Math.min(lines.length, startIndex + (limit ?? lines.length));
+    if (charOffset > (lines[startIndex]?.length ?? 0)) {
+        throw new Error(`book_read 的 char_offset 超出 ${path} 第 ${offset} 行长度`);
+    }
+    const kept: string[] = [];
+    let size = 0;
+    let cursor = startIndex;
+    let nextCharOffset = 0;
+    for (; cursor < requestedEnd; cursor += 1) {
+        const line = cursor === startIndex ? lines[cursor]!.slice(charOffset) : lines[cursor]!;
+        const cost = line.length + (kept.length > 0 ? 1 : 0);
+        if (size + cost > budget) {
+            if (kept.length === 0) {
+                // UTF-16 游标不得截断代理对；续读仍针对同一物理行。
+                let end = budget;
+                if (end > 0 && /[\uD800-\uDBFF]/.test(line[end - 1]!)) end -= 1;
+                if (end === 0) break;
+                kept.push(line.slice(0, end));
+                nextCharOffset = charOffset + end;
+            }
+            break;
+        }
+        kept.push(line);
+        size += cost;
+    }
+    const truncated = cursor < requestedEnd;
+    const nextOffset = cursor + 1;
+    const endLine = nextCharOffset > 0 ? nextOffset : Math.max(startIndex, cursor);
+    const hint = truncated
+        ? `[已触发单次 ${maxOutputChars} 字符上限，本文件显示第 ${offset}~${endLine} 行（共 ${lines.length} 行）${nextCharOffset > 0 ? '，末行仅部分显示' : ''}；续读请传 path="${path}", offset=${nextOffset}, limit=${requestedEnd - cursor}${nextCharOffset > 0 ? `, char_offset=${nextCharOffset}` : ''}]`
+        : undefined;
     return {
-        path: target.normalized,
-        content: sliced.content,
-        totalLines: sliced.totalLines,
-        startLine: sliced.startLine,
-        endLine: sliced.endLine,
-        fromStaging
+        path,
+        // 未截断、未切片时保留原始换行字节，避免把 CRLF 全文误标为原文。
+        content: !truncated && offset === 1 && limit === undefined && charOffset === 0 && rawText.length <= budget
+            ? rawText
+            : kept.join('\n'),
+        totalLines: lines.length,
+        startLine: offset,
+        endLine,
+        ...(hint !== undefined ? { nextOffset, nextCharOffset, hint } : {})
     };
 }
 
-/** 创建受控作品只读工具 book_read（优先读取当前 runId 的 StagingSession 暂存覆盖层，支持单文件与最多 8 路批量读取） */
+/** 创建受控作品只读工具，批量读取按成功调用计费并保留逐文件续读位置。 */
 export function createBookReadTool(options: BookReadToolOptions): ToolDefinition {
     const { store, runId, fence, quota, stagingOverlay } = options;
+    const remindedPaths = new Set<string>();
 
     return defineTool({
         name: 'book_read',
         description:
-            '受控读取作品文件（限 world/、lore_library/、index/、entities/、manuscripts/）。支持 path 单文件读取或 paths 批量读取（最多 8 个路径，自动去重且仅消耗 1 次配额）。优先读取当前 runId 的暂存修改（Read-Your-Own-Writes），禁止读取 .ops/、.git/ 或越界路径。',
+            '受控读取作品文件。path 单读或 paths 批读（最多 8 个路径，成功读取才消耗 1 次共享配额）；缺失批量成员独立跳过。单次默认 24000 字符，整行截断并提供精确续读参数。已完整预注入文件首次提醒免扣，显式切片或再次调用正常读取。优先返回暂存修改，路径与时间线围栏始终生效。',
         parameters: {
-            path: {
-                type: 'string',
-                description: '单文件读取时的作品内相对路径，例如 world/open_threads.md（与 paths 二选一）'
-            },
-            paths: {
-                type: 'array',
-                items: { type: 'string' },
-                description: '批量读取的作品内相对路径列表（最多 8 个，保序去重），仅消耗 1 次只读配额（与 path 二选一）'
-            },
-            offset: {
-                type: 'integer',
-                description: '可选起始行号（1-based，默认 1）'
-            },
-            limit: {
-                type: 'integer',
-                description: '可选最多读取行数'
-            }
+            path: { type: 'string', description: '作品内相对路径，例如 world/open_threads.md，与 paths 二选一' },
+            paths: { type: 'array', items: { type: 'string' }, description: '最多 8 个作品内相对路径，保序去重，与 path 二选一' },
+            offset: { type: 'integer', description: '起始行号（1-based，默认 1）' },
+            limit: { type: 'integer', description: '最多读取行数' },
+            char_offset: { type: 'integer', description: '仅超长单行续读时使用返回的字符游标（0-based UTF-16），仅支持 path 单文件，配合 offset 定位原行' }
         },
         output: {
             schema: {
@@ -132,6 +115,9 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                     startLine: { type: 'integer', required: true },
                     endLine: { type: 'integer', required: true },
                     fromStaging: { type: 'boolean', required: true },
+                    nextOffset: { type: 'integer' },
+                    nextCharOffset: { type: 'integer' },
+                    hint: { type: 'string' },
                     items: {
                         type: 'array',
                         items: {
@@ -143,100 +129,102 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                                 totalLines: { type: 'integer', required: true },
                                 startLine: { type: 'integer', required: true },
                                 endLine: { type: 'integer', required: true },
-                                fromStaging: { type: 'boolean', required: true }
+                                fromStaging: { type: 'boolean', required: true },
+                                nextOffset: { type: 'integer' },
+                                nextCharOffset: { type: 'integer' },
+                                hint: { type: 'string' }
                             }
                         }
                     }
                 }
             },
             render(_args, value) {
-                if (value.items && value.items.length > 1) {
-                    return [{ type: 'text', text: value.content }];
-                }
-                const header = `path: ${value.path} (lines ${value.startLine}-${value.endLine} of ${value.totalLines}, staging=${String(value.fromStaging)})`;
-                return [{ type: 'text', text: `${header}\n\n${value.content}` }];
+                const header = value.items ? '' : `path: ${value.path} (lines ${value.startLine}-${value.endLine} of ${value.totalLines}, staging=${String(value.fromStaging)})\n\n`;
+                return [{ type: 'text', text: `${header}${value.content}${value.hint ? `\n${value.hint}` : ''}\n${quota.render()}` }];
             }
         },
-        isConcurrencySafe: () => true,
+        // 同一角色共享配额，串行执行才能保证成功后扣费不发生并发超卖。
+        isConcurrencySafe: () => false,
         async execute(args, exec) {
             exec.signal.throwIfAborted();
-            if (args.offset !== undefined && args.offset < 1) {
-                throw new Error(`book_read 的 offset 必须 >= 1，收到: ${args.offset}`);
-            }
-            if (args.limit !== undefined && args.limit < 1) {
-                throw new Error(`book_read 的 limit 必须 >= 1，收到: ${args.limit}`);
-            }
-
-            const requestedPaths: string[] = [];
-            if (args.path !== undefined) {
-                requestedPaths.push(args.path);
-            }
-            if (args.paths !== undefined) {
-                requestedPaths.push(...args.paths);
-            }
-            if (requestedPaths.length === 0) {
-                throw new Error('book_read 需要提供 path 或非空 paths 参数');
-            }
-
-            // 1. 原始路径保序去重后校验数量上限（超限时不消耗配额）
-            const dedupedRaw = dedupeStringsPreserveOrder(requestedPaths);
-            if (dedupedRaw.length > MAX_BATCH_READ_PATHS) {
-                throw new Error(
-                    `book_read 单次最多读取 ${MAX_BATCH_READ_PATHS} 个路径，收到 ${dedupedRaw.length} 个`
-                );
-            }
-
-            // 2. 必须在消耗 ReadQuotaCounter 前对全部目标路径逐一执行 PathFence 校验
-            const verifiedTargets: Array<{ normalized: string; absPath: string }> = [];
-            const seenNormalized = new Set<string>();
-            for (const rawPath of dedupedRaw) {
-                exec.signal.throwIfAborted();
-                const verified = await fence.assertReadFile(rawPath);
-                if (!seenNormalized.has(verified.normalized)) {
-                    seenNormalized.add(verified.normalized);
-                    verifiedTargets.push(verified);
+            for (const key of ['offset', 'limit', 'char_offset'] as const) {
+                const value = args[key];
+                const minimum = key === 'char_offset' ? 0 : 1;
+                if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) {
+                    throw new Error(`book_read 的 ${key} 必须为 >= ${minimum} 的整数`);
                 }
             }
-
-            // 3. 全部围栏校验通过后，仅消耗 1 次只读配额
-            quota.consume('book_read');
-
-            // 4. 逐一读取并保持兼容返回结构
-            const items: BookReadItem[] = [];
-            for (const target of verifiedTargets) {
+            if (args.char_offset !== undefined && (args.path === undefined || args.paths !== undefined)) {
+                throw new Error('char_offset 仅支持 path 单文件续读');
+            }
+            const requestedPaths = [...new Set([...(args.path === undefined ? [] : [args.path]), ...(args.paths ?? [])])];
+            if (requestedPaths.length === 0) throw new Error('book_read 需要提供 path 或非空 paths 参数');
+            if (requestedPaths.length > MAX_BATCH_READ_PATHS) {
+                throw new Error(`book_read 单次最多读取 ${MAX_BATCH_READ_PATHS} 个路径，收到 ${requestedPaths.length} 个`);
+            }
+            const targets = new Map<string, { normalized: string; absPath: string }>();
+            for (const path of requestedPaths) {
                 exec.signal.throwIfAborted();
-                items.push(
-                    await readSingleTarget(store, runId, target, args.offset, args.limit, stagingOverlay)
-                );
+                const target = await fence.assertReadFile(path);
+                targets.set(target.normalized, target);
             }
-
-            const first = items[0]!;
-            if (args.paths === undefined && items.length === 1) {
-                return first;
+            const config = options.maxOutputChars === undefined ? await readOptionalBookConfig(store, fence.bookRoot) : null;
+            const retrieval = config?.retrieval as { read_max_output_chars?: number } | undefined;
+            const maxOutputChars = options.maxOutputChars ?? retrieval?.read_max_output_chars ?? DEFAULT_MAX_OUTPUT_CHARS;
+            if (!Number.isSafeInteger(maxOutputChars) || maxOutputChars < 256) throw new Error('book_read 的字符预算必须为 >= 256 的整数');
+            // 预留路径头、逐文件提示与配额尾注；正文预算独立累计，后续文件不会伪装为空文件。
+            let remaining = maxOutputChars - quota.render().length - 128
+                - [...targets.keys()].reduce((sum, path) => sum + path.length * 3 + 240, 0);
+            if (remaining < 2) throw new Error('book_read 的路径与续读提示已占满字符预算，请缩小 paths 批次或提高 read_max_output_chars');
+            const items: BookReadItem[] = [];
+            const notices: string[] = [];
+            const missing: string[] = [];
+            let budgetExhausted = false;
+            const staged = store.staging.has(runId) ? store.staging.getPendingWrites(runId) : undefined;
+            for (const target of targets.values()) {
+                exec.signal.throwIfAborted();
+                if (budgetExhausted) {
+                    notices.push(`[未读取: ${target.normalized} 因前序文件已占满单次字符预算，请单独调用 book_read]`);
+                    continue;
+                }
+                if (args.offset === undefined && args.limit === undefined && args.char_offset === undefined
+                    && options.preInjectedFullPaths?.has(target.normalized) && !remindedPaths.has(target.normalized)
+                    && !staged?.has(target.normalized) && !stagingOverlay?.has(target.normalized)) {
+                    remindedPaths.add(target.normalized);
+                    notices.push(`[提示: ${target.normalized} 全文已在当前上下文上方 === SOURCE_REF: ${target.normalized} === 预注入，请直接查阅；若仍需重读请再次调用]`);
+                    continue;
+                }
+                quota.assertAvailable('book_read');
+                try {
+                    const read = await readContentWithStagingPriority({ store, runId, normalizedPath: target.normalized,
+                        absPath: target.absPath, stagingOverlay, missingInOverlayMessage: `文件在当前分支视图中不存在或不可见: ${target.normalized}` });
+                    const item = { ...sliceWithinBudget(read.content, target.normalized, remaining, maxOutputChars, args.offset, args.limit, args.char_offset), fromStaging: read.fromStaging };
+                    items.push(item);
+                    remaining -= item.content.length;
+                    budgetExhausted = item.nextOffset !== undefined || remaining <= 0;
+                } catch (error: unknown) {
+                    if (isEnoentError(error)) {
+                        missing.push(target.normalized);
+                        continue;
+                    }
+                    const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+                    throw new Error(`读取 ${target.normalized} 失败${typeof code === 'string' && /^[A-Z0-9_]+$/.test(code) ? ` (${code})` : ''}，请核对文件类型及当前分支可见范围`);
+                }
             }
-
-            if (items.length === 1) {
-                return {
-                    ...first,
-                    items
-                };
+            if (items.length === 0 && notices.length === 0) {
+                throw new Error(`文件不存在: ${missing.join(', ')}`);
             }
-
-            const combinedContent = items
-                .map((item) => {
-                    const header = `=== ${item.path} (lines ${item.startLine}-${item.endLine} of ${item.totalLines}, staging=${String(item.fromStaging)}) ===`;
-                    return `${header}\n${item.content}`;
-                })
-                .join('\n\n');
-
-            // 多文件批量时顶层 startLine/endLine 以首项为准，避免跨文件行号失真累加；各文件精确范围保留在 items 中
+            if (items.length > 0) quota.consume('book_read');
+            notices.unshift(...missing.map(path => `[跳过不存在的文件: ${path}]`));
+            const first = items[0];
+            if (args.paths === undefined && first && notices.length === 0) return first;
             return {
-                path: items.map((item) => item.path).join(', '),
-                content: combinedContent,
+                path: [...targets.keys()].join(', '),
+                content: [...notices, ...items.map(item => `=== ${item.path} (lines ${item.startLine}-${item.endLine} of ${item.totalLines}, staging=${String(item.fromStaging)}) ===\n${item.content}${item.hint ? `\n${item.hint}` : ''}`)].join('\n\n'),
                 totalLines: items.reduce((sum, item) => sum + item.totalLines, 0),
-                startLine: first.startLine,
-                endLine: first.endLine,
-                fromStaging: items.some((item) => item.fromStaging),
+                startLine: first?.startLine ?? 0,
+                endLine: first?.endLine ?? 0,
+                fromStaging: items.some(item => item.fromStaging),
                 items
             };
         }

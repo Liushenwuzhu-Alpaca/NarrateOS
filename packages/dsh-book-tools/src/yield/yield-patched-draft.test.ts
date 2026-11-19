@@ -84,7 +84,7 @@ describe('yield_patched_draft 终态门禁工具', () => {
         expect(caughtError).toBeInstanceOf(GateValidationError);
         expect((caughtError as Error).message).toContain('[1]');
         expect((caughtError as Error).message).toContain('micro_anatomy');
-        expect((caughtError as Error).message).toContain('指节泛白');
+        expect((caughtError as Error).message).not.toContain('指节泛白');
         expect((caughtError as Error).message).toContain('patch_paragraphs');
         expect(yielded).toBeUndefined();
         expect(failSpy.concludedCount()).toBe(0);

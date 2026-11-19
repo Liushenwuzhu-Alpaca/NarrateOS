@@ -4,7 +4,7 @@ cleanroom: false
 promptFile: ./prompts/extractor.md
 temperature: 0.1
 reasoningEffort: low
-maxSteps: 6
+maxSteps: 10
 maxReadCalls: 4
 tools:
     - book_read

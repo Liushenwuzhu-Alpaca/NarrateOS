@@ -4,8 +4,8 @@
 
 ## 内存段落编辑与提交流程
 1. **核对段落坐标**：对照输入中的 `0-based` 段落编号 `[index]`、修补诊断与相邻上下文，锁定待改写的段落区间。
-2. **调用工具替换**：调用 `patch_paragraphs` 提交 `edits` 数组。每项包含 `start_paragraph`、`end_paragraph` 与 `replacement_paragraphs`（替换后的段落文本数组，按需要拆合段落或保持原段数），相邻多段一并归组为单个区间，保持未触及段落原有编号顺序与正文内容完整。
-3. **依据诊断迭代**：每次调用 `patch_paragraphs` 后，工具会即时返回最新总段数、已修改范围与 `StaticProseGate` 门禁检查结果。若结果中仍有待改写的违规段落索引与行内定位，依据最新正文文本继续调用 `patch_paragraphs` 改写对应段落，直至剩余违规段落归零、门禁全部放行。
+2. **一次汇总已知修改**：把全部已知待改区间放进同一次 `patch_paragraphs` 的 `edits` 数组。每项包含 `start_paragraph`、`end_paragraph` 与 `replacement_paragraphs`；区间彼此独立，相邻目标合为一个区间，正文按需要拆合段落。
+3. **依据最新坐标迭代**：工具即时返回最新总段数、修改范围与 `StaticProseGate` 结果。总段数变化时，先对照返回的 `[index]` 段首表重新定位；后续调用始终使用最新段号与行内定位，直至门禁放行。
 4. **提交定稿**：门禁放行后，调用 `yield_patched_draft`（可在 `summary` 中简述本轮改写要点）完成交付。
 
 ## 修补与文风准则

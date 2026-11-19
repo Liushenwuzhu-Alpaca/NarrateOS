@@ -32,6 +32,7 @@ export interface YieldContextPackResult {
     payload: LibrarianOutput;
     recalledSlices: RecallSlice[];
     selectedLoreEntries: string[];
+    selectedLoreSources: Array<{ path: string; content: string }>;
 }
 
 export interface YieldContextPackOptions {
@@ -286,7 +287,7 @@ async function validateSelectedLoreFiles(
     fence: PathFence,
     combinedOverlay: ReadonlyMap<string, string | null>,
     selectedLoreFiles: readonly string[]
-): Promise<string[]> {
+): Promise<Array<{ path: string; content: string }>> {
     const entries = new Map<string, string>();
     for (const loreFile of selectedLoreFiles) {
         const normalizedInput = loreFile.replace(/\\/g, '/').trim();
@@ -314,7 +315,7 @@ async function validateSelectedLoreFiles(
         }
         entries.set(verifiedLore.normalized, loreContent);
     }
-    return [...entries.values()];
+    return Array.from(entries, ([path, content]) => ({ path, content }));
 }
 
 async function loadEntityProfileWithOverlay(
@@ -460,7 +461,7 @@ async function verifyAndEnvelopeManualSlices(params: {
     } = params;
     const manualSlices: TaggedRecallSlice[] = [];
 
-    for (const rawSlice of rawSlices) {
+    for (const [sliceIndex, rawSlice] of rawSlices.entries()) {
         if (!rawSlice.file || rawSlice.file.trim().length === 0) {
             throw new GateValidationError(
                 'yield_context_pack',
@@ -526,10 +527,10 @@ async function verifyAndEnvelopeManualSlices(params: {
         const chapterDay = params.chapterDays[realChapterNumber] ?? extractChapterStoryDay(chapterText);
         const truncatedSnippet = truncateSliceText(rawSlice.snippet, sliceMaxChars);
         const profile = rawSlice.entity_id ? params.entityProfiles.get(rawSlice.entity_id) : undefined;
-        const matchedKeys = profile ? [profile.metadata.entity_id, profile.metadata.canonical_name, ...profile.metadata.unique_aliases]
+        const matchedKeys = profile ? [profile.metadata.entity_id, profile.metadata.canonical_name, ...profile.metadata.unique_aliases, ...profile.metadata.contextual_titles]
             .filter(key => key.length > 0 && truncatedSnippet.includes(key)) : [];
         if (rawSlice.entity_id && matchedKeys.length === 0) {
-            throw new GateValidationError('yield_context_pack', `手填切片缺少实体 ${rawSlice.entity_id} 的身份依据，请使用 recall_queries 核验`);
+            throw new GateValidationError('yield_context_pack', `第 ${sliceIndex + 1} 条手填切片缺少实体 ${rawSlice.entity_id} 的身份依据（entity_id、canonical_name、unique_aliases 或 contextual_titles），请使用 recall_queries 核验`);
         }
         const envelopedSlice: RecallSlice = {
             file: verified.normalized,
@@ -632,7 +633,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                         snippet: { type: 'string', required: true }
                     }
                 },
-                description: '已核实挂载的 L3 原稿召回切片列表'
+                description: '已核实的 L3 原稿切片；使用 recall_queries 时请省略或传 []。手填须包含原稿路径、逐字引文及实体身份词'
             },
             selected_lore_files: {
                 type: 'array',
@@ -702,12 +703,13 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             assertRecallEntityPairing(parsed, validPackEntityIds);
 
             // 2. 校验 selected_lore_files 合法可达（支持 lore_xxx.md 或 lore_library/lore_xxx.md）
-            const selectedLoreEntries = await validateSelectedLoreFiles(
+            const selectedLoreSources = await validateSelectedLoreFiles(
                 bookRoot,
                 fence,
                 combinedOverlay,
                 parsed.selected_lore_files
             );
+            const selectedLoreEntries = selectedLoreSources.map(source => source.content);
 
             // 3. 加载已选及冷宫唤醒实体档案（支持 entities/ 与 entities/cold_archive/）
             const entityProfiles = new Map<string, EntityProfile>();
@@ -830,6 +832,7 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
             onYield?.({
                 payload: parsed,
                 selectedLoreEntries,
+                selectedLoreSources,
                 recalledSlices
             });
 

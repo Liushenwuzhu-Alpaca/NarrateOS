@@ -488,6 +488,7 @@ export class NarrateRuntimeController {
     private lastObservedAgentDefaultKey: string | null = null;
     private pendingSessionDefaultSelection: HostDefaultModelSelection | null = null;
     private activeTask: RuntimeTaskKind = 'IDLE';
+    private activeStage: YoloRuntimeState['currentStage'] = null;
     private haltRequested = false;
     private shuttingDown = false;
     private activeAbortController: AbortController | null = null;
@@ -511,12 +512,11 @@ export class NarrateRuntimeController {
     } | null = null;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-    private readonly yoloState: YoloRuntimeState = {
+    private readonly yoloState: Omit<YoloRuntimeState, 'currentStage'> = {
         running: false,
         stopRequested: false,
         completedChapters: 0,
         targetChapters: 0,
-        currentStage: null,
         loopPromise: null
     };
 
@@ -931,7 +931,7 @@ export class NarrateRuntimeController {
                 stopRequested: this.yoloState.stopRequested,
                 completedChapters: this.yoloState.completedChapters,
                 targetChapters: this.yoloState.targetChapters,
-                currentStage: this.yoloState.currentStage
+                currentStage: this.activeStage
             }
         };
     }
@@ -1420,6 +1420,7 @@ export class NarrateRuntimeController {
                     chapterGoal: effectiveGoal,
                     signal: options.signal ?? signal,
                     onStageSession: (evt) => {
+                        this.activeStage = evt.stage;
                         this.handleStageSession(evt);
                         options.onStageSession?.(evt);
                     },
@@ -1470,9 +1471,7 @@ export class NarrateRuntimeController {
                         options.onCheckerResult?.(checkerEvt);
                     },
                     onProgress: (evt) => {
-                        if (this.yoloState.running) {
-                            this.yoloState.currentStage = evt.stage;
-                        }
+                        this.activeStage = evt.stage;
                         if (!evt.activeSessionId) {
                             // 进入新一轮子调用前清理同阶段上一轮残留会话，避免在 onStageSession 到达前误绑旧 sessionId
                             this.activeStageSessions.delete(evt.stage);
@@ -1562,6 +1561,8 @@ export class NarrateRuntimeController {
                     error: err instanceof Error ? err.message : String(err)
                 });
                 throw err;
+            } finally {
+                this.activeStage = null;
             }
         };
 
@@ -1604,7 +1605,7 @@ export class NarrateRuntimeController {
         this.yoloState.stopRequested = false;
         this.yoloState.completedChapters = 0;
         this.yoloState.targetChapters = targetChapters;
-        this.yoloState.currentStage = 'STARTING';
+        this.activeStage = 'STARTING';
 
         try {
             await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止启动 YOLO 连跑');
@@ -1614,7 +1615,7 @@ export class NarrateRuntimeController {
             if (this.yoloGeneration === currentGen) {
                 this.yoloState.running = false;
                 this.yoloState.stopRequested = false;
-                this.yoloState.currentStage = null;
+                this.activeStage = null;
                 this.yoloState.loopPromise = null;
             }
             throw err;
@@ -1671,7 +1672,7 @@ export class NarrateRuntimeController {
                     }
                 }
 
-                this.yoloState.currentStage = 'DREAMING';
+                this.activeStage = 'DREAMING';
                 await this.runDreaming(
                     { currentChapter: stepRes.chapterNumber },
                     true
@@ -1710,7 +1711,7 @@ export class NarrateRuntimeController {
             this.storeService.endRun(runId);
             if (this.yoloGeneration === currentGen) {
                 this.yoloState.running = false;
-                this.yoloState.currentStage = null;
+                this.activeStage = null;
                 this.yoloState.loopPromise = null;
             }
         }
@@ -1742,7 +1743,7 @@ export class NarrateRuntimeController {
             stopRequested: true,
             running: this.yoloState.running,
             completedChapters: this.yoloState.completedChapters,
-            currentStage: this.yoloState.currentStage,
+            currentStage: this.activeStage,
             message: '将在当前章安全点完成后停止',
             timestamp: new Date().toISOString()
         });

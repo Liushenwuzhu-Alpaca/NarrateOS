@@ -22,6 +22,7 @@ import {
     type CompiledEntity
 } from '../yield/schemas.js';
 import { validateBootBundle } from './boot-validation.js';
+import { COMPILED_ENTITY_TOOL_SCHEMA } from './compiled-entity-input.js';
 
 const STANDARD_BOOK_GITIGNORE = [
     '# NarrateOS 运行态与事务临时文件（严禁纳入版本历史）',
@@ -253,7 +254,9 @@ function formatArcDirectorPlanMarkdown(input: ParsedLockCharterAndBootInput): st
 }
 
 function formatMarkdownWithFallbackHeading(content: string, fallbackHeading: string): string {
-    const trimmed = content.trim();
+    const trimmed = (!content.includes('\n') && content.includes('\\n')
+        ? content.replaceAll('\\n', '\n')
+        : content).trim();
     if (trimmed.startsWith('#')) {
         return `${trimmed}\n`;
     }
@@ -582,9 +585,9 @@ export function createLockCharterAndBootTool(
             entities: {
                 type: 'array',
                 required: true,
-                items: { type: 'json' },
+                items: COMPILED_ENTITY_TOOL_SCHEMA,
                 description:
-                    '初始实体档案列表（>=1 个）。注意 entities[] 元素内部使用 camelCase：entityId (char_*/item_*)、canonicalName (须含中文)、uniqueAliases、contextualTitles、innateLocks ([{ visibility, text }])、acquiredState ([{ storyDay<=0, visibility, slotKey?, text }])、irreversibleTrajectory ([{ storyDay<=0, text }])、recentBuffer ([{ storyDay?<=0, text }])；顶层与其余数组使用 snake_case。'
+                    '初始实体档案列表（>=1 个），字段采用 snake_case，兼容既有 camelCase 输入；story_day <= 0。'
             },
             lore_entries: {
                 type: 'array',

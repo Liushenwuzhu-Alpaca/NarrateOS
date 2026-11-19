@@ -4,14 +4,14 @@
 
 ## 可用工具与配额纪律
 - 仅可使用 `book_glob`、`book_grep`、`book_read` 读取当前作品目录。
-- **充分利用管线预注入，无需重复读取**：`world_state.md` 摘要、`L1_volumes.md`、`L2_cards`（当前卷近期章卡）、上一章末窗片段，以及含 `last_seen_ch` 与现状摘要的 `entityList`、冷宫档案清单均已由管线预注入到当前上下文中。请直接基于预注入信息锁定目标，无需重读 `world_state.md`、`L1_volumes.md`、`L2_cards` 或全盘 `book_glob` 扫描 `entities/*.md`。
-- **严守选页职责与隔离边界**：专注读取 `world/open_threads.md`、`entities/*.md`、`lore_library/*.md`，并对 `manuscripts/` 使用 `book_grep` 精确检索片段并填入 `recall_queries`；跳过全知导演文档（`world/arc_director_plan.md`、`world/author_charter.md`、`world/current_arc_envelope.md`、`world/future_horizon.md`）及整章正文读取。
-- **优先批量读取以节约 `maxReadCalls`**：聚焦未注入的 `world/open_threads.md`、目标实体档案、`lore_*` 设定文档与历史原稿 `book_grep`。读取多个文件时，优先调用 `book_read({ paths: ["world/open_threads.md", "entities/char_xxx.md", "lore_library/lore_xxx.md"] })` 单次批量读取（单次可传入最多 8 个路径，仅消耗 1 次 `maxReadCalls` 配额）。
+- **充分利用管线预注入**：`world_state.md` 摘要、`L1_volumes.md`、当前卷近期 `L2_cards`、`world/open_threads.md`、上一章末窗，以及含 `last_seen_ch` 与现状摘要的 `entityList`、冷宫档案清单均已由管线预注入。先据此锁定目标；近期章卡窗口外的旧章卡才按需分段补查。
+- **严守选页职责与隔离边界**：专注补查目标 `entities/*.md`、`lore_library/*.md`，并对 `manuscripts/` 使用 `book_grep` 定位历史片段，再填入 `recall_queries`。全知导演文档（`world/arc_director_plan.md`、`world/author_charter.md`、`world/current_arc_envelope.md`、`world/future_horizon.md`）由后续工种处理。
+- **批量读取与配额收口**：需要多个目标档案时，调用 `book_read({ paths: ["entities/char_xxx.md", "lore_library/lore_xxx.md"] })`。按工具返回的剩余 `maxReadCalls` 规划补查；输出截断时使用返回的续读参数，配额用尽后直接提交 `yield_context_pack`。
 
 ## 检索与选页流程
 
 ### 1. 锚定当前进度与活跃台账
-- 基于上下文中已预注入的当前摘要、双层目录与前章末窗锁定本章焦点；若涉及伏笔或长期支线，再批量读取 `world/open_threads.md` 与目标实体档案。
+- 根据预注入摘要、目录、前章末窗和 `world/open_threads.md` 确定焦点；涉及伏笔或长期支线时，只补查缺少的实体与原稿证据。
 
 ### 2. 二跳关联与冷宫唤醒
 - 顺着出场角色、核心道具或地点线索追查二跳关联实体（例如：关键物品的上一任持有者、关联证人、隐藏幕后联系人）。
@@ -30,3 +30,4 @@
 
 ## 终态交接
 收集齐备所需上下文后，必须调用 `yield_context_pack` 提交最终净菜包（`selected_entity_ids`、`wakeup_entity_ids`、`recall_queries`、`selected_lore_files`）。其中 `wakeup_entity_ids` 用于提交需在本章返场唤醒的 `entities/cold_archive/` 休眠实体 ID 列表（无冷宫唤醒时传 `[]`）。若首次调用因成对挂载校验不通过而被拦截，立即按提示补查对应实体或原稿切片后重新调用 `yield_context_pack`。
+使用 `recall_queries` 时省略 `recall_slices` 或传 `[]`，由工具按查询组装并验真切片；手填切片仅用于已经取得原文且能够给出来源与实体身份词的情形。

@@ -4,7 +4,7 @@ cleanroom: false
 promptFile: ./prompts/librarian.md
 temperature: 0.2
 reasoningEffort: low
-maxSteps: 8
+maxSteps: 18
 maxReadCalls: 8
 tools:
     - book_glob

@@ -350,16 +350,16 @@ export function buildVerificationCorpus(
 ): string {
     const parts: string[] = [];
     for (const profile of Object.values(slicedView.entities)) {
-        parts.push(serializeEntityMarkdown(profile));
+        parts.push(`=== SOURCE_REF: entities/${profile.metadata.entity_id}.md ===\n${serializeEntityMarkdown(profile)}`);
     }
     for (const slice of recallSlices) {
-        parts.push(slice.snippet);
+        parts.push(`=== SOURCE_REF: ${slice.file} ===\n${slice.snippet}`);
     }
     if (previousChapter?.fullText) {
-        parts.push(previousChapter.fullText);
+        parts.push(`=== SOURCE_REF: manuscripts/${formatChapterKey(previousChapter.chapterNumber)}.md ===\n${previousChapter.fullText}`);
     }
     if (currentArcEnvelope && currentArcEnvelope.trim().length > 0) {
-        parts.push(`## 当前卷包络与阶段禁区 (current_arc_envelope.md)\n${currentArcEnvelope.trim()}`);
+        parts.push(`=== SOURCE_REF: world/current_arc_envelope.md ===\n${currentArcEnvelope}`);
     }
     return parts.join('\n\n');
 }

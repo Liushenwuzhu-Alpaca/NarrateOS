@@ -7,6 +7,7 @@ import {
     VoiceSampleSourceSchema
 } from '@narrateos/dsh-book-store';
 import { collectEntityRefs, extractActiveOpenThreadLines } from './shared.js';
+import { normalizeCompiledEntityInput } from '../boot/compiled-entity-input.js';
 
 export { PlannerOutlineSchema };
 
@@ -19,7 +20,7 @@ export const BootVoiceSampleSchema = z.object({
 export type BootVoiceSample = z.infer<typeof BootVoiceSampleSchema>;
 
 /** 开书编译实体档案 Schema */
-export const CompiledEntitySchema = z.object({
+const CompiledEntityRawSchema = z.object({
     entityId: z.string().regex(/^(char|item)_[a-zA-Z0-9_]+$/),
     canonicalName: z.string().min(1),
     uniqueAliases: z.array(z.string()).default([]),
@@ -64,6 +65,7 @@ export const CompiledEntitySchema = z.object({
         )
         .default([])
 });
+export const CompiledEntitySchema = z.preprocess(normalizeCompiledEntityInput, CompiledEntityRawSchema) as z.ZodType<z.output<typeof CompiledEntityRawSchema>, z.ZodTypeDef, z.input<typeof CompiledEntityRawSchema>>;
 export type CompiledEntity = z.infer<typeof CompiledEntitySchema>;
 
 /** 开书编译世界书词条 Schema */
@@ -137,10 +139,21 @@ export const FactCheckIssueSchema = z.object({
 });
 export type FactCheckIssue = z.infer<typeof FactCheckIssueSchema>;
 
+/** 附加销账建议容错归一化，不影响正文审校结论。 */
+const ConfirmationLabelsSchema = z.preprocess(
+    (value) => Array.isArray(value)
+        ? [...new Set(value.filter((item): item is string => typeof item === 'string')
+            .map((item) => item.trim()).filter(Boolean))]
+        : [],
+    z.array(z.string())
+).optional();
+
 /** Step 5: Fact Checker 审校输出 Schema */
 export const FactCheckOutputSchema = z.object({
     passed: z.boolean(),
-    issues: z.array(FactCheckIssueSchema).default([])
+    issues: z.array(FactCheckIssueSchema).default([]),
+    confirmed_completed_beats: ConfirmationLabelsSchema,
+    confirmed_resolved_threads: ConfirmationLabelsSchema
 });
 export type FactCheckOutput = z.infer<typeof FactCheckOutputSchema>;
 

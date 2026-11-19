@@ -761,6 +761,43 @@ describe('IndexRecall', () => {
         expect(cat6.dynamicTail).toContain('## ch_0006 (day:6)');
     });
 
+    it('近期章卡窗口只裁剪显示，旧章仍可回表且未来章节保持不可达', async () => {
+        const bookRoot = await createTempBookDir();
+        const recall = new IndexRecall(new NodeSystemAdapter());
+        const cards: string[] = [];
+        const chapterFiles: string[] = [];
+        await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
+        for (let chapter = 1; chapter <= 25; chapter += 1) {
+            const id = `ch_${String(chapter).padStart(4, '0')}`;
+            const file = `manuscripts/${id}.md`;
+            chapterFiles.push(file);
+            await writeFile(join(bookRoot, file), `<!-- story_day: ${chapter} -->\n# 窗口标题_${id}\n\n${chapter === 1 ? '风纪委员长推开门。' : '窗外有风。'}`);
+            cards.push(`## ${id} (day:${chapter})\n- 主干剧情：窗口剧情_${id}\n- 出场实体：${chapter === 1 ? 'char_002' : 'char_003'}`);
+        }
+        await writeFile(join(bookRoot, 'index/L2_cards/vol_01_cards.md'), cards.join('\n\n'));
+        const catalog = await recall.buildLibrarianCatalog(bookRoot, { currentVolume: 1 });
+        expect(catalog.chapters.map((entry) => entry.chapterNumber)).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
+        expect(catalog.fullCatalog).not.toContain('窗口剧情_ch_0005');
+        expect(catalog.fullCatalog).not.toContain('窗口标题_ch_0005');
+        expect(catalog.fullCatalog).toContain('窗口剧情_ch_0006');
+        expect(catalog.fullCatalog).toContain('窗口标题_ch_0025');
+        expect(catalog.fullCatalog).toContain('index/L2_cards/vol_01_cards.md');
+        const slices = await recall.recallEntitySlices(bookRoot, { profile: createSampleProfile(), targetChapter: 26, targetDay: 30 });
+        expect(slices.map((slice) => slice.chapterNumber)).toContain(1);
+        const limited = await recall.buildLibrarianCatalog(bookRoot, { currentVolume: 1, librarianRecentL2Window: 2 });
+        expect(limited.fullCatalog).not.toContain('窗口剧情_ch_0023');
+        expect(limited.fullCatalog).not.toContain('窗口标题_ch_0023');
+        expect(limited.fullCatalog).toContain('窗口剧情_ch_0024');
+        expect(limited.chapters).toHaveLength(25);
+        const past = await recall.buildLibrarianCatalog(bookRoot, { currentVolume: 1, chapterFiles: chapterFiles.slice(0, 23), librarianRecentL2Window: 3, l2FullUnfrozenThreshold: 2, l2FreezeBlockChapters: 2 });
+        expect(past.fullCatalog).not.toContain('窗口剧情_ch_0020');
+        expect(past.fullCatalog).not.toContain('窗口标题_ch_0020');
+        expect(past.fullCatalog).not.toContain('窗口剧情_ch_0024');
+        expect(past.fullCatalog).not.toContain('窗口标题_ch_0024');
+        expect(past.fullCatalog).toContain('窗口剧情_ch_0021');
+        expect(past.chapters.map((entry) => entry.chapterNumber)).toEqual(Array.from({ length: 23 }, (_, i) => i + 1));
+    });
+
     it('verifyPairedRecall：空证据返回 unpaired、不篡改 focusChapters、过滤 WARPED 且支持双侧缺席与不截断审计', async () => {
         const bookRoot = await createTempBookDir();
         const recall = new IndexRecall(new NodeSystemAdapter());

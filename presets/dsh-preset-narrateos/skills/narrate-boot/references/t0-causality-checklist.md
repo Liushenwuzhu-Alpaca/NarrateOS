@@ -9,19 +9,11 @@
 3. **主角不可替代手艺**：当前危局为何必须由主角依靠其具体职业手艺、性格软肋或关系网来撬动，而非交给警方/官方机构/旁人一眼看破？
 4. **核心角色自主弧线**：除主角外，至少 2-3 名核心配角具备独立于主角主线之外的私欲、算计或盲区，在有限信息下会做出合乎自身利益的合理误判。
 
-## 2. `T0` 时序零泄露清单 (`storyDay <= 0`)
+## 2. T0 现状与预期事件分开记账
 
-- 系统自动将 `world_state.md` 初始化为 `story_day: 0`、`current_volume: 1`、`current_chapter: 0`、`timeline_mode: MAINLINE`。
-- `entities[]` 检查（注意 `entities[]` 内部字段全为 **`camelCase`**）：
-  - `entityId`：必须匹配 `^(char|item)_[a-zA-Z0-9_]+$`，且全数组不重复；
-  - `canonicalName`：**必须包含至少 1 个中文字符**；
-  - `innateLocks`（`{ visibility, text }`）：先天/底层永久特征（落盘后自动标注 `since_day: -inf`）；
-  - `acquiredState`（`{ storyDay, visibility, slotKey?, text }`）：**仅允许 `storyDay <= 0`** 的开局前既成事实与在场持物；**任何 `storyDay > 0` 会被 `BootGateError` 拦截**；
-  - `irreversibleTrajectory`（`{ storyDay, text }`）：仅记录 `T0` 之前（**`storyDay <= 0`**）的过往重大节点；
-  - `recentBuffer`（`{ storyDay?, text }`）：若填写 `storyDay`，同样必须 `<= 0`；
-  - 所有条目的 `text` 均须通过 `StaticProseGate`（具体事实表述，无微距套话、无空泛修饰、无标签注释）。
-- `future_horizon_events[]`（注意此处为 **`snake_case`**）：
-  - 所有预定在 `T0` 之后才发生的外部变故或同人原著惯性事件统一存放在此，每项为 `{ event_id, story_day (>0), premise, description }`，必须写明可证伪的前提条件 `premise`。
+逐条询问：这是开局之前已发生的事实、此刻在场状态，还是未来才可能兑现的预期？前两者进入实体档案，未来动态进入 `future_horizon_events`。日期合法不代表因果成立：人物此刻持有某物，还要能说明物品如何到手。
+
+每项未来事件的 `premise` 写成可以被事实推翻的条件。例如“密信仍在原处且港口封锁照常执行”能被失窃或解封推翻；“按计划推进”无法核验。事件的公开影响与幕后原因分别保留知情边界。字段拼法、日历边界和实体格式直接核对当前工具 Schema，不从旧文档复制结构。
 
 ## 3. 四级信息边界与防泄底清单
 
@@ -32,5 +24,5 @@
 | `READER_KNOWN` | 读者已知但场上角色不知的戏剧张力点 | 转为 `[仅读者已知的戏剧张力点]` 提示 |
 | `OMNISCIENT_SECRET` | 尚未揭晓的幕后真相与底牌 | **无条件物理剥离（绝对不可见）** |
 
-- `current_arc_envelope`：仅包含写手安全可见的**正向舞台常态**，检查零 `OMNISCIENT_SECRET` 泄底、零否定禁令词，且必须通过 `StaticProseGate`。
+- `current_arc_envelope` 只写当前公开舞台与正向动作目标；未揭底牌留在全知资产。角色自身的保密动作或道具牌文属于剧情，区别于对写手下达的否定禁令。
 - 同人设定模式（`Canon Delta`）：核对原著专名、人物关系与核心设定守恒率 `>= 98%`，拆片指南见 [fanfic-canon-delta.md](fanfic-canon-delta.md)。

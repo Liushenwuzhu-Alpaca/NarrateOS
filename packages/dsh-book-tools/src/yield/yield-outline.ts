@@ -14,12 +14,11 @@ import { isEnoentError, readOptionalBookConfig } from '../tools/shared.js';
 import { PlannerOutlineSchema } from './schemas.js';
 import { extractSubstantiveNormalizedClauses } from './restricted-clauses.js';
 import { ENTITY_FILENAME_RE, toVisibleEntityMap } from './shared.js';
+import { formatNegativeDirectiveViolations } from './negative-directives.js';
 
 const DEFAULT_FIRST_CHAPTER_MAX_BEATS = BookOpeningConfigSchema.parse({}).first_chapter_max_beats;
 const OUTLINE_RESTRICTED_RE =
     /\b(?:OMNISCIENT_SECRET|WARPED|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
-const OUTLINE_NEGATIVE_PROHIBITION_RE =
-    /(?:禁止|严禁|禁用|不要|不得|切忌|绝不|决不|不能|不可|切勿|莫要)/;
 
 export interface YieldOutlineOptions {
     store?: NarrateStoreService | undefined;
@@ -81,11 +80,16 @@ function assertOutlineCleanroomIsolation(
             `outline_text 禁止包含全知或导演禁区标签「${spoilerHit[0]}」`
         );
     }
-    const negativeHit = OUTLINE_NEGATIVE_PROHIBITION_RE.exec(publicText);
-    if (negativeHit) {
+    const negativeViolations = formatNegativeDirectiveViolations({
+        chapter_title: outline.chapter_title,
+        ending_beat: outline.ending_beat,
+        chapter_turn: outline.chapter_turn,
+        outline_text: outline.outline_text
+    }, 'narrative');
+    if (negativeViolations.length > 0) {
         throw new GateValidationError(
             'yield_outline',
-            `outline_text 禁止包含写手受限否定禁令「${negativeHit[0]}」，请改写为正向动作/镜头指令`
+            `${negativeViolations.join('\n')}\n请改写为正向动作/镜头指令`
         );
     }
 
@@ -211,7 +215,7 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
                         is_spotlight: { type: 'boolean' }
                     }
                 },
-                description: '1~2 个连续场景编排'
+                description: '按当章任务给定上限安排连续场景；首章默认 1 个，其余章 1~2 个'
             },
             outline_text: {
                 type: 'string',
@@ -221,6 +225,10 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
             preferred_voice_tag: {
                 type: 'string',
                 description: '可选声纹标签'
+            },
+            target_beat_label: {
+                type: 'string',
+                description: '可选：本章拟推进或完成的导演节拍标签，实际完成由终审核查确认'
             }
         },
         output: {

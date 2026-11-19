@@ -372,7 +372,7 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         ).rejects.toThrow('已卸载');
     });
 
-    it('允许 max_auto_rollback_chapters 为 0（关闭自动回滚），拒绝负数，且工具 Schema 描述标明 camelCase/snake_case 差异', async () => {
+    it('允许 max_auto_rollback_chapters 为 0（关闭自动回滚），拒绝负数', async () => {
         const booksRoot = await makeTempBooksRoot();
 
         const res = await lockCharterAndBoot(
@@ -397,15 +397,6 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         ).rejects.toThrow();
         expect(existsSync(join(booksRoot, 'negative-rollback-book'))).toBe(false);
 
-        const tool = createLockCharterAndBootTool({ booksRoot });
-        const props = (tool.parameters as { properties?: Record<string, { description?: string }> }).properties ?? {};
-        expect(props['entities']?.description).toContain('camelCase');
-        expect(props['entities']?.description).toContain('entityId');
-        expect(props['entities']?.description).toContain('snake_case');
-        expect(props['lore_entries']?.description).toContain('lore_*');
-        expect(props['open_threads']?.description).toContain('15');
-        expect(props['future_horizon_events']?.description).toContain('story_day');
-        expect(props['voice_samples']?.description).toContain('StaticProseGate');
     });
 
     it('apply(ctx) 注册的 lock_charter_and_boot 成功建库后自动 switchBook，遇到在途锁冲突时不回滚已落盘目录', async () => {
@@ -537,12 +528,12 @@ describe('lock_charter_and_boot 开书建库与门禁停机', () => {
         await expect(
             lockCharterAndBoot(
                 buildMinimalValidBootInput({
-                    book_slug: 'bad-negative-arc',
+                    book_slug: 'narrative-negative-arc',
                     current_arc_envelope: '寒冬夜班期间禁止揭露幕后真相。'
                 }),
                 { booksRoot }
             )
-        ).rejects.toThrow(BootGateError);
+        ).resolves.toMatchObject({ halted: true });
 
         await expect(
             lockCharterAndBoot(

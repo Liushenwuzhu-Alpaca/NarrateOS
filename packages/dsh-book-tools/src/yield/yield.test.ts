@@ -1348,7 +1348,7 @@ describe('yield_* 终态门禁工具确定性校验', () => {
                 },
                 createSpyExec('yield_verdict', {}).exec
             )
-        ).rejects.toThrow(GateValidationError);
+        ).rejects.toMatchObject({ name: 'ToolArgsError', code: 'INVALID_ARGS' });
 
         // 2. 2 段草稿单段 LOCAL_PATCH（去重段数===1）豁免比例拦截正常放行
         const singleRes = (await verdict2.execute(

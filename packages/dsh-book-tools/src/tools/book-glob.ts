@@ -4,7 +4,7 @@ import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
-import { isEnoentError, matchesAnyPathPrefix } from './shared.js';
+import { isEnoentError, matchesAnyPathPrefix, readOptionalBookConfig } from './shared.js';
 
 export interface BookGlobToolOptions {
     store: NarrateStoreService;
@@ -13,6 +13,8 @@ export interface BookGlobToolOptions {
     quota: ReadQuotaCounter;
     /** 可选内存分支覆盖层（string 覆写/新增，null 删除） */
     stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
+    /** 默认每页最大文件数，缺省读取 retrieval.glob_default_max_results。 */
+    defaultMaxResults?: number | undefined;
 }
 
 function globToRegExp(pattern: string): RegExp {
@@ -143,6 +145,14 @@ export function createBookGlobTool(options: BookGlobToolOptions): ToolDefinition
             path: {
                 type: 'string',
                 description: '可选限定目录（须位于允许目录内）'
+            },
+            max_results: {
+                type: 'integer',
+                description: '单页最多返回文件数（默认 200）'
+            },
+            offset: {
+                type: 'integer',
+                description: '跳过的匹配文件数（0-based，默认 0），使用返回的 nextOffset 继续翻页'
             }
         },
         output: {
@@ -150,19 +160,26 @@ export function createBookGlobTool(options: BookGlobToolOptions): ToolDefinition
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                    files: { type: 'array', required: true, items: { type: 'string' } }
+                    files: { type: 'array', required: true, items: { type: 'string' } },
+                    totalFiles: { type: 'integer', required: true },
+                    nextOffset: { type: 'integer' }
                 }
             },
             render(_args, value) {
-                if (value.files.length === 0) {
-                    return [{ type: 'text', text: '(无匹配文件)' }];
-                }
-                return [{ type: 'text', text: value.files.join('\n') }];
+                const content = value.files.length === 0 ? '(无匹配文件)' : value.files.join('\n');
+                const hint = value.nextOffset === undefined ? '' : `\n[共 ${value.totalFiles} 个匹配文件，结果已分页；使用 offset=${value.nextOffset} 继续读取]`;
+                return [{ type: 'text', text: `${content}${hint}\n${quota.render()}` }];
             }
         },
-        isConcurrencySafe: () => true,
+        isConcurrencySafe: () => false,
         async execute(args, exec) {
             exec.signal.throwIfAborted();
+            const offset = args.offset ?? 0;
+            if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('book_glob 的 offset 必须为 >= 0 的整数');
+            const config = options.defaultMaxResults === undefined ? await readOptionalBookConfig(store, fence.bookRoot) : null;
+            const retrieval = config?.retrieval as { glob_default_max_results?: number } | undefined;
+            const maxResults = args.max_results ?? options.defaultMaxResults ?? retrieval?.glob_default_max_results ?? 200;
+            if (!Number.isSafeInteger(maxResults) || maxResults < 1) throw new Error('book_glob 的 max_results 必须为 >= 1 的整数');
             if (args.pattern !== undefined) {
                 fence.assertSafeGlobPattern(args.pattern);
             }
@@ -197,7 +214,10 @@ export function createBookGlobTool(options: BookGlobToolOptions): ToolDefinition
                 });
             }
 
-            return { files };
+            const totalFiles = files.length;
+            const page = files.slice(offset, offset + maxResults);
+            const nextOffset = offset + page.length;
+            return { files: page, totalFiles, ...(nextOffset < totalFiles ? { nextOffset } : {}) };
         }
     });
 }

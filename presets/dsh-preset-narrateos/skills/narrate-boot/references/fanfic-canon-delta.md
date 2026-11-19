@@ -24,6 +24,7 @@
 ## 4. `lore_library/` 拆片粒度
 
 - 原著庞杂的势力架构、力量体系、地理图志、年表与名词解释，严禁整坨塞进 `world/static_base_and_voice.md`（写手静态基线须保持精炼）。
+- 公开词条只收纳当前可揭露的知识；未揭露超自然法则、力量体系真实代价和谜底机制进入 `unrevealed_pivots` 或实体的 `OMNISCIENT_SECRET` 槽位，不能因其属于“世界设定”就提前交给写手。
 - 将静态设定按**单一主题**拆分为多条 `lore_entries[]`（`snake_case`：`{ id: "lore_*", title, summary, content }`）：
   - 每条专注一个独立主题（如单个宗门/机构规程、单项法术/器械代价、单一城市区划），正文控制在 **300-800 字**；
   - `summary` 用 1-2 句说清触发检索的关键词与核心约束，供后台 `Librarian` 按章节需要精准召回 `lore_library/<id>.md`。

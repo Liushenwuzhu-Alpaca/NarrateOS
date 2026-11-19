@@ -11,7 +11,7 @@
 ## 2. 四步只读取证与增量改纲流程
 
 ### Step 1：只读取证盘点（定位受波及范围）
-使用只读工具直接核查目标作品目录 `books/<slug>/` 下的真实文件（`world/author_charter.md`、`world/arc_director_plan.md`、`world/world_state.md`、`world/open_threads.md`、`world/future_horizon.md`、`index/L1_volumes.md` 与最近数章 `index/L2_cards/vol_*.md`、`manuscripts/`）：
+先确认当前激活作品的 `books/<slug>/`，所有检索路径限定在该目录，避免混读同名实体或另一部作品的章卡。使用只读工具核查 `world/author_charter.md`、`world/arc_director_plan.md`、`world/world_state.md`、`world/open_threads.md`、`world/future_horizon.md`、`index/L1_volumes.md` 与相关章卡、手稿。长文件优先传 `offset` / `limit` 分段读取，记下已覆盖范围与引用行号；需要此前原句时重新读取目标范围，不依赖对话历史中可能已被剪枝的工具结果。这是主会话的操作约束，通用只读文件工具本身不提供单书硬围栏。
 1. 已提交到第几章（`.ops/tx_state.json` 的 `last_committed_ch`）、当前 `story_day` 与卷号；
 2. 哪些已定稿事实与新想法存在张力，哪些仍然完全成立；
 3. 若由 `SAFE_HALT` 挂起触发，核对冲突双侧章号、行号与波及章数（参考 `.ops/runs.jsonl` 或 Studio 报错）。

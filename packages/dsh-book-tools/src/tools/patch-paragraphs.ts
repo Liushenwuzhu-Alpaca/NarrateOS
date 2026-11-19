@@ -7,6 +7,20 @@ import {
     type ProseGateResult
 } from '@narrateos/dsh-book-store';
 
+export const GATE_POSITIVE_GUIDANCE: Record<string, string> = {
+    tag_residue: '直接输出纯粹的小说散文正文，保持段落干净自然。',
+    negation_contrast: '直接陈述当下发生的动作、神态与客观场景状态，以正面描摹推进句子。',
+    subjective_judgment: '坚持第三人称客观镜头白描，借助具体动作、手势与口语对白自然显现人物态度与情绪。',
+    micro_anatomy: '改用整体肢体动作、物件触碰、站位移动或简短对白刻画人物反应。',
+    skeletal_quota: '以日常衣着动静、步态姿势与环境交互展现人物体态。',
+    filler_trace: '选用具体可感的动作动词与实感细节描摹现场变化。',
+    deictic_na: '使用明确的人名、物件名称或干净的短句衔接指代。',
+    reduplication_verb: '采用干脆利落的单动作动词推进叙事节奏。',
+    deictic_density: '通过具体的光线、声响、温度、气味与触感细节营造现场氛围。',
+    filler_cliche: '使用贴合人物身份的生活化口语与日常动作白描推进情节。',
+    ending_moralizing: '结尾定格在具体的动作落点、环境声响或待解事态的客观画面上，留出自然余韵。',
+    cross_chapter_simile: '采用贴合当下场景的新鲜具象意象或直接白描，呈现独特的现场质感。'
+};
 /** 单条段落区间替换参数 Schema */
 export const PatchParagraphEditSchema = z.object({
     start_paragraph: z.number().int().nonnegative(),
@@ -34,8 +48,7 @@ export type PatchParagraphViolation = {
     ruleId: string;
     line: number;
     column: number;
-    matchedText: string;
-    lineText: string;
+    message: string;
 };
 
 /** 违规段落的带编号当前正文快照 */
@@ -88,7 +101,7 @@ export function formatPatchViolationsText(
         lines.push('违规定位清单:');
         for (const v of violations) {
             lines.push(
-                `- [${v.paragraphIndex}] (${v.ruleId}, line ${v.line}:${v.column}) 命中 "${v.matchedText}" | 行内容: ${v.lineText}`
+                `- [${v.paragraphIndex}] (${v.ruleId}, line ${v.line}:${v.column}) ${v.message}`
             );
         }
     }
@@ -231,12 +244,13 @@ export class InMemoryDraftPatchSession {
             ruleId: v.ruleId,
             line: v.line,
             column: v.column,
-            matchedText: v.matchedText,
-            lineText: v.lineText
+            message: `${GATE_POSITIVE_GUIDANCE[v.ruleId] ?? '以具体动作与现场感官细节重写。'} ${v.message.replace(/"[^"]*"|<[^>]*>/g, '[定位片段]')}`
         }));
         const violatedParagraphs: ViolatedParagraphSnapshot[] = violatedParagraphIndices.map((idx) => ({
             index: idx,
-            text: this.paragraphs[idx] ?? ''
+            text: gateResult.violations.reduce((text, violation) =>
+                violation.matchedText ? text.split(violation.matchedText).join('[定位片段]') : text,
+                this.paragraphs[idx] ?? '')
         }));
         return {
             configured: true,
@@ -251,6 +265,7 @@ export class InMemoryDraftPatchSession {
     /** 校验并按逆序应用一组互不重叠的 0-based 段落区间替换 */
     applyEdits(rawEdits: readonly PatchParagraphEdit[]): PatchParagraphsResult {
         const parsed = PatchParagraphsInputSchema.parse({ edits: rawEdits });
+        const previousLength = this.paragraphs.length;
         const sortedAsc = validateAndSortPatchEdits(parsed.edits, this.paragraphs.length);
 
         const originalParagraph0 = this.paragraphs[0];
@@ -303,6 +318,9 @@ export class InMemoryDraftPatchSession {
         this.editCount += parsed.edits.length;
 
         const report = this.evaluateGateReport();
+        const indexPreviews = this.paragraphs.length !== previousLength
+            ? new Map(report.violatedParagraphs.map(({ index, text }) => [index, text]))
+            : null;
 
         return {
             totalParagraphs: this.paragraphs.length,
@@ -320,7 +338,9 @@ export class InMemoryDraftPatchSession {
                 titlePreserved,
                 preservedTitleLine,
                 report
-            )
+            ) + (indexPreviews
+                ? `\n段落数量已变化，请按最新索引继续：\n${this.paragraphs.map((paragraph, index) => `[${index}] ${(indexPreviews.get(index) ?? paragraph).slice(0, 25).replace(/\s+/g, ' ')}`).join('\n')}`
+                : '')
         };
     }
 }
@@ -401,8 +421,7 @@ export function createPatchParagraphsTool(options: PatchParagraphsToolOptions): 
                                 ruleId: { type: 'string', required: true },
                                 line: { type: 'integer', required: true },
                                 column: { type: 'integer', required: true },
-                                matchedText: { type: 'string', required: true },
-                                lineText: { type: 'string', required: true }
+                                message: { type: 'string', required: true }
                             }
                         }
                     },

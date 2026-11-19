@@ -5,6 +5,7 @@ import { dirname, isAbsolute, posix, relative, resolve } from 'node:path';
 interface StagingSessionState {
     bookRoot: string;
     overlay: Map<string, string>;
+    history: Map<string, string[]>;
 }
 
 /** .ops/ 只读最小白名单：仅开放遥测文件供只读诊断 */
@@ -265,7 +266,8 @@ export class StagingSessionManager {
         }
         this.sessions.set(runId, {
             bookRoot: resolve(bookRoot),
-            overlay: new Map<string, string>()
+            overlay: new Map<string, string>(),
+            history: new Map<string, string[]>()
         });
     }
 
@@ -321,7 +323,14 @@ export class StagingSessionManager {
         const current = base ?? await this.read(runId, normalized);
         const firstIdx = current.indexOf(targetText);
         if (firstIdx === -1) {
-            throw new Error(`在 ${normalized} 中未找到匹配的目标文本`);
+            const needle = targetText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? '';
+            const prefix = needle.slice(0, Math.min(12, Math.max(1, Math.floor(needle.length / 2))));
+            const nearby = current.split(/\r?\n/)
+                .map((line, index) => ({ line, index }))
+                .filter(({ line }) => prefix && line.includes(prefix))
+                .slice(0, 2)
+                .map(({ line, index }) => `第 ${index + 1} 行: ${line.slice(0, 200)}`);
+            throw new Error(`在 ${normalized} 中未找到匹配的目标文本${nearby.length ? `；相近行：\n${nearby.join('\n')}` : ''}`);
         }
         if (current.indexOf(targetText, firstIdx + targetText.length) !== -1) {
             throw new Error(`在 ${normalized} 中匹配到多处目标文本，请提供更精确上下文`);
@@ -329,7 +338,7 @@ export class StagingSessionManager {
 
         const nextContent =
             current.slice(0, firstIdx) + replacementText + current.slice(firstIdx + targetText.length);
-        session.overlay.set(normalized, nextContent);
+        this.saveVersion(session, normalized, nextContent);
         return nextContent;
     }
 
@@ -341,7 +350,34 @@ export class StagingSessionManager {
         const session = this.requireSession(runId);
         const { normalized, absPath } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
         assertRealPathAllowedSync(session.bookRoot, absPath, relPath, true);
-        session.overlay.set(normalized, content);
+        this.saveVersion(session, normalized, content);
+    }
+
+    /** 撤销该路径最后一次暂存修改；首次修改撤销后直接回到磁盘或分支视图。 */
+    async revert(runId: string, relPath: string): Promise<{ staged: boolean; content: string | null }> {
+        const session = this.requireSession(runId);
+        const { normalized, absPath } = normalizeAndValidateRelPath(session.bookRoot, relPath, true);
+        await assertRealPathAllowed(session.bookRoot, absPath, relPath, true);
+        const history = session.history.get(normalized);
+        if (history?.length) {
+            const content = history.pop()!;
+            session.overlay.set(normalized, content);
+            if (!history.length) session.history.delete(normalized);
+            return { staged: true, content };
+        }
+        session.overlay.delete(normalized);
+        session.history.delete(normalized);
+        return { staged: false, content: null };
+    }
+
+    private saveVersion(session: StagingSessionState, path: string, content: string): void {
+        const previous = session.overlay.get(path);
+        if (previous !== undefined) {
+            const history = session.history.get(path) ?? [];
+            history.push(previous);
+            session.history.set(path, history);
+        }
+        session.overlay.set(path, content);
     }
 
     /** 返回当前 runId 待提交的暂存文件快照（只读副本） */

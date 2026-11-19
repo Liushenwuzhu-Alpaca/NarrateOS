@@ -3,6 +3,7 @@ import type { NarrationSubjectivity } from '@narrateos/dsh-book-store';
 import { validateBootBundle } from '../boot/boot-validation.js';
 import { GateValidationError } from '../errors.js';
 import { BootBundleOutputSchema, type BootBundleOutput } from './schemas.js';
+import { COMPILED_ENTITY_TOOL_SCHEMA } from '../boot/compiled-entity-input.js';
 
 export interface YieldBootBundleOptions {
     narrationSubjectivity?: NarrationSubjectivity | undefined;
@@ -94,7 +95,7 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
             },
             entities: {
                 type: 'array',
-                items: { type: 'json' },
+                items: COMPILED_ENTITY_TOOL_SCHEMA,
                 description: '初始实体档案列表（>=1 个，允许 0 条 OMNISCIENT_SECRET）'
             },
             contract_conflicts: {
@@ -149,13 +150,13 @@ export function createYieldBootBundleTool(options: YieldBootBundleOptions = {}):
 
             const outcome = validateBootBundle(parsed, {
                 narrationSubjectivity,
-                voiceSampleMode: 'strict'
+                voiceSampleMode: 'filter'
             });
             if (outcome.issues.length > 0) {
                 throw new GateValidationError('yield_boot_bundle', outcome.issues.join('; '));
             }
 
-            onYield?.(parsed);
+            onYield?.({ ...parsed, voice_samples: outcome.cleanVoiceSamples });
             exec.concludeTurn();
 
             return {

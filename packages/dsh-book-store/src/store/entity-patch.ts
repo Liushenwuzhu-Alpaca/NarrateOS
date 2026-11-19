@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
     DEFAULT_SECTION_HEADINGS,
     assertEntryTagsSafe,
@@ -176,6 +177,28 @@ function applyAcquiredStateOps(
     }
 }
 
+/** 缓冲先按章号排列，再裁旧；同日同章的重复记录及已在活跃状态中的事实不重复占位。 */
+function normalizeRecentBuffer(profile: EntityProfile): void {
+    const active = profile.acquiredState.filter((entry) => entry.status !== 'WARPED');
+    const retained: EntityEntry[] = [];
+    for (const entry of profile.recentBuffer) {
+        const timed = entry.chapter !== undefined || entry.storyDay !== undefined;
+        const inActiveState = timed && active.some((state) =>
+            state.text.trim() === entry.text.trim() &&
+            state.visibility === entry.visibility && state.owner === entry.owner &&
+            state.rawInvalidVisibility === entry.rawInvalidVisibility &&
+            isDeepStrictEqual(state.continuationLines, entry.continuationLines)
+        );
+        if (!inActiveState && !retained.some((prior) => isDeepStrictEqual(prior, entry))) retained.push(entry);
+    }
+    retained.sort((a, b) => {
+        const chapterA = a.chapter ?? Number.MAX_SAFE_INTEGER;
+        const chapterB = b.chapter ?? Number.MAX_SAFE_INTEGER;
+        return chapterA - chapterB || (a.storyDay ?? Number.MAX_SAFE_INTEGER) - (b.storyDay ?? Number.MAX_SAFE_INTEGER);
+    });
+    profile.recentBuffer = retained;
+}
+
 function applyBufferOps(
     profile: EntityProfile,
     ops: NonNullable<EntityPatch['buffer_ops']>
@@ -188,6 +211,7 @@ function applyBufferOps(
             assertEntryTagsSafe(nextEntry);
             profile.recentBuffer.push(nextEntry);
         } else if (op.op === 'trim_buffer') {
+            normalizeRecentBuffer(profile);
             const timedIndices: number[] = [];
             profile.recentBuffer.forEach((entry, idx) => {
                 if (entry.storyDay !== undefined || entry.chapter !== undefined) {
@@ -283,6 +307,7 @@ export function mergeEntityProfilePatch(
     if (patch.buffer_ops) {
         applyBufferOps(profile, patch.buffer_ops);
     }
+    normalizeRecentBuffer(profile);
 
     profile.metadata = EntityMetadataSchema.parse(profile.metadata);
     return profile;

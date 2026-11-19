@@ -108,6 +108,10 @@ export interface BuildRoleToolsOptions {
     chapterGoal?: string | undefined;
     /** Fact Checker 待审校草稿正文 */
     draftText?: string | undefined;
+    /** 本章细纲虚拟来源，仅供 PLAN_CONFLICT 验真 */
+    outlineText?: string | undefined;
+    /** 当前上下文已逐字全文注入且未经裁剪的路径 */
+    preInjectedFullPaths?: ReadonlySet<string> | undefined;
     /** Fact Checker 待审校草稿路径 */
     draftPath?: string | undefined;
     /** Extractor / Dreamer 关联章号 */
@@ -230,6 +234,7 @@ export class NarrateToolsService {
                         runId,
                         fence: fence!,
                         quota,
+                        preInjectedFullPaths: options.preInjectedFullPaths,
                         stagingOverlay: options.stagingOverlay
                     })
                 );
@@ -309,6 +314,7 @@ export class NarrateToolsService {
                     runId,
                     fence: fence!,
                     draftText: options.draftText,
+                    outlineText: options.outlineText,
                     draftPath: options.draftPath,
                     stagingOverlay: options.stagingOverlay,
                     onYield: recordYield

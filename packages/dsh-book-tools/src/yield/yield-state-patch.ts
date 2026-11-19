@@ -16,6 +16,7 @@ import {
 import { GateValidationError } from '../errors.js';
 import { isEnoentError, readOptionalDiskText } from '../tools/shared.js';
 import { ExtractorOutputSchema, hasChineseCharacter, type ExtractorOutput } from './schemas.js';
+import { ENTITY_PATCH_TOOL_SCHEMA } from './entity-patch-tool-schema.js';
 import {
     collectReachableKeysFromBookDirs,
     ENTITY_FILENAME_RE,
@@ -199,6 +200,11 @@ async function inspectAndValidateEntityPatches(params: {
             }
         }
 
+        if (existing !== null && patch.canonical_name !== undefined &&
+            [existing.metadata.canonical_name, ...existing.metadata.unique_aliases].includes(patch.canonical_name.trim())) {
+            delete patch.canonical_name;
+        }
+
         mergedProfiles.set(patch.entity_id, mergeEntityProfilePatch(existing, patch, allowInnateMutation));
     }
 
@@ -232,7 +238,7 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             entity_patches: {
                 type: 'array',
                 required: true,
-                items: { type: 'json' },
+                items: ENTITY_PATCH_TOOL_SCHEMA,
                 description: [
                     '实体增量补丁列表 (EntityPatch[])。每项结构：',
                     '{ entity_id: "char_xxx"|"item_xxx", last_seen_ch?: int>=0, canonical_name?: string(新建必填且含中文，既有不可改),',

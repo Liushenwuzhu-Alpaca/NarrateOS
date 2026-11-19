@@ -1737,6 +1737,58 @@ describe('Wave 3B 收口回归集成测试', () => {
         return { bookRoot, booksRoot, ctx, web, cmds, mockState };
     }
 
+    it.each(['完成', '异常', '取消'] as const)('BUG-02b: 单步挂起时返回工种，%s后清空', async (outcome) => {
+        const entered = createDeferred<void>();
+        const release = createDeferred<void>();
+        const abort = new AbortController();
+        registerCleanup(() => release.resolve());
+        const { ctx, web } = await setupWave3bWorkspace(`step-stage-${outcome}`, {
+            onAgent: async ({ tools, execTool }) => {
+                if (tools.has('yield_context_pack')) {
+                    entered.resolve();
+                    await release.promise;
+                    if (outcome === '异常') throw new Error('单步工种失败');
+                    if (abort.signal.aborted) throw abort.signal.reason;
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'], recall_queries: [], selected_lore_files: []
+                    });
+                } else if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '工种状态测试', target_word_count: 1000,
+                        focus_cast: ['char_001'], background_cast: [], ending_beat: 'HOOK',
+                        director_rationale: '秘辛', chapter_turn: '推进港口剧情',
+                        scene_plan: [{ scene_index: 1, location: '港口', summary: '推进剧情', is_spotlight: true }],
+                        outline_text: '推进港口剧情。'
+                    });
+                } else if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                } else if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', {
+                        entity_patches: [], story_day_delta: 0, chapter_summary: '提交完成', next_chapter_options: []
+                    });
+                }
+            },
+            onLlmStream: () => textToStreamChunks('雨歇之后，铁锚重新沉入浅水，灯塔光束掠过防波堤。')
+        });
+        const step = ctx.narratePipeline.stepChapter({ chapterGoal: '推进港口剧情', signal: abort.signal });
+        // 立即接住拒绝，避免取消或工种失败形成未处理的 Promise。
+        const settled = step.then(() => '完成', () => '拒绝');
+        try {
+            await entered.promise;
+            const status = await web.invoke('GET', '/api/narrate/status');
+            expect(status.statusCode).toBe(200);
+            expect(status.json['runtime']).toMatchObject({ activeTask: 'STEPPING' });
+            expect(status.json['yolo']).toMatchObject({ running: false, currentStage: 'LIBRARIAN' });
+            if (outcome === '取消') abort.abort(new Error('单步取消'));
+        } finally {
+            release.resolve();
+        }
+        expect(await settled).toBe(outcome === '完成' ? '完成' : '拒绝');
+        const status = await web.invoke('GET', '/api/narrate/status');
+        expect(status.json['runtime']).toMatchObject({ activeTask: 'IDLE' });
+        expect(status.json['yolo']).toMatchObject({ running: false, currentStage: null });
+    });
+
     it('章节 PUT 必须同时匹配原作品、章号与工作树版本，拒绝时不备份也不启动 Sync', async () => {
         const { bookRoot, ctx, web } = await setupWave3bWorkspace('edit-origin');
         const other = await createGitBookWorkspace(tempDirs, 'edit-other');
@@ -2518,6 +2570,9 @@ describe('Wave 3B 收口回归集成测试', () => {
 
         // 等待第 1 章进入 WRITER 后发出默认软停机 (force=false)
         await writerEntered.promise;
+        expect((await web.invoke('GET', '/api/narrate/status')).json['yolo']).toMatchObject({
+            running: true, currentStage: 'WRITER'
+        });
         const softHaltRes = await web.invoke('POST', '/api/narrate/halt', {});
         expect(softHaltRes.statusCode).toBe(202);
         expect(softHaltRes.json['force']).toBe(false);
@@ -2532,6 +2587,7 @@ describe('Wave 3B 收口回归集成测试', () => {
         const txAfterSoftHalt = await ctx.narrateStore.openStore().readTxState();
         expect(txAfterSoftHalt.last_committed_ch).toBe(1);
         expect(dreamingCalls).toBe(0);
+        expect(ctx.narratePipeline.runtimeStatus.yolo.currentStage).toBeNull();
 
         // 3. 验证 force: true 硬中断立即触发 AbortSignal 且不消费未提交章的新信号
         await ctx.narratePipeline.enqueueSignal({ type: 'DIRECTOR_NOTE', reason: '硬中断后仍保留' });
@@ -2551,6 +2607,7 @@ describe('Wave 3B 收口回归集成测试', () => {
         );
         await new Promise((r) => setImmediate(r));
         expect(observedAbortSignals).toContain(true);
+        expect(ctx.narratePipeline.runtimeStatus.yolo.currentStage).toBeNull();
         expect(await ctx.narratePipeline.countPendingSignals()).toBe(1);
     });
 

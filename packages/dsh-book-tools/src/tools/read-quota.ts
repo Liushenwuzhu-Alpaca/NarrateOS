@@ -29,11 +29,16 @@ export class ReadQuotaCounter {
         this.yieldToolHint = options.yieldToolHint ?? 'yield_*';
     }
 
-    /** 消耗 1 次只读配额；超限时立即抛出 ReadQuotaExceededError */
-    consume(toolName: string): number {
+    /** 读盘前检查余量，成功返回内容后再扣减。 */
+    assertAvailable(toolName: string): void {
         if (this.usedCount >= this.maxReadCalls) {
             throw new ReadQuotaExceededError(toolName, this.maxReadCalls, this.yieldToolHint);
         }
+    }
+
+    /** 消耗 1 次只读配额；超限时立即抛出 ReadQuotaExceededError。 */
+    consume(toolName: string): number {
+        this.assertAvailable(toolName);
         this.usedCount += 1;
         return this.usedCount;
     }
@@ -49,5 +54,15 @@ export class ReadQuotaCounter {
             return Number.POSITIVE_INFINITY;
         }
         return Math.max(0, this.maxReadCalls - this.usedCount);
+    }
+
+    /** 在工具结果末尾显示当前共享配额，耗尽时给出可执行的交棒指引。 */
+    render(): string {
+        const max = Number.isFinite(this.maxReadCalls) ? this.maxReadCalls : '不限';
+        const remaining = Number.isFinite(this.remaining) ? this.remaining : '不限';
+        const hint = this.remaining === 0
+            ? `\n只读配额已用尽，下一步请直接调用 ${this.yieldToolHint} 提交结果`
+            : '';
+        return `[只读配额: ${this.count}/${max}, 剩余: ${remaining}]${hint}`;
     }
 }

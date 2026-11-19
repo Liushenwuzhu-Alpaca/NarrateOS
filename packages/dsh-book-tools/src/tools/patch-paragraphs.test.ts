@@ -227,19 +227,17 @@ describe('InMemoryDraftPatchSession 与 patch_paragraphs', () => {
         expect(res1.violations).toHaveLength(1);
         expect(res1.violations[0]).toMatchObject({
             paragraphIndex: 3,
-            ruleId: 'filler_trace',
-            matchedText: '一丝',
-            lineText: '老周嘴角浮现一丝冷意，转身收起账本。'
+            ruleId: 'filler_trace'
         });
         expect(res1.violations[0]!.line).toBeGreaterThan(1);
         expect(res1.violations[0]!.column).toBeGreaterThan(0);
-        expect(res1.violatedParagraphs).toEqual([
-            { index: 3, text: '老周嘴角浮现一丝冷意，转身收起账本。' }
-        ]);
+        expect(res1.violatedParagraphs.map((paragraph) => paragraph.index)).toEqual([3]);
+        expect(JSON.stringify(res1)).not.toContain('一丝');
 
         const rendered1 = tool.output!.render!(round1Args, res1);
         const rendered1Text = rendered1.map((part) => ('text' in part ? part.text : '')).join('\n');
-        expect(rendered1Text).toContain('[3] 老周嘴角浮现一丝冷意，转身收起账本。');
+        expect(rendered1Text).toContain('[3]');
+        expect(rendered1Text).not.toContain('一丝');
         expect(rendered1Text).toContain('filler_trace');
 
         // 第二轮：修补第 3 段，门禁全部清零并提示调用 yield_patched_draft

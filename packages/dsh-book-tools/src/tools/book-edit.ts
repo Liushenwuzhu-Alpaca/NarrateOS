@@ -1,6 +1,7 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import { PathFence } from './path-fence.js';
+import { validateDreamWrite } from '../yield/dream-write-validation.js';
 
 export interface BookEditToolOptions {
     store: NarrateStoreService;
@@ -16,7 +17,7 @@ export function createBookEditTool(options: BookEditToolOptions): ToolDefinition
     return defineTool({
         name: 'book_edit',
         description:
-            '在当前 runId 的隔离内存暂存区中编辑或写入作品资产（world/、lore_library/、index/、entities/）。严禁修改 manuscripts/ 或 .ops/，不会直接写入磁盘。',
+            '在当前 runId 的隔离内存暂存区编辑、写入或逐步撤销作品资产（world/、lore_library/、index/、entities/，以及授权的 .ops/voice_samples.yaml）。严禁修改 manuscripts/，不会直接写入磁盘。暂存预警时用 mode=revert 撤销最后一步后继续。',
         parameters: {
             path: {
                 type: 'string',
@@ -29,13 +30,12 @@ export function createBookEditTool(options: BookEditToolOptions): ToolDefinition
             },
             replacement_text: {
                 type: 'string',
-                required: true,
                 description: '替换后的文本（mode=write 时为完整文件内容）'
             },
             mode: {
                 type: 'string',
-                enum: ['replace', 'write'],
-                description: '编辑模式：replace 精确替换（默认），write 全文写入暂存'
+                enum: ['replace', 'write', 'revert'],
+                description: 'replace 精确替换（默认），write 全文暂存，revert 撤销该文件最后一步；revert 无需 replacement_text'
             }
         },
         output: {
@@ -46,14 +46,15 @@ export function createBookEditTool(options: BookEditToolOptions): ToolDefinition
                     path: { type: 'string', required: true },
                     staged: { type: 'boolean', required: true },
                     mode: { type: 'string', required: true },
-                    bytes: { type: 'integer', required: true }
+                    bytes: { type: 'integer', required: true },
+                    warning: { type: 'string' }
                 }
             },
             render(_args, value) {
                 return [
                     {
                         type: 'text',
-                        text: `已写入暂存区 (${value.mode}): ${value.path} (${value.bytes} bytes)`
+                        text: `${value.staged ? '已写入暂存区' : '已移出暂存区'} (${value.mode}): ${value.path} (${value.bytes} bytes)${value.warning ? `\n[暂存预警: ${value.warning}]` : ''}`
                     }
                 ];
             }
@@ -67,11 +68,18 @@ export function createBookEditTool(options: BookEditToolOptions): ToolDefinition
             }
 
             const mode = args.mode ?? 'replace';
-            let nextContent: string;
-            if (mode === 'write') {
+            let nextContent: string | null;
+            let staged = true;
+            if (mode === 'revert') {
+                const result = await store.staging.revert(runId, normalized);
+                nextContent = result.content;
+                staged = result.staged;
+            } else if (mode === 'write') {
+                if (args.replacement_text === undefined) throw new Error('book_edit 在 write 模式下必须提供 replacement_text');
                 store.staging.stageWrite(runId, normalized, args.replacement_text);
                 nextContent = args.replacement_text;
             } else {
+                if (args.replacement_text === undefined) throw new Error('book_edit 在 replace 模式下必须提供 replacement_text');
                 if (args.target_text === undefined || args.target_text.length === 0) {
                     throw new Error('book_edit 在 replace 模式下必须提供非空 target_text');
                 }
@@ -84,11 +92,21 @@ export function createBookEditTool(options: BookEditToolOptions): ToolDefinition
                 );
             }
 
+            let warning: string | undefined;
+            if (staged && nextContent !== null) {
+                try {
+                    await validateDreamWrite(fence.bookRoot, normalized, nextContent, fence);
+                } catch (error) {
+                    warning = error instanceof Error ? error.message : String(error);
+                }
+            }
+
             return {
                 path: normalized,
-                staged: true,
+                staged,
                 mode,
-                bytes: Buffer.byteLength(nextContent, 'utf8')
+                bytes: Buffer.byteLength(nextContent ?? '', 'utf8'),
+                ...(warning ? { warning } : {})
             };
         }
     });

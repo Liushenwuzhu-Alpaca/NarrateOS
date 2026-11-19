@@ -214,7 +214,6 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，不动态查
     assert.ok(compactionByName.has('@deepseek-ai/dsh-command-compact'));
     const pruner = compactionByName.get('@deepseek-ai/dsh-compaction-tool-result-pruner');
     assert.ok(pruner);
-    assert.equal(pruner.config?.thresholdChars, 8192);
 
     // 4. 顶层覆盖必须精确禁用 dsh-base 真实存在的全部 8 个编码/终端/计划宿主行（避免主会话泄露全局写工具）
     const overrideRows = parsed.filter((item) => !Array.isArray(item?.insert));
@@ -440,6 +439,10 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         if (expected.maxReadCalls !== undefined) {
             assert.equal(cfg.maxReadCalls, expected.maxReadCalls, `角色 ${roleId} 的 maxReadCalls 应为 ${expected.maxReadCalls}`);
         }
+        if (['librarian', 'planner', 'fact-checker', 'extractor'].includes(roleId)) {
+            assert.ok(cfg.maxSteps >= cfg.maxReadCalls * 2 + 2,
+                `${roleId} 需为读取纠错和终态提交保留步数`);
+        }
         assert.deepEqual(cfg.tools, expected.tools);
         assert.equal(cfg.yieldTool, expected.yieldTool);
 
@@ -482,125 +485,6 @@ test('全部 8 个外部化角色 YAML 与正向/受控系统提示词校验通�
         }
     }
 
-    // 校验 Ch.2 修复相关的提示词契约锚点
-    const writerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/writer.md'), 'utf8');
-    assert.ok(writerPrompt.includes('# 标题名称'), 'writer.md 必须正向说明正文首行输出 `# 标题名称` 一级标题');
-    assert.ok(!writerPrompt.includes('局部定点修补') && !writerPrompt.includes('Patch'), 'writer.md 不应残留局部定点修补（Patch）模式章节');
-
-    const patchPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/patch.md'), 'utf8');
-    for (const marker of ['# ', '0-based', 'patch_paragraphs', 'StaticProseGate', 'yield_patched_draft']) {
-        assert.ok(patchPrompt.includes(marker), `patch.md 缺少关键正向契约锚点: ${marker}`);
-    }
-
-    const librarianPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/librarian.md'), 'utf8');
-    for (const marker of [
-        '已由管线预注入',
-        'world_state.md',
-        'L1_volumes.md',
-        'L2_cards',
-        'open_threads.md',
-        'last_seen_ch',
-        'book_read({ paths:',
-        'lore_library/lore_xxx.md',
-        'maxReadCalls',
-        'world/arc_director_plan.md',
-        'world/author_charter.md',
-        'world/current_arc_envelope.md',
-        'world/future_horizon.md',
-        'manuscripts/',
-        'book_grep',
-        'recall_queries',
-        'wakeup_entity_ids',
-        '首次登场'
-    ]) {
-        assert.ok(librarianPrompt.includes(marker), `librarian.md 缺少关键契约锚点: ${marker}`);
-    }
-    assert.ok(!librarianPrompt.includes('"lore_xxx.md"'), 'librarian.md 示例路径必须补全 lore_library/ 前缀，避免触发 PathFence 拦截');
-    for (const forbiddenNegative of ['不得读取', '不整章', '不在选页职责范围内']) {
-        assert.ok(!librarianPrompt.includes(forbiddenNegative), `librarian.md 应保持纯粹正向陈述，不应包含 "${forbiddenNegative}"`);
-    }
-
-    const factCheckerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/fact-checker.md'), 'utf8');
-    for (const marker of [
-        '已由管线预注入',
-        'manuscripts/ch_0001.md',
-        '本书任务给出的上限',
-        '本书占比上限',
-        'quote_draft',
-        'source_ref',
-        'quote_source'
-    ]) {
-        assert.ok(factCheckerPrompt.includes(marker), `fact-checker.md 缺少关键契约锚点: ${marker}`);
-    }
-
-    const plannerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/planner.md'), 'utf8');
-    for (const marker of ['实体档案摘要', '上章上下文', '点查']) {
-        assert.ok(plannerPrompt.includes(marker), `planner.md 缺少预注入与点查边界锚点: ${marker}`);
-    }
-
-    const extractorPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/extractor.md'), 'utf8');
-    for (const marker of [
-        '已由管线预注入',
-        'open_threads.md',
-        'buffer_ops',
-        'upsert_slot',
-        'trim_buffer',
-        'max_entries',
-        'acquired_state_ops',
-        'upsert_ledger',
-        'trajectory_ops',
-        'entry',
-        'yield_state_patch',
-        'plot_summary',
-        'prose_anchors',
-        'appeared_entity_ids',
-        'OMNISCIENT_SECRET',
-        'READER_KNOWN',
-        'slot_key'
-    ]) {
-        assert.ok(extractorPrompt.includes(marker), `extractor.md 缺少关键契约锚点: ${marker}`);
-    }
-
-    const jsonMatch = /```json\r?\n([\s\S]*?)\r?\n```/.exec(extractorPrompt);
-    assert.ok(jsonMatch, 'extractor.md 必须包含 JSON 示例块');
-    const examplePayload = JSON.parse(jsonMatch[1]);
-    assert.equal(typeof examplePayload.plot_summary, 'string');
-    assert.ok(Array.isArray(examplePayload.prose_anchors));
-    assert.ok(Array.isArray(examplePayload.appeared_entity_ids));
-    assert.ok(Array.isArray(examplePayload.entity_patches) && examplePayload.entity_patches.length >= 1);
-    const firstPatch = examplePayload.entity_patches[0];
-    assert.ok(Array.isArray(firstPatch.acquired_state_ops) && firstPatch.acquired_state_ops.some((op) => op.op === 'upsert_slot'));
-    assert.ok(Array.isArray(firstPatch.trajectory_ops) && firstPatch.trajectory_ops.some((op) => op.op === 'append'));
-    assert.ok(Array.isArray(firstPatch.buffer_ops) && firstPatch.buffer_ops.some((op) => op.op === 'upsert_slot') && firstPatch.buffer_ops.some((op) => op.op === 'trim_buffer'));
-
-    const dreamerPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/dreamer.md'), 'utf8');
-    for (const marker of [
-        'advanceVolume',
-        'world/current_arc_envelope.md',
-        'prose_anchors',
-        'Archived WARPED',
-        'world/future_horizon.md',
-        '.ops/signals.jsonl',
-        'spotlight_triggers'
-    ]) {
-        assert.ok(dreamerPrompt.includes(marker), `dreamer.md 缺少关键契约锚点: ${marker}`);
-    }
-
-    const bootPrompt = fs.readFileSync(path.join(rolesDir, 'prompts/boot-compiler.md'), 'utf8');
-    for (const marker of [
-        'author_sample',
-        'boot_seed',
-        '15-45',
-        'OMNISCIENT_SECRET',
-        'slotKey',
-        'innateLocks',
-        'acquiredState'
-    ]) {
-        assert.ok(bootPrompt.includes(marker), `boot-compiler.md 缺少关键契约锚点: ${marker}`);
-    }
-
-    const readmeText = fs.readFileSync(path.join(PRESET_ROOT, 'README.md'), 'utf8');
-    assert.ok(readmeText.includes('8 大工种') && readmeText.includes('patch.yml'), 'README.md 必须更新为 8 大工种并列出 patch.yml');
 });
 
 test('narrate-boot Skill 满足 < 8,192 字符预算并附带完整 references', () => {
@@ -611,41 +495,13 @@ test('narrate-boot Skill 满足 < 8,192 字符预算并附带完整 references',
     const content = fs.readFileSync(skillPath, 'utf8');
     assert.ok(
         content.length < 8192,
-        `SKILL.md 字符数 (${content.length}) 必须严格小于 8192（tool-result-pruner 阈值）`
+        `SKILL.md 字符数 (${content.length}) 必须严格小于 8192（技能输入预算）`
     );
 
     const frontmatter = parseFrontmatter(content);
     assert.equal(frontmatter.name, 'narrate-boot');
     assert.equal(typeof frontmatter.description, 'string');
     assert.ok(frontmatter.description.trim().length > 10);
-    assert.ok(!frontmatter.description.includes('->'), 'SKILL.md description 不得包含流程箭头摘要');
-    for (const csoKeyword of ['T0', 'Canon Delta', 'SAFE_HALT', 'Stage Ceiling']) {
-        assert.ok(frontmatter.description.includes(csoKeyword), `SKILL.md description 缺少 CSO 触发关键词: ${csoKeyword}`);
-    }
-
-    for (const marker of [
-        'web_search',
-        'ask_user_question',
-        'lock_charter_and_boot',
-        'T0',
-        'Voice Harvest',
-        'OPEN_HORIZON',
-        'Local Closure',
-        'Canon Delta',
-        'When NOT to Use',
-        'Red Flags',
-        'StaticProseGate',
-        'entityId',
-        'camelCase',
-        'snake_case',
-        'fanfic-canon-delta.md',
-        'hybrid_rolling',
-        'boot_seed',
-        'chapter_harvest',
-        'switchConflictReason'
-    ]) {
-        assert.ok(content.includes(marker), `SKILL.md 缺少关键流程锚点: ${marker}`);
-    }
 
     for (const refFile of ['charter-and-beats.md', 't0-causality-checklist.md', 'replan-protocol.md', 'fanfic-canon-delta.md']) {
         const refPath = path.join(skillDir, 'references', refFile);

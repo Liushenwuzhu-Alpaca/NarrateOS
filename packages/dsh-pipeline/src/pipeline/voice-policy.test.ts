@@ -38,3 +38,19 @@ it('等待模型期间声纹池有新版本，拒绝整池覆盖', async () => {
     await expect(harvestVoiceWithPool({ store, llm, chapterText: '风停。门开。帆落。' })).rejects.toThrow('声纹池已更新');
     expect((await store.readVoiceSamples()).samples[0]?.id).toBe('author');
 });
+
+it.each(['boot_seed', 'chapter_harvest'] as const)('滚动池不足目标时替换并补齐，已有来源为 %s', async (source) => {
+    const root = await createGitBookWorkspace(dirs, `voice-refill-${source}`, { storyDay: 2, currentChapter: 2 });
+    const store = new BookStore(root, new NodeSystemAdapter());
+    const currentPool = { samples: ['旧门。', '旧帆。'].map((text, i) => ({ id: `old_${i}`, tag: '动作', text, last_used_ch: 0, source })) };
+    await store.writeVoiceSamples(currentPool);
+    const samples = ['风停。', '门开。', '帆落。', '潮退。'].map((text) => ({ tag: '动作', text }));
+    const llm: LlmPort = { generate: async () => ({ usage, text: JSON.stringify({ samples }) }) };
+    const result = await harvestVoiceWithPool({ store, llm, chapterNumber: 2, chapterText: '风停。门开。帆落。潮退。', rollingReplaceBootSeeds: true });
+    expect(result.skipped).toBe(false);
+    expect(result.updatedPool.samples).toHaveLength(4);
+    expect(result.updatedPool.samples.every((sample) => sample.source === 'chapter_harvest')).toBe(true);
+    expect(result.replacedIds).toEqual(source === 'boot_seed' ? ['old_0', 'old_1'] : []);
+    expect(result.harvestedCount).toBe(source === 'boot_seed' ? 4 : 2);
+    expect(await store.readVoiceSamples()).toEqual(result.updatedPool);
+});

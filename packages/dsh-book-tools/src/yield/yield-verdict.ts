@@ -8,7 +8,7 @@ import {
 } from '@narrateos/dsh-book-store';
 import { GateValidationError } from '../errors.js';
 import { PathFence } from '../tools/path-fence.js';
-import { readContentWithStagingPriority, readOptionalBookConfig } from '../tools/shared.js';
+import { isEnoentError, readContentWithStagingPriority, readOptionalBookConfig } from '../tools/shared.js';
 import { FactCheckOutputSchema, type FactCheckIssue, type FactCheckOutput } from './schemas.js';
 
 const DEFAULT_REPAIR_LOOP_CFG = BookRepairLoopConfigSchema.parse({});
@@ -20,8 +20,55 @@ export interface YieldVerdictOptions {
     fence?: PathFence | undefined;
     draftText?: string | undefined;
     draftPath?: string | undefined;
+    /** 本章内存细纲，仅供 PLAN_CONFLICT 引用 */
+    outlineText?: string | undefined;
     stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
     onYield?: ((verdict: FactCheckOutput) => void) | undefined;
+}
+
+const WORLD_SOURCE_NAMES: Record<string, true> = {
+    'current_arc_envelope.md': true, 'open_threads.md': true, 'arc_director_plan.md': true,
+    'author_charter.md': true, 'static_base_and_voice.md': true, 'world_state.md': true, 'future_horizon.md': true
+};
+
+/** 只补齐已知世界文档；其他路径仍交给围栏判定。 */
+function canonicalSourceRef(value: string): string {
+    return Object.hasOwn(WORLD_SOURCE_NAMES, value) ? `world/${value}` : value;
+}
+
+function sourceQuoteHint(quote: string, content: string, sourceRef: string): string {
+    const normalizedQuote = normalizeForQuoteMatch(quote);
+    const grams = new Set<string>();
+    for (let index = 0; index + 1 < normalizedQuote.length; index += 1) {
+        grams.add(normalizedQuote.slice(index, index + 2));
+    }
+    let closest = '';
+    let coverage = 0;
+    if (grams.size > 0) {
+        for (const line of content.split('\n')) {
+            const normalizedLine = normalizeForQuoteMatch(line);
+            let hits = 0;
+            for (const gram of grams) if (normalizedLine.includes(gram)) hits += 1;
+            const score = hits / grams.size;
+            if (score > coverage) { coverage = score; closest = line; }
+        }
+    }
+    return coverage >= 0.7
+        ? `源文件中最接近的原句为：“${closest}”。注意：与你提交的引文存在字词差异，请先核对该原句的真实含义是否仍支持你的冲突指控；若源文件原句含义其实与草稿一致，请直接删除该条误报 issue！`
+        : `在 ${sourceRef} 中未找到与 quote_source 相近的表述，请核实该事实依据是否真实存在`;
+}
+
+/** 只合并相邻段；不把隔段片段拼成原稿中不存在的引用。 */
+function matchesTargetParagraphs(indices: readonly number[], paragraphs: readonly string[], quote: string): boolean {
+    let group: string[] = [];
+    for (let index = 0; index < indices.length; index += 1) {
+        if (index > 0 && indices[index] !== indices[index - 1]! + 1) {
+            if (normalizeForQuoteMatch(group.join('\n')).includes(quote)) return true;
+            group = [];
+        }
+        group.push(paragraphs[indices[index]!]!);
+    }
+    return normalizeForQuoteMatch(group.join('\n')).includes(quote);
 }
 
 async function loadSourceContent(
@@ -32,15 +79,24 @@ async function loadSourceContent(
     stagingOverlay?: ReadonlyMap<string, string | null>
 ): Promise<string> {
     const { normalized, absPath } = await fence.assertReadFile(relPath);
-    const { content } = await readContentWithStagingPriority({
-        store,
-        runId,
-        normalizedPath: normalized,
-        absPath,
-        stagingOverlay,
-        missingInOverlayMessage: `文件在当前分支视图中不存在: ${normalized}`
-    });
-    return content;
+    try {
+        const { content } = await readContentWithStagingPriority({
+            store,
+            runId,
+            normalizedPath: normalized,
+            absPath,
+            stagingOverlay,
+            missingInOverlayMessage: `文件在当前分支视图中不存在: ${normalized}`
+        });
+        return content;
+    } catch (error: unknown) {
+        if (isEnoentError(error) && /^entities\/(?:char|item)_[a-zA-Z0-9_]+\.md$/.test(normalized)
+            && !stagingOverlay?.has(normalized)) {
+            return loadSourceContent(store, runId, fence, normalized.replace('entities/', 'entities/cold_archive/'), stagingOverlay);
+        }
+        if (isEnoentError(error)) throw new Error(`文件不存在: ${normalized}`);
+        throw error;
+    }
 }
 
 async function resolveRepairLoopLimits(
@@ -133,12 +189,20 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                         paragraph_index: { type: 'integer' },
                         paragraph_indices: { type: 'array', items: { type: 'integer' } },
                         description: { type: 'string', required: true },
-                        quote_draft: { type: 'string' },
-                        quote_source: { type: 'string' },
-                        source_ref: { type: 'string' }
+                        quote_draft: { type: 'string', required: true },
+                        quote_source: { type: 'string', required: true },
+                        source_ref: { type: 'string', required: true, description: '预注入 SOURCE_REF 路径；outline 仅用于 PLAN_CONFLICT' }
                     }
                 },
                 description: '发现的硬性事实冲突清单（passed=true 时须为空数组）'
+            },
+            confirmed_completed_beats: {
+                type: 'json',
+                description: '可选字符串数组：仅在通过终审时填写，正文已彻底达成 completion_sign 的节拍标签；格式偏差按无附加确认处理'
+            },
+            confirmed_resolved_threads: {
+                type: 'json',
+                description: '可选字符串数组：仅在通过终审时填写，正文已彻底结案的 thread_id；格式偏差按无附加确认处理'
             }
         },
         output: {
@@ -192,7 +256,7 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                 const issueNumber = i + 1;
                 const draftQuote = issue.quote_draft.trim();
                 const sourceQuote = issue.quote_source.trim();
-                const sourceRef = issue.source_ref?.trim() ?? '';
+                const sourceRef = canonicalSourceRef(issue.source_ref?.trim() ?? '');
 
                 if (draftQuote.length === 0) {
                     throw new GateValidationError(
@@ -224,27 +288,38 @@ export function createYieldVerdictTool(options: YieldVerdictOptions): ToolDefini
                     : undefined;
 
                 let sourceText: string;
-                try {
-                    sourceText = await loadSourceContent(store, runId, fence, sourceRef, stagingOverlay);
-                } catch (err: unknown) {
-                    throw new GateValidationError(
-                        'yield_verdict',
-                        `第 ${issueNumber} 条问题的 source_ref 无法读取 (${sourceRef}): ${err instanceof Error ? err.message : String(err)}`
-                    );
+                if (sourceRef === 'outline' || sourceRef === 'outline_text') {
+                    if (issue.severity !== 'PLAN_CONFLICT') {
+                        throw new GateValidationError('yield_verdict', 'source_ref=outline 仅限 PLAN_CONFLICT；其他事实冲突请引用 entities/、manuscripts/、lore_library/ 或 world/ 的真实档案');
+                    }
+                    if (options.outlineText === undefined) {
+                        throw new GateValidationError('yield_verdict', '当前运行未提供内存细纲，无法核验 source_ref=outline');
+                    }
+                    sourceText = options.outlineText;
+                } else {
+                    try {
+                        sourceText = await loadSourceContent(store, runId, fence, sourceRef, stagingOverlay);
+                    } catch (err: unknown) {
+                        const message = (err instanceof Error ? err.message : String(err)).split(bookRoot).join('<bookRoot>');
+                        throw new GateValidationError(
+                            'yield_verdict',
+                            `第 ${issueNumber} 条问题的 source_ref 无法读取 (${sourceRef}): ${message}`
+                        );
+                    }
                 }
                 const dual = verifyDualQuotes(draftQuote, resolvedDraft, sourceQuote, sourceText);
-                if (!dual.sideA.matched || (targets && !targets.some(idx =>
-                    normalizeForQuoteMatch(draftParagraphs[idx]!).includes(dual.sideA.normalizedQuote)
-                ))) {
+                if (!dual.sideA.matched || (targets && !matchesTargetParagraphs(targets, draftParagraphs, dual.sideA.normalizedQuote))) {
+                    const previews = (targets ?? draftParagraphs.map((_, index) => index))
+                        .map(index => `[P${index}] ${draftParagraphs[index]!.slice(0, 200)}`).join('\n');
                     throw new GateValidationError(
                         'yield_verdict',
-                        `第 ${issueNumber} 条问题的 quote_draft 未在${targets ? '指定段落' : '草稿正文'}中命中，请重新读取草稿逐字核查`
+                        `第 ${issueNumber} 条问题的 quote_draft 未在${targets ? '指定段落' : '草稿正文'}中命中，请对照待审正文 [Pxx] 逐字复制：\n${previews}`
                     );
                 }
                 if (!dual.sideB.matched) {
                     throw new GateValidationError(
                         'yield_verdict',
-                        `第 ${issueNumber} 条问题的 quote_source 未在 ${sourceRef} 中命中（疑似捏造或改写引文），请重新读取档案/原稿逐字核查`
+                        `第 ${issueNumber} 条问题的 quote_source 未在 ${sourceRef} 中命中。${sourceQuoteHint(sourceQuote, sourceText, sourceRef)}`
                     );
                 }
             }

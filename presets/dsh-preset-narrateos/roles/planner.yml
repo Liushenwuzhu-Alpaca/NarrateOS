@@ -4,7 +4,7 @@ cleanroom: false
 promptFile: ./prompts/planner.md
 temperature: 0.5
 reasoningEffort: medium
-maxSteps: 6
+maxSteps: 8
 maxReadCalls: 3
 tools:
     - book_read

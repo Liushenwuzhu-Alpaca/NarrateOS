@@ -14,12 +14,11 @@ import {
 } from '../yield/schemas.js';
 import { collectEntityRefs, hasOmniscientSecretMarker } from '../yield/shared.js';
 import { extractSubstantiveNormalizedClauses } from '../yield/restricted-clauses.js';
+import { formatNegativeDirectiveViolations } from '../yield/negative-directives.js';
 
 const DEFAULT_STATIC_BASE_MAX_CHARS = BookContextAssemblyConfigSchema.parse({}).static_base_max_chars;
 const DEFAULT_MAX_ACTIVE_OPEN_THREADS = BookDreamingConfigSchema.parse({}).max_active_open_threads;
 
-const NEGATIVE_PROHIBITION_RE =
-    /(?:禁止|严禁|禁用|不要|不得|切忌|绝不|决不|不能|不可|切勿|莫要)/;
 const WRITER_SPOILER_DIRECTIVE_RE =
     /\b(?:OMNISCIENT_SECRET|WARPED|SELF_ONLY)\b|Stage\s*Ceiling|阶段天花板|导演禁区|director_rationale/i;
 
@@ -146,12 +145,10 @@ function validateCleanroomNarrativeFields(
         if (clauses.some(clause => normalized.includes(clause))) {
             issues.push(`${cleanroomDoc.label} 含有导演禁区或非公开实体原文`);
         }
-        const negMatch = NEGATIVE_PROHIBITION_RE.exec(cleanroomDoc.text);
-        if (negMatch) {
-            issues.push(
-                `${cleanroomDoc.label} 禁止包含否定禁令词「${negMatch[0]}」，请改写为正向具象表达`
-            );
-        }
+        issues.push(...formatNegativeDirectiveViolations(
+            { [cleanroomDoc.label]: cleanroomDoc.text },
+            cleanroomDoc.label === 'static_base_and_voice' ? 'discipline' : 'narrative'
+        ));
         const spoilerMatch = WRITER_SPOILER_DIRECTIVE_RE.exec(cleanroomDoc.text);
         if (spoilerMatch) {
             issues.push(
@@ -377,65 +374,36 @@ function validateBootVoiceSamples(
     issues: string[]
 ): { cleanVoiceSamples: BootVoiceSampleInput[]; filteredVoiceSampleCount: number } {
     const cleanVoiceSamples: BootVoiceSampleInput[] = [];
-    let filteredVoiceSampleCount = 0;
-
-    for (const sample of voiceSamples) {
-        pushSafeEntityTagIssue('voice_tag', sample.tag, issues);
+    const rejected: string[] = [];
+    for (const [index, sample] of voiceSamples.entries()) {
+        const sampleIssues: string[] = [];
+        pushSafeEntityTagIssue('voice_tag', sample.tag, sampleIssues);
         const res = proseGate.evaluate(sample.sample, {
             narrationSubjectivity: options.narrationSubjectivity
         });
-        const properName = canonicalNames.find((name) => name && (sample.sample.includes(name) || sample.tag.includes(name)));
-
+        if (!res.passed) {
+            sampleIssues.push(`StaticProseGate 未通过: ${res.violations.map(v => v.message).join('; ')}`);
+        }
+        const properName = canonicalNames.find(name => name && (sample.sample.includes(name) || sample.tag.includes(name)));
+        if (properName) sampleIssues.push(`声纹样本禁止包含初始角色专名「${properName}」`);
         if (sample.source === 'boot_seed') {
             const nonSpaceLen = sample.sample.replace(/\s+/g, '').length;
-            let seedValid = true;
             if (nonSpaceLen < 15 || nonSpaceLen > 45) {
-                issues.push(
-                    `boot_seed 声纹样本 (${sample.tag}) 长度 (${nonSpaceLen} 字) 必须在 15~45 字之间`
-                );
-                seedValid = false;
+                sampleIssues.push(`boot_seed 长度 (${nonSpaceLen} 字) 必须在 15~45 字之间`);
             }
-            if (!res.passed) {
-                issues.push(
-                    `StaticProseGate 未通过 (boot_seed:${sample.tag}): ${res.violations.map((v) => v.message).join('; ')}`
-                );
-                seedValid = false;
-            }
-            if (properName) {
-                issues.push(`boot_seed 声纹样本 (${sample.tag}) 禁止包含初始角色专名「${properName}」`);
-                seedValid = false;
-            }
-            if (seedValid) {
-                cleanVoiceSamples.push(sample);
-            } else {
-                filteredVoiceSampleCount += 1;
-            }
-            continue;
         }
-
-        if (res.passed && !properName) {
+        if (sampleIssues.length === 0) {
             cleanVoiceSamples.push(sample);
         } else {
-            filteredVoiceSampleCount += 1;
-            if (options.voiceSampleMode === 'strict') {
-                if (properName) issues.push(`声纹样本禁止包含初始角色专名「${properName}」`);
-                issues.push(
-                    `StaticProseGate 未通过 (voice_sample:${sample.tag}): ${res.violations.map((v) => v.message).join('; ')}`
-                );
-            }
+            rejected.push(`voice_samples[${index}] (${sample.tag}): ${sampleIssues.join('; ')}`);
         }
     }
-
-    if (
-        options.voiceSampleMode === 'filter' &&
-        voiceSamples.length > 0 &&
-        cleanVoiceSamples.length === 0 &&
-        !voiceSamples.every((s) => s.source === 'boot_seed')
-    ) {
-        issues.push('作者提供的声纹样本全部未通过 StaticProseGate 静态文风门禁');
+    if (options.voiceSampleMode === 'strict') {
+        issues.push(...rejected);
+    } else if (voiceSamples.length > 0 && cleanVoiceSamples.length === 0) {
+        issues.push(`声纹样本全部未通过 StaticProseGate 或样本约束: ${rejected.join('; ')}`);
     }
-
-    return { cleanVoiceSamples, filteredVoiceSampleCount };
+    return { cleanVoiceSamples, filteredVoiceSampleCount: rejected.length };
 }
 
 /**

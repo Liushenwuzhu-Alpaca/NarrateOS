@@ -18,7 +18,8 @@ export const PlannerOutlineSchema = z.object({
     chapter_turn: z.string().min(1),
     scene_plan: z.array(PlannerSceneSchema).min(1),
     outline_text: z.string().min(1),
-    preferred_voice_tag: z.string().optional()
+    preferred_voice_tag: z.string().optional(),
+    target_beat_label: z.string().optional()
 });
 
 export type PlannerOutline = z.infer<typeof PlannerOutlineSchema>;
@@ -71,6 +72,9 @@ export const BookRetrievalConfigSchema = z.object({
     slice_max_chars: z.number().int().positive().default(500),
     grep_default_max_matches: z.number().int().positive().default(80),
     grep_max_output_chars: z.number().int().positive().default(12000),
+    read_max_output_chars: z.number().int().min(256).default(24000),
+    glob_default_max_results: z.number().int().positive().default(200),
+    librarian_recent_l2_window: z.number().int().positive().default(20),
     l2_freeze_block_chapters: z.number().int().positive().default(20),
     l2_full_unfrozen_threshold: z.number().int().positive().default(40),
     extractor_full_entity_threshold: z.number().int().positive().default(15),
@@ -349,6 +353,10 @@ export const TxStateSchema = z.object({
         signalCursorUpdate: z.object({
             consumedLines: z.number().int().nonnegative(),
             consumedIds: z.array(z.string())
+        }).optional(),
+        fact_confirmations: z.object({
+            completed_beats: z.array(z.string()),
+            resolved_threads: z.array(z.string())
         }).optional(),
         parallelWindowId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
         parallelBranchId: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional()

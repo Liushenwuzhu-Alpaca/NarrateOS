@@ -51,6 +51,7 @@ export interface BuildCatalogOptions extends RecallReadOptions {
     chapterFiles?: string[];
     l2FullUnfrozenThreshold?: number | undefined;
     l2FreezeBlockChapters?: number | undefined;
+    librarianRecentL2Window?: number | undefined;
 }
 
 /** Librarian 双层章节目录 */
@@ -1072,9 +1073,22 @@ export class IndexRecall {
         const threshold = options.l2FullUnfrozenThreshold ?? DEFAULT_L2_FULL_UNFROZEN_THRESHOLD;
         const blockSize = options.l2FreezeBlockChapters ?? DEFAULT_L2_FREEZE_BLOCK_CHAPTERS;
         const activeDynamicCards: ParsedVolumeCard[] = [];
+        const recentWindow = options.librarianRecentL2Window ?? 20;
+        const hiddenCardHints: string[] = [];
 
         for (const card of activeCards) {
-            const { frozenBlocks, dynamicCard } = partitionActiveVolumeCard(card, threshold, blockSize);
+            const parsed = parseL2CardSections(card.content);
+            const sections = parsed.sections.sort((a, b) => a.chapterNumber - b.chapterNumber);
+            let visibleCard = card;
+            if (sections.length > recentWindow) {
+                visibleCard = {
+                    ...card,
+                    content: [parsed.preamble, ...sections.slice(sections.length - recentWindow).map((section) => section.rawSection)]
+                        .filter(Boolean).join('\n\n')
+                };
+                hiddenCardHints.push(`较早章节未预注入；请用 book_read 按 offset/limit 分页读取 index/L2_cards/${card.fileName}（offset 为从 1 开始的行号）。`);
+            }
+            const { frozenBlocks, dynamicCard } = partitionActiveVolumeCard(visibleCard, threshold, blockSize);
             staticParts.push(...frozenBlocks);
             if (dynamicCard) {
                 activeDynamicCards.push(dynamicCard);
@@ -1120,13 +1134,15 @@ export class IndexRecall {
         for (const card of activeDynamicCards) {
             dynamicParts.push(`## Active Volume Card: ${card.fileName}\n${card.content.trimEnd()}`);
         }
-        if (activeChapterLines.length > 0) {
-            dynamicParts.push(`## Active Volume Chapters (Vol ${currentVolume})\n${activeChapterLines.join('\n')}`);
+        const recentChapterLines = activeChapterLines.slice(Math.max(0, activeChapterLines.length - recentWindow));
+        if (recentChapterLines.length > 0) {
+            dynamicParts.push(`## Active Volume Chapters (Vol ${currentVolume})\n${recentChapterLines.join('\n')}`);
         }
+        dynamicParts.push(...hiddenCardHints);
 
         const openThreads = await readTextWithStaging(bookRoot, 'world/open_threads.md', options);
         if (openThreads !== null && openThreads.trim().length > 0) {
-            dynamicParts.push(`## Open Threads\n${openThreads.trimEnd()}`);
+            dynamicParts.push(`## Open Threads\n=== SOURCE_REF: world/open_threads.md ===\n${openThreads}`);
         }
 
         const dynamicTail = dynamicParts.join('\n\n');

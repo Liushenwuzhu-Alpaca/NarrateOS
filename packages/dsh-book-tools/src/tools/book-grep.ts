@@ -307,7 +307,7 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
             },
             render(_args, value) {
                 if (value.matches.length === 0) {
-                    return [{ type: 'text', text: '未找到匹配内容 (0 matches)' }];
+                    return [{ type: 'text', text: `未找到匹配内容 (0 matches)\n${quota.render()}` }];
                 }
                 const formatted = value.matches
                     .map(m => [...m.contextBefore, `${m.file}:${m.line}: ${m.text}`, ...m.contextAfter].join('\n'))
@@ -315,10 +315,10 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
                 const suffix = value.truncated
                     ? `\n${value.hint ?? '结果已达上限被截断，请通过 path 限定目录或使用更精确的 pattern 缩小检索范围。'}`
                     : '';
-                return [{ type: 'text', text: `共命中 ${value.totalMatches} 处:\n${formatted}${suffix}` }];
+                return [{ type: 'text', text: `共命中 ${value.totalMatches} 处:\n${formatted}${suffix}\n${quota.render()}` }];
             }
         },
-        isConcurrencySafe: () => true,
+        isConcurrencySafe: () => false,
         async execute(args, exec) {
             exec.signal.throwIfAborted();
             if (args.pattern.length === 0) {

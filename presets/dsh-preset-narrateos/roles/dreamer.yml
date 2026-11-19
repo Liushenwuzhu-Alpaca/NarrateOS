@@ -4,7 +4,7 @@ cleanroom: false
 promptFile: ./prompts/dreamer.md
 temperature: 0.3
 reasoningEffort: high
-maxSteps: 10
+maxSteps: 24
 maxReadCalls: 12
 tools:
     - book_read

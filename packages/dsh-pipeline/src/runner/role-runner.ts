@@ -70,6 +70,8 @@ export interface RunMultiTurnOptions {
     targetDay?: number | undefined;
     chapterGoal?: string | undefined;
     draftText?: string | undefined;
+    outlineText?: string | undefined;
+    preInjectedFullPaths?: ReadonlySet<string> | undefined;
     draftPath?: string | undefined;
     chapterNumberForTools?: number | undefined;
     timelineMode?: TimelineMode | undefined;
@@ -493,6 +495,8 @@ export class RoleRunner {
             targetDay: options.targetDay,
             chapterGoal: options.chapterGoal,
             draftText: options.draftText,
+            outlineText: options.outlineText,
+            preInjectedFullPaths: options.preInjectedFullPaths,
             draftPath: options.draftPath,
             chapterNumberForTools: options.chapterNumberForTools,
             timelineMode: options.timelineMode,
@@ -544,6 +548,8 @@ export class RoleRunner {
         targetDay?: number | undefined;
         chapterGoal?: string | undefined;
         draftText?: string | undefined;
+        outlineText?: string | undefined;
+        preInjectedFullPaths?: ReadonlySet<string> | undefined;
         draftPath?: string | undefined;
         chapterNumberForTools?: number | undefined;
         timelineMode?: TimelineMode | undefined;
@@ -695,6 +701,8 @@ export class RoleRunner {
                     targetDay: params.targetDay,
                     chapterGoal: params.chapterGoal,
                     draftText: params.draftText,
+                    outlineText: params.outlineText,
+                    preInjectedFullPaths: params.preInjectedFullPaths,
                     draftPath: params.draftPath,
                     chapterNumber: params.chapterNumberForTools ?? params.chapterNumber,
                     timelineMode: params.timelineMode,
@@ -910,6 +918,10 @@ export class RoleRunner {
 
                     // 补齐 MALFORMED_RESPONSE（例如上游重复 message_start）指数退避重试
                     agentCtx.on('agent/request-error', async (payload, next) => {
+                        recordSessionEvent({
+                            timestamp: new Date().toISOString(), kind: 'error',
+                            text: `${payload.failure.code}: ${payload.failure.message}`
+                        });
                         const upstream = await next();
                         if (upstream?.kind === 'retry') {
                             return upstream;
@@ -934,7 +946,7 @@ export class RoleRunner {
                             textBlocks.clear();
                             recordSessionEvent({ timestamp: new Date().toISOString(), kind: 'status', status: 'attempt-start' });
                         } else if (frame.type === 'end' && (frame.outcome.kind === 'abandoned' || frame.outcome.eventType === 'assistant/attempt')) {
-                            recordSessionEvent({ timestamp: new Date().toISOString(), kind: 'status', status: 'attempt-discarded' });
+                            recordSessionEvent({ timestamp: new Date().toISOString(), kind: 'status', status: 'attempt-discarded', text: JSON.stringify(frame.outcome) });
                         }
                         if (frame.type !== 'chunk') return;
                         const ts = new Date().toISOString();

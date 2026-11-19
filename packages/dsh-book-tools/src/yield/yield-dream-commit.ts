@@ -3,12 +3,9 @@ import { appendFile, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import {
-    assertEntryTagsSafe,
     assertForeignKeysReachable,
     BookDreamingConfigSchema,
     ForeignKeyError,
-    InnateLockViolationError,
-    parseEntityMarkdown,
     parseVoiceSamplesYaml,
     StaticProseGate,
     type NarrationSubjectivity,
@@ -18,13 +15,11 @@ import { GateValidationError } from '../errors.js';
 import { PathFence } from '../tools/path-fence.js';
 import {
     isEnoentError,
-    matchesAnyPathPrefix,
     readOptionalBookConfig
 } from '../tools/shared.js';
 import {
     countActiveOpenThreads,
     DreamCommitInputSchema,
-    hasChineseCharacter,
     type DreamCommitInput,
     type DreamCommitRecord
 } from './schemas.js';
@@ -33,21 +28,11 @@ import {
     assertTextForeignKeys,
     collectReachableKeysFromBookDirs,
     ENTITY_ID_PATTERN_RE,
-    extractActiveOpenThreadLines,
-    hasOmniscientSecretMarker
+    extractActiveOpenThreadLines
 } from './shared.js';
 
-const ENTITY_PROFILE_PATH_RE = /^entities\/(?:cold_archive\/)?([^/]+)\.md$/;
+import { ENTITY_PROFILE_PATH_RE, validateDreamWrite } from './dream-write-validation.js';
 const DEFAULT_DREAMING_CFG = BookDreamingConfigSchema.parse({});
-const DREAM_READONLY_PROTECTED_PATHS = [
-    'manuscripts',
-    'world/roles',
-    'world/author_charter.md',
-    'world/book_config.yaml',
-    'world/ops_style_amendments.md',
-    'world/current_arc_envelope.md',
-    'world/static_base_and_voice.md'
-] as const;
 
 function extractActiveThreadKeys(markdown: string): string[] {
     return extractActiveOpenThreadLines(markdown).map((trimmed) => {
@@ -98,90 +83,6 @@ async function buildDreamReachableKeys(
     return keys;
 }
 
-async function assertDreamPendingWritePathsSafe(
-    pendingWrites: ReadonlyMap<string, string>,
-    fence: PathFence
-): Promise<void> {
-    for (const relPath of pendingWrites.keys()) {
-        if (matchesAnyPathPrefix(relPath, DREAM_READONLY_PROTECTED_PATHS)) {
-            const matchedPrefix = DREAM_READONLY_PROTECTED_PATHS.find((prefix) =>
-                matchesAnyPathPrefix(relPath, [prefix])
-            );
-            throw new GateValidationError(
-                'yield_dream_commit',
-                `禁止 Dreamer 修改只读保护路径 (${matchedPrefix}): ${relPath}`
-            );
-        }
-        await fence.assertWriteFile(relPath);
-    }
-}
-
-async function validateStagedDreamEntities(
-    bookRoot: string,
-    pendingWrites: ReadonlyMap<string, string>,
-    reachableKeys: ReadonlySet<string>
-): Promise<void> {
-    for (const [relPath, stagedContent] of pendingWrites.entries()) {
-        const entityMatch = ENTITY_PROFILE_PATH_RE.exec(relPath);
-        if (!entityMatch?.[1]) continue;
-        if (!ENTITY_ID_PATTERN_RE.test(entityMatch[1])) {
-            if (relPath.startsWith('entities/cold_archive/')) continue;
-            throw new GateValidationError('yield_dream_commit', `非法活跃实体文件名: ${relPath}`);
-        }
-        const fileStem = entityMatch[1];
-        const stagedProfile = parseEntityMarkdown(stagedContent);
-        assertForeignKeysReachable(fileStem, stagedProfile, reachableKeys);
-        for (const sectionList of [
-            stagedProfile.innateLocks,
-            stagedProfile.acquiredState,
-            stagedProfile.irreversibleTrajectory,
-            stagedProfile.recentBuffer
-        ]) {
-            for (const entry of sectionList) {
-                assertEntryTagsSafe(entry);
-            }
-        }
-        if (stagedProfile.metadata.entity_id !== fileStem) {
-            throw new GateValidationError(
-                'yield_dream_commit',
-                `实体档案 ${relPath} 的 entity_id (${stagedProfile.metadata.entity_id}) 与文件名不一致`
-            );
-        }
-
-        const diskRaw = await readDiskOptional(join(bookRoot, relPath));
-        if (diskRaw !== null) {
-            const diskProfile = parseEntityMarkdown(diskRaw);
-            if (stagedProfile.metadata.canonical_name !== diskProfile.metadata.canonical_name) {
-                throw new InnateLockViolationError(
-                    stagedProfile.metadata.entity_id,
-                    `禁止篡改实体 ${stagedProfile.metadata.entity_id} 的 canonical_name (${diskProfile.metadata.canonical_name} -> ${stagedProfile.metadata.canonical_name})`
-                );
-            }
-            if (JSON.stringify(stagedProfile.innateLocks) !== JSON.stringify(diskProfile.innateLocks)) {
-                throw new InnateLockViolationError(
-                    stagedProfile.metadata.entity_id,
-                    `禁止篡改实体 ${stagedProfile.metadata.entity_id} 的 1. Innate Locks`
-                );
-            }
-            continue;
-        }
-
-        if (!hasChineseCharacter(stagedProfile.metadata.canonical_name)) {
-            throw new GateValidationError(
-                'yield_dream_commit',
-                `新建实体 ${stagedProfile.metadata.entity_id} 必须提供包含中文字符的 canonical_name`
-            );
-        }
-        for (const lockEntry of stagedProfile.innateLocks) {
-            if (hasOmniscientSecretMarker(lockEntry)) {
-                throw new GateValidationError(
-                    'yield_dream_commit',
-                    `新建实体 ${stagedProfile.metadata.entity_id} 第 1 区 Innate Locks 严禁包含 OMNISCIENT_SECRET`
-                );
-            }
-        }
-    }
-}
 
 async function validateStagedOpenThreads(
     bookRoot: string,
@@ -400,12 +301,12 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 }
                 const pendingWrites = store.staging.getPendingWrites(runId);
 
-                // 1. 校验暂存路径白名单，物理拒止 manuscripts/、只读世界保护集、current_arc_envelope.md 与越界路径
-                await assertDreamPendingWritePathsSafe(pendingWrites, fence);
-
-                // 2. 校验所有暂存实体档案（含 cold_archive 实体，跳过非实体文档如 warped_horizon.md）
+                // 路径、实体格式与先天锁校验和 book_edit 的当步预警保持一致。
                 const reachableKeys = await buildDreamReachableKeys(bookRoot, pendingWrites);
-                await validateStagedDreamEntities(bookRoot, pendingWrites, reachableKeys);
+                for (const [relPath, content] of pendingWrites) {
+                    const profile = await validateDreamWrite(bookRoot, relPath, content, fence);
+                    if (profile) assertForeignKeysReachable(profile.metadata.entity_id, profile, reachableKeys);
+                }
 
                 // 3. 校验暂存 world/open_threads.md 的活跃伏笔上限与单次新增伏笔上限
                 await validateStagedOpenThreads(

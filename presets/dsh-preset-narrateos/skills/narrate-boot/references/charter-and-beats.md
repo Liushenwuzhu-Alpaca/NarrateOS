@@ -1,39 +1,24 @@
-# 作者契约与开篇节拍细则 (Charter & Opening Beats)
+# 作者契约与开篇节拍细则
 
-在 `narrate-boot` Step 2 与 Step 3 中按本细则组织《作者契约》与开篇序列节拍，确保传入 `lock_charter_and_boot` 的参数无缺项、无模糊口号。
+在 `narrate-boot` 对齐契约与开篇节拍时使用本细则。`lock_charter_and_boot` 的字段、类型和配额以工具 Schema 为准；这里检查结构校验无法判断的创作含义。
 
-## 1. 《作者契约》与 `lock_charter_and_boot` 核心字段对齐
+## 契约要能裁决冲突
 
-1. **核心承诺（写入 `world/author_charter.md`）**：
-   - `commitments`：核心阅读体验、题材边界、世界物理/超自然规则（非空数组）；
-   - `narration_subjectivity`：叙述人称主观度枚举，仅允许 `'objective_third'`（默认，第三人称客观限知镜头）或 `'subjective_first'`（强主观第一人称）；
-   - `excluded_cliches`：显式排除的廉价套路清单（仅存契约，对写手物理屏蔽）；
-   - `t0_anchor`：作者原话逐字锁定的 `T0` 开局现场（时间、地点、在场人物、持有物与初始困境）。
-   - `authorization_boundary`：运行期授权边界说明，同样写入作者契约。
-2. **运行预算（写入 `world/book_config.yaml`）**：
-   - `max_auto_rollback_chapters`：整数 `>= 0`（`0` 表示关闭自动回滚全由人工确认，默认 `3`）；
-   - `writer_token_budget`：写手窗口 Token 预算（`null` 或正整数）；
-   - `craft_plugins`：启用的外置认知插件名列表（默认 `[]`）。
-3. **跨卷与当前卷骨架**：
-   - `l1_volumes_markdown`：**必填**，支持 `>= 1` 卷单卷完结，文本中必须至少包含 1 个 `vol_XX`（如 `vol_01`）或 `第X卷`（如 `第1卷`）标记，否则门禁拒绝；
-   - `open_threads`：活跃伏笔数组（`snake_case`：`{ thread_id, title, wakeup_condition }`），上限 **<= 15 条**；
-   - 按需模块结论（`OPEN_HORIZON` 远期留白与 `Local Closure` 当前卷因果闭环，或 `Canon Delta` 同人魔改差值）应体现在 `commitments`、`world_summary` 与 `stage_ceiling` 中。
+- 核心承诺描述读者持续获得的体验、世界边界与授权范围，而非抽象赞美词。发生冲突时，应能据此判断保留哪条事实、调整哪条后续路径。
+- `t0_anchor` 保留作者原话的时刻、地点、在场人物和持有物；角色私欲与信息盲区解释其当下行动，而非提前写完人物结局。
+- `OPEN_HORIZON` 允许远期留白，`Local Closure` 要求当前摆上台面的异常具备第一层因果解答；两者分别约束远期和当前，不互相抵消。
+- 作者的排雷清单与裁决底牌只进入全知契约；写手可见文件呈现可演绎的正向目标。
 
-## 2. 无章号「开篇序列节拍（3-5 拍）」规范
+## 节拍以可见结果完成
 
-`opening_sequence_beats`（3-5 个对象，**严禁绑死固定章号**）写入 `world/arc_director_plan.md` 按序消耗。每拍精确字段（`snake_case`）：
-- `beat_label`（可选）：节拍标签，如 `节拍一：异常接单与现场受阻`；
-- `craft_focus`（必填）：体验与手艺落点，确立主角手艺与当前生活/职业约束；
-- `clue_budget`（必填）：限量投放的 1-2 个具体物理线索或关系暗流，防止开局泄底；
-- `completion_sign`（必填）：正文中可直接核验的客观过拍事件，供 `Dreamer` 翻阅原稿后标为 `DONE`。
+`opening_sequence_beats` 按因果顺序推进，不绑定固定章号。每拍围绕一个体验或手艺落点限制线索释放；`completion_sign` 写成定稿中可定位的客观过拍事件，例如证物完成交接，而非“气氛更紧张”或“关系升温”。
 
-## 3. `Stage Ceiling` 阶段天花板禁区
+Planner 以 `target_beat_label` 提名当前拍，Fact Checker 对定稿核验完成标志后确认，管线同步进度。提名、触及线索、人物猜测都不等于完成。Dreamer 后续整理继续以原稿校对账本。
 
-- `stage_ceiling`（必填）明确列出本阶段（如第 1 卷前段或整个第 1 卷）**不可提前揭露或提前触发**的真相、幕后人物或能力跃迁；
-- 仅写入 `world/arc_director_plan.md`（对 `Writer` 物理屏蔽），供 `Planner` 绕行与 `Fact Checker` 把关。
+## 阶段禁区与公开舞台分流
 
-## 4. 写手静态基线 (`<=1,500 字`) 与声纹边界
+`Stage Ceiling` 说明当前阶段尚未兑现的底牌或能力跃迁，供规划与审校使用。`current_arc_envelope` 写角色眼前可见的舞台与冲突；`static_base_and_voice` 写公开常驻规则、空间拓扑与抽象句法纪律。尚未揭露的底层机制放入 `unrevealed_pivots` 或实体秘密槽，而非公开世界书。
 
-- `static_base_and_voice` 必须精炼在 **1,500 字以内**，仅承载：世界常驻底层规则、主要空间拓扑、人称主观度基线、可执行句法纪律（长篇设定切分至 `lore_entries`）；
-- `world_summary`、`static_base_and_voice`、`current_arc_envelope` 均须通过 `StaticProseGate`：写具体物象、地形、规程与动作结果，不使用思维标签/`<!-- -->`、空泛修饰或人体微距套话、不作说教式结尾；
-- `voice_samples`：作者提供样章时提取脱敏的 `author_sample`；无样章可传 `[]`，或提交 3-4 条通过静态门禁的 `boot_seed`（15-45 字，不含角色专名，包含硬动作或对话）。
+## 编码与表达核验
+
+多行 Markdown 使用真实换行，由 JSON 编码器处理转义，避免把 `\\n` 当作正文写入。`StaticProseGate` 检查的事实与声纹用具体物象、动作结果表达；声纹示范节奏而非提供可复用的剧情句，作者原句与启动种子的来源如实标注。

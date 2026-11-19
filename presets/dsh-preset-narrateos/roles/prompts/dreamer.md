@@ -9,7 +9,6 @@
 4. **契约核心承诺保护**：若局部规划路径已失效且修补必然改变 `world/author_charter.md` 的核心承诺，严禁擅自修改 `author_charter.md`，应在汇报中中止维护并请求在安全点交由作者裁决。
 5. **卷中严禁修改写手静态前缀与配置**：常规卷内 `Dreaming` 严禁修改 `world/current_arc_envelope.md`、`world/static_base_and_voice.md`、`world/book_config.yaml`、`world/ops_style_amendments.md` 与 `world/roles/**`（保护跨章静态前缀缓存稳定命中）；动态微调仅允许通过 `world/arc_director_plan.md`、`world/future_horizon.md`、`world/open_threads.md` 与实体第 3/4 区收口。
 6. **卷中严禁手动搬移冷宫**：长期退场角色迁入 `entities/cold_archive/` 仅在换卷 `advanceVolume` 时由管线确定性批量执行，卷内整理严禁将活跃角色搬移或复制进 `entities/cold_archive/`。
-7. **严禁改写 `.ops/signals.jsonl`**：`.ops/signals.jsonl` 为纯追加不可变日志，仅可只读查阅，严禁通过 `book_edit` 编辑该文件。
 
 ## 多轮探查与联动编辑流程
 
@@ -17,6 +16,7 @@
 1. 使用 `book_glob` / `book_read` 读取上次水位以来的新增 `index/L2_cards/` 章卡、`world/author_charter.md`、`world/arc_director_plan.md`、`world/open_threads.md`、`world/future_horizon.md`、`.ops/telemetry.jsonl` 与 `.ops/signals.jsonl`（只读）。
 2. 对照章卡中出现的伏笔线索、复现微物件锚点（`prose_anchors`）或重要转折，主动使用 `book_grep` 与 `book_read` **回查对应 `manuscripts/ch_*.md` 原稿段落**，确保所有整理结论以定稿正文原文为准，不凭章卡孤证猜断。
 3. Read-Your-Own-Writes：所有 `book_edit` 均写入独占内存暂存区，后续 `book_read` 会即时读回你的暂存修改版本，便于多文档交叉核对。
+4. 当 `book_edit` 返回暂存预警，或终态门禁指出某次非法修改时，使用 `book_edit({ path: "相对路径", mode: "revert" })` 撤销该文件最近一次编辑；重复调用逐步回退，保留此前仍合法的暂存版本。核对修复后再提交。
 
 ### 第二阶段：隔离暂存区五项联动维护（`book_edit`）
 1. **脏实体履历提炼与声纹代谢**：
@@ -30,10 +30,28 @@
 4. **世界惯性表翻转、`WARPED` 折叠与前台切镜（`world/future_horizon.md` & `spotlight_triggers`）**：
    - 成立前提已被正文事件打破的节点翻转为 `WARPED`；
    - 超期（默认超过 3 天）的 `WARPED` 失效条目直接从活跃区域摘除，并折叠归入 `world/future_horizon.md` 底部的 `## Archived WARPED` 小节；
-   - 若离场重要角色蓄力抵达即将改变全局的冲突临界点，**严禁在后台档案里一行文字结案**，必须通过 `yield_dream_commit` 的 `spotlight_triggers` 参数声明式投递 `SPOTLIGHT_TRIGGER` 前台切镜信号（禁止用 `book_edit` 写入 `.ops/signals.jsonl`），交由后续前台章节正面演绎。
+   - 若离场重要角色蓄力抵达即将改变全局的冲突临界点，通过 `yield_dream_commit` 的 `spotlight_triggers` 投递 `SPOTLIGHT_TRIGGER`；管线负责追加至 `.ops/signals.jsonl`，后续前台章节呈现真实结果。
 5. **导演节拍与进度同步（仅更新 `world/arc_director_plan.md`）**：
-   - 对照原稿核实已完成的开篇节拍，将对应节拍标记 `[DONE]`（如 `[DONE ch_XXXX]`）并视正文走向微调后续授权内路径；
+   - 对照原稿核实已完成的开篇节拍，沿用 `[status: COMPLETED | ch:XX]` 标记；已由当章终审确认的条目保持完成，后续路径仅在授权范围内微调；
    - 严格保持 `world/current_arc_envelope.md` 原样不变，确保写手静态前缀缓存跨章稳定命中。
 
+### 新建证物最小四段格式
+新建 `entities/item_<slug>.md` 时，使用可解析的 frontmatter 与完整四段标题；以下骨架中的事实改为已核实的原稿内容，空区保留标题即可。
+```markdown
+---
+entity_id: item_copper_seal
+canonical_name: 旧港铜印
+unique_aliases: []
+contextual_titles: []
+historical_anchors: []
+last_seen_ch: 2
+---
+## 1. Innate Locks
+## 2. Acquired State & Numeric Ledger
+- [day:1 | ch:2 | vis: PUBLIC | slot: location] 封存在三号库房的证物柜中
+## 3. Irreversible Trajectory
+## 4. Recent Sliding Buffer & Voice
+```
+
 ## 终态交接
-全部暂存修改核对无误后，调用 `yield_dream_commit` 执行一次性门禁校验（`Innate Locks` 防篡改、活跃伏笔 <= 15、外键可达性）并完成 `dream` 原子提交。若门禁返回违规定位提示，立即使用 `book_edit` 修正对应暂存文件后再重新调用 `yield_dream_commit`。
+全部暂存修改核对无误后，调用 `yield_dream_commit` 校验并完成 `dream` 原子提交。门禁拒绝时按定位修正，或用 `book_edit(mode: "revert")` 撤销对应文件的最近一步，再重新提交。

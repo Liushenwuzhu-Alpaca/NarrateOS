@@ -67,7 +67,7 @@ function containsEntityProperNoun(text: string, entityNames: readonly string[]):
 function buildVoiceHarvestPrompt(params: {
     chapterNumber: number;
     isRollingMode: boolean;
-    bootSeedCount: number;
+    sampleBudget: number;
     bootSeedTags: readonly string[];
     existingRealTags: readonly string[];
 }): string {
@@ -82,7 +82,7 @@ function buildVoiceHarvestPrompt(params: {
     }
 
     return [
-        `你是长篇小说表达声纹采集器 (Voice Harvest)。请从第 ${params.chapterNumber} 章已定稿正文提取 1-${Math.min(params.bootSeedCount, 2)} 句真实好句，替换临时启动拐杖标本，写入 JSON 字段 samples（每条含 tag 与 text）。`,
+        `你是长篇小说表达声纹采集器 (Voice Harvest)。请从第 ${params.chapterNumber} 章已定稿正文提取 1-${params.sampleBudget} 句真实好句，优先置换临时启动标本，再补足声纹池容量，写入 JSON 字段 samples（每条含 tag 与 text）。`,
         params.bootSeedTags.length > 0
             ? `待替换的临时语域标签参考：${params.bootSeedTags.join('、')}。`
             : '',
@@ -125,7 +125,12 @@ export async function harvestVoiceWithPool(
             replacedIds: []
         };
     }
-    if (isRollingMode && bootSeedIndices.length === 0) {
+    const config = await options.store.readBookConfig();
+    const capacity = config.opening?.target_voice_pool_size ?? 4;
+    const capacityGap = Math.max(0, capacity - basePool.samples.length);
+    const replacementBudget = Math.min(2, bootSeedIndices.length);
+    const sampleBudget = Math.min(5, options.maxNewSamples ?? 5, replacementBudget + capacityGap);
+    if (isRollingMode && sampleBudget <= 0) {
         return {
             harvestedCount: 0,
             skipped: true,
@@ -142,7 +147,6 @@ export async function harvestVoiceWithPool(
         throw new NotFoundError(`Voice Harvest 失败：未找到已定稿章节 ${chRelPath}`);
     }
 
-    const config = await options.store.readBookConfig();
     const retryOptions: StructuredRetryOptions = options.retryOptions ?? {
         maxRetries: config.structured_json_retry.max_retries,
         backoffMs: config.structured_json_retry.backoff_ms
@@ -174,7 +178,7 @@ export async function harvestVoiceWithPool(
     const promptInstruction = buildVoiceHarvestPrompt({
         chapterNumber,
         isRollingMode,
-        bootSeedCount: bootSeedIndices.length,
+        sampleBudget,
         bootSeedTags,
         existingRealTags
     });
@@ -209,12 +213,13 @@ export async function harvestVoiceWithPool(
         }
     };
 
+    const existingTexts = new Set(basePool.samples.map((sample) => sample.text.trim()));
     const accepted: VoiceSample[] = [];
     for (const item of res.data.samples) {
         const text = item.text.trim();
         const tag = item.tag.trim();
         if (text.length === 0 || tag.length === 0) continue;
-        if (!chapterText.includes(text) || accepted.some((sample) => sample.text === text) || containsEntityProperNoun(`${text}\n${tag}`, entityNames)) {
+        if (!chapterText.includes(text) || existingTexts.has(text) || accepted.some((sample) => sample.text === text) || containsEntityProperNoun(`${text}\n${tag}`, entityNames)) {
             continue;
         }
         const gateRes = gate.evaluate(text, {
@@ -236,7 +241,6 @@ export async function harvestVoiceWithPool(
         });
     }
 
-    const capacity = config.opening?.target_voice_pool_size ?? 4;
     if ((!isRollingMode && Math.min(accepted.length, capacity) < 3) || accepted.length === 0) {
         throw new ValidationError('Voice Harvest 有效原句不足：请检查原文、脱专名与门禁要求');
     }
@@ -246,12 +250,7 @@ export async function harvestVoiceWithPool(
     const committedSamples: VoiceSample[] = [];
 
     if (isRollingMode) {
-        const maxReplace = Math.min(
-            2,
-            bootSeedIndices.length,
-            options.maxNewSamples ?? bootSeedIndices.length,
-            accepted.length
-        );
+        const maxReplace = Math.min(replacementBudget, sampleBudget, accepted.length);
         const remainingBootIndices = [...bootSeedIndices];
         const nextSamples = basePool.samples.map((s) => ({ ...s }));
 
@@ -268,6 +267,9 @@ export async function harvestVoiceWithPool(
             nextSamples[targetIdx] = replacement;
             committedSamples.push(replacement);
         }
+        const appended = accepted.slice(maxReplace, Math.min(sampleBudget, maxReplace + capacityGap));
+        nextSamples.push(...appended);
+        committedSamples.push(...appended);
         nextPool = { samples: nextSamples };
     } else {
         nextPool = { samples: accepted.slice(0, capacity) };
