@@ -9,10 +9,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
     CenterWorkbench,
+    resolvePrimaryStageSession,
     type CenterWorkbenchDraftHandle,
     type CenterWorkbenchProps,
     type ChapterDetailData
 } from '../src/client/CenterWorkbench.js';
+import { STUDIO_CSS } from '../src/client/styles.js';
+import { BOOT_CSS } from '../src/client/boot-styles.js';
 
 const globalState = globalThis as Record<string, unknown>;
 let hadReactActEnv = false;
@@ -928,6 +931,230 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
         expect(onSubmitSignal).not.toHaveBeenCalled();
         expect(noteInput.value).toBe('');
         expect(view.container.querySelector('.ns-note-kind-btn')?.textContent).toContain('圆谎修补');
+        view.unmount();
+    });
+});
+
+/** 提取指定 CSS 选择器的规则体（支持同名多块合并检查） */
+function extractCssRuleBodies(cssText: string, selector: string): string {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'g');
+    const matches: string[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(cssText)) !== null) {
+        matches.push(match[1] ?? '');
+    }
+    return matches.join('\n');
+}
+
+describe('Studio 前端回归修复 (BUG-01 / BUG-02 / BUG-05 / BUG-06)', () => {
+    it('BUG-01 & BUG-06: 关键滚动容器、浮层、弹窗弹性链与顶栏/6 节点卡片样式约束完备', () => {
+        const sheetRule = extractCssRuleBodies(STUDIO_CSS, '.ns-manuscript-sheet');
+        expect(sheetRule).toContain('flex-shrink: 0;');
+
+        const menuPopRule = extractCssRuleBodies(STUDIO_CSS, '.ns-menu-pop');
+        expect(menuPopRule).toContain('max-height: min(60vh, 420px);');
+        expect(menuPopRule).toContain('overflow-y: auto;');
+        expect(menuPopRule).toContain('overscroll-behavior: contain;');
+
+        const sessionEmptyRule = extractCssRuleBodies(STUDIO_CSS, '.ns-session-empty');
+        expect(sessionEmptyRule).toContain('overflow-y: auto;');
+
+        const modalFormRule = extractCssRuleBodies(BOOT_CSS, '.ns-b-modal-content > form');
+        expect(modalFormRule).toContain('display: flex;');
+        expect(modalFormRule).toContain('flex-direction: column;');
+        expect(modalFormRule).toContain('flex: 1;');
+        expect(modalFormRule).toContain('min-height: 0;');
+        expect(extractCssRuleBodies(BOOT_CSS, '.ns-modal-head')).toContain('flex-shrink: 0;');
+        expect(extractCssRuleBodies(BOOT_CSS, '.ns-b-steps')).toContain('flex-shrink: 0;');
+        expect(extractCssRuleBodies(BOOT_CSS, '.ns-modal-foot')).toContain('flex-shrink: 0;');
+
+        const headerLeftRule = extractCssRuleBodies(STUDIO_CSS, '.ns-header-left');
+        expect(headerLeftRule).toContain('flex: 1 1 auto;');
+        expect(headerLeftRule).toContain('min-width: 0;');
+        expect(headerLeftRule).not.toContain('overflow: hidden;');
+
+        expect(extractCssRuleBodies(STUDIO_CSS, '.ns-header-right')).toContain('flex-shrink: 0;');
+        expect(extractCssRuleBodies(STUDIO_CSS, '.ns-header-book-wrap')).toContain('min-width: 0;');
+
+        const bookSwitcherRule = extractCssRuleBodies(STUDIO_CSS, '.ns-book-switcher');
+        expect(bookSwitcherRule).toContain('max-width: 100%;');
+        expect(bookSwitcherRule).toContain('min-width: 0;');
+        expect(bookSwitcherRule).toContain('white-space: nowrap;');
+
+        const stepNameRule = extractCssRuleBodies(STUDIO_CSS, '.ns-pipe-step-name');
+        expect(stepNameRule).toContain('min-width: 0;');
+        expect(stepNameRule).toContain('flex: 1 1 auto;');
+        expect(stepNameRule).toContain('overflow: hidden;');
+        expect(stepNameRule).toContain('text-overflow: ellipsis;');
+        expect(stepNameRule).toContain('white-space: nowrap;');
+
+        const stepStateRule = extractCssRuleBodies(STUDIO_CSS, '.ns-pipe-step-state');
+        expect(stepStateRule).toContain('white-space: nowrap;');
+        expect(stepStateRule).toContain('flex-shrink: 0;');
+    });
+
+    it('BUG-02: 新书 0 章开写第 1 章期间挂载流水线胶囊并自动展开 6 节点抽屉，允许运行中手动收起', () => {
+        const view = mountWorkbench({
+            bookTitle: '开卷测试作品',
+            currentBookRoot: '/books/fresh',
+            currentChapter: 0,
+            chapters: [],
+            chapterDetail: null,
+            activeTask: 'IDLE'
+        });
+
+        // 0 章空闲态不挂载工具栏
+        expect(view.container.querySelector('.ns-reader-toolbar-wrap')).toBeNull();
+
+        // 进入推章态 -> 自动挂载流水线胶囊、左侧状态标识（无直接改稿按钮）并自动展开 6 节点抽屉
+        view.rerender({
+            activeTask: 'STEPPING',
+            latestSseStage: 'PLANNER'
+        });
+        const toolbar = view.container.querySelector('.ns-reader-toolbar-wrap');
+        expect(toolbar).not.toBeNull();
+        expect(toolbar?.querySelector('.ns-reader-status-label')?.textContent).toContain('正在生成第 1 章');
+        expect(toolbar?.textContent).not.toContain('直接改稿');
+
+        const toggleBtn = toolbar?.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn');
+        expect(toggleBtn?.getAttribute('aria-expanded')).toBe('true');
+        expect(view.container.querySelectorAll('.ns-pipe-card')).toHaveLength(6);
+
+        // 运行期间用户手动收起后，阶段推进不得再次强行弹开
+        click(toggleBtn!);
+        expect(toggleBtn?.getAttribute('aria-expanded')).toBe('false');
+        expect(view.container.querySelector('.ns-pipeline-drawer')).toBeNull();
+
+        view.rerender({
+            activeTask: 'STEPPING',
+            latestSseStage: 'WRITER'
+        });
+        expect(toggleBtn?.getAttribute('aria-expanded')).toBe('false');
+        expect(view.container.querySelector('.ns-pipeline-drawer')).toBeNull();
+
+        // 组件直接以推章态挂载时初始即展开 6 节点抽屉
+        view.unmount();
+        const liveMount = mountWorkbench({
+            bookTitle: '开卷测试作品',
+            currentBookRoot: '/books/fresh',
+            currentChapter: 0,
+            chapters: [],
+            chapterDetail: null,
+            activeTask: 'STEPPING'
+        });
+        expect(
+            liveMount.container.querySelector('.ns-pipeline-toggle-btn')?.getAttribute('aria-expanded')
+        ).toBe('true');
+        expect(liveMount.container.querySelectorAll('.ns-pipe-card')).toHaveLength(6);
+        liveMount.unmount();
+    });
+
+    it('BUG-05: WRITER 与 LOCAL_PATCH 并存时，历史态点击 3. Writer 默认看 Writer 原稿，实时 Patch 态看 Patch，校勘条精准看 Patch', () => {
+        const onSelectStageSession = vi.fn();
+
+        // 纯函数边界验证
+        expect(
+            resolvePrimaryStageSession('WRITER', {
+                status: 'done',
+                sessionId: 'sess-patch-1',
+                sessions: [
+                    { stage: 'WRITER', role: 'writer', sessionId: 'sess-writer-1', status: 'completed', attempt: 1 },
+                    { stage: 'LOCAL_PATCH', role: 'patch', sessionId: 'sess-patch-1', status: 'completed', attempt: 2 }
+                ]
+            })?.sessionId
+        ).toBe('sess-writer-1');
+        expect(
+            resolvePrimaryStageSession('WRITER', {
+                status: 'healing',
+                sessionId: 'sess-patch-live',
+                sessions: [
+                    { stage: 'WRITER', role: 'writer', sessionId: 'sess-writer-1', status: 'completed', attempt: 1 },
+                    { stage: 'LOCAL_PATCH', role: 'patch', sessionId: 'sess-patch-live', status: 'running', attempt: 2 }
+                ]
+            })?.sessionId
+        ).toBe('sess-patch-live');
+
+        // 1. 历史完成态：3. Writer 卡片默认指向 sess-writer-1，校勘条仍指向 sess-patch-1
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            stages: {
+                WRITER: {
+                    status: 'done',
+                    sessionId: 'sess-patch-1',
+                    sessions: [
+                        { stage: 'WRITER', role: 'writer', sessionId: 'sess-writer-1', status: 'completed', attempt: 1 },
+                        { stage: 'LOCAL_PATCH', role: 'patch', sessionId: 'sess-patch-1', status: 'completed', attempt: 2 }
+                    ]
+                }
+            },
+            gateViolations: [{ rule: 'filler_cliche', detail: '空气仿佛凝固了', patched: true }],
+            onSelectStageSession
+        });
+
+        click(view.container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!);
+        const writerCard = view.container.querySelector<HTMLButtonElement>(
+            '.ns-pipe-card[data-stage-id="WRITER"]'
+        )!;
+        expect(writerCard.dataset.sessionId).toBe('sess-writer-1');
+        click(writerCard);
+        expect(onSelectStageSession).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                stageId: 'WRITER',
+                sessionId: 'sess-writer-1'
+            })
+        );
+
+        // 校勘条继续打开 Patch 会话
+        click(buttonByText(view.container.querySelector('.ns-patch-colophon-bar')!, '查看润色思考过程 →'));
+        expect(onSelectStageSession).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                stageId: 'WRITER',
+                sessionId: 'sess-patch-1'
+            })
+        );
+
+        // 2. 实时 Patch 运行态：点击 3. Writer 优先看正在运行的 Patch 会话
+        view.rerender({
+            stages: {
+                WRITER: {
+                    status: 'healing',
+                    sessionId: 'sess-patch-live',
+                    sessions: [
+                        { stage: 'WRITER', role: 'writer', sessionId: 'sess-writer-1', status: 'completed', attempt: 1 },
+                        { stage: 'LOCAL_PATCH', role: 'patch', sessionId: 'sess-patch-live', status: 'running', attempt: 2 }
+                    ]
+                }
+            }
+        });
+        expect(writerCard.dataset.sessionId).toBe('sess-patch-live');
+        click(writerCard);
+        expect(onSelectStageSession).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                stageId: 'WRITER',
+                sessionId: 'sess-patch-live'
+            })
+        );
+        view.unmount();
+    });
+
+    it('BUG-06: 中栏顶栏书名与窄屏目录按钮具备完整悬停 title 与单行省略结构', () => {
+        const longTitle = '一本名字特别长特别长会在 1280 宽度下导致溢出遮挡右栏的作品';
+        const view = mountWorkbench({
+            ...baseProps(chapterOneDetail),
+            bookTitle: longTitle,
+            showCompactNav: true
+        });
+
+        const bookWrap = view.container.querySelector('.ns-header-book-wrap');
+        expect(bookWrap).not.toBeNull();
+        const switcher = bookWrap?.querySelector<HTMLButtonElement>('.ns-book-switcher');
+        expect(switcher?.title).toBe(`《${longTitle}》`);
+        expect(switcher?.querySelector('.ns-book-switcher-title')?.textContent).toBe(`《${longTitle}》`);
+
+        const tocWrap = view.container.querySelector('.ns-header-toc-wrap');
+        expect(tocWrap?.querySelector('.ns-compact-toc-btn')?.getAttribute('title')).toContain('目录与设定集');
+        expect(tocWrap?.querySelector('.ns-compact-toc-label')?.textContent).toContain('目录与设定集');
         view.unmount();
     });
 });

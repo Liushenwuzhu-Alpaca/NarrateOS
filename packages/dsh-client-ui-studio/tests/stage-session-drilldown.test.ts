@@ -1578,4 +1578,120 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
         ).toBe('完整归档思考');
         expect(container.querySelector('.ns-session-turn-output')?.textContent).toBe('最终结论');
     });
+
+    it('BUG-05: 历史 WRITER + LOCAL_PATCH 并存时点击 3. Writer 与运行状态默认均打开 Writer 原稿，且阶段记录胶囊清晰切换 Patch', async () => {
+        runsByChapter.set(1, [
+            {
+                runId: 'run-ch1-wp',
+                chapter: 1,
+                stage: 'WRITER',
+                role: 'writer',
+                sessionId: 'sess-ch1-writer-orig',
+                status: 'completed',
+                attempt: 1,
+                mode: 'one-shot'
+            },
+            {
+                runId: 'run-ch1-wp',
+                chapter: 1,
+                stage: 'LOCAL_PATCH',
+                role: 'patch',
+                sessionId: 'sess-ch1-patch-1',
+                status: 'completed',
+                attempt: 2,
+                triggerReason: 'StaticProseGate: 1 处套话违规'
+            }
+        ]);
+
+        const { container } = await mountStudio();
+        await openStageStrip(container);
+
+        const writerNode = stageNode(container, 'WRITER');
+        expect(writerNode.dataset.sessionId).toBe('sess-ch1-writer-orig');
+
+        // 点击 3. Writer 默认打开原始 Writer 会话，并渲染高对比度「阶段记录 (2)」切换胶囊
+        await click(writerNode);
+        expect(
+            container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')
+        ).toBe('sess-ch1-writer-orig');
+
+        const attemptsLabel = container.querySelector('.ns-session-attempts-label');
+        expect(attemptsLabel?.textContent?.trim()).toBe('阶段记录 (2)');
+
+        const pills = Array.from(
+            container.querySelectorAll<HTMLButtonElement>('.ns-session-attempt-pill[data-attempt-session-id]')
+        );
+        expect(pills.map((p) => p.getAttribute('data-attempt-session-id'))).toEqual([
+            'sess-ch1-writer-orig',
+            'sess-ch1-patch-1'
+        ]);
+        expect(pills[0]?.classList.contains('ns-active')).toBe(true);
+        expect(pills[0]?.getAttribute('aria-pressed')).toBe('true');
+        expect(pills[1]?.classList.contains('ns-active')).toBe(false);
+
+        // 点击 Patch 胶囊可切换至局部润色记录
+        await click(pills[1]!);
+        expect(
+            container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')
+        ).toBe('sess-ch1-patch-1');
+
+        // 切至右栏「运行状态」：默认「查看思考过程」仍指向 Writer 原稿，且关联列表完整保留两条记录
+        await click(container.querySelector<HTMLButtonElement>('#ns-right-tab-status')!);
+        const primaryInspectBtn = Array.from(
+            container.querySelectorAll<HTMLButtonElement>('.ns-i-stage-session-row button')
+        ).find((btn) => btn.textContent?.includes('查看思考过程'));
+        expect(primaryInspectBtn).toBeDefined();
+        await click(primaryInspectBtn!);
+        expect(
+            container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')
+        ).toBe('sess-ch1-writer-orig');
+
+        await click(container.querySelector<HTMLButtonElement>('#ns-right-tab-status')!);
+        const allAttemptIds = Array.from(
+            container.querySelectorAll<HTMLButtonElement>(
+                '[aria-label="关联会话轨迹列表"] button[data-attempt-session-id]'
+            )
+        ).map((btn) => btn.getAttribute('data-attempt-session-id'));
+        expect(allAttemptIds).toEqual(['sess-ch1-writer-orig', 'sess-ch1-patch-1']);
+    });
+
+    it('BUG-02: 0 章新书在 STEPPING 态刷新页面且 runs 暂为空时，仍自动展开 6 节点流水线并承接第 1 章 SSE', async () => {
+        vi.mocked(api.fetchStatus).mockResolvedValue({
+            ...makeStatus(),
+            activeChapter: 0,
+            lastCommittedChapter: 0,
+            latestChapter: 0,
+            chapterCount: 0,
+            worldState: { story_day: 1, current_chapter: 0, timeline_mode: 'MAINLINE' },
+            runtime: { activeTask: 'STEPPING', haltRequested: false }
+        });
+        vi.mocked(api.fetchChapters).mockResolvedValue({ chapters: [] });
+        vi.mocked(api.fetchRunRecords).mockResolvedValue({ runs: [] });
+
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const root = createRoot(container);
+        mountedRoots.push(root);
+        await act(async () => {
+            root.render(createElement(NarrateStudioRoot));
+        });
+
+        expect(api.fetchRunRecords).toHaveBeenCalledWith(1);
+        const toggle = container.querySelector<HTMLButtonElement>('button.ns-pipeline-toggle-btn');
+        expect(toggle).not.toBeNull();
+        expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+        expect(container.querySelectorAll('.ns-pipe-card')).toHaveLength(6);
+
+        await emit({
+            event: 'stage',
+            data: {
+                stage: 'LIBRARIAN',
+                chapterNumber: 1,
+                activeSessionId: 'sess-ch1-live-lib',
+                status: 'running',
+                message: '正在检索第 1 章实体'
+            }
+        });
+        expect(stageNode(container, 'LIBRARIAN').dataset.sessionId).toBe('sess-ch1-live-lib');
+    });
 });

@@ -404,6 +404,84 @@ export function resolveStageId(stageName: string): PipelineStageId | null {
         : null;
 }
 
+/** 阶段节点首选展示会话信息 */
+export interface PrimaryStageSessionInfo {
+    sessionId: string;
+    parentSessionId?: string | undefined;
+    mode?: string | undefined;
+    runId?: string | undefined;
+}
+
+function isRunningAttemptStatus(status: string | undefined): boolean {
+    const normalized = (status ?? '').trim().toLowerCase();
+    return normalized === 'running' || normalized === 'active' || normalized === 'in_progress';
+}
+
+function isPrimaryWriterAttempt(attempt: StageAttemptSession): boolean {
+    const upperStage = attempt.stage.trim().toUpperCase();
+    const lowerRole = (attempt.role ?? '').trim().toLowerCase();
+    if (upperStage === 'LOCAL_PATCH' || lowerRole === 'patch') {
+        return false;
+    }
+    return upperStage === 'WRITER' || upperStage === 'REWRITE';
+}
+
+function toPrimaryStageSession(attempt: StageAttemptSession): PrimaryStageSessionInfo {
+    return {
+        sessionId: attempt.sessionId,
+        ...(attempt.parentSessionId !== undefined ? { parentSessionId: attempt.parentSessionId } : {}),
+        ...(attempt.mode !== undefined ? { mode: attempt.mode } : {}),
+        ...(attempt.runId !== undefined ? { runId: attempt.runId } : {})
+    };
+}
+
+/**
+ * 解析阶段节点默认打开的首选会话：
+ * - WRITER 节点存在运行中尝试时优先跟随实时运行会话（含实时 Patch）；
+ * - WRITER 节点处于历史/终态时优先选取最新一次原始执笔会话（WRITER / REWRITE，排除 LOCAL_PATCH），
+ *   无原始执笔记录时再回退到 nodeState.sessionId；
+ * - 其余阶段保持既有行为。
+ */
+export function resolvePrimaryStageSession(
+    stageId: PipelineStageId,
+    nodeState?: StageNodeState | null
+): PrimaryStageSessionInfo | null {
+    if (!nodeState) return null;
+    const sessions = nodeState.sessions ?? [];
+
+    if (stageId === 'WRITER' && sessions.length > 0) {
+        for (let i = sessions.length - 1; i >= 0; i -= 1) {
+            const item = sessions[i]!;
+            if (isRunningAttemptStatus(item.status)) {
+                return toPrimaryStageSession(item);
+            }
+        }
+        for (let i = sessions.length - 1; i >= 0; i -= 1) {
+            const item = sessions[i]!;
+            if (isPrimaryWriterAttempt(item)) {
+                return toPrimaryStageSession(item);
+            }
+        }
+    }
+
+    if (nodeState.sessionId) {
+        return {
+            sessionId: nodeState.sessionId,
+            ...(nodeState.parentSessionId !== undefined
+                ? { parentSessionId: nodeState.parentSessionId }
+                : {}),
+            ...(nodeState.mode !== undefined ? { mode: nodeState.mode } : {}),
+            ...(nodeState.runId !== undefined ? { runId: nodeState.runId } : {})
+        };
+    }
+
+    if (sessions.length > 0) {
+        return toPrimaryStageSession(sessions[sessions.length - 1]!);
+    }
+
+    return null;
+}
+
 function deriveStagesFromSse(
     sseStage: string | null | undefined,
     overrides?: Partial<Record<PipelineStageId, StageNodeState>>
@@ -940,6 +1018,7 @@ function renderPipelineDrawer(params: {
         <section className="ns-pipeline-drawer" aria-label="6 步 Agent 工序与模型矩阵">
             {PIPELINE_STAGES.map((stage) => {
                 const nodeState = params.stageMap[stage.id];
+                const primarySession = resolvePrimaryStageSession(stage.id, nodeState);
                 const effectiveModel = params.resolveStageModelLabel(stage);
                 const isRunningLive =
                     nodeState.status === 'active' || nodeState.status === 'healing';
@@ -957,7 +1036,7 @@ function renderPipelineDrawer(params: {
                         type="button"
                         className={cardClass}
                         data-stage-id={stage.id}
-                        data-session-id={nodeState.sessionId ?? ''}
+                        data-session-id={primarySession?.sessionId ?? ''}
                         onClick={() => params.onInspectStep(stage)}
                         title={`点击查看 ${stage.label} 思考过程`}
                     >
@@ -1524,6 +1603,7 @@ export function CenterWorkbench({
     // 同步防重入锁（ISS-069）：防止在途前连续点击写出重复请求
     const stepSubmittingRef = useRef(false);
     const [stepSubmitting, setStepSubmitting] = useState(false);
+    const isStepping = activeTask === 'STEPPING' || isYoloRunning || stepSubmitting;
 
     // 浮层菜单状态：'book' | 'toc' | 'run' | 'stop' | 'ops' | null
     const [openMenu, setOpenMenu] = useState<'book' | 'toc' | 'run' | 'stop' | 'ops' | null>(null);
@@ -1534,8 +1614,15 @@ export function CenterWorkbench({
     const [chapterTab, setChapterTab] = useState<'prose' | 'plan' | 'diff'>('prose');
     const [codexTab, setCodexTab] = useState<MaterializedViewKind>('entities');
 
-    // 3x2 工序与模型矩阵开关
-    const [stageDrawerOpen, setStageDrawerOpen] = useState(false);
+    // 3x2 工序与模型矩阵开关（进入推章态时自动展开，运行期间允许用户手动收起）
+    const [stageDrawerOpen, setStageDrawerOpen] = useState(() => isStepping);
+    const prevSteppingRef = useRef(isStepping);
+    useEffect(() => {
+        if (isStepping && !prevSteppingRef.current) {
+            setStageDrawerOpen(true);
+        }
+        prevSteppingRef.current = isStepping;
+    }, [isStepping]);
     const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId>('WRITER');
 
     // 响应外部导航命令（左栏全书设定集 / 选章复位）
@@ -2123,6 +2210,17 @@ export function CenterWorkbench({
 
     const hasActiveBook = Boolean(currentBookRoot);
     const hasChapterContent = chapters.length > 0 || chapterDetail !== null;
+    const hasPipelineActivity =
+        isStepping ||
+        Boolean(latestSseStage) ||
+        PIPELINE_STAGES.some((s) => {
+            const st = stageMap[s.id];
+            return (
+                (st.status !== 'idle' && st.status !== 'dormant') ||
+                Boolean(st.sessionId) ||
+                Boolean(st.sessions && st.sessions.length > 0)
+            );
+        });
     const displayBookTitle =
         bookTitle || bookSlug || (hasActiveBook ? '未命名作品' : '选择或开启作品');
     const displayVolumeLabel =
@@ -2130,19 +2228,20 @@ export function CenterWorkbench({
 
     const handleInspectStep = (stageDef: StageDefinition) => {
         const nodeState = stageMap[stageDef.id];
+        const primarySession = resolvePrimaryStageSession(stageDef.id, nodeState);
         runWithViewTransition(() => {
             setInspectedStageId(stageDef.id);
             onInspectStage?.(stageDef.id);
             if (!onSelectStageSession) return;
-            if (nodeState.sessionId) {
+            if (primarySession) {
                 onSelectStageSession(
                     buildStageSessionSelection({
                         stageId: stageDef.id,
                         stageLabel: stageDef.label,
-                        sessionId: nodeState.sessionId,
-                        parentSessionId: nodeState.parentSessionId,
-                        mode: nodeState.mode,
-                        runId: nodeState.runId,
+                        sessionId: primarySession.sessionId,
+                        parentSessionId: primarySession.parentSessionId,
+                        mode: primarySession.mode,
+                        runId: primarySession.runId,
                         status: nodeState.status
                     })
                 );
@@ -2474,17 +2573,20 @@ export function CenterWorkbench({
                         </button>
                     )}
 
-                    <div className="ns-header-pop-wrap">
+                    <div className="ns-header-pop-wrap ns-header-book-wrap">
                         <button
                             type="button"
                             className="ns-book-switcher"
+                            title={hasActiveBook ? `《${displayBookTitle}》` : displayBookTitle}
                             aria-haspopup="menu"
                             aria-expanded={openMenu === 'book'}
                             onClick={() =>
                                 setOpenMenu((prev) => (prev === 'book' ? null : 'book'))
                             }
                         >
-                            <span>{hasActiveBook ? `《${displayBookTitle}》` : displayBookTitle}</span>
+                            <span className="ns-book-switcher-title">
+                                {hasActiveBook ? `《${displayBookTitle}》` : displayBookTitle}
+                            </span>
                             {StudioIcons.chev}
                         </button>
                         {renderBookMenu({
@@ -2498,17 +2600,20 @@ export function CenterWorkbench({
                     </div>
 
                     {showCompactNav && (
-                        <div className="ns-header-pop-wrap">
+                        <div className="ns-header-pop-wrap ns-header-toc-wrap">
                             <button
                                 type="button"
-                                className="ns-btn ns-btn-subtle"
+                                className="ns-btn ns-btn-subtle ns-compact-toc-btn"
+                                title={`${compactNavPrefix} · 目录与设定集`}
                                 aria-haspopup="menu"
                                 aria-expanded={openMenu === 'toc'}
                                 onClick={() =>
                                     setOpenMenu((prev) => (prev === 'toc' ? null : 'toc'))
                                 }
                             >
-                                <span>{compactNavPrefix} · 目录与设定集</span>
+                                <span className="ns-compact-toc-label">
+                                    {compactNavPrefix} · 目录与设定集
+                                </span>
                                 {StudioIcons.chev}
                             </button>
                             {renderCompactTocMenu({
@@ -2599,53 +2704,61 @@ export function CenterWorkbench({
                 </div>
             </header>
 
-            {/* 单章工具栏（严禁出现原型 .sim-bar；独立设定集视图下隐藏） */}
-            {mainSurface === 'chapter' && hasChapterContent && (
+            {/* 单章工具栏（严禁出现原型 .sim-bar；独立设定集视图下隐藏；新书推第 1 章期间同样挂载流水线胶囊与抽屉） */}
+            {mainSurface === 'chapter' && (hasChapterContent || hasPipelineActivity) && (
                 <div className="ns-reader-toolbar-wrap">
                     <div className="ns-reader-bar">
-                        <div
-                            className="ns-seg-tabs"
-                            role="tablist"
-                            aria-label="章节视图"
-                            onKeyDown={handleTabKeyDown}
-                        >
-                            <button
-                                type="button"
-                                role="tab"
-                                id="ns-tab-prose"
-                                aria-controls="ns-chapter-panel"
-                                tabIndex={chapterTab === 'prose' ? 0 : -1}
-                                aria-selected={chapterTab === 'prose'}
-                                className={`ns-seg-tab${chapterTab === 'prose' ? ' ns-active' : ''}`}
-                                onClick={() => setChapterTab('prose')}
+                        {hasChapterContent ? (
+                            <div
+                                className="ns-seg-tabs"
+                                role="tablist"
+                                aria-label="章节视图"
+                                onKeyDown={handleTabKeyDown}
                             >
-                                本章正文
-                            </button>
-                            <button
-                                type="button"
-                                role="tab"
-                                id="ns-tab-plan"
-                                aria-controls="ns-chapter-panel"
-                                tabIndex={chapterTab === 'plan' ? 0 : -1}
-                                aria-selected={chapterTab === 'plan'}
-                                className={`ns-seg-tab${chapterTab === 'plan' ? ' ns-active' : ''}`}
-                                onClick={() => setChapterTab('plan')}
-                            >
-                                本章细纲
-                            </button>
-                            <button
-                                type="button"
-                                role="tab"
-                                id="ns-tab-diff"
-                                aria-controls="ns-chapter-panel"
-                                tabIndex={chapterTab === 'diff' ? 0 : -1}
-                                aria-selected={chapterTab === 'diff'}
-                                className={`ns-seg-tab${chapterTab === 'diff' ? ' ns-active' : ''}`}
-                                onClick={() => setChapterTab('diff')}
-                            >
-                                改动对比
-                            </button>
-                        </div>
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    id="ns-tab-prose"
+                                    aria-controls="ns-chapter-panel"
+                                    tabIndex={chapterTab === 'prose' ? 0 : -1}
+                                    aria-selected={chapterTab === 'prose'}
+                                    className={`ns-seg-tab${chapterTab === 'prose' ? ' ns-active' : ''}`}
+                                    onClick={() => setChapterTab('prose')}
+                                >
+                                    本章正文
+                                </button>
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    id="ns-tab-plan"
+                                    aria-controls="ns-chapter-panel"
+                                    tabIndex={chapterTab === 'plan' ? 0 : -1}
+                                    aria-selected={chapterTab === 'plan'}
+                                    className={`ns-seg-tab${chapterTab === 'plan' ? ' ns-active' : ''}`}
+                                    onClick={() => setChapterTab('plan')}
+                                >
+                                    本章细纲
+                                </button>
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    id="ns-tab-diff"
+                                    aria-controls="ns-chapter-panel"
+                                    tabIndex={chapterTab === 'diff' ? 0 : -1}
+                                    aria-selected={chapterTab === 'diff'}
+                                    className={`ns-seg-tab${chapterTab === 'diff' ? ' ns-active' : ''}`}
+                                    onClick={() => setChapterTab('diff')}
+                                >
+                                    改动对比
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="ns-reader-status-label" role="status">
+                                {isStepping
+                                    ? `正在生成第 ${Math.max(1, currentChapter + 1)} 章`
+                                    : `第 ${Math.max(1, currentChapter + 1)} 章流水线轨迹`}
+                            </div>
+                        )}
 
                         <div className="ns-header-right">
                             <button
@@ -2666,15 +2779,17 @@ export function CenterWorkbench({
                                 {stageDrawerOpen ? StudioIcons.chevUp : StudioIcons.chev}
                             </button>
 
-                            <button
-                                type="button"
-                                className={`ns-btn${isEditing ? ' ns-btn-subtle' : ''}`}
-                                disabled={savingEdit}
-                                onClick={isEditing ? handleCancelEditing : handleStartEditing}
-                            >
-                                {StudioIcons.edit}
-                                <span>{isEditing ? '退出编辑' : '直接改稿'}</span>
-                            </button>
+                            {hasChapterContent && (
+                                <button
+                                    type="button"
+                                    className={`ns-btn${isEditing ? ' ns-btn-subtle' : ''}`}
+                                    disabled={savingEdit}
+                                    onClick={isEditing ? handleCancelEditing : handleStartEditing}
+                                >
+                                    {StudioIcons.edit}
+                                    <span>{isEditing ? '退出编辑' : '直接改稿'}</span>
+                                </button>
+                            )}
                         </div>
                     </div>
 
@@ -2711,7 +2826,9 @@ export function CenterWorkbench({
                 id="ns-chapter-panel"
                 role="tabpanel"
                 aria-labelledby={
-                    mainSurface === 'chapter' ? `ns-tab-${chapterTab}` : undefined
+                    mainSurface === 'chapter' && hasChapterContent
+                        ? `ns-tab-${chapterTab}`
+                        : undefined
                 }
                 tabIndex={0}
             >

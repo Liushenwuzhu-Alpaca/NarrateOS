@@ -640,8 +640,9 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             data: { sessionId: 'sess-live-sse', stage: 'LIBRARIAN', kind: 'tool-call', toolName: 'book_grep', callId: 'c1', text: '{"pattern":"驳船"}' }
         });
 
-        // 展开 3x2 矩阵并点击 Librarian
-        await click(container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!);
+        // 进入推章态时 3x2 矩阵自动展开，直接点击 Librarian
+        const pipelineToggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        expect(pipelineToggle.getAttribute('aria-expanded')).toBe('true');
         await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="LIBRARIAN"]')!);
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('检索码头账本');
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('book_grep');

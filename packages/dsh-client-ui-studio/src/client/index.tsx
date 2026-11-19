@@ -36,6 +36,7 @@ import {
 import { BootBookModal } from './BootBookModal';
 import {
     CenterWorkbench,
+    resolvePrimaryStageSession,
     resolveStageId,
     STAGE_REPAIR_META,
     type CenterWorkbenchDraftHandle,
@@ -1260,8 +1261,13 @@ export function NarrateStudioRoot({
                     setHistoricalRuns([]);
                 }
 
-                if (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) {
+                if (
+                    (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) &&
+                    isCurrentWorkspace(epoch) &&
+                    seq === refreshRequestRef.current
+                ) {
                     const activeTargetChapter = (statusRes.latestChapter ?? 0) + 1;
+                    setLiveRunChapter(activeTargetChapter);
                     const activeRunsRes = await fetchRunRecords(activeTargetChapter).catch(() => null);
                     if (
                         activeRunsRes &&
@@ -1269,7 +1275,6 @@ export function NarrateStudioRoot({
                         isCurrentWorkspace(epoch) &&
                         seq === refreshRequestRef.current
                     ) {
-                        setLiveRunChapter(activeTargetChapter);
                         applyStageOverrides((prev) =>
                             Object.keys(prev).length > 0
                                 ? prev
@@ -2454,6 +2459,7 @@ export function NarrateStudioRoot({
 
         if (targetStageId) {
             const nodeState = effectiveStages[targetStageId];
+            const primarySession = resolvePrimaryStageSession(targetStageId, nodeState);
             const idx = STAGE_SEQUENCE.indexOf(targetStageId);
             const meta = PIPELINE_STAGE_META.find((item) => item.id === targetStageId);
             let base: StageArtifactTelemetry;
@@ -2470,7 +2476,7 @@ export function NarrateStudioRoot({
             return {
                 ...base,
                 ...assemblyFields,
-                ...(nodeState?.sessionId ? { sessionId: nodeState.sessionId } : {}),
+                ...(primarySession?.sessionId ? { sessionId: primarySession.sessionId } : {}),
                 ...(nodeState?.sessions && nodeState.sessions.length > 0
                     ? { sessions: nodeState.sessions }
                     : {})

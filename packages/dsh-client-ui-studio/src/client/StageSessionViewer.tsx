@@ -617,25 +617,28 @@ function renderAttemptSessionsRow(
 ): React.ReactNode {
     if (!attemptSessions || attemptSessions.length === 0) return null;
     return (
-        <div className="ns-session-model-row" role="group" aria-label="同阶段尝试切换">
-            {attemptSessions.map((item) => {
-                const isCurrent = item.sessionId === currentSessionId;
-                return (
-                    <button
-                        key={item.sessionId}
-                        type="button"
-                        data-attempt-session-id={item.sessionId}
-                        aria-pressed={isCurrent}
-                        title={item.triggerReason}
-                        className={`ns-btn ns-btn-xs ${
-                            isCurrent ? 'ns-btn-ghost ns-btn-active' : 'ns-btn-ghost'
-                        }`}
-                        onClick={() => onSelectAttemptSession?.(item.sessionId)}
-                    >
-                        {item.label}
-                    </button>
-                );
-            })}
+        <div className="ns-session-attempts-bar" role="group" aria-label="同阶段尝试切换">
+            <span className="ns-session-attempts-label">
+                阶段记录 ({attemptSessions.length})
+            </span>
+            <div className="ns-session-attempts-pills">
+                {attemptSessions.map((item) => {
+                    const isCurrent = item.sessionId === currentSessionId;
+                    return (
+                        <button
+                            key={item.sessionId}
+                            type="button"
+                            data-attempt-session-id={item.sessionId}
+                            aria-pressed={isCurrent}
+                            title={item.triggerReason}
+                            className={`ns-session-attempt-pill${isCurrent ? ' ns-active' : ''}`}
+                            onClick={() => onSelectAttemptSession?.(item.sessionId)}
+                        >
+                            {item.label}
+                        </button>
+                    );
+                })}
+            </div>
         </div>
     );
 }

@@ -8,6 +8,7 @@ export const BOOT_CSS = `
 .ns-b-modal-shell {
     width: min(860px, calc(100vw - 32px));
     max-width: 860px;
+    max-height: calc(100vh - 32px);
     margin: 0 auto;
     padding: 0;
     display: flex;
@@ -154,6 +155,14 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell,
     padding: 0;
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.ns-b-modal-content > form {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
     min-height: 0;
 }
 
@@ -171,6 +180,7 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell,
     justify-content: space-between;
     font-weight: 600;
     font-size: 14px;
+    flex-shrink: 0;
 }
 
 .ns-modal-body {
@@ -178,8 +188,11 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell,
     display: flex;
     flex-direction: column;
     gap: 12px;
+    flex: 1 1 auto;
+    min-height: 0;
     max-height: 75vh;
     overflow-y: auto;
+    overscroll-behavior: contain;
     scrollbar-width: thin;
     scrollbar-color: var(--ns-border-2) transparent;
 }
@@ -246,6 +259,7 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell,
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    flex-shrink: 0;
 }
 
 /* 弹窗头部 */
@@ -325,6 +339,7 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell,
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
+    flex-shrink: 0;
 }
 
 .ns-b-step-btn {
@@ -733,6 +748,7 @@ body:not([data-ds-dark-theme]) .ns-b-modal-shell,
     .ns-b-modal-shell {
         width: calc(100vw - 16px);
         max-width: 100%;
+        max-height: calc(100vh - 16px);
     }
 
     .ns-b-mode-grid,

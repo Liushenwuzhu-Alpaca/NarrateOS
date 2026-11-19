@@ -3370,6 +3370,7 @@ details.ns-acc[open] summary {
     justify-content: center;
     align-items: center;
     padding: 16px;
+    overflow-y: auto;
 }
 
 .ns-session-empty-card,
@@ -3447,6 +3448,62 @@ details.ns-acc[open] summary {
     flex-wrap: wrap;
     gap: 6px;
     font-size: 11px;
+}
+
+.ns-session-attempts-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: var(--ns-r-sm);
+    background: var(--ns-bg-panel);
+    border: 1px solid var(--ns-border-1);
+}
+
+.ns-session-attempts-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ns-text-2);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.ns-session-attempts-pills {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    min-width: 0;
+}
+
+.ns-session-attempt-pill {
+    height: 24px;
+    padding: 0 9px;
+    border-radius: var(--ns-r-pill);
+    border: 1px solid var(--ns-border-2);
+    background: var(--ns-bg-card);
+    color: var(--ns-text-2);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.ns-session-attempt-pill:hover {
+    border-color: var(--ns-border-3);
+    color: var(--ns-text-1);
+    background: var(--ns-bg-hover);
+}
+
+.ns-session-attempt-pill.ns-active {
+    border-color: var(--ns-brand);
+    background: var(--ns-brand-soft);
+    color: var(--ns-brand-ink);
+    font-weight: 600;
+    box-shadow: 0 0 0 1px var(--ns-brand-line);
 }
 
 .ns-session-view-ring {
@@ -3930,6 +3987,9 @@ details.ns-acc[open] summary {
     top: calc(100% + 6px);
     right: 0;
     min-width: 244px;
+    max-height: min(60vh, 420px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     background: var(--ns-bg-elevated);
     border: 1px solid var(--ns-border-2);
     border-radius: var(--ns-r-lg);
@@ -4152,6 +4212,7 @@ details.ns-acc[open] summary {
     justify-content: space-between;
     gap: 12px;
     flex-shrink: 0;
+    min-width: 0;
 }
 
 .ns-book-switcher {
@@ -4162,16 +4223,48 @@ details.ns-acc[open] summary {
     font-size: 14px;
     font-weight: 600;
     padding: 4px 8px;
-    margin-left: -8px;
+    margin: 0 0 0 -8px;
     border-radius: var(--ns-r-sm);
     display: inline-flex;
     align-items: center;
     gap: 6px;
     cursor: pointer;
+    max-width: 100%;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.ns-book-switcher > span,
+.ns-book-switcher-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-book-switcher > svg {
+    flex-shrink: 0;
 }
 
 .ns-book-switcher:hover {
     background: var(--ns-bg-hover);
+}
+
+.ns-compact-toc-btn {
+    max-width: 100%;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.ns-compact-toc-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ns-compact-toc-btn > svg {
+    flex-shrink: 0;
 }
 
 /* 阅读工具栏 + 672px 版心光学对齐的 3x2 Agent 工序矩阵 */
@@ -4193,6 +4286,16 @@ details.ns-acc[open] summary {
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
+}
+
+.ns-reader-status-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ns-text-2);
+    white-space: nowrap;
 }
 
 .ns-seg-tabs {
@@ -4342,20 +4445,35 @@ details.ns-acc[open] summary {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
+    min-width: 0;
 }
 
 .ns-pipe-step-name {
     display: inline-flex;
     align-items: center;
     gap: 7px;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 12px;
     font-weight: 600;
     color: var(--ns-text-1);
 }
 
+.ns-pipe-step-name > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .ns-pipe-step-state {
     font-size: 11px;
     color: var(--ns-text-3);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .ns-pipe-card.ns-running-live .ns-pipe-step-state {
@@ -4414,6 +4532,7 @@ details.ns-acc[open] summary {
     box-shadow: var(--ns-shadow-sheet);
     position: relative;
     overflow: hidden;
+    flex-shrink: 0;
     view-transition-name: ns-studio-sheet;
 }
 
@@ -4937,10 +5056,31 @@ details.ns-acc[open] summary {
     min-width: 0;
 }
 
+.ns-header-left {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.ns-header-right {
+    flex-shrink: 0;
+}
+
 .ns-header-pop-wrap {
     position: relative;
     display: inline-flex;
     align-items: center;
+}
+
+.ns-header-book-wrap {
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 100%;
+}
+
+.ns-header-toc-wrap {
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 180px;
 }
 
 .ns-menu-pop-bottom {
