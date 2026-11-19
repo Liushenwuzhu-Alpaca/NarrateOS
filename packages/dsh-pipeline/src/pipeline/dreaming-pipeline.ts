@@ -72,7 +72,6 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_DREAM_WORD_THRESHOLD = 15000;
 const DEFAULT_DREAM_BUFFER_LIMIT = 6;
-const DEFAULT_WARPED_ARCHIVE_AFTER_DAYS = 3;
 const DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS = 2;
 const DEFAULT_HEAL_GIT_LOG_MAX_COUNT = 2000;
 
@@ -96,50 +95,6 @@ async function appendSignalJsonl(bookRoot: string, signal: OpsSignal): Promise<s
     return relPath;
 }
 
-/** 扫描未来线与实体卡中超过阈值的过期 WARPED 条目（排除已折叠进 Archived WARPED 的历史条目） */
-function scanExpiredWarpedEntries(
-    futureHorizonRaw: string | null | undefined,
-    entities: Readonly<Record<string, EntityProfile>>,
-    currentStoryDay: number,
-    warpedArchiveAfterDays: number
-): string[] {
-    const notes: string[] = [];
-    if (futureHorizonRaw) {
-        const lines = futureHorizonRaw.replace(/\r\n/g, '\n').split('\n');
-        for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (/^##\s+Archived\s+WARPED\b/i.test(line)) {
-                break;
-            }
-            if (!/\bWARPED\b/i.test(line)) continue;
-            const dayMatch = /(?:\bday|故事日)\s*[:：]\s*(-?\d+)/i.exec(line);
-            if (!dayMatch?.[1]) continue;
-            const entryDay = Number(dayMatch[1]);
-            if (Number.isFinite(entryDay) && currentStoryDay - entryDay > warpedArchiveAfterDays) {
-                notes.push(`- [future_horizon] ${line}`);
-            }
-        }
-    }
-
-    for (const profile of Object.values(entities)) {
-        const entityId = profile.metadata.entity_id;
-        for (const entry of [...profile.acquiredState, ...profile.recentBuffer]) {
-            const isWarped =
-                entry.status === 'WARPED' ||
-                /\bWARPED\b/i.test(entry.text) ||
-                entry.continuationLines.some((l) => /\bWARPED\b/i.test(l));
-            if (!isWarped) continue;
-            if (
-                entry.storyDay !== undefined &&
-                entry.storyDay > 0 &&
-                currentStoryDay - entry.storyDay > warpedArchiveAfterDays
-            ) {
-                notes.push(`- [实体 ${entityId}] day:${entry.storyDay} ${entry.text}`);
-            }
-        }
-    }
-    return notes;
-}
 
 /** 扫描尚未出场或退场但仍在伏笔/未来线活跃的角色 */
 function scanOffscreenEntityNotes(
@@ -296,8 +251,6 @@ export class DreamingPipeline {
                 options.dreamBufferLimit ??
                 dreamingCfg?.buffer_limit ??
                 DEFAULT_DREAM_BUFFER_LIMIT;
-            const warpedArchiveAfterDays =
-                dreamingCfg?.warped_archive_after_days ?? DEFAULT_WARPED_ARCHIVE_AFTER_DAYS;
             const promoteAnchorMinChapters =
                 dreamingCfg?.promote_anchor_min_chapters ?? DEFAULT_PROMOTE_ANCHOR_MIN_CHAPTERS;
             const watermarkObj = await this.store.readDreamWatermark();
@@ -350,6 +303,7 @@ export class DreamingPipeline {
             }
 
             const wordTriggered = recentWordDelta >= wordThreshold;
+            const impactedHorizonEvents = options.impactedHorizonEvents ?? [];
             // 若仅由字数达标或强制触发且无实体达到 bufferLimit，仍把水位以来出场实体纳入脏清单避免空转
             if ((wordTriggered || options.force) && dirtyEntityIds.length === 0) {
                 dirtyEntityIds.push(...allCandidateIds);
@@ -371,12 +325,6 @@ export class DreamingPipeline {
                 openThreadsRaw,
                 futureHorizonRaw
             );
-            const expiredWarpedNotes = scanExpiredWarpedEntries(
-                futureHorizonRaw,
-                snapshot.entities,
-                currentStoryDay,
-                warpedArchiveAfterDays
-            );
             const sections = (await readBookL2Sections(this.store.bookRoot))
                 .filter((section) => section.chapterNumber <= options.currentChapter);
             const anchorCandidates = scanRecurringProseAnchors(
@@ -389,7 +337,7 @@ export class DreamingPipeline {
             const bufferTriggered = dirtyEntityIds.length > 0;
             const hasHorizonWork =
                 offscreenList.length > 0 ||
-                expiredWarpedNotes.length > 0 ||
+                impactedHorizonEvents.length > 0 ||
                 anchorCandidates.length > 0;
 
             if (!options.force && !wordTriggered && !bufferTriggered && !hasHorizonWork) {
@@ -409,6 +357,9 @@ export class DreamingPipeline {
             const threadLimits = dreamingCfg ?? BookDreamingConfigSchema.parse({});
             const taskPrompt = [
                 `## 本轮睡眠整理任务 (${formatChapterKey(options.currentChapter)} | story_day=${currentStoryDay})`,
+                ...(impactedHorizonEvents.length > 0
+                    ? ['## 本章因果相变事件（逐项对照定稿核销、排查下游并补写改道事件）', ...impactedHorizonEvents.map((event) => `- ${event}`)]
+                    : []),
                 `- 上次 Dreaming 水位章号: ${watermarkCh}`,
                 `- 本书伏笔上限：本次新增不超过 ${threadLimits.max_new_threads_per_dream} 条，活跃总数不超过 ${threadLimits.max_active_open_threads} 条。`,
                 `- 水位以来累计新增字数: ${recentWordDelta}`,
@@ -427,13 +378,6 @@ export class DreamingPipeline {
                               (c) =>
                                   `- ${c.entityId}: 目标="${c.pendingGoal}" | 当前进度="${c.progressNote}"`
                           )
-                      ]
-                    : []),
-                ...(expiredWarpedNotes.length > 0
-                    ? [
-                          '',
-                          `## 超期 WARPED 废止条目待折叠清单（超过 ${warpedArchiveAfterDays} 故事日，请统一折叠至 world/future_horizon.md 底部 ## Archived WARPED 小节，严禁写入 entities/cold_archive/）`,
-                          ...expiredWarpedNotes
                       ]
                     : []),
                 ...(anchorCandidates.length > 0

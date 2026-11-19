@@ -57,7 +57,7 @@ export const ENTITY_PATCH_TOOL_SCHEMA = {
         add_historical_anchors: { type: 'array', items: { type: 'string' } },
         innate_locks_ops: { type: 'array', items: { oneOf: [append, removeSlot] } },
         acquired_state_ops: { type: 'array', items: { oneOf: [append, upsertSlot, removeSlot, upsertLedger] } },
-        trajectory_ops: { type: 'array', items: append },
+        trajectory_ops: { type: 'array', items: append, description: '普通章留空；每章每实体最多一条不可逆人生大拐点，多条输入由终态门禁拒绝' },
         buffer_ops: { type: 'array', items: { oneOf: [append, upsertSlot, trimBuffer] } }
     }
 } as const satisfies ValueSchemaSpec;

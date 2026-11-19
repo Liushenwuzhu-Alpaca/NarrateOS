@@ -352,6 +352,9 @@ export function buildVerificationCorpus(
     for (const profile of Object.values(slicedView.entities)) {
         parts.push(`=== SOURCE_REF: entities/${profile.metadata.entity_id}.md ===\n${serializeEntityMarkdown(profile)}`);
     }
+    for (const memory of slicedView.crossEntityKnownEntries) {
+        parts.push(`=== SOURCE_REF: ${memory.sourcePath} ===\n${[memory.entry.text, ...memory.entry.continuationLines].join('\n')}`);
+    }
     for (const slice of recallSlices) {
         parts.push(`=== SOURCE_REF: ${slice.file} ===\n${slice.snippet}`);
     }
@@ -370,7 +373,7 @@ export function sanitizeExtractorPatches(
     patches: EntityPatch[]
 ): EntityPatch[] {
     return patches.map((patch) => {
-        if (snapshot.entities[patch.entity_id] && patch.canonical_name !== undefined) {
+        if ((snapshot.entities[patch.entity_id] ?? snapshot.coldEntities[patch.entity_id]) && patch.canonical_name !== undefined) {
             const { canonical_name: _ignored, ...rest } = patch;
             return rest;
         }
@@ -500,7 +503,11 @@ export async function wakeColdArchiveEntitiesInMemory(
     if (toLoad.length === 0) {
         return snapshot;
     }
-    const loaded = await store.readColdArchivedEntities(toLoad);
+    const loaded: Record<string, EntityProfile> = {};
+    for (const id of toLoad) {
+        const profile = snapshot.coldEntities[id];
+        if (profile) loaded[id] = profile;
+    }
     if (Object.keys(loaded).length === 0) {
         return snapshot;
     }

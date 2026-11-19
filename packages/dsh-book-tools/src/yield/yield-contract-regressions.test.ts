@@ -10,6 +10,7 @@ import { createYieldVerdictTool } from './yield-verdict.js';
 import { createYieldStatePatchTool, type YieldStatePatchResult } from './yield-state-patch.js';
 import { createYieldContextPackTool } from './yield-context-pack.js';
 import { findNegativeDirectives } from './negative-directives.js';
+import { ExtractorOutputSchema } from './schemas.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -28,6 +29,17 @@ async function book() {
 }
 
 describe('剧情与事实交接回归', () => {
+    it('每实体单章履历限额不能通过拆分补丁绕过，普通状态不受影响', () => {
+        const trajectory = { op: 'append', entry: { text: '身份揭破后永失继承权', chapter: 2 } };
+        const patch = { entity_id: 'char_001', last_seen_ch: 2, trajectory_ops: [trajectory] };
+        const payload = { plot_summary: '继承权被撤销', entity_patches: [patch] };
+        expect(ExtractorOutputSchema.parse(payload).entity_patches[0]?.trajectory_ops).toEqual([trajectory]);
+        expect(ExtractorOutputSchema.safeParse({ ...payload, entity_patches: [{ ...patch, trajectory_ops: [trajectory, trajectory] }] }).success).toBe(false);
+        expect(ExtractorOutputSchema.safeParse({ ...payload, entity_patches: [patch, patch] }).success).toBe(false);
+        const independent = ExtractorOutputSchema.parse({ ...payload, entity_patches: [patch, { ...patch, entity_id: 'char_002' }, { entity_id: 'char_001', last_seen_ch: 2, buffer_ops: [{ op: 'append', entry: { text: '暂居旧港' } }] }] });
+        expect(independent.entity_patches[2]?.buffer_ops).toEqual([{ op: 'append', entry: { text: '暂居旧港' } }]);
+    });
+
     it('放行剧情否定表达，并准确定位独立字段内的写作指令', async () => {
         const tool = createYieldOutlineTool();
         await expect(tool.execute(outline, exec())).resolves.toMatchObject({ accepted: true });

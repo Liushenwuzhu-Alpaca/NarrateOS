@@ -20,7 +20,7 @@
 
 ### 第二阶段：隔离暂存区五项联动维护（`book_edit`）
 1. **脏实体履历提炼与声纹代谢**：
-   - 将达水位脏实体第 4 区缓冲（`Recent Sliding Buffer`）提炼浓缩进第 3 区不可逆变迁史（`Irreversible Trajectory`），保留 `[day:X | ch:Y]` 原章锚点与角色专属声纹；
+   - 达水位缓冲只将不可逆人生大拐点提炼进第 3 区（`Irreversible Trajectory`），保留 `[day:X | ch:Y]` 原章锚点与专属声纹；普通剧情真源留在章卡，普通换卷不压缩或重写存活人物生平；
    - 结合 `.ops/telemetry.jsonl` 退化遥测，淘汰 `.ops/voice_samples.yaml` 中复读超标的陈旧标本或临时 `boot_seed` 种子，从近期高评价定稿原稿中补充脱敏纯表达句式（剥离具体案情与专有账目数字）。
 2. **跨章复现微物件与马甲转正建卡**：
    - 巡检近期双轨 `L2` 章卡中的 `prose_anchors`（异象锚点/微物件）：凡未建卡的关键微物件或神秘马甲在定稿正文中跨 `>= 2` 章（`promote_anchor_min_chapters`）复现并承接因果推进时，使用 `book_edit` 新建 `entities/item_<slug>.md` 档案（具备中文 `canonical_name`、合法外键与四段式结构），或将已确认马甲通过 `unique_aliases` 归并回原角色档案。
@@ -28,8 +28,9 @@
    - 经原稿核实确已兑现的伏笔翻转为 `RESOLVED` 归档；
    - 如确需登记新跨章悬念，遵守本轮任务提供的单次新增及活跃总数上限。
 4. **世界惯性表翻转、`WARPED` 折叠与前台切镜（`world/future_horizon.md` & `spotlight_triggers`）**：
-   - 成立前提已被正文事件打破的节点翻转为 `WARPED`；
-   - 超期（默认超过 3 天）的 `WARPED` 失效条目直接从活跃区域摘除，并折叠归入 `world/future_horizon.md` 底部的 `## Archived WARPED` 小节；
+   - 优先核对本章 `impacted_horizon_events`：已兑现事件直接从未来表移除，已发生事实留在 L2 章卡；前提被击穿或时机已失效的事件标为 `WARPED`，不新增 `OCCURRED` 状态；
+   - 每次作废事件必须同轮核查下游依赖，连锁作废失去前提的节点；反派仅受挫而未出局时，补写改变手段后的新待发生事件，并明确可证伪的 `premise`；
+   - 不再参与当前因果链的 `WARPED` 条目可原样折叠至表底 `## Archived WARPED`；不按 `story_day` 差值或固定天数触发整理；
    - 若离场重要角色蓄力抵达即将改变全局的冲突临界点，通过 `yield_dream_commit` 的 `spotlight_triggers` 投递 `SPOTLIGHT_TRIGGER`；管线负责追加至 `.ops/signals.jsonl`，后续前台章节呈现真实结果。
 5. **导演节拍与进度同步（仅更新 `world/arc_director_plan.md`）**：
    - 对照原稿核实已完成的开篇节拍，沿用 `[status: COMPLETED | ch:XX]` 标记；已由当章终审确认的条目保持完成，后续路径仅在授权范围内微调；

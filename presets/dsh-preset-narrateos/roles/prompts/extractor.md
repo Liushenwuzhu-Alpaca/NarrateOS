@@ -14,8 +14,9 @@
 - **只抽取跨章生效状态**：
   - 物品持有变更、数值账本增减（`upsert_ledger`）、新伤势/痊愈、驻留节点迁移（`upsert_slot`）；
   - **角色认知更新与解密翻转**：可揭晓的 `OMNISCIENT_SECRET` 底牌均置于第 2 区 `Acquired State` 并绑定明确的 `slot_key`（第 1 区 `Innate Locks` 仅放 `PUBLIC` / `SELF_ONLY` 先天红线）；当本章正式公开某条 `OMNISCIENT_SECRET` 秘密时，在 `acquired_state_ops` 中提交相同 `slot_key` 的 `upsert_slot`，将 `visibility` 原地翻转为 `READER_KNOWN`（仅读者获知）或 `PUBLIC`（公众/出场方已知），可选同时向第 3 区追加公开事件记录；
-  - 重大不可逆决定写入第 3 区（`trajectory_ops`）；
+  - 第 3 区（`trajectory_ops`）单章单实体最多 1 条，仅记录断肢、身份揭破、生死决裂、晋升等不可逆人生大拐点；普通过渡章留空不传，日常剧情写章卡和第 4 区；
   - 近期跨章有效细节写入第 4 区滑动缓冲（`buffer_ops`）。
+- **共知状态单点保存**：世界公知写 `world_state.md`；私密关系只在主承载卡保留一份 `SELF_ONLY`，`owner` 使用逗号分隔的实体 ID 名单。显式名单仅授权所列角色，即使宿主未列出也不可默认知情。跨卡记忆只读投影，严禁回抄到当前 POV 卡；改变秘密时对标注的真源卡提交补丁。
 
 ### 2. 实体入库锁与外键规范
 - **严禁篡改 `Innate Locks`**：禁止提交删除或修改既有实体先天红线的操作（门禁会立即拦截）。
@@ -32,7 +33,7 @@
 ### 4. 双轨 `L2` 章卡与候选方向（`Q1` 契约）
 - `plot_summary`：1-2 句简洁客观的因果主干剧情与意图功能义（向后兼容旧字段 `chapter_summary`，优先输出 `plot_summary`）。
 - `prose_anchors`：0-8 个从本章定稿正文中**原文逐字出现**的非角色微物件、空间死角或感官意象短词（宁缺毋滥，单条去空白长度 >= 2，严禁改写加减助词或凭记忆编造；门禁会核对原稿逐字存在性）。
-- `appeared_entity_ids`：本章实际登场交互或推进状态的已建档实体 ID 列表（含未发生永久状态变更的在场实体；仅在远方台词中被提及者不列入）。
+- `appeared_entity_ids`：本章实际登场交互的已建档实体 ID 列表（含无永久状态变更的在场实体）；远方提及或仅被动更新档案不算登场，冷宫实体仅更新档案不迁回活跃区。
 - `next_chapter_options`：提供 2-3 条自然延续的后续推进候选方向（不含题材套路偏见）。
 
 ### 5. `yield_state_patch` 精确 JSON 字段结构示例
@@ -58,17 +59,6 @@
                 {
                     "op": "upsert_ledger",
                     "entries": { "silver_coins": "18", "stamina": 85 }
-                }
-            ],
-            "trajectory_ops": [
-                {
-                    "op": "append",
-                    "entry": {
-                        "storyDay": 1,
-                        "chapter": 2,
-                        "visibility": "PUBLIC",
-                        "text": "与陈九达成口头协议，承担次日夜航押运"
-                    }
                 }
             ],
             "buffer_ops": [

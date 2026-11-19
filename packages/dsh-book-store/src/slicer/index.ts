@@ -1,8 +1,10 @@
 export {
     ViewSlicer,
+    isWarpedEntry,
     sanitizeLoreForWriter,
     sliceWorldDocuments,
     stripWriterRestrictedDirectives,
+    type CrossEntityKnownEntry,
     type DramaticIronyHint,
     type MemoryWakeupHint,
     type ParallelBroadcastItem,

@@ -393,10 +393,12 @@ export class SyncPipeline {
                 summaryMarkdown: snapshot.worldState.summaryMarkdown
             },
             entities: { ...snapshot.entities },
+            coldEntities: { ...snapshot.coldEntities },
             coldArchiveIds: [...snapshot.coldArchiveIds]
         };
         const stagedEntities = new Map<string, EntityProfile>();
         const wokenColdArchiveIds = new Set<string>();
+        const sleepingColdIds = new Set<string>();
         const pendingNewEntityIds = new Set<string>();
         let hasFactualHeadOrNext = false;
         let lastFactualChapterNumber: number | null = null;
@@ -469,6 +471,16 @@ export class SyncPipeline {
                 workingSnapshot,
                 extracted.entity_patches as EntityPatch[]
             );
+            const knownIds = new Set<string>([
+                ...Object.keys(workingSnapshot.entities),
+                ...workingSnapshot.coldArchiveIds,
+                ...sanitizedPatches.map((patch) => patch.entity_id)
+            ]);
+            // 补丁涉及的实体仍进入 L2 索引，但不能据此认定本人在场。
+            const appearedInChapterIds = new Set([
+                ...effectivePovCharIds,
+                ...extracted.appeared_entity_ids.filter((id) => knownIds.has(id))
+            ]);
 
             if (effectiveTimelineMode === 'FLASHBACK' && extracted.story_day_delta > 0) {
                 throw new ValidationError(
@@ -495,6 +507,7 @@ export class SyncPipeline {
                     stagedEntities.get(patch.entity_id) ??
                     workingSnapshot.entities[patch.entity_id] ??
                     null;
+                let isCold = sleepingColdIds.has(patch.entity_id);
 
                 if (!existing) {
                     const diskEntityPath = join(
@@ -506,28 +519,43 @@ export class SyncPipeline {
                     if (diskRaw !== null) {
                         existing = parseEntityMarkdown(diskRaw);
                     } else if (!SAGA_SHARD_RE.test(patch.entity_id)) {
-                        const coldProfile = await this.store.readColdArchivedEntity(patch.entity_id);
+                        const coldProfile = workingSnapshot.coldEntities[patch.entity_id] ??
+                            await this.store.readColdArchivedEntity(patch.entity_id);
                         if (coldProfile) {
-                            if (effectiveTimelineMode !== 'MAINLINE') {
-                                throw new ValidationError(
-                                    `${effectiveTimelineMode} 模式下禁止将冷宫实体 ${patch.entity_id} 迁回主线 entities/`
-                                );
-                            }
                             existing = coldProfile;
-                            wokenColdArchiveIds.add(patch.entity_id);
-                            workingSnapshot.coldArchiveIds = workingSnapshot.coldArchiveIds.filter(
-                                (id) => id !== patch.entity_id
-                            );
+                            isCold = true;
                         }
                     }
                     if (!existing) {
                         pendingNewEntityIds.add(patch.entity_id);
                     }
                 }
+                if (isCold) {
+                    if (effectiveTimelineMode !== 'MAINLINE') {
+                        throw new ValidationError(
+                            `${effectiveTimelineMode} 模式下禁止将冷宫实体 ${patch.entity_id} 迁回主线 entities/`
+                        );
+                    }
+                    if (appearedInChapterIds.has(patch.entity_id)) {
+                        sleepingColdIds.delete(patch.entity_id);
+                        wokenColdArchiveIds.add(patch.entity_id);
+                        delete workingSnapshot.coldEntities[patch.entity_id];
+                        workingSnapshot.coldArchiveIds = workingSnapshot.coldArchiveIds.filter(
+                            (id) => id !== patch.entity_id
+                        );
+                    } else {
+                        sleepingColdIds.add(patch.entity_id);
+                    }
+                }
 
                 const merged = mergeEntityProfilePatch(existing, patch, false);
+                if (sleepingColdIds.has(patch.entity_id) && existing) {
+                    merged.metadata.last_seen_ch = existing.metadata.last_seen_ch;
+                    workingSnapshot.coldEntities[patch.entity_id] = merged;
+                } else {
+                    workingSnapshot.entities[patch.entity_id] = merged;
+                }
                 stagedEntities.set(patch.entity_id, merged);
-                workingSnapshot.entities[patch.entity_id] = merged;
             }
 
             const targetVol = this.resolveVolumeForChapter(dirty.chapterNumber, volumeContext);
@@ -538,15 +566,9 @@ export class SyncPipeline {
                     ? effectiveTargetDay + extracted.story_day_delta
                     : effectiveTargetDay;
             const validAnchors = filterValidProseAnchors(extracted.prose_anchors, currentText);
-            const knownIds = new Set<string>([
-                ...Object.keys(workingSnapshot.entities),
-                ...workingSnapshot.coldArchiveIds,
-                ...sanitizedPatches.map((p) => p.entity_id)
-            ]);
             const appearedIds = [
                 ...new Set([
-                    ...effectivePovCharIds,
-                    ...extracted.appeared_entity_ids.filter((id) => knownIds.has(id)),
+                    ...appearedInChapterIds,
                     ...sanitizedPatches.map((p) => p.entity_id)
                 ])
             ];
@@ -626,7 +648,9 @@ export class SyncPipeline {
         // Step 3：单次 recordPendingWrites + 单次 commitPaths 原子提交全部变更
         const dirtyPaths = dirtyChapters.map((d) => d.relativePath);
         const cardPaths = [...stagedCards.keys()];
-        const entityPaths = [...stagedEntities.keys()].map((id) => `entities/${id}.md`);
+        const entityRelPath = (id: string): string =>
+            `entities/${sleepingColdIds.has(id) ? 'cold_archive/' : ''}${id}.md`;
+        const entityPaths = [...stagedEntities.keys()].map(entityRelPath);
         const coldArchivePaths = [...wokenColdArchiveIds].map(
             (id) => `entities/cold_archive/${id}.md`
         );
@@ -651,7 +675,7 @@ export class SyncPipeline {
             await mkdir(join(this.store.bookRoot, 'entities'), { recursive: true });
             for (const [entityId, profile] of stagedEntities.entries()) {
                 await writeFile(
-                    join(this.store.bookRoot, `entities/${entityId}.md`),
+                    join(this.store.bookRoot, entityRelPath(entityId)),
                     serializeEntityMarkdown(profile),
                     'utf8'
                 );
@@ -1027,12 +1051,8 @@ export class SyncPipeline {
             }
         }
 
-        const coldEntities =
-            snapshot.coldArchiveIds.length > 0
-                ? await this.store.readColdArchivedEntities(snapshot.coldArchiveIds)
-                : {};
         const combinedEntities: Record<string, EntityProfile> = {
-            ...coldEntities,
+            ...snapshot.coldEntities,
             ...snapshot.entities
         };
 

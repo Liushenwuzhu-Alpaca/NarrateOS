@@ -19,6 +19,7 @@ export const PlannerOutlineSchema = z.object({
     scene_plan: z.array(PlannerSceneSchema).min(1),
     outline_text: z.string().min(1),
     preferred_voice_tag: z.string().optional(),
+    impacted_horizon_events: z.array(z.string().min(1)).default([]),
     target_beat_label: z.string().optional()
 });
 
@@ -108,7 +109,6 @@ export const BookDreamingConfigSchema = z.object({
     buffer_limit: z.number().int().positive().default(6),
     max_active_open_threads: z.number().int().positive().default(15),
     max_new_threads_per_dream: z.number().int().nonnegative().default(2),
-    warped_archive_after_days: z.number().int().nonnegative().default(3),
     promote_anchor_min_chapters: z.number().int().positive().default(2),
     saga_fold_volume_interval: z.number().int().positive().default(10)
 });
@@ -396,6 +396,7 @@ export interface BookSnapshot {
     worldState: WorldState;
     txState: TxState;
     entities: Record<string, EntityProfile>;
+    coldEntities: Record<string, EntityProfile>;
     coldArchiveIds: string[];
     chapterFiles: string[];
     parallelBroadcastEntries?: EntityEntry[] | undefined;

@@ -6,6 +6,8 @@ temperature: 0.1
 reasoningEffort: medium
 maxSteps: 14
 maxReadCalls: 6
+blockedReadPaths:
+    - world/future_horizon.md
 tools:
     - book_read
     - book_grep

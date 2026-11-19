@@ -248,7 +248,8 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
                     '  trajectory_ops?: Array<{ op: "append", entry: Entry }>,',
                     '  innate_locks_ops?: Array<{ op: "append", entry: Entry } | { op: "remove_slot", slot_key: string }>(仅新建或显式放行可用) }。',
                     '其中 entry 对象结构：{ text: string(必填), storyDay?: int, chapter?: int>=0, visibility?: "SELF_ONLY"|"OMNISCIENT_SECRET"|"PUBLIC"|"READER_KNOWN", owner?: string, status?: "ACTIVE"|"WARPED", slotKey?: string, extraTags?: Record<string, string>, isNumericLedger?: boolean, ledger?: Record<string, string>, continuationLines?: string[] }。',
-                    '示例：{"entity_id":"char_001","last_seen_ch":2,"acquired_state_ops":[{"op":"upsert_slot","slot_key":"location","entry":{"storyDay":2,"chapter":2,"visibility":"PUBLIC","text":"位于旧码头仓库"}},{"op":"upsert_ledger","entries":{"随身银元":"15枚"}}],"trajectory_ops":[{"op":"append","entry":{"storyDay":2,"chapter":2,"text":"确认仓库账本被篡改"}}],"buffer_ops":[{"op":"upsert_slot","slot_key":"focus","entry":{"storyDay":2,"chapter":2,"text":"盘查夜班记录"}},{"op":"append","entry":{"storyDay":2,"chapter":2,"text":"与货主核对提单"}},{"op":"trim_buffer","max_entries":8}]}'
+                    '普通章 trajectory_ops 留空不传，仅发生断肢、身份揭破、生死决裂、晋升等不可逆人生大拐点时填 1 条；普通剧情存 L2 与第 4 区。',
+                    '示例：{"entity_id":"char_001","last_seen_ch":2,"acquired_state_ops":[{"op":"upsert_slot","slot_key":"location","entry":{"storyDay":2,"chapter":2,"visibility":"PUBLIC","text":"位于旧码头仓库"}}],"buffer_ops":[{"op":"append","entry":{"storyDay":2,"chapter":2,"text":"与货主核对提单"}}]}'
                 ].join('\n')
             },
             story_day_delta: {
@@ -272,7 +273,7 @@ export function createYieldStatePatchTool(options: YieldStatePatchOptions): Tool
             appeared_entity_ids: {
                 type: 'array',
                 items: { type: 'string' },
-                description: '本章实际在场但未产生永久状态变更的实体 ID 列表'
+                description: '本章实际登场交互的实体 ID（含没有状态变更者）；远方提及或仅被动更新档案不算登场'
             },
             world_summary_markdown: {
                 type: 'string',

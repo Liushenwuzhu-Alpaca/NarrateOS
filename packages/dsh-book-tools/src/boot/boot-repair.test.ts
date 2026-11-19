@@ -25,6 +25,17 @@ function payload() {
 const goodVoice = { tag: '动作', sample: '她把茶杯挪到桌角，拿起账本翻到昨天那一页。', source: 'boot_seed' as const };
 
 describe('开书编译输入与容错回归', () => {
+    it('多人知情名单逐个校验实体，支持空格并拒绝名单中未知成员', () => {
+        const data = payload();
+        data.entities.push(CompiledEntitySchema.parse({ entityId: 'char_li', canonicalName: '李四' }));
+        const known = { storyDay: 0, visibility: 'SELF_ONLY' as const, owner: 'char_zhou, char_li', text: '两人已核对过货单' };
+        data.entities[0]!.acquiredState.push(known);
+        data.entities[0]!.irreversibleTrajectory.push({ ...known });
+        data.entities[0]!.recentBuffer.push({ ...known });
+        expect(validateBootBundle(data, { narrationSubjectivity: 'objective_third', voiceSampleMode: 'filter' }).issues).toEqual([]);
+        data.entities[0]!.acquiredState[0]!.owner = 'char_zhou, char_missing';
+        expect(validateBootBundle(data, { narrationSubjectivity: 'objective_third', voiceSampleMode: 'filter' }).issues.join()).toContain('char_missing');
+    });
     it('实际建库将单行双转义文档还原，已有真实换行的字面字符保持原样', async () => {
         const root = await mkdtemp(join(tmpdir(), 'narrate-boot-repair-')); roots.push(root);
         const data = input();

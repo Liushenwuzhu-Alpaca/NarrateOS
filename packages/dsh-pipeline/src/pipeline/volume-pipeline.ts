@@ -470,7 +470,7 @@ export class VolumePipeline {
                                 `## index/L0_sagas.md\n${effectiveL0Text || '(暂无)'}`,
                                 `## index/L1_volumes.md\n${updatedL1Text}`,
                                 `## 当前 world/arc_director_plan.md\n${currentDirectorPlan || '(暂无)'}`,
-                                `## 当前角色与道具档案\n${entityDocuments.map((doc) => doc.raw.trim()).join('\n\n') || '(暂无)'}`,
+                                `## 当前角色与道具档案\n${entityDocuments.filter((doc) => doc.profile.metadata.entity_id.startsWith('item_') || companionIds.has(doc.profile.metadata.entity_id)).map((doc) => doc.raw.trim()).join('\n\n') || '(暂无)'}`,
                                 `## world/open_threads.md\n${openThreadsText || '(暂无)'}`,
                                 `## 当前 world/future_horizon.md\n${currentHorizon || '(暂无)'}`
                             ].join('\n\n')

@@ -255,6 +255,7 @@ export interface StepChapterResult {
     stateCommitSha: string;
     recoveredFromPhase?: 'FEAT_COMMITTED' | undefined;
     outline: PlannerOutline | null;
+    impactedHorizonEvents: string[];
     replanCount: number;
     rewriteCount: number;
     patchRounds: number;
@@ -438,6 +439,7 @@ export interface OffscreenCharacterProgress {
 /** runDreaming() 执行选项 */
 export interface RunDreamingOptions {
     currentChapter: number;
+    impactedHorizonEvents?: readonly string[] | undefined;
     currentStoryDay?: number | undefined;
     recentWordDelta?: number | undefined;
     dreamWordThreshold?: number | undefined;
@@ -446,7 +448,6 @@ export interface RunDreamingOptions {
     activeEntityIds?: string[] | undefined;
     coldArchiveCandidateIds?: string[] | undefined;
     coldArchiveInactiveChapters?: number | undefined;
-    warpedExpireDays?: number | undefined;
     offscreenCharacters?: OffscreenCharacterProgress[] | undefined;
     retryOptions?: StructuredRetryOptions | undefined;
     signal?: AbortSignal | undefined;

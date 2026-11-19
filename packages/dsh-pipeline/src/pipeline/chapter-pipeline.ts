@@ -7,6 +7,7 @@ import {
     computeTelemetry,
     CraftPluginLoader,
     IndexRecall,
+    formatCrossEntityKnownEntries,
     normalizeForQuoteMatch,
     ParallelSandbox,
     readChapterDays,
@@ -181,19 +182,17 @@ function isRestrictedFactQuoteSource(
         if (normQuote.length > 0 && ref.startsWith('entities/')) {
             const entityId = ref.replace(/^entities\/(?:cold_archive\/)?/, '').replace(/\.md$/, '');
             const visibleProfile = writerView.entities[entityId];
-            if (!visibleProfile) {
-                return true;
-            }
-            const visibleRendered = renderEntityProfile(visibleProfile, {
-                compactCard: false,
-                stripWarped: true,
-                cleanroomDisplay: true
-            });
+            const visibleRendered = visibleProfile
+                ? renderEntityProfile(visibleProfile, { compactCard: false, stripWarped: true, cleanroomDisplay: true })
+                : formatCrossEntityKnownEntries({
+                    ...writerView,
+                    crossEntityKnownEntries: writerView.crossEntityKnownEntries.filter((item) => item.entityId === entityId)
+                }, true);
             if (!normalizeForQuoteMatch(visibleRendered).includes(normQuote)) {
                 return true;
             }
 
-            const rawProfile = snapshot.entities[entityId];
+            const rawProfile = snapshot.entities[entityId] ?? snapshot.coldEntities[entityId];
             if (rawProfile) {
                 if (rawProfile.metadata.status === 'WARPED') {
                     return true;
@@ -212,10 +211,10 @@ function isRestrictedFactQuoteSource(
                         entry.visibility === 'OMNISCIENT_SECRET' ||
                         entry.rawInvalidVisibility !== undefined ||
                         (entry.visibility === 'SELF_ONLY' &&
-                            !povSet.has(entry.owner ?? entityId)) ||
+                            !(entry.owner ?? entityId).split(',').some((owner) => povSet.has(owner.trim()))) ||
                         /\b(?:OMNISCIENT_SECRET|WARPED)\b/i.test(entryText) ||
                         (/\bSELF_ONLY\b/i.test(entryText) &&
-                            !povSet.has(entry.owner ?? entityId));
+                            !(entry.owner ?? entityId).split(',').some((owner) => povSet.has(owner.trim())));
                     if (!isRestricted) return false;
                     return normalizeForQuoteMatch(entryText).includes(normQuote);
                 });
@@ -1240,6 +1239,7 @@ export class ChapterPipeline {
             featCommitSha: featRes.sha,
             stateCommitSha: stateRes.stateCommitSha,
             outline: activeOutline,
+            impactedHorizonEvents: activeOutline.impacted_horizon_events,
             replanCount: totalReplans,
             rewriteCount: totalRewrites,
             patchRounds: totalPatchRounds,
@@ -1372,6 +1372,7 @@ export class ChapterPipeline {
             stateCommitSha: stateRes.stateCommitSha,
             recoveredFromPhase: 'FEAT_COMMITTED',
             outline: recoveredOutline,
+            impactedHorizonEvents: recoveredOutline?.impacted_horizon_events ?? [],
             replanCount: 0,
             rewriteCount: 0,
             patchRounds: 0,
@@ -1410,8 +1411,7 @@ export class ChapterPipeline {
         });
 
         const summaryMaxChars = retrievalCfg?.librarian_entity_summary_chars ?? 60;
-        const entityList = Object.values(snapshot.entities)
-            .map((e) => {
+        const formatEntityCatalogLine = (e: EntityProfile): string => {
                 const extraParts: string[] = [];
                 if (e.metadata.unique_aliases.length > 0) {
                     extraParts.push(`别名: ${e.metadata.unique_aliases.join('、')}`);
@@ -1455,15 +1455,15 @@ export class ChapterPipeline {
                         : normalizedSummary;
                 const statusSuffix = statusSummary ? ` | 现状: ${statusSummary}` : '';
                 return `- ${e.metadata.entity_id}: ${e.metadata.canonical_name}${suffix} [last_seen_ch=${e.metadata.last_seen_ch}]${statusSuffix}`;
-            })
-            .join('\n');
+        };
+        const entityList = Object.values(snapshot.entities).map(formatEntityCatalogLine).join('\n');
 
         const coldArchiveSection =
             snapshot.coldArchiveIds.length > 0
                 ? [
                       '',
                       '## 冷宫休眠实体清单 (entities/cold_archive/)',
-                      snapshot.coldArchiveIds.map((id) => `- ${id}`).join('\n')
+                      snapshot.coldArchiveIds.map((id) => formatEntityCatalogLine(snapshot.coldEntities[id]!)).join('\n')
                   ]
                 : [];
 
@@ -1899,6 +1899,7 @@ export class ChapterPipeline {
             cleanStaticVoice ? `## 抽象文风纪律锁\n${cleanStaticVoice}` : '',
             cleanOutlineText ? `## 本章细纲基准\n${cleanOutlineText}` : '',
             entityCardsText ? `## 可见出场实体事实基准（净室脱敏）\n${entityCardsText}` : '',
+            formatCrossEntityKnownEntries(params.writerView, true),
             `## 修补原因与触发来源\n${patchReasonText}`,
             `## 待修补段落索引 (0-based)\n[${sortedUnique.join(', ')}]`,
             violationLines.length > 0 ? `## 静态门禁违规定位清单\n${violationLines.join('\n')}` : '',
@@ -2093,6 +2094,10 @@ export class ChapterPipeline {
             povCharId: povCharIds,
             parallelBroadcastEntries: snapshot.parallelBroadcastEntries
         });
+        const knownMemoryView = this.slicer.slice({
+            snapshot, forRole: 'extractor', targetDay, currentCh: chapterNumber,
+            timelineMode, povCharId: povCharIds, entityIds: selectedEntityIds
+        });
 
         const retrievalCfg = snapshot.config.retrieval;
         const fullThreshold = retrievalCfg?.extractor_full_entity_threshold ?? 15;
@@ -2128,6 +2133,7 @@ export class ChapterPipeline {
                 ? [`## 当前卷近期章节卡片 (${cardRelPath})\n${recentL2Cards}`]
                 : []),
             `## 当前实体档案视图\n${entitySummary || '(暂无实体)'}`,
+            formatCrossEntityKnownEntries(knownMemoryView, false),
             Object.keys(extractorView.entities).length > fullThreshold
                 ? `实体数量超过 ${fullThreshold}，部分档案已降级为摘要；需要具体槽位时请用 book_read 定点查阅。` : '',
             `## 第 ${chapterNumber} 章定稿正文 (mode=${timelineMode}, story_day=${targetDay})\n${prose}`,
@@ -2271,17 +2277,20 @@ export class ChapterPipeline {
         const validatedAppearedIds = extracted.appeared_entity_ids.filter((id) =>
             knownEntityIds.has(id)
         );
-        const finalAppearedIds = Array.from(
+        const appearedInChapterIds = Array.from(
             new Set(
                 [
                     ...povCharIds,
                     ...(outline?.focus_cast ?? []),
                     ...(outline?.background_cast ?? []),
-                    ...sanitizedPatches.map((patch) => patch.entity_id),
                     ...validatedAppearedIds
                 ].filter((id) => id.trim().length > 0)
             )
         );
+        const finalAppearedIds = Array.from(new Set([
+            ...appearedInChapterIds,
+            ...sanitizedPatches.map((patch) => patch.entity_id)
+        ]));
 
         const plotSummary = extracted.plot_summary;
         const proseAnchors = extracted.prose_anchors;
@@ -2344,6 +2353,7 @@ export class ChapterPipeline {
             parallel ? [] : sanitizedPatches,
             {
                 timelineMode,
+                appearedEntityIds: new Set(appearedInChapterIds),
                 worldStateUpdate,
                 extraCommitPaths
             }

@@ -7,7 +7,8 @@ import {
     hasUnknownVisibilityTag,
     isWarpedEntry,
     sanitizeLoreForWriter,
-    stripWriterRestrictedDirectives
+    stripWriterRestrictedDirectives,
+    type SlicedView
 } from '../slicer/view-slicer.js';
 import type { EntityEntry, EntityProfile } from '../store/schemas.js';
 import type { EvictionLevel, PreviousChapterContext } from './types.js';
@@ -90,6 +91,24 @@ function shouldKeepEntry(
             CLEANROOM_ENTRY_RESTRICTED_RE.test(line) ||
             hasDisallowedInlineVis(line, CLEANROOM_ENTRY_ALLOWED_VIS)
     );
+}
+
+/** 共知条目沿用实体渲染门禁；写手只接收知情事实，维护工种同时接收真源回写约束。 */
+export function formatCrossEntityKnownEntries(
+    view: SlicedView,
+    cleanroomDisplay = view.forRole === 'writer'
+): string {
+    const entries = view.crossEntityKnownEntries.filter(
+        (item) => shouldKeepEntry(item.entry, true, cleanroomDisplay)
+    );
+    if (entries.length === 0) return '';
+    return [
+        '## 视角人物跨卡知情记忆',
+        cleanroomDisplay
+            ? '以下事实属于当前视角人物已知的记忆；每条标明原档案来源。'
+            : '唯一真源位于原档案，抽卡员严禁在当前角色卡重复建槽；若本章剧情改变了该秘密状态，请直接对真源卡提交补丁。',
+        ...entries.map((item) => `### ${item.canonicalName} (${item.entityId}) [SOURCE_REF: ${item.sourcePath}]\n${formatEntryLine(item.entry, cleanroomDisplay)}`)
+    ].join('\n');
 }
 
 function sliceRecentBuffer(entries: EntityEntry[], limit: number | undefined): EntityEntry[] {
@@ -220,6 +239,7 @@ export interface DynamicTailDraft {
     dramaticIronyLines: string[];
     memoryWakeupLines: string[];
     parallelBroadcastLines: string[];
+    crossEntityKnownSection?: string | undefined;
     recallSlices: RecallSlice[];
     loreEntries: string[];
     previousChapter?: PreviousChapterContext | undefined;
@@ -371,6 +391,9 @@ function renderDynamicTail(
     }
     if (draft.parallelBroadcastLines.length > 0) {
         pushIfNonEmpty(`## 平行时间线全局广播\n${draft.parallelBroadcastLines.join('\n')}`);
+    }
+    if (draft.crossEntityKnownSection) {
+        blocks.push(draft.crossEntityKnownSection);
     }
 
     // 召回切片（拆分为必配证据保底切片与可裁剪可选切片，受第 3 级预算裁剪控制）

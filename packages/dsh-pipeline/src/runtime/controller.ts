@@ -54,6 +54,7 @@ import {
     createEmptyUsage,
     formatChapterKey,
     formatVolumeCardRelPath,
+    listOpenParallelWindows,
     parseJsonLines,
     readHealPlan,
     readNextChapterOptions,
@@ -1554,6 +1555,23 @@ export class NarrateRuntimeController {
                 await this.flushTelemetryEvents();
                 const cursorState = await readSignalsCursorState(store.bookRoot);
                 this.signalsConsumedLines = cursorState.consumedLines;
+                const bookConfig = await store.readBookConfig();
+                const awaitingCalibration = resData.chapterNumber === 1 &&
+                    bookConfig.opening?.pause_after_chapter_1 === true &&
+                    !await this.isOpeningCalibrationConfirmed(store.bookRoot);
+                const tx = await store.readTxState();
+                if (!fromHeal && !options.parallelWindowId && !options.parallelBranchId &&
+                    !awaitingCalibration && !this.haltRequested && !this.shuttingDown &&
+                    !(options.signal ?? signal).aborted &&
+                    tx.chapter_context?.timelineMode !== 'PARALLEL' &&
+                    (await listOpenParallelWindows(store.bookRoot)).length === 0) {
+                    await this.executeDreaming(store, {
+                        currentChapter: resData.chapterNumber,
+                        impactedHorizonEvents: resData.impactedHorizonEvents,
+                        signal: options.signal ?? signal,
+                        onStageSession: options.onStageSession
+                    });
+                }
                 return resData;
             } catch (err) {
                 this.emitEvent('chapter:phase', {
@@ -1672,16 +1690,6 @@ export class NarrateRuntimeController {
                     }
                 }
 
-                this.activeStage = 'DREAMING';
-                await this.runDreaming(
-                    { currentChapter: stepRes.chapterNumber },
-                    true
-                );
-
-                if (this.shouldStopYoloLoop()) {
-                    this.finalizeStopRequestedYolo();
-                    return;
-                }
             }
 
             if (this.yoloState.stopRequested || this.haltRequested) {
@@ -1908,29 +1916,35 @@ export class NarrateRuntimeController {
 
         return await this.runExclusiveTask(
             'DREAMING',
-            async (signal) => {
-                const txState = await store.readTxState();
-                const currentChapter = options.currentChapter ?? txState.last_committed_ch;
-                const pipeline = this.createDreamingPipeline(store);
-                this.emitEvent('dream:started', { currentChapter });
-                const dreamRes = await pipeline.runDreaming({
-                    ...options,
-                    currentChapter,
-                    signal: options.signal ?? signal,
-                    onStageSession: (evt) => {
-                        this.handleStageSession(evt);
-                        options.onStageSession?.(evt);
-                    }
-                });
-                this.emitEvent('dream:completed', {
-                    skipped: dreamRes.skipped,
-                    committedPaths: dreamRes.committedPaths,
-                    spotlightTriggerCount: dreamRes.spotlightTriggerCount
-                });
-                return dreamRes;
-            },
+            async (signal) => this.executeDreaming(store, { ...options, signal: options.signal ?? signal }),
             { allowDuringYolo: fromYolo }
         );
+    }
+
+    /** 章末与手动整理共用实现；调用者已持有控制器任务准入权，避免嵌套取锁。 */
+    private async executeDreaming(store: BookStore, options: Partial<RunDreamingOptions>): Promise<RunDreamingResult> {
+        const txState = await store.readTxState();
+        const currentChapter = options.currentChapter ?? txState.last_committed_ch;
+        this.activeStage = 'DREAMING';
+        this.emitEvent('dream:started', { currentChapter });
+        try {
+            const dreamRes = await this.createDreamingPipeline(store).runDreaming({
+                ...options,
+                currentChapter,
+                onStageSession: (evt) => {
+                    this.handleStageSession(evt);
+                    options.onStageSession?.(evt);
+                }
+            });
+            this.emitEvent('dream:completed', {
+                skipped: dreamRes.skipped,
+                committedPaths: dreamRes.committedPaths,
+                spotlightTriggerCount: dreamRes.spotlightTriggerCount
+            });
+            return dreamRes;
+        } finally {
+            this.activeStage = null;
+        }
     }
 
     private async rerunFromHealPlan(

@@ -253,14 +253,18 @@ function validateBootEntityAndCollectionRefs(
         for (const item of [...entity.irreversibleTrajectory, ...entity.recentBuffer]) {
             if (item.owner !== undefined) {
                 pushSafeEntityTagIssue('owner', item.owner, issues);
-                if (!entityIds.has(item.owner)) issues.push(`实体 ${entity.entityId} 的 owner (${item.owner}) 在 entities 中不存在`);
+                for (const ownerId of item.owner.split(',').map((id) => id.trim())) {
+                    if (!entityIds.has(ownerId)) issues.push(`实体 ${entity.entityId} 的 owner (${ownerId}) 在 entities 中不存在`);
+                }
             }
         }
         for (const item of entity.acquiredState) {
-            if (item.owner !== undefined && !entityIds.has(item.owner)) {
-                issues.push(
-                    `实体 ${entity.entityId} 的 acquiredState.owner (${item.owner}) 在 entities 中不存在`
-                );
+            if (item.owner !== undefined) {
+                for (const ownerId of item.owner.split(',').map((id) => id.trim())) {
+                    if (!entityIds.has(ownerId)) {
+                        issues.push(`实体 ${entity.entityId} 的 acquiredState.owner (${ownerId}) 在 entities 中不存在`);
+                    }
+                }
             }
             assertRefsInEntityIds(`实体 ${entity.entityId}.acquiredState`, item.text, entityIds, issues);
         }

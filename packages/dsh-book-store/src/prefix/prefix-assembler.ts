@@ -3,6 +3,7 @@ import { sanitizeLoreForWriter, type SlicedView } from '../slicer/view-slicer.js
 import type { EntityProfile } from '../store/schemas.js';
 import {
     evictDynamicTailToBudget,
+    formatCrossEntityKnownEntries,
     sanitizePositiveText,
     type DynamicTailDraft
 } from './budget-evictor.js';
@@ -155,6 +156,7 @@ function finalizeAssembleResult(
         dramaticIronyLines: input.slicedView.dramaticIronyHints.map((h) => `- ${h.formattedHint}`),
         memoryWakeupLines: input.slicedView.memoryWakeupHints.map((h) => `- ${h.formattedHint}`),
         parallelBroadcastLines: input.slicedView.parallelBroadcast.map((b) => `- ${b.text}`),
+        crossEntityKnownSection: formatCrossEntityKnownEntries(input.slicedView, draftParams.cleanroomDisplay),
         recallSlices: input.recallSlices ?? [],
         loreEntries: draftParams.loreEntries,
         previousChapter: input.previousChapter,

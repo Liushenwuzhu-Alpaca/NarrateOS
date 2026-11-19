@@ -556,6 +556,14 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         next_chapter_options: ['追查二号码头']
                     });
                 }
+                if (tools.has('yield_dream_commit')) {
+                    const txState = await ctx.narrateStore.openStore().readTxState();
+                    await execTool('yield_dream_commit', {
+                        summary: '完成章末整理',
+                        chapter_number: txState.last_committed_ch,
+                        accumulated_words: 0
+                    });
+                }
             },
             onLlmStream: (opts) => {
                 const sys = opts.system ?? '';
@@ -697,7 +705,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(existsSync(join(bookRoot, '.ops/safe_halt.json'))).toBe(false);
     });
 
-    it('Q4.2 / Q5: Dreaming 读取 config.dreaming（默认 promote_anchor_min_chapters=2）、注入超期 WARPED/复现异象锚点并移除卷中冷宫搬迁诱导', async () => {
+    it('Q4.2 / Q5: Dreaming 回查跨卷复现异象锚点并拒绝未来水位', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'dreaming-prescans', {
             storyDay: 10,
             currentChapter: 3,
@@ -780,12 +788,70 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(dreamRes.skipped).toBe(false);
         expect(dreamerPromptSeen).toContain('黑铜钥匙');
         expect(dreamerPromptSeen).toContain('账册压着黑铜钥匙。');
-        expect(dreamerPromptSeen).toContain('废弃的码头火灾路线');
-        expect(dreamerPromptSeen).not.toContain('已折叠的历史废止线');
-        expect(dreamerPromptSeen).not.toContain('长期退场候选实体');
         await writeFile(join(bookRoot, 'world/future_horizon.md'), '');
         await writeFile(join(bookRoot, 'world/open_threads.md'), '## 已解决\n- char_001 的旧账已结。\n');
         expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);
+    });
+
+    it('因果信号可在空实体候选时提交世界整理，故事日龄不单独触发整理', async () => {
+        const bookRoot = await createGitBookWorkspace(tempDirs, 'dreaming-causal-world-only', {
+            storyDay: 10000,
+            currentChapter: 1,
+            extraChapters: { 'ch_0001.md': '# 第一章\n\n旧桥已经被拆除。\n' }
+        });
+        const horizonPath = join(bookRoot, 'world/future_horizon.md');
+        const oldHorizon = '# 未来惯性\n\n- [day:1] 旧桥夜袭 [WARPED]\n';
+        const newHorizon = '# 未来惯性\n\n- [day:10001] 商队改走渡口 | premise: 旧桥已经拆除\n';
+        await writeFile(horizonPath, oldHorizon);
+        await setupBookGitignoreAndCommit(bookRoot, ['world/future_horizon.md'], 'test: prepare world-only dreaming');
+        const entityBefore = await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8');
+
+        const ctx = new Context();
+        const promptFiber = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => promptFiber.dispose());
+        const toolsFiber = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsFiber.dispose());
+        const storeFiber = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => storeFiber.dispose());
+        const bookToolsFiber = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => bookToolsFiber.dispose());
+        let dreamCalls = 0;
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool }) => {
+                if (!tools.has('yield_dream_commit')) return;
+                dreamCalls += 1;
+                await execTool('book_edit', {
+                    path: 'world/future_horizon.md',
+                    mode: 'write',
+                    replacement_text: newHorizon
+                });
+                await execTool('yield_dream_commit', {
+                    summary: '桥毁后商队改道',
+                    chapter_number: 1,
+                    accumulated_words: 0
+                });
+            },
+            onLlmStream: () => textToStreamChunks('ok')
+        });
+        const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeFiber.dispose());
+
+        const options = { currentChapter: 1, activeEntityIds: [], recentWordDelta: 0 };
+        const ageOnly = await ctx.narratePipeline.runDreaming(options);
+        expect(ageOnly.skipped).toBe(true);
+        expect(dreamCalls).toBe(0);
+        expect(await readFile(horizonPath, 'utf8')).toBe(oldHorizon);
+
+        const causal = await ctx.narratePipeline.runDreaming({
+            ...options,
+            impactedHorizonEvents: ['旧桥夜袭的通行前提已被拆桥破坏']
+        });
+        expect(causal.skipped).toBe(false);
+        expect(dreamCalls).toBe(1);
+        expect(await readFile(horizonPath, 'utf8')).toBe(newHorizon);
+        expect(await readFile(join(bookRoot, 'entities/char_001.md'), 'utf8')).toBe(entityBefore);
+        expect((await ctx.narrateStore.openStore().readTxState()).phase).toBe('DREAM_COMMITTED');
+        expect(await isWorkingTreeClean(bookRoot)).toBe(true);
     });
 
     it('ISS-034 / ISS-048 / ISS-050: Patch 剥离 author_charter 原文引文、FLASHBACK 屏蔽未来尾窗、FEAT_COMMITTED 崩溃恢复补全 L2 与信号游标', async () => {
@@ -903,6 +969,14 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         prose_anchors: ['木门'],
                         appeared_entity_ids: ['char_001'],
                         next_chapter_options: ['回到主线']
+                    });
+                }
+                if (tools.has('yield_dream_commit')) {
+                    const txState = await ctx.narrateStore.openStore().readTxState();
+                    await execTool('yield_dream_commit', {
+                        summary: '完成章末整理',
+                        chapter_number: txState.last_committed_ch,
+                        accumulated_words: 0
                     });
                 }
             },
@@ -1218,6 +1292,17 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                 if (tools.has('yield_verdict')) {
                     fcRound += 1;
                     if (fcRound === 1) {
+                        await expect(execTool('yield_verdict', {
+                            passed: false,
+                            issues: [{
+                                severity: 'LOCAL_PATCH',
+                                paragraph_index: 1,
+                                description: '请保持当前夜间巡检氛围。',
+                                quote_draft: '程三爷提起沉船海图。',
+                                quote_source: '港务稽查队将在三号码头封锁仓库',
+                                source_ref: 'world/future_horizon.md'
+                            }]
+                        })).rejects.toThrow(/角色无权读取受限路径/);
                         await execTool('yield_verdict', {
                             passed: false,
                             issues: [
@@ -1236,14 +1321,6 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                                     quote_draft: '程三爷提起沉船海图。',
                                     quote_source: '海图藏在茶壶底座暗格里',
                                     source_ref: 'entities/char_099.md'
-                                },
-                                {
-                                    severity: 'LOCAL_PATCH',
-                                    paragraph_index: 1,
-                                    description: '请保持当前夜间巡检氛围。',
-                                    quote_draft: '程三爷提起沉船海图。',
-                                    quote_source: '港务稽查队将在三号码头封锁仓库',
-                                    source_ref: 'world/future_horizon.md'
                                 }
                             ]
                         });
@@ -1260,6 +1337,14 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         prose_anchors: ['茶壶'],
                         appeared_entity_ids: ['char_001', 'char_099'],
                         next_chapter_options: ['继续追查']
+                    });
+                }
+                if (tools.has('yield_dream_commit')) {
+                    const txState = await ctx.narrateStore.openStore().readTxState();
+                    await execTool('yield_dream_commit', {
+                        summary: '完成章末整理',
+                        chapter_number: txState.last_committed_ch,
+                        accumulated_words: 0
                     });
                 }
             },

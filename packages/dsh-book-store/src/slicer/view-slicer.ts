@@ -73,6 +73,15 @@ export interface SlicedWorldDocuments {
     futureHorizon: string | null;
 }
 
+/** 未挂载真源卡向当前视角投射的只读知情记忆。 */
+export interface CrossEntityKnownEntry {
+    entityId: string;
+    canonicalName: string;
+    sourcePath: string;
+    section: SectionKey;
+    entry: EntityEntry;
+}
+
 /** ViewSlicer 裁剪输出视图 */
 export interface SlicedView {
     forRole: SlicerRole;
@@ -84,6 +93,7 @@ export interface SlicedView {
     dramaticIronyHints: DramaticIronyHint[];
     memoryWakeupHints: MemoryWakeupHint[];
     parallelBroadcast: ParallelBroadcastItem[];
+    crossEntityKnownEntries: CrossEntityKnownEntry[];
 }
 
 type SectionKey = 'innateLocks' | 'acquiredState' | 'irreversibleTrajectory' | 'recentBuffer';
@@ -409,6 +419,42 @@ export class ViewSlicer {
             }
         }
 
+        const crossEntityKnownEntries: CrossEntityKnownEntry[] = [];
+        const targetSet = new Set(targetIds);
+        const coldSet = new Set(snapshot.coldArchiveIds);
+        const sections: SectionKey[] = ['innateLocks', 'acquiredState', 'irreversibleTrajectory', 'recentBuffer'];
+        for (const profiles of [snapshot.entities, snapshot.coldEntities]) {
+            for (const [entityId, profile] of Object.entries(profiles)) {
+                if (targetSet.has(entityId) || profile.metadata.status === 'WARPED' ||
+                    (profiles === snapshot.coldEntities && entityId in snapshot.entities)) continue;
+                for (const section of sections) {
+                    for (const entry of profile[section]) {
+                        if (entry.owner === undefined || !this.isOwnedByPov(entry.owner, povSet) ||
+                            isWarpedEntry(entry) ||
+                            CLEANROOM_ENTRY_RESTRICTED_RE.test(entry.text) ||
+                            entry.continuationLines.some((line) => CLEANROOM_ENTRY_RESTRICTED_RE.test(line)) ||
+                            !this.passesTimelineFilter(entry, section, targetDay, timelineMode) ||
+                            this.evaluateVisibility(entityId, entry, povSet, 'writer') !== 'KEEP') continue;
+                        // 仅保留八条候选，避免长篇快照为最终丢弃的条目分配副本。
+                        const insertion = crossEntityKnownEntries.findIndex(
+                            (item) => (item.entry.chapter ?? 0) < (entry.chapter ?? 0)
+                        );
+                        const index = insertion < 0 ? crossEntityKnownEntries.length : insertion;
+                        if (index >= 8) continue;
+                        crossEntityKnownEntries.splice(index, 0, {
+                            entityId,
+                            canonicalName: profile.metadata.canonical_name,
+                            sourcePath: `entities/${coldSet.has(entityId) ? 'cold_archive/' : ''}${entityId}.md`,
+                            section,
+                            entry
+                        });
+                        if (crossEntityKnownEntries.length > 8) crossEntityKnownEntries.pop();
+                    }
+                }
+            }
+        }
+        for (const item of crossEntityKnownEntries) item.entry = cloneEntry(item.entry);
+
         const parallelBroadcast =
             timelineMode === 'PARALLEL'
                 ? this.filterParallelBroadcast(
@@ -429,6 +475,7 @@ export class ViewSlicer {
             entities,
             dramaticIronyHints,
             memoryWakeupHints,
+            crossEntityKnownEntries,
             parallelBroadcast
         };
     }
@@ -513,7 +560,7 @@ export class ViewSlicer {
                     if (
                         ctx.forRole === 'planner' &&
                         entry.visibility === 'READER_KNOWN' &&
-                        !ctx.povSet.has(entry.owner ?? profile.metadata.entity_id)
+                        !this.isOwnedByPov(entry.owner ?? profile.metadata.entity_id, ctx.povSet)
                     ) {
                         ironySink.push(this.createIronyHint(profile, section, entry));
                     }
@@ -551,6 +598,10 @@ export class ViewSlicer {
         return entry.storyDay === undefined || entry.storyDay <= targetDay;
     }
 
+    private isOwnedByPov(owner: string, povSet: ReadonlySet<string>): boolean {
+        return owner.split(',').some((id) => povSet.has(id.trim()));
+    }
+
     /** POV 可见性判定 */
     private evaluateVisibility(
         entityId: string,
@@ -574,7 +625,7 @@ export class ViewSlicer {
             rawVis !== undefined ? [rawVis, ...inlineVisibilities] : inlineVisibilities;
 
         const effectiveOwner = entry.owner ?? entityId;
-        const isOwnedByPov = povSet.has(effectiveOwner);
+        const isOwnedByPov = this.isOwnedByPov(effectiveOwner, povSet);
 
         if (effectiveVisibilities.length === 0) {
             return 'KEEP';

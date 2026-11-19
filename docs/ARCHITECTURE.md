@@ -64,7 +64,7 @@ books/<book-slug>/                 # 独立 Git 仓库（与引擎源码物理�
 │   ├── arc_director_plan.md       # [导演禁区计划] 阶段天花板 Stage Ceiling、开篇 3~5 拍序列（PENDING / COMPLETED 游标）与未揭拐点（对 Writer 屏蔽）
 │   ├── ops_style_amendments.md    # [动态风格补丁] 卷中新增长期风格微调（换卷提炼合入 static_base_and_voice.md）
 │   ├── world_state.md             # 全局日历锚点（含整数 story_day、当前卷号与 POV 体制）及宏观局势摘要
-│   ├── future_horizon.md          # 世界默认惯性表（承载预定外部动态与 T0 后事件，超期 WARPED 折叠至底部 Archived WARPED 小节）
+│   ├── future_horizon.md          # 世界默认惯性表（预定外部动态含成立前提；废止事件折叠至 Archived WARPED，不以日龄触发整理）
 │   ├── open_threads.md            # 跨卷必收伏笔台账（活跃上限 <=15 条，不被 L0 纪元折叠裁除）
 │   └── roles/                     # [可选单书覆盖] 针对本书微调特定工种的 YAML 配额或提示词
 ├── lore_library/
@@ -77,7 +77,7 @@ books/<book-slug>/                 # 独立 Git 仓库（与引擎源码物理�
 ├── entities/
 │   ├── char_001.md                # 不可变 entity_id 命名：四段式角色档案（单一实体单文件可追溯，不拆分纪元分片）
 │   ├── item_001.md                # 唯一性关键证物/道具档案
-│   └── cold_archive/              # 仅在换卷时迁入的退场休眠角色档案（支持返场唤醒）
+│   └── cold_archive/              # 换卷迁入的退场角色与道具档案（支持被动原地更新与实际返场唤醒）
 ├── manuscripts/
 │   └── ch_0001.md                 # [WAL 唯一真源] 剥离工程标签后的章节定稿（支持人工直接编辑）
 └── .ops/
@@ -184,7 +184,7 @@ flowchart TD
    - **`Planner` 规划输入**：系统规划指令 + `author_charter.md` + `static_base_and_voice.md` + `current_arc_envelope.md` + `arc_director_plan.md` + `world_state.md` 摘要 + 按需挂载的 `craft_plugins`、`future_horizon.md`（含 `WARPED` 原委）与 `Librarian` 交付的净菜包。
    - **`Prose Writer` 净室输入**：零工具系统执笔指令 + `static_base_and_voice.md` + `current_arc_envelope.md`（正向卷纲）+ 动态尾部的 `ops_style_amendments.md`、`outline_text`、`LRU` 抽出的 1 条 `voice_samples` 标本、挑出的 `lore_library` 词条、经 POV 与时间线物理裁剪后的出场实体视图、相邻章衔接文本与当章微调信号。
 2. **禁区与灰象双视图物理隔离（防粉红大象词法反噬）**：
-   - `author_charter.md`（含排雷禁词）、`arc_director_plan.md`（含 `Stage Ceiling` 禁区）及 `future_horizon.md` 中因前提破灭翻转为 `WARPED` 的条目仅向规划、审校与维护工种暴露；
+   - `author_charter.md`（含排雷禁词）、`arc_director_plan.md`（含 `Stage Ceiling` 禁区）向规划、审校与维护工种暴露；`future_horizon.md` 仅供规划与维护使用，Fact Checker 不得把未兑现预测当成既成事实。
    - 为 `Prose Writer` 拼装请求时，**物理剔除上述禁区文档、一切 `WARPED` 条目及未揭底牌**，确保写手窗口内只存在正向具象戏码。
 3. **可配置预算四级降级链（Context Eviction Pipeline）**：
    - 写手窗口上限由 `book_config.yaml` 的 `writer_token_budget` 控制（未配置或未超标时无损放行）；超出预算时按固定顺序压缩：① 将“上一章全文”降级为「上章 `L2` 摘要 + 末尾 600 字尾窗」；② 将 `background_cast` 压缩为单行简卡；③ 缩减可选 `L3 ripgrep` 切片（每个必需证据章至少保留 1 条）；④ 缩减可选 `lore_library` 词条。若四级压缩后必需证据仍超预算，明确报错停止生成，严禁静默删减必需证据。
@@ -230,8 +230,11 @@ last_seen_ch: 45
 
 第 4 区在裁剪容量前按章号升序归并重复条目，并去掉与第 2 区活跃状态相同的正文。`upsert_slot` 仍原地替换现态，历史由 Git 与 Dreamer 提炼到第 3 区保留，不在现态中无限堆积旧行。
 
+第 3 区只记录不可逆人生拐点，普通章节留空；`yield_state_patch` 按每章每实体聚合拒绝超过一条的新增履历，不截断既有历史，常规换卷不重写存活实体传记。
+
 - **POV 物理剥离与表演潜台词指导（兼顾防泄底与对手戏机锋）**：
-  - 面向 `Prose Writer` 与局部 `Patch` 的净室裁剪路径对非当前 `pov_character` 物理剔除 `vis: SELF_ONLY`，对全员无条件剔除 `vis: OMNISCIENT_SECRET`（未知或异常 `vis:` 标签按 Fail-Closed 默认丢弃），将 `vis: READER_KNOWN` 转化为 `[仅读者已知的戏剧张力点]`，并隐去内部槽位/权限工程标签；`Planner`、`Fact Checker` 与 `Extractor` 视图保留完整工程标签以保证精确核对与回写。
+  - `owner` 是逗号分隔的实体 ID 知情名单；显式名单优先于宿主归属，缺省才以宿主实体为知情者。面向 `Prose Writer` 与局部 `Patch` 的净室裁剪按该名单判断 `SELF_ONLY`，对全员剔除 `OMNISCIENT_SECRET`（未知 `vis` 按 Fail-Closed 丢弃），仅对 POV 未知的 `READER_KNOWN` 标记读者信息差；净室隐藏工程标签，其他工种保留标签供核对。
+  - 快照包含活跃与冷宫档案。对于未选入场景但明确包含当前 POV 的知情条目，按章号倒序投射最多八条带来源标识的跨卡记忆，并复用时间线与净室过滤；该段进入写手、修补、审校及抽卡上下文，不把原文复制进 POV 卡。冷宫目录提供中文名、别名和现态摘要；被动更新留在冷宫且不推进 `last_seen_ch`，只有实际出场才迁回活跃目录，插叙沿用禁止冷宫写回的限制。
   - 细纲强制拆分为 **`director_rationale`（全知因果推演，对写手物理丢弃）** 与 **`outline_text`（面向写手的镜头与当场表演潜台词单）**：在高密度试探或智斗戏中，`outline_text` 须写明角色当场的表面动作与试探张力（如视线落点、话锋施压方向），同时严禁直白写出尚未揭晓的谜底事实。
 - **`OMNISCIENT_SECRET` 原地解密翻转闭环**：一切可揭晓的 `OMNISCIENT_SECRET` 底牌统一置于第 2 区 `Acquired State` 并绑定明确的 `slot_key`（第 1 区 `Innate Locks` 仅放 `PUBLIC` / `SELF_ONLY` 先天红线）。剧情抵达正式揭秘节点时，`Planner` 将本次揭晓内容写入 `outline_text` 交写手正面呈现；定稿后 `Extractor` 对同一 `slot_key` 原地将可见性翻转为 `PUBLIC` 或 `READER_KNOWN`（可选追加第 3 区公开记录），确保后续章节正常继承既成事实。
 - **入库锁、别名归并与路人缓建档**：状态提交严查 `Innate Locks` 防篡改、新建实体必填标准中文 `canonical_name` 与外键可达性；揭晓马甲时通过 `unique_aliases` 归并原卡；临时路人未跨章复现且未关联 `open_threads.md` 前仅记于 `L2` 备注。
@@ -244,6 +247,7 @@ last_seen_ch: 45
 3. **伏笔与证物成对挂载（含首秀豁免）**：仅当目标实体在当前章之前的可达定稿章中确有历史出场记录或历史锚点时，凡触及 `open_threads.md` 回收、唯一道具重现或故地重游，方强制在 `yield_context_pack` 门禁中核验同时挂齐「实体/设定视图 + 至少 1 段 `L3` 原稿切片」；尚未在历史正文出场的预建实体首次登场直接豁免。手填切片强制核验路径可达性与原稿去标点逐字存在性并加盖时间差信封。
 4. **受控读取的预算与接力**：只读工具返回已用及剩余配额，配额耗尽后提示提交终态门禁。`book_read` 保留最多八路径批读；不存在项单独报告相对路径，全部不存在不扣配额，至少成功读取一个新文件才扣一次。总输出受 `read_max_output_chars`（默认 `24000`）约束，整行优先截断，`offset` 从 1 开始，超长单行用 `char_offset` 接续；`book_glob` 由 `glob_default_max_results`（默认 `200`）限制结果数。只有完整无裁剪预注入且无暂存覆盖的路径，首次无分页重读才免扣提醒，重复请求正常读取。
 5. **审校引文定位**：预注入来源标注规范 `SOURCE_REF`，包括当章选入的世界书、卷包络、伏笔及导演计划。内存 `outline` 只可作为 `PLAN_CONFLICT` 依据；局部问题的跨段引文只能拼接连续目标段。局部修补后复审带上前轮问题和修改段号，仍允许检查全文关联事实。
+6. **设定退役**：标记 `WARPED` 的设定卡退出自动目录、全文检索和选页；过滤同时尊重暂存新版本，显式 `book_read` 仍可供维护查证。文件不搬入新的归档目录，卡内秘密继续使用标准 `vis: OMNISCIENT_SECRET` 标签隔离。
 
 ---
 
@@ -306,14 +310,14 @@ flowchart TD
 
 ### 6.1 多轮查证、隔离暂存编辑与原子提交 (`Dreaming`)
 
-当累计新增定稿字数或活跃实体第 4 区缓冲达到配置水位（或作者手动触发）时，在 `STATE_COMMITTED` 安全相位且无开放 `PARALLEL` 窗口前提下启动多轮 `Dreamer`：
+单步与 YOLO 在章节状态提交后共用章末整理入口：累计字数、实体缓冲等既有水位或最终细纲的非空 `impacted_horizon_events` 触发多轮 `Dreamer`，也允许作者手动触发。首章校准暂停、停机和开放 `PARALLEL` 窗口优先；不因故事日推进或 `WARPED` 日龄启动整理。因果信号允许零实体任务，只维护世界文件。
 
 1. **按脏页准入与原稿回查**：未出场干净实体零读取零修改（保持文件 `mtime` 不变）；`Dreamer` 通过受控只读工具读取上次水位以来的新增 `L2` 章卡、`author_charter.md`、`arc_director_plan.md`、`open_threads.md` 与 `future_horizon.md`，对疑似兑现的伏笔或阶段节点**主动翻阅对应章节原稿段落核实**。
 2. **隔离暂存区多文档联动编辑（`book_edit`）**：所有修改写入本轮独占的内存暂存区（后续 `book_read` 自动读取暂存新版本，严禁触碰 `manuscripts/`）：
    - **逐步撤销与即时诊断**：暂存保存每个文件的历次暂存版本，`book_edit(mode: "revert")` 每次撤销一步，栈空才回到磁盘原状。只读路径、实体格式或先天锁违规在编辑时非阻塞预警，终态仍拒绝并指明撤销方法；锁比较保留权限、时间、槽位、账本及续行的完整语义，仅容忍表示差异。
    - **实体履历提炼、微物件升格与声纹代谢**：将达水位脏实体的第 4 区缓冲提炼入第 3 区变迁履历（保留原章锚点与角色专属声纹），巡检近期双轨 `L2` 章卡中跨 `>= promote_anchor_min_chapters`（默认 `2`）章复现的未建卡异象锚点升格建卡或归并马甲别名；结合退化遥测淘汰 `.ops/voice_samples.yaml` 中复读超标的陈旧口癖标本并经静态门禁检验后补充近期优质定稿句式；
    - **伏笔台账盘点（`open_threads.md`）**：将经原稿核实已兑现的伏笔翻转为 `RESOLVED` 归档，登记新跨章悬念（单次新增 `<=2` 条、全局活跃总数 `<=15` 条）；
-   - **惯性表折叠与前台切镜（`future_horizon.md`）**：前提破灭节点翻转为 `WARPED`，超期（默认 `3` 天）死元组折叠归入 `world/future_horizon.md` 底部 `## Archived WARPED` 小节（不再写入 `entities/cold_archive/`）；长期退场角色不在卷中搬迁，统一留待换卷阶段归档冷宫；离场重要角色蓄力抵达即将改变局势的冲突临界点时，严禁后台一行结算，向 `.ops/signals.jsonl` 投递 **`Spotlight Trigger`（前台切镜信号）** 交后续章节正面叙事；
+   - **惯性核销、连锁重排与前台切镜（`future_horizon.md`）**：逐条核对 `premise`；已发生的节点从活跃未来表删除，前提破灭节点翻为 `WARPED` 并折叠到文件底部 `## Archived WARPED`，沿依赖核销后续节点并补写新日程。人物与道具仅在换卷时归档冷宫；离场重要角色抵达改变局势的冲突临界点时，向 `.ops/signals.jsonl` 投递 **`Spotlight Trigger`**，由后续章节正面叙事，不在后台结算。
    - **导演节拍维护与静态前缀保鲜**：对照正文证据维护 `arc_director_plan.md`（更新 `status: COMPLETED | ch:XX` 状态与后续路径微调）；**常规卷内整理不改写 `current_arc_envelope.md` 与 `static_base_and_voice.md` 以保鲜写手静态前缀缓存**；若路径失效且修正需改变 `author_charter.md` 核心承诺，则中止提交并在安全点挂起请作者裁决。
 3. **终态门禁原子落盘（`yield_dream_commit`）**：一次性对暂存区全部变更执行确定性校验——拦截任何针对活跃与冷宫档案 `Innate Locks` 或 `canonical_name` 的篡改、校验声纹静态门禁与活跃伏笔 `<=15`（单次新增 `<=2`）配额及外键合法性；违规项精准报错令 `Dreamer` 当场继续修妥，全部通过后一次性落盘、将 `.ops/dream_watermark.json` 累计新增字数清零并完成 Git `dream` 提交。
 
@@ -340,12 +344,10 @@ Studio 从同步报告中展示一项，提交作品、报告版本及该项下�
 ### 6.4 五步原子换卷交接 (`advanceVolume`)
 
 当本卷收束标志已由正文兑现（或作者裁决确认交接）且无开放 `PARALLEL` 并行窗口时，执行五步原子交接：
-1. **封存旧卷与纪元折叠**：将第 $k$ 卷实际收束摘要与 `story_day` 跨度写回 `index/L1_volumes.md`；每满 `saga_fold_volume_interval`（默认 `10`）卷或全书完结时，向 `index/L0_sagas.md` 追加一段旧纪元汇总摘要（保留未结 `open_threads`；单实体履历保持单文件不拆分 `*_saga_XX.md`）；旧卷 `vol_{k}_cards.md` 转为只读历史索引，非完结时新建 `vol_{k+1}_cards.md`；
-2. **旧舞台角色冷归档**：将非伴随旧地图角色批量移入 `entities/cold_archive/`（仅在换卷阶段统一归档；后续返场时先加载入内存快照，若主线推进产生状态变更则合并原 `Innate Locks` 后迁回 `entities/`）；
-3. **提炼合入风格修订**：将 `world/ops_style_amendments.md` 去重提炼合入 `world/static_base_and_voice.md`（总长校验 `<= static_base_max_chars` 默认 `1,500` 字，禁止暴力硬截断）并清空修订表；
-4. **完结封笔 vs 新卷双文件结构化编译**：
-   - **完结封笔**：若已走完终局卷且无续写计划，将开放悬念标为 `OPEN_ENDING`；
-   - **新卷展开**：注入 `author_charter.md`、`L0_sagas.md`、`L1_volumes.md`、当前实体状态与未结伏笔，物理拆离编译下一卷对写手安全的正向 `current_arc_envelope.md`（兜底剥离受限禁区词）与全知 `arc_director_plan.md`（承载下卷 `Stage Ceiling` 与新开篇节拍）及近期 `future_horizon.md`（需改变核心承诺时挂起交作者裁决）；
+1. **携带完整伏笔编译**：封卷摘要和下一卷的 `current_arc_envelope.md`、`arc_director_plan.md`、`future_horizon.md` 均以仍含 `RESOLVED` 原条目的伏笔表为输入，保留已兑现因果；涉及作者核心承诺的变更挂起裁决。完结时将未结悬念标为 `OPEN_ENDING`。
+2. **封存已结伏笔与纪元折叠**：编译完成后，将 `RESOLVED` 条目及全部续行原样从活跃伏笔表迁入本卷 `index/L1_volumes.md` 封存块；每满 `saga_fold_volume_interval`（默认 `10`）卷或完结时，使用更新后的 L1 生成 L0 纪元摘要。旧卷章卡保留，非完结时新建下卷章卡。
+3. **角色与道具冷归档**：保留核心伴随角色、仍被活跃伏笔或新卷有效未来事件引用的实体，以及活跃主角/伴随角色持有的道具；其余旧舞台角色与道具迁入冷宫。引用匹配采用精确实体 ID 或无歧义中文名/别名，忽略废止条目与归档小节，歧义检查覆盖活跃和冷宫档案。
+4. **提炼合入风格修订**：将 `world/ops_style_amendments.md` 去重提炼合入 `world/static_base_and_voice.md`（总长校验 `<= static_base_max_chars` 默认 `1,500` 字，禁止暴力硬截断）并清空修订表；存活实体保持完整历史，不进行卷末传记压缩。
 5. **推进卷游标、显式受控提交与后置标签**：递增 `world_state.md` 的 `current_volume`，登记写前写集后仅显式提交本次受控资产变更（严禁提交 `.ops/` 运行态锁或日志），**提交成功后方打 `arc-seal-vol-{k}`（及完结时的 `novel-completed`）标签**。
 
 ---
@@ -358,4 +360,4 @@ Studio 从同步报告中展示一项，提交作品、报告版本及该项下�
 | **工种、插件与缓存** | 全面扎根 `@deepseek-ai/dsh` 插件与单一顶层创作模式；Host 后端与浏览器前端物理分包；多轮探查工种经 `yield_*` 门禁与未提交续跑 Hook 收口；写手（`WRITER` / `REWRITE`）零工具单轮净室，`Patch` 为纯内存段落编辑闭环（零磁盘读写）；各工种统一经原生会话隔离运行并独立复用自身前缀缓存；四级预算降级顺序 | `roles/*.yml` 与 `prompts/*.md`（模型池、工具白名单、只读次数上限、提示词，支持单书覆盖）、`tokens_per_char`、`writer_token_budget`、`model_routing` 与分角色两层 `role_routing` 覆盖、`repair_loop` 双轨配额分组 |
 | **契约、双账本与隔离** | 手稿 `WAL` 真源；构思收口沉淀只读 `author_charter.md`，导演禁区拆入 `arc_director_plan.md`；建库完成即自动尝试 `switchBook` 并原地停机；`author_charter`、`arc_director_plan` 与 `world/roles/**` 对净室工种硬屏蔽；四段式补集结构；POV、`WARPED`、第 2 区底牌按 `slot_key` 原地翻转与异常 `vis` Fail-Closed 剥离；固有属性锁、中文 `canonical_name` 与外键校验 | 作品体验承诺、POV 切镜体制、卷/副本尺度（支持 `>=1` 卷单卷本与明牌 `0` 黑幕）、远期留白（`OPEN_HORIZON`）、`context_assembly`（尾窗字数、重逢唤醒章距、静态基线字数上限）、`retrieval`（切片限流、L2 冻结阈值、目录窗口） |
 | **文风、声纹与群像** | `hybrid_rolling` 声纹与 `LRU` 抽样及 `Dreaming` 代谢；可开关 `Static Prose Gate` 与违规原词脱敏；临时路人未跨章复现且未绑伏笔前缓建独立实体卡；离场大事件抛 `Spotlight Trigger` 交前台叙事 | `opening`（`voice_seed_mode`、池容量、滚动暖机章数、独立 `pause_after_first_chapter` 开关、首章节拍上限）、叙述人称与主观度基线、`.ops/voice_samples.yaml` 标签与标本（`0~N`）、`prose_gate` 规则阈值、单场 `focus_cast / background_cast` 划分、外置 `plugins/craft/*.yaml` (`craft_plugins`) |
-| **时序、维持与自愈** | 主对话负责构思与大改纲，Studio 与 `/narrate-*` 触发后台管线，Studio 底部框仅投递安全点微调信号；主线终审确认随 `STATE_COMMITTED` 同批幂等核销开篇节拍与已结案伏笔；`Dreamer` 隔离暂存支持单步 `revert` 并经 `yield_dream_commit` 原子落盘；三态时间线隔离与三方合并；双原句代码验真；历史章手改只读下游冲突扫描；闭区间分段锁 `Heal` 与软硬双档停机 | `dreaming`（`word_threshold`、`buffer_limit`、活跃/新增伏笔上限、超期 `WARPED` 天数、锚点升格章数、`saga_fold_volume_interval`）、`ops_and_sync`（锁超时、信号回溯窗口、扫描批字符上限、回滚检索深度）、`max_auto_rollback_chapters`、`parallel_max_chapters` |
+| **时序、维持与自愈** | 主对话负责构思与大改纲，Studio 与命令触发后台管线；主线终审确认随状态提交幂等核销节拍与伏笔；章末因果信号与容量水位触发 `Dreamer`，隔离暂存经终态门禁原子落盘；三态时间线隔离、双原句验真、历史章只读冲突扫描与分段锁自愈 | `dreaming`（`word_threshold`、`buffer_limit`、活跃/新增伏笔上限、锚点升格章数、`saga_fold_volume_interval`）、`ops_and_sync`（锁超时、信号回溯窗口、扫描批字符上限、回滚检索深度）、`max_auto_rollback_chapters`、`parallel_max_chapters` |

@@ -635,6 +635,11 @@ export class ParallelSandbox {
             return chapter <= metadata.baseChapter || delta?.chapterNumbers?.includes(chapter);
         });
         const coldArchiveIds = snapshot.coldArchiveIds.filter((id) => !(id in entities));
+        const coldEntities: Record<string, EntityProfile> = {};
+        for (const id of coldArchiveIds) {
+            const profile = await this.loadBaseProfile(metadata.baseTag, id);
+            if (profile) coldEntities[id] = profile;
+        }
         const parallelBroadcastEntries = toParallelBroadcastEntries(
             metadata.globalBroadcast,
             metadata.baseDay
@@ -642,6 +647,7 @@ export class ParallelSandbox {
         return {
             ...snapshot,
             entities,
+            coldEntities,
             coldArchiveIds,
             chapterFiles,
             parallelBroadcastEntries,

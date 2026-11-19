@@ -226,6 +226,11 @@ export function createYieldOutlineTool(options: YieldOutlineOptions = {}): ToolD
                 type: 'string',
                 description: '可选声纹标签'
             },
+            impacted_horizon_events: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '本章兑现、击穿成立前提或跨过时机的未来事件标识；无影响时留空，由章末整理师核销'
+            },
             target_beat_label: {
                 type: 'string',
                 description: '可选：本章拟推进或完成的导演节拍标签，实际完成由终审核查确认'

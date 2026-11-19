@@ -255,6 +255,7 @@ function createSnapshot(configOverrides: Partial<BookConfig> = {}): BookSnapshot
             char_099: createWarpedProfile()
         },
         coldArchiveIds: [],
+        coldEntities: {},
         chapterFiles: ['ch_0044.md']
     };
 }
@@ -295,6 +296,36 @@ function createSampleRecallSlices(): RecallSlice[] {
         }
     ];
 }
+describe('跨卡知情前缀', () => {
+    it('写手保留知情事实与真源引用、剥离权限标签，且记忆计入硬预算', () => {
+        const snapshot = createSnapshot();
+        snapshot.entities['char_002']!.acquiredState = [{
+            text: '林雾已经知道雪乃保管着铜钥匙', owner: 'char_001, char_002',
+            visibility: 'SELF_ONLY', continuationLines: []
+        }];
+        const assembler = new PrefixAssembler();
+        const slicer = new ViewSlicer();
+        const input = {
+            config: snapshot.config, staticPrefix: { volumeNumber: 1 },
+            slicedView: slicer.sliceForWriter(snapshot, { entityIds: ['char_001'] }),
+            outline: '林雾走进档案室。'
+        };
+        const result = assembler.assembleWriterRequest(input);
+        expect(result.request.dynamicTail).toContain('林雾已经知道雪乃保管着铜钥匙');
+        expect(result.request.dynamicTail).toContain('SOURCE_REF: entities/char_002.md');
+        expect(result.request.dynamicTail).not.toContain('SELF_ONLY');
+        expect(result.request.dynamicTail).not.toContain('owner:');
+        expect(result.request.dynamicTail).not.toContain('严禁');
+        expect(() => assembler.assembleWriterRequest({ ...input, config: { ...snapshot.config, writer_token_budget: 1 } })).toThrow();
+        const planner = assembler.assemblePlannerRequest({
+            config: snapshot.config, staticPrefix: { volumeNumber: 1 }, chapterGoal: '核对钥匙去向',
+            slicedView: slicer.sliceForPlanner(snapshot, { entityIds: ['char_001'] })
+        });
+        expect(planner.request.dynamicTail).toContain('直接对真源卡提交补丁');
+        expect(planner.request.dynamicTail).toContain('owner:char_001, char_002');
+    });
+});
+
 
 describe('PrefixAssembler', () => {
     it('同卷内 Planner 与 Writer 跨多章的 staticPrefixBlocks 字节与 SHA-256 100% 一致', async () => {

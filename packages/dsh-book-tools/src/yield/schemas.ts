@@ -239,6 +239,7 @@ export const EntityPatchSchema = z.object({
         .optional(),
     trajectory_ops: z
         .array(z.object({ op: z.literal('append'), entry: EntityEntryInputSchema }))
+        .max(1)
         .optional(),
     buffer_ops: z
         .array(
@@ -264,6 +265,16 @@ const ExtractorOutputRawSchema = z.object({
 
 /** Step 6: Extractor 结构化抽取输出 Schema（双轨字段 + 向后兼容 chapter_summary 双向回填） */
 export const ExtractorOutputSchema = ExtractorOutputRawSchema.superRefine((data, ctx) => {
+    const trajectoryCounts = new Map<string, number>();
+    for (const [index, patch] of data.entity_patches.entries()) {
+        const count = (trajectoryCounts.get(patch.entity_id) ?? 0) + (patch.trajectory_ops?.length ?? 0);
+        trajectoryCounts.set(patch.entity_id, count);
+        if (count > 1) ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['entity_patches', index, 'trajectory_ops'],
+            message: '单章单实体最多新增 1 条不可逆人生大拐点，普通事件写入章卡与近期缓冲'
+        });
+    }
     const plot = data.plot_summary?.trim() ?? '';
     const chapter = data.chapter_summary?.trim() ?? '';
     if (plot.length === 0 && chapter.length === 0) {

@@ -242,11 +242,82 @@ function createTestSnapshot(): BookSnapshot {
             char_999: warpedEntity
         },
         coldArchiveIds: [],
+        coldEntities: {},
         chapterFiles: []
     };
 }
 
 describe('ViewSlicer', () => {
+    it('显式多人知情名单覆盖宿主默认，读者已知条目不对共知视角误报反讽', () => {
+        const snapshot = createTestSnapshot();
+        const source = snapshot.entities['char_002']!;
+        source.acquiredState = [
+            { visibility: 'SELF_ONLY', owner: 'char_001, char_003', text: '宿主未获知的隐情', continuationLines: [] },
+            { visibility: 'SELF_ONLY', text: '宿主自己的记忆', continuationLines: [] },
+            { visibility: 'READER_KNOWN', owner: 'char_002, char_001', text: '双方已知的钥匙去向', continuationLines: [] }
+        ];
+        const slicer = new ViewSlicer();
+        expect(slicer.sliceForWriter(snapshot).entities['char_002']!.acquiredState.map((entry) => entry.text))
+            .toEqual(['宿主未获知的隐情', '双方已知的钥匙去向']);
+        expect(slicer.sliceForWriter(snapshot, { povCharId: 'char_002' }).entities['char_002']!.acquiredState.map((entry) => entry.text))
+            .toEqual(['宿主自己的记忆', '双方已知的钥匙去向']);
+        expect(slicer.sliceForPlanner(snapshot).dramaticIronyHints).toEqual([]);
+    });
+
+    it('未选中的活跃与冷宫卡按章号合并最近八条共知记忆，带真实源路径且不改变快照', () => {
+        const snapshot = createTestSnapshot();
+        const active = snapshot.entities['char_002']!;
+        active.acquiredState = Array.from({ length: 9 }, (_, index) => ({
+            visibility: 'SELF_ONLY' as const, owner: 'char_001, char_002', chapter: index + 1,
+            text: `共知事实${index + 1}`, continuationLines: []
+        }));
+        const cold = structuredClone(active);
+        cold.metadata.entity_id = 'char_cold';
+        cold.metadata.canonical_name = '老王';
+        cold.acquiredState = [{ visibility: 'SELF_ONLY', owner: 'char_001', chapter: 10, text: '冷宫关系仍然有效', continuationLines: [] }];
+        snapshot.coldEntities['char_cold'] = cold;
+        snapshot.coldArchiveIds = ['char_cold'];
+        const slicer = new ViewSlicer();
+        const result = slicer.sliceForWriter(snapshot, { entityIds: ['char_001'] });
+        expect(result.crossEntityKnownEntries.map((item) => item.entry.text)).toEqual([
+            '冷宫关系仍然有效', '共知事实9', '共知事实8', '共知事实7', '共知事实6', '共知事实5', '共知事实4', '共知事实3'
+        ]);
+        expect(result.crossEntityKnownEntries[0]).toMatchObject({ entityId: 'char_cold', canonicalName: '老王', sourcePath: 'entities/cold_archive/char_cold.md' });
+        expect(result.crossEntityKnownEntries[1]!.sourcePath).toBe('entities/char_002.md');
+        result.crossEntityKnownEntries[0]!.entry.text = '已修改视图';
+        expect(cold.acquiredState[0]!.text).toBe('冷宫关系仍然有效');
+        expect(slicer.sliceForWriter(snapshot, { entityIds: ['char_001', 'char_002'] }).crossEntityKnownEntries.map((item) => item.entityId)).toEqual(['char_cold']);
+    });
+
+    it('跨卡知情投影继续遵守未知权限、全知底牌、作废与插叙时间线过滤', () => {
+        const snapshot = createTestSnapshot();
+        const source = snapshot.entities['char_002']!;
+        const known = { visibility: 'SELF_ONLY' as const, owner: 'char_001', continuationLines: [] };
+        source.innateLocks = [{ ...known, text: '先天共知' }];
+        source.acquiredState = [
+            { ...known, text: '现在共知', storyDay: 1 },
+            { ...known, text: '过期共知', status: 'WARPED' },
+            { ...known, text: '未解底牌', visibility: 'OMNISCIENT_SECRET' },
+            { ...known, text: '异常标记', rawInvalidVisibility: 'BROKEN' },
+            { ...known, text: '污染续行', continuationLines: ['OMNISCIENT_SECRET 藏在续行的底牌'] },
+            { ...known, text: '未来共知', storyDay: 20 },
+            { ...known, text: '非当前视角', owner: 'char_other' }
+        ];
+        source.irreversibleTrajectory = [
+            { ...known, text: '过去共知', storyDay: 1 },
+            { ...known, text: '同日不明先后', storyDay: 12 }
+        ];
+        source.recentBuffer = [{ ...known, text: '当前缓冲' }];
+        const slicer = new ViewSlicer();
+        const options = { entityIds: ['char_001'] };
+        expect(slicer.sliceForWriter(snapshot, options).crossEntityKnownEntries.map((item) => item.entry.text))
+            .toEqual(['先天共知', '现在共知', '过去共知', '同日不明先后', '当前缓冲']);
+        expect(slicer.sliceForWriter(snapshot, { ...options, timelineMode: 'FLASHBACK' }).crossEntityKnownEntries.map((item) => item.entry.text))
+            .toEqual(['先天共知', '过去共知']);
+        source.metadata.status = 'WARPED';
+        expect(slicer.sliceForPlanner(snapshot, options).crossEntityKnownEntries).toEqual([]);
+    });
+
     it('MAINLINE 模式下按 story_day <= targetDay 过滤未来条目，并保留无日期的先天红线', () => {
         const snapshot = createTestSnapshot();
         const slicer = new ViewSlicer();

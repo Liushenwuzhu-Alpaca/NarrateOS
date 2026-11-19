@@ -63,6 +63,7 @@ export interface TxLockOptions {
 export interface ApplyStatePatchOptions {
     allowInnateMutation?: boolean | undefined;
     timelineMode?: TimelineMode | undefined;
+    appearedEntityIds?: ReadonlySet<string> | undefined;
     worldStateUpdate?: (Partial<WorldStateFrontmatter> & { summaryMarkdown?: string | undefined }) | undefined;
     extraCommitPaths?: string[] | undefined;
 }
@@ -635,12 +636,14 @@ export class BookStore {
         }
 
         const coldArchiveIds: string[] = [];
+        const coldEntities: Record<string, EntityProfile> = {};
         try {
             const coldFiles = await readdir(this.coldArchiveDir);
             for (const file of coldFiles) {
                 if (!file.endsWith('.md')) continue;
                 const base = file.slice(0, -3);
                 if (ENTITY_ID_RE.test(base) && !SAGA_SHARD_RE.test(base)) {
+                    coldEntities[base] = parseEntityMarkdown(await readFile(join(this.coldArchiveDir, file), 'utf8'));
                     coldArchiveIds.push(base);
                 }
             }
@@ -654,6 +657,7 @@ export class BookStore {
             worldState,
             txState,
             entities,
+            coldEntities,
             coldArchiveIds,
             chapterFiles
         };
@@ -903,6 +907,7 @@ export class BookStore {
             const stagedProfiles = new Map<string, EntityProfile>();
             const pendingNewEntityIds = new Set<string>();
             const wokenColdArchiveIds = new Set<string>();
+            const sleepingColdIds = new Set<string>();
 
             // 第一阶段：在内存中校验时间线写保护、entity_id、加载（含冷宫回查）并合并所有补丁
             for (const patch of patches) {
@@ -941,7 +946,11 @@ export class BookStore {
                                 );
                             }
                             existing = coldProfile;
-                            wokenColdArchiveIds.add(patch.entity_id);
+                            if (options?.appearedEntityIds !== undefined && !options.appearedEntityIds.has(patch.entity_id)) {
+                                sleepingColdIds.add(patch.entity_id);
+                            } else {
+                                wokenColdArchiveIds.add(patch.entity_id);
+                            }
                         } else {
                             pendingNewEntityIds.add(patch.entity_id);
                         }
@@ -949,6 +958,9 @@ export class BookStore {
                 }
 
                 const merged = mergeEntityProfilePatch(existing, patch, allowInnate);
+                if (sleepingColdIds.has(patch.entity_id) && existing) {
+                    merged.metadata.last_seen_ch = existing.metadata.last_seen_ch;
+                }
                 stagedProfiles.set(patch.entity_id, merged);
             }
 
@@ -959,9 +971,11 @@ export class BookStore {
             }
 
             // 第三阶段：全部校验通过后落盘（含冷宫唤醒写回与旧档删除双路径）并提交 Git
+            const entityRelPath = (id: string): string =>
+                `entities/${sleepingColdIds.has(id) ? 'cold_archive/' : ''}${id}.md`;
             const coldArchiveRelPaths = [...wokenColdArchiveIds].map((id) => `entities/cold_archive/${id}.md`);
             await this.recordPendingWrites([
-                ...[...stagedProfiles.keys()].map((id) => `entities/${id}.md`),
+                ...[...stagedProfiles.keys()].map(entityRelPath),
                 ...coldArchiveRelPaths,
                 ...(options?.worldStateUpdate ? ['world/world_state.md'] : []),
                 ...(options?.extraCommitPaths ?? [])
@@ -969,7 +983,7 @@ export class BookStore {
             const commitPaths: string[] = [];
             const updatedEntities: string[] = [];
             for (const [entityId, profile] of stagedProfiles.entries()) {
-                const relPath = `entities/${entityId}.md`;
+                const relPath = entityRelPath(entityId);
                 await writeFile(join(this.bookRoot, relPath), serializeEntityMarkdown(profile), 'utf8');
                 commitPaths.push(relPath);
                 updatedEntities.push(entityId);
