@@ -71,7 +71,8 @@ test('package.json 与本地化清单符合 DSH Bundle 规范', () => {
         '@narrateos/dsh-book-store',
         '@narrateos/dsh-book-tools',
         '@narrateos/dsh-pipeline',
-        '@narrateos/dsh-client-ui-studio'
+        '@narrateos/dsh-client-ui-studio',
+        '@narrateos/dsh-client-ui-theme-narrateos'
     ];
     for (const dep of requiredPeers) {
         assert.ok(pkg.peerDependencies?.[dep], `缺少 peerDependencies["${dep}"]`);
@@ -107,7 +108,8 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，不动态查
         '@narrateos/dsh-book-store',
         '@narrateos/dsh-book-tools',
         '@narrateos/dsh-pipeline',
-        '@narrateos/dsh-client-ui-studio'
+        '@narrateos/dsh-client-ui-studio',
+        '@narrateos/dsh-client-ui-theme-narrateos'
     ]) {
         const entry = hostByName.get(hostPlugin);
         assert.ok(entry && entry.disabled !== true, `必须在顶层宿主平面挂载 ${hostPlugin}`);
@@ -301,6 +303,10 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
             if (specifier === '@narrateos/dsh-client-ui-studio') {
                 const studioDistPath = path.join(REPO_ROOT, 'packages/dsh-client-ui-studio/dist/index.js');
                 return await import(pathToFileURL(studioDistPath).href);
+            }
+            if (specifier === '@narrateos/dsh-client-ui-theme-narrateos') {
+                const themeDistPath = path.join(REPO_ROOT, 'packages/dsh-client-ui-theme-narrateos/dist/index.js');
+                return await import(pathToFileURL(themeDistPath).href);
             }
             return await importFromRoot(specifier);
         }
