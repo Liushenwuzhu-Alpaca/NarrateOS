@@ -74,9 +74,7 @@
 
 ### 3.2 按书选装的外置认知插件（`craft_plugins`，默认关闭）
 
-以下认知脚手架全量外置为 `plugins/craft/*.yaml`（支持单书目录覆盖），默认为空数组 `[]` 不加载，仅在高心理博弈或强结构化作品中通过 `world/book_config.yaml` 的 `craft_plugins` 声明按单通道挂载至 `Planner` 上下文：
-
-同 ID 的单书定义覆盖预设；插件按 `applicable_roles` 独立注入 Planner、Writer、FactChecker。正文和声纹采收只叠加适用于 Writer 的门禁规则，再应用本书逐规则覆盖。
+以下认知脚手架全量外置为 `plugins/craft/*.yaml`（支持单书在 `<bookRoot>/plugins/` 下同 ID 覆盖），默认为空数组 `[]` 不加载；仅在作品 `world/book_config.yaml` 的 `craft_plugins` 显式声明时，按各插件定义的 `applicable_roles` 独立注入 `Planner`、`Writer`、`FactChecker` 上下文（正文与声纹采收仅叠加适用于 `Writer` 的门禁规则，再应用本书逐规则覆盖）：
 
 - **`vad-bdi`（`vad-bdi.yaml`，三维情绪钳位与认知演算链）**：按效价（Valence）、唤醒度（Arousal）、支配度（Dominance）限制情绪突变，按 `信念 -> 欲望 -> 现实约束 -> 意图 -> 行动` 推演慢热关系。
 - **`dual-reaction`（`dual-reaction.yaml`，戏眼双反应择优）**：规划核心戏眼时显式排除最俗套的第一顺位反应，采用贴合角色私欲与执念的克制第二反应。
