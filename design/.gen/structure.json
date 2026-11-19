@@ -1,0 +1,189 @@
+{
+  "generatedBy": "ssot gen",
+  "elements": [
+    {
+      "fqn": "author",
+      "kind": "actor",
+      "parent": null,
+      "children": [],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "llmProvider",
+      "kind": "system",
+      "parent": null,
+      "children": [],
+      "tags": [
+        "external"
+      ],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos",
+      "kind": "system",
+      "parent": null,
+      "children": [
+        "narrateos.bookRepo",
+        "narrateos.chatWorkbench",
+        "narrateos.hostService",
+        "narrateos.opsLedger",
+        "narrateos.studioUi"
+      ],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.bookRepo",
+      "kind": "store",
+      "parent": "narrateos",
+      "children": [],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.chatWorkbench",
+      "kind": "container",
+      "parent": "narrateos",
+      "children": [],
+      "tags": [],
+      "group": "Author interaction surfaces",
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.hostService",
+      "kind": "container",
+      "parent": "narrateos",
+      "children": [],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.opsLedger",
+      "kind": "store",
+      "parent": "narrateos",
+      "children": [],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.studioUi",
+      "kind": "container",
+      "parent": "narrateos",
+      "children": [],
+      "tags": [],
+      "group": "Author interaction surfaces",
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "webSources",
+      "kind": "system",
+      "parent": null,
+      "children": [],
+      "tags": [
+        "external"
+      ],
+      "group": null,
+      "business": false,
+      "contract": null
+    }
+  ],
+  "relations": [
+    {
+      "source": "author",
+      "target": "narrateos",
+      "title": "规划小说设定、操控章节撰稿并审阅修订手稿"
+    },
+    {
+      "source": "author",
+      "target": "narrateos.chatWorkbench",
+      "title": "通过对话构思小说设定并下达创作指令"
+    },
+    {
+      "source": "author",
+      "target": "narrateos.studioUi",
+      "title": "操控章节生成、编辑手稿并检阅执行记录"
+    },
+    {
+      "source": "narrateos",
+      "target": "llmProvider",
+      "title": "请求大语言模型完成剧情推演与章节撰稿"
+    },
+    {
+      "source": "narrateos",
+      "target": "webSources",
+      "title": "检索并抓取创作背景考据资料"
+    },
+    {
+      "source": "narrateos.chatWorkbench",
+      "target": "narrateos.hostService",
+      "title": "转发设定构思对话与创作操控指令"
+    },
+    {
+      "source": "narrateos.hostService",
+      "target": "llmProvider",
+      "title": "调用大语言模型执行剧情推演、撰稿与审校"
+    },
+    {
+      "source": "narrateos.hostService",
+      "target": "narrateos.bookRepo",
+      "title": "读取作品上下文并归档定稿手稿与设定档案"
+    },
+    {
+      "source": "narrateos.hostService",
+      "target": "narrateos.opsLedger",
+      "title": "读写任务执行进度、创作调整指令与过程记录"
+    },
+    {
+      "source": "narrateos.hostService",
+      "target": "webSources",
+      "title": "检索并抓取创作背景考据资料"
+    },
+    {
+      "source": "narrateos.studioUi",
+      "target": "narrateos.hostService",
+      "title": "提交章节控制、手稿修订与模型配置请求"
+    }
+  ],
+  "views": [
+    {
+      "id": "index",
+      "of": null,
+      "nodes": [
+        "author",
+        "llmProvider",
+        "narrateos",
+        "webSources"
+      ]
+    },
+    {
+      "id": "narrateosView",
+      "of": "narrateos",
+      "nodes": [
+        "author",
+        "llmProvider",
+        "narrateos",
+        "narrateos.bookRepo",
+        "narrateos.chatWorkbench",
+        "narrateos.hostService",
+        "narrateos.opsLedger",
+        "narrateos.studioUi",
+        "webSources"
+      ]
+    }
+  ]
+}

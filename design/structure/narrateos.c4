@@ -1,0 +1,126 @@
+specification {
+  element actor
+  element system
+  element container
+  element store {
+    style {
+      shape storage
+    }
+  }
+  element component
+
+  tag external
+  tag contract
+  tag untrusted
+
+  deploymentNode host
+}
+
+model {
+  author = actor 'Author' {
+    description '制定全书创作设定与章节意图，掌控章节生成进度并审阅修订小说手稿的创作者'
+  }
+
+  narrateos = system 'NarrateOS' {
+    description '辅助创作者完成长篇小说设定建档、章节推演撰稿、手稿审校修订与全书设定一致性维护的协作写作系统'
+
+    chatWorkbench = container 'Director Chat Workbench' {
+      technology 'Browser Web chat client'
+      description '供创作者通过对话构思全书设定、调整剧情走向并下达写作指令的交互界面'
+      metadata {
+        group 'Author interaction surfaces'
+      }
+    }
+
+    studioUi = container 'Operator Studio UI' {
+      technology 'Browser React SPA'
+      description '供创作者启停章节生成、浏览设定档案、对比与编辑小说手稿、检阅执行记录及配置模型连接的可视化工作台'
+      metadata {
+        group 'Author interaction surfaces'
+      }
+    }
+
+    hostService = container 'NarrateOS Host Service' {
+      technology 'Node.js / Cordis service process'
+      description '受理对话与工作台请求，统筹设定建档、章节推演撰稿、手稿审校修订与全书设定同步的后台核心服务'
+    }
+
+    bookRepo = store 'Book Asset Repository' {
+      technology 'Local Git repository & Markdown/YAML store'
+      description '持久存放每部作品已定稿的章节手稿，以及全书设定、角色档案与章节目录等作品资产的版本库'
+    }
+
+    opsLedger = store 'Operational Runtime Store' {
+      technology 'Local JSON/JSONL/YAML file store'
+      description '持久存放章节生成任务进度、待执行的创作调整指令、手稿冲突检查报告与后台执行过程记录的运行状态库'
+    }
+  }
+
+  llmProvider = system 'LLM Provider' {
+    #external
+    description '提供文本推理与小说章节生成能力的大语言模型服务'
+  }
+
+  webSources = system 'External Web Sources' {
+    #external
+    description '提供时代背景、行业知识与创作考据资料的互联网搜索与网页源'
+  }
+
+  // 顶层
+  author -> narrateos '规划小说设定、操控章节撰稿并审阅修订手稿'
+  narrateos -> llmProvider '请求大语言模型完成剧情推演与章节撰稿'
+  narrateos -> webSources '检索并抓取创作背景考据资料'
+
+  // narrateos 容器层
+  author -> narrateos.chatWorkbench '通过对话构思小说设定并下达创作指令'
+  author -> narrateos.studioUi '操控章节生成、编辑手稿并检阅执行记录'
+  narrateos.chatWorkbench -> narrateos.hostService '转发设定构思对话与创作操控指令'
+  narrateos.studioUi -> narrateos.hostService '提交章节控制、手稿修订与模型配置请求'
+  narrateos.hostService -> narrateos.bookRepo '读取作品上下文并归档定稿手稿与设定档案'
+  narrateos.hostService -> narrateos.opsLedger '读写任务执行进度、创作调整指令与过程记录'
+  narrateos.hostService -> llmProvider '调用大语言模型执行剧情推演、撰稿与审校'
+  narrateos.hostService -> webSources '检索并抓取创作背景考据资料'
+}
+
+deployment {
+  host authorClient 'Author Browser' {
+    description '运行主对话工作台与可视化编辑部界面的本地浏览器环境'
+    instanceOf narrateos.chatWorkbench
+    instanceOf narrateos.studioUi
+  }
+  host localHost 'Local Host Machine' {
+    description '运行宿主服务进程并存放作品版本库与运行账本的本地受信任主机环境'
+    instanceOf narrateos.hostService
+    instanceOf narrateos.bookRepo
+    instanceOf narrateos.opsLedger
+  }
+  host externalNet 'External Cloud & Internet' {
+    #untrusted
+    description '承载外部大模型服务网关与公开互联网检索源的外部网络，与本地主机分属不同信任边界'
+    instanceOf llmProvider
+    instanceOf webSources
+  }
+}
+
+views {
+  view index {
+    title 'NarrateOS 系统上下文'
+    description 'NarrateOS 为谁服务，又调用哪些外部系统'
+    include *
+  }
+
+  view narrateosView of narrateos {
+    title 'NarrateOS 容器图'
+    description 'NarrateOS 由哪些运行单元与数据存储组成，它们之间以及与外部怎样调用'
+    include *
+  }
+
+  deployment view deployed {
+    title 'NarrateOS 部署图'
+    description 'NarrateOS 的运行单元与数据存储部署在哪些节点上，信任边界在哪里'
+    include authorClient.**
+    include localHost.**
+    include externalNet.**
+    exclude * -> * where source.kind is component or target.kind is component
+  }
+}
