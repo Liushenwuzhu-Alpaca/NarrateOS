@@ -28,7 +28,14 @@
 - **零残留卸载**：在 Cordis `Service` 或插件入口注册的一切子服务、HTTP/SSE 路由、斜杠命令、钩子监听器、`AbortController` 与后台定时器，必须在 `ctx.on('dispose', ...)` 或返回清理句柄中对称释放，确保热重载与多实例测试互不串扰。
 - **零模块级可变单例**：运行期作品状态、工作区路径与会话缓存绑定于服务实例或 `BookStore` 实例，不使用模块顶层可变全局变量跨书共享。
 
-## 5. `ovnfs` 隔离工作树与门禁闭环
+## 5. SSOT 与长篇状态防膨胀准则
+
+- **禁以 `story_day` 日历算术作系统触发器**：`Dreaming` 周期整理仅由累计字数、实体第 4 区缓冲水位、导演当章 `impacted_horizon_events` 因果相变信号或显式手动指令触发（单步 `step` 与连跑 `yolo` 共用同一章末入口）；严禁引入基于 `story_day` 跨度或过期天数的自动触发逻辑。
+- **跨卡共知单点存储与只读限流投射**：多人共知秘密仅在主承载实体卡通过逗号分隔 `owner` 单点记录，由 `ViewSlicer` 在主卡未出场且 `owner` 命中当前 POV 时按章号倒序限流（`<=8` 条）投射只读跨卡记忆；严禁将同一事实跨多张角色卡复制写入。
+- **冷态原位标记与静默更新**：旧副本退役设定卡直接在原文件头部标记 `status: WARPED` 退出目录与检索，严禁新建 `lore_library/archive/` 子目录或 `entities/cold_archive/INDEX.md` 静态索引文件；`applyStatePatch` 更新未在当章 `appearedEntityIds` 实际出场的冷宫实体时，必须在 `entities/cold_archive/` 原地落盘且保持原 `last_seen_ch`，严禁将其误唤醒回活跃区。
+- **职责与履历边界**：`world/future_horizon.md` 仅供 `Planner` 与 `Dreamer` 消费，严禁注入 `Fact Checker` 把未兑现预测当成既成事实；实体第 3 区 `Irreversible Trajectory` 单章单实体最多写入 1 条不可逆拐点，常规换卷严禁调用模型重写或压缩存活实体的既有生平履历。
+
+## 6. `ovnfs` 隔离工作树与门禁闭环
 
 - **一任务一检出**：并行实现或独立修复在各自命名的 `ovnfs` 检出（`/home/alpaca/checkouts/<task-name>`）及独立 Git 分支内闭环，互不跨检出直接改写文件。
 - **合入前双检**：合入主目录前，必须确认检出内 `pnpm run check` 退出码为 `0`、`ovnfs diff <task-name>` 不含计划外改动或临时调试残留，且 `ovnfs apply <task-name> --dry-run` 零冲突，随后通过 `git fetch /home/alpaca/checkouts/<task-name> <branch> && git merge FETCH_HEAD`（或 `ovnfs land <task-name>`）保留提交历史合入。
