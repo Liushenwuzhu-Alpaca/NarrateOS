@@ -1,0 +1,58 @@
+-- 受控作品工具与终态交接门禁这个盒子（REQ-3、REQ-7）：按章节管理后台工种的隔离内存暂存会话、终态交接核验与中止清理。
+-- 只写每个端口在数据上的前后条件；在途暂存编辑与章节暂存窗口关闭之间的先后由 design/behavior 持有。
+-- 精度停在“已关闭暂存窗口的章节拒绝晚到暂存写入、终态交接或中止时清空未提交暂存”：配额计数、段落坐标与词法脱敏保持不透明。
+module narrateos_hostService_bookTools
+imports
+  from narrateos_hostService_bookStore
+    types ChapterId
+exports
+  types
+    SessionId; struct Rejected
+  operations
+    stageEdit : narrateos_hostService_bookStore`ChapterId * SessionId ==> SessionId | Rejected;
+    yieldSession : narrateos_hostService_bookStore`ChapterId * SessionId ==> ();
+    abortSession : narrateos_hostService_bookStore`ChapterId ==> ()
+definitions
+types
+  SessionId = token;
+  Rejected = <Rejected>;
+
+-- REQ-7
+-- REQ-11
+-- 哪些章节已关闭当轮受控工具暂存窗口（已完成终态交接或已中止收束），以及当前未交接的隔离内存暂存会话属于哪个章节。
+state Staging of
+  sealed : set of narrateos_hostService_bookStore`ChapterId
+  staged : map SessionId to narrateos_hostService_bookStore`ChapterId
+inv mk_Staging(sl, stg) ==
+  rng stg inter sl = {}
+init s == s = mk_Staging({}, {|->})
+end
+
+operations
+  -- REQ-7
+  -- REQ-8
+  -- REQ-11
+  -- 在隔离内存暂存区中登记受控修改或段落修补会话：已记入 sealed 的章节一律拒绝后续暂存写入；违规编辑也可被拒绝；被接纳的会话记入 staged。
+  stageEdit(ch : narrateos_hostService_bookStore`ChapterId, sid : SessionId) r : SessionId | Rejected
+  ext rd sealed
+      wr staged
+  pre sid not in set dom staged
+  post (ch in set sealed => r = <Rejected>) and
+       ((r = sid and ch not in set sealed and staged = staged~ munion {sid |-> ch}) or
+        (r = <Rejected> and staged = staged~));
+
+  -- REQ-3
+  -- REQ-11
+  -- 终态交接门禁通过：采纳该暂存会话的结果，同时关闭该章节当轮暂存窗口并清空其未提交暂存会话。
+  yieldSession(ch : narrateos_hostService_bookStore`ChapterId, sid : SessionId)
+  ext wr sealed, staged
+  pre sid in set dom staged and staged(sid) = ch
+  post sealed = sealed~ union {ch} and staged = staged~ :-> {ch};
+
+  -- REQ-11
+  -- 会话中止或崩溃恢复收束：关闭该章节当轮暂存窗口并清空其全部未提交的内存暂存会话；对同一章节幂等。
+  abortSession(ch : narrateos_hostService_bookStore`ChapterId)
+  ext wr sealed, staged
+  post sealed = sealed~ union {ch} and staged = staged~ :-> {ch};
+
+end narrateos_hostService_bookTools

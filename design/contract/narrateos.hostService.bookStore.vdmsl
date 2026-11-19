@@ -1,0 +1,63 @@
+-- 作品资产与运行状态存储引擎这个盒子：定稿章节手稿、随正文保存的终审节拍与伏笔确认、派生状态结案记录与手改同步记录。
+-- 只写每个端口在数据上的前后条件；两阶段提交、崩溃恢复与手改同步之间的先后由 design/behavior 持有。
+-- 精度停在“正文与确认同批落盘、派生状态重用已保存确认结案、未结案章节禁止手改同步代结账”：正文文本、角色字段与检索打分保持不透明。
+module narrateos_hostService_bookStore
+exports
+  types
+    ChapterId; Confirmation; struct Settlement
+  operations
+    commitManuscript : ChapterId * Confirmation ==> ();
+    settleDerivedState : ChapterId * Confirmation * Settlement ==> ();
+    syncEditedManuscript : ChapterId ==> ()
+definitions
+types
+  ChapterId = token;
+  Confirmation = token;
+  -- 章节派生状态与节拍伏笔核销的结案方式：当轮正常推进完成，或崩溃重启后重用已保存确认恢复完成。
+  Settlement = <Normal> | <Recovered>;
+
+-- REQ-2
+-- REQ-9
+-- REQ-10
+-- 已定稿落盘的章节手稿、随正文保存的终审节拍伏笔确认、已完成派生状态结案的章节与已完成手改同步的章节。
+state Ledger of
+  manuscripts   : set of ChapterId
+  confirmations : map ChapterId to Confirmation
+  settled       : map ChapterId to Settlement
+  synced        : set of ChapterId
+inv mk_Ledger(ms, cfs, stl, sy) ==
+  dom cfs = ms and dom stl subset ms and sy subset dom stl
+init s == s = mk_Ledger({}, {|->}, {|->}, {})
+end
+
+operations
+  -- REQ-2
+  -- REQ-9
+  -- 阶段一原子提交：在无未结案半章时归档定稿正文，并同批持久化终审确认的节拍与伏笔；每章正文至多定稿落盘一次。
+  commitManuscript(ch : ChapterId, cf : Confirmation)
+  ext rd settled
+      wr manuscripts, confirmations
+  pre ch not in set manuscripts and manuscripts = dom settled
+  post manuscripts = manuscripts~ union {ch} and
+       confirmations = confirmations~ munion {ch |-> cf};
+
+  -- REQ-2
+  -- REQ-9
+  -- 阶段二原子提交：重用随该章正文保存的终审确认提交派生状态与节拍伏笔核销；每章派生状态至多结案一次。
+  settleDerivedState(ch : ChapterId, cf : Confirmation, mode : Settlement)
+  ext rd manuscripts, confirmations
+      wr settled
+  pre ch in set manuscripts and ch not in set dom settled and
+      confirmations(ch) = cf
+  post settled = settled~ munion {ch |-> mode};
+
+  -- REQ-6
+  -- REQ-10
+  -- 创作者手改增量同步：仅在目标章节已结案且不存在未完成派生状态结案的半章时受理，禁止以同步代为结账。
+  syncEditedManuscript(ch : ChapterId)
+  ext rd manuscripts, settled
+      wr synced
+  pre ch in set dom settled and manuscripts = dom settled
+  post synced = synced~ union {ch};
+
+end narrateos_hostService_bookStore
