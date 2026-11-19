@@ -1754,6 +1754,11 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect((await put(draft)).statusCode).toBe(409);
         expect(await readFile(join(other, rel), 'utf8')).toBe('两本书的相同原文。\n');
         await ctx.narratePipeline.switchBook(bookRoot);
+        const store = ctx.narrateStore.openStore(bookRoot);
+        await store.beginDraft(2);
+        const pendingResult = await put(draft);
+        expect(pendingResult.statusCode).toBe(409);
+        expect(await readFile(join(bookRoot, rel), 'utf8')).toBe('两本书的相同原文。\n');
         await writeFile(join(bookRoot, rel), '其他编辑器的新原文。\n');
         expect((await put(draft)).statusCode).toBe(409);
         expect(await readFile(join(bookRoot, rel), 'utf8')).toBe('其他编辑器的新原文。\n');

@@ -1857,6 +1857,11 @@ export class NarrateRuntimeController {
                     throw new TaskConflictError('作品或原稿版本已变更，未保存手稿；请比对当前正文');
                 }
 
+                await store.prepareSync();
+                if ((await store.readWorldState()).frontmatter.timeline_mode === 'PARALLEL') {
+                    throw new TaskConflictError('并行窗口合并前不能保存并同步主线手稿');
+                }
+
                 const backupDir = join(bookRoot, '.ops/manual_edits');
                 await mkdir(backupDir, { recursive: true });
                 const backupPath = join(backupDir, `${randomUUID()}.json`);

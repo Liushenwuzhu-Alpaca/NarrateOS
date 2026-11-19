@@ -910,6 +910,7 @@ export class DreamingPipeline {
         const targetChapter = Math.max(0, conflict.chapterB - 1);
 
         const prepared = await this.store.withTxLock(async () => {
+                await this.store.assertNoPendingWrites();
                 const txState = await this.store.assertDreamingPhaseSafe();
                 const end = txState.last_committed_ch;
                 rollbackChapters = end - conflict.chapterB + 1;
