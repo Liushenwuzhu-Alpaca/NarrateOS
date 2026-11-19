@@ -316,31 +316,19 @@ describe('Cordis ctx.narrateStore 插件生命周期与切书保护', () => {
         const store2 = service.openStore();
         let activeHolders = 0;
         let maxConcurrentHolders = 0;
-        const holdReady = Promise.withResolvers<void>();
-        let releaseFirst!: () => void;
-        const firstGate = new Promise<void>((res) => {
-            releaseFirst = res;
-        });
-
-        const task1 = store1.withTxLock(async () => {
+        // 两个竞争者都持锁到对方失败，不假设启动顺序就是获锁顺序。
+        const loserFinished = Promise.withResolvers<void>();
+        const tasks = [store1, store2].map(store => store.withTxLock(async () => {
             activeHolders += 1;
             maxConcurrentHolders = Math.max(maxConcurrentHolders, activeHolders);
-            holdReady.resolve();
-            await firstGate;
+            if (activeHolders === 2) loserFinished.resolve();
+            await loserFinished.promise;
             activeHolders -= 1;
-            return 'winner-1';
-        });
-
-        const task2 = store2.withTxLock(async () => {
-            activeHolders += 1;
-            maxConcurrentHolders = Math.max(maxConcurrentHolders, activeHolders);
-            activeHolders -= 1;
-            return 'winner-2';
-        });
-
-        await holdReady.promise;
-        releaseFirst();
-        const results = await Promise.allSettled([task1, task2]);
+        }).catch(error => {
+            loserFinished.resolve();
+            throw error;
+        }));
+        const results = await Promise.allSettled(tasks);
         const fulfilled = results.filter((r) => r.status === 'fulfilled');
         const rejected = results.filter((r) => r.status === 'rejected');
 
