@@ -43,6 +43,18 @@ model {
     hostService = container 'NarrateOS Host Service' {
       technology 'Node.js / Cordis service process'
       description '受理对话与工作台请求，统筹设定建档、章节推演撰稿、手稿审校修订与全书设定同步的后台核心服务'
+
+      pipeline = component 'Narrative Pipeline Controller' {
+        description '受理对话与工作台请求，统筹开书构思、章节推演撰稿、手稿审校修订与跨章冲突恢复的流程编排组件'
+      }
+
+      bookTools = component 'Controlled Book Toolset' {
+        description '向创作与审校环节提供受权限约束的作品检索、草稿段落修订、新书建库与阶段结果核验的工具组件'
+      }
+
+      bookStore = component 'Book & State Store Engine' {
+        description '统一管理作品资产与运行状态读写、创作上下文装配、文本合规校验及事务持久化的数据存储组件'
+      }
     }
 
     bookRepo = store 'Book Asset Repository' {
@@ -80,6 +92,17 @@ model {
   narrateos.hostService -> narrateos.opsLedger '读写任务执行进度、创作调整指令与过程记录'
   narrateos.hostService -> llmProvider '调用大语言模型执行剧情推演、撰稿与审校'
   narrateos.hostService -> webSources '检索并抓取创作背景考据资料'
+
+  // hostService 组件层
+  narrateos.chatWorkbench -> narrateos.hostService.pipeline '转发设定构思对话与创作操控指令'
+  narrateos.studioUi -> narrateos.hostService.pipeline '提交章节控制、手稿修订与模型配置请求'
+  narrateos.hostService.pipeline -> narrateos.hostService.bookTools '调用受控工具执行作品操作与结果核验'
+  narrateos.hostService.pipeline -> narrateos.hostService.bookStore '读取创作上下文并提交章节与运行状态'
+  narrateos.hostService.bookTools -> narrateos.hostService.bookStore '读写作品内容并校验待提交结果'
+  narrateos.hostService.bookStore -> narrateos.bookRepo '读取作品上下文并归档定稿手稿与设定档案'
+  narrateos.hostService.bookStore -> narrateos.opsLedger '读写任务执行进度、创作调整指令与过程记录'
+  narrateos.hostService.pipeline -> llmProvider '调用大语言模型执行剧情推演、撰稿与审校'
+  narrateos.hostService.pipeline -> webSources '检索并抓取创作背景考据资料'
 }
 
 deployment {
@@ -112,6 +135,12 @@ views {
   view narrateosView of narrateos {
     title 'NarrateOS 容器图'
     description 'NarrateOS 由哪些运行单元与数据存储组成，它们之间以及与外部怎样调用'
+    include *
+  }
+
+  view hostServiceView of narrateos.hostService {
+    title 'NarrateOS Host Service 组件图'
+    description 'NarrateOS Host Service 内部由哪些功能组件组成，它们之间以及与外部怎样调用'
     include *
   }
 

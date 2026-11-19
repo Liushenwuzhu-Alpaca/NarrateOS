@@ -63,6 +63,40 @@
       "fqn": "narrateos.hostService",
       "kind": "container",
       "parent": "narrateos",
+      "children": [
+        "narrateos.hostService.bookStore",
+        "narrateos.hostService.bookTools",
+        "narrateos.hostService.pipeline"
+      ],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.hostService.bookStore",
+      "kind": "component",
+      "parent": "narrateos.hostService",
+      "children": [],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.hostService.bookTools",
+      "kind": "component",
+      "parent": "narrateos.hostService",
+      "children": [],
+      "tags": [],
+      "group": null,
+      "business": false,
+      "contract": null
+    },
+    {
+      "fqn": "narrateos.hostService.pipeline",
+      "kind": "component",
+      "parent": "narrateos.hostService",
       "children": [],
       "tags": [],
       "group": null,
@@ -134,6 +168,11 @@
       "title": "转发设定构思对话与创作操控指令"
     },
     {
+      "source": "narrateos.chatWorkbench",
+      "target": "narrateos.hostService.pipeline",
+      "title": "转发设定构思对话与创作操控指令"
+    },
+    {
       "source": "narrateos.hostService",
       "target": "llmProvider",
       "title": "调用大语言模型执行剧情推演、撰稿与审校"
@@ -154,12 +193,68 @@
       "title": "检索并抓取创作背景考据资料"
     },
     {
+      "source": "narrateos.hostService.bookStore",
+      "target": "narrateos.bookRepo",
+      "title": "读取作品上下文并归档定稿手稿与设定档案"
+    },
+    {
+      "source": "narrateos.hostService.bookStore",
+      "target": "narrateos.opsLedger",
+      "title": "读写任务执行进度、创作调整指令与过程记录"
+    },
+    {
+      "source": "narrateos.hostService.bookTools",
+      "target": "narrateos.hostService.bookStore",
+      "title": "读写作品内容并校验待提交结果"
+    },
+    {
+      "source": "narrateos.hostService.pipeline",
+      "target": "llmProvider",
+      "title": "调用大语言模型执行剧情推演、撰稿与审校"
+    },
+    {
+      "source": "narrateos.hostService.pipeline",
+      "target": "narrateos.hostService.bookStore",
+      "title": "读取创作上下文并提交章节与运行状态"
+    },
+    {
+      "source": "narrateos.hostService.pipeline",
+      "target": "narrateos.hostService.bookTools",
+      "title": "调用受控工具执行作品操作与结果核验"
+    },
+    {
+      "source": "narrateos.hostService.pipeline",
+      "target": "webSources",
+      "title": "检索并抓取创作背景考据资料"
+    },
+    {
       "source": "narrateos.studioUi",
       "target": "narrateos.hostService",
+      "title": "提交章节控制、手稿修订与模型配置请求"
+    },
+    {
+      "source": "narrateos.studioUi",
+      "target": "narrateos.hostService.pipeline",
       "title": "提交章节控制、手稿修订与模型配置请求"
     }
   ],
   "views": [
+    {
+      "id": "hostServiceView",
+      "of": "narrateos.hostService",
+      "nodes": [
+        "llmProvider",
+        "narrateos.bookRepo",
+        "narrateos.chatWorkbench",
+        "narrateos.hostService",
+        "narrateos.hostService.bookStore",
+        "narrateos.hostService.bookTools",
+        "narrateos.hostService.pipeline",
+        "narrateos.opsLedger",
+        "narrateos.studioUi",
+        "webSources"
+      ]
+    },
     {
       "id": "index",
       "of": null,
