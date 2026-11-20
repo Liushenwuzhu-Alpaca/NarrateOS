@@ -300,6 +300,11 @@ export const DreamCommitInputSchema = z.object({
     summary: z.string().min(1),
     chapter_number: z.number().int().nonnegative().optional(),
     accumulated_words: z.number().int().nonnegative().default(0),
+    appearances: z.array(z.object({
+        entity_id: z.string().regex(/^(?:char|item)_[a-zA-Z0-9_]+$/),
+        chapter_number: z.number().int().min(1).max(9999),
+        quote: z.string().trim().min(1).nullable()
+    })).default([]),
     spotlight_triggers: z
         .array(
             z.object({

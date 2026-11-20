@@ -14,6 +14,11 @@ import { isEnoentError, matchesAnyPathPrefix } from '../tools/shared.js';
 import { ENTITY_ID_PATTERN_RE, hasOmniscientSecretMarker } from './shared.js';
 
 export const ENTITY_PROFILE_PATH_RE = /^entities\/(?:cold_archive\/)?([^/]+)\.md$/;
+
+export interface ValidatedDreamEntity {
+    profile: EntityProfile;
+    newNames: string[];
+}
 const DREAM_READONLY_PROTECTED_PATHS = [
     'manuscripts', 'world/roles', 'world/author_charter.md', 'world/book_config.yaml',
     'world/ops_style_amendments.md', 'world/current_arc_envelope.md', 'world/static_base_and_voice.md'
@@ -60,7 +65,7 @@ export async function validateDreamWrite(
     path: string,
     content: string,
     fence: PathFence
-): Promise<EntityProfile | null> {
+): Promise<ValidatedDreamEntity | null> {
     try {
         if (matchesAnyPathPrefix(path, DREAM_READONLY_PROTECTED_PATHS)) {
             throw new GateValidationError('yield_dream_commit', `禁止 Dreamer 修改只读保护路径: ${path}`);
@@ -80,12 +85,16 @@ export async function validateDreamWrite(
         for (const entries of [profile.innateLocks, profile.acquiredState, profile.irreversibleTrajectory, profile.recentBuffer]) {
             for (const entry of entries) assertEntryTagsSafe(entry);
         }
+        let newNames: string[];
+        let originalBuffer: readonly EntityEntry[] = [];
         let original = await readExistingEntity(bookRoot, path, fence);
         if (original === null && !path.startsWith('entities/cold_archive/')) {
             original = await readExistingEntity(bookRoot, `entities/cold_archive/${id}.md`, fence);
         }
         if (original !== null) {
             const before = parseEntityMarkdown(original);
+            originalBuffer = before.recentBuffer;
+            newNames = profile.metadata.unique_aliases.filter((alias) => !before.metadata.unique_aliases.includes(alias));
             if (profile.metadata.canonical_name !== before.metadata.canonical_name) {
                 throw new InnateLockViolationError(id, `禁止篡改实体 ${id} 的 canonical_name`);
             }
@@ -95,8 +104,22 @@ export async function validateDreamWrite(
                 );
                 throw new InnateLockViolationError(id, `禁止篡改实体 ${id} 的 1. Innate Locks（第 ${index < 0 ? before.innateLocks.length + 1 : index + 1} 条）`);
             }
-        } else if (profile.innateLocks.some(hasOmniscientSecretMarker)) {
-            throw new GateValidationError('yield_dream_commit', `新建实体 ${id} 第 1 区 Innate Locks 严禁包含 OMNISCIENT_SECRET`);
+        } else {
+            newNames = [profile.metadata.canonical_name, ...profile.metadata.unique_aliases];
+            if (profile.innateLocks.some(hasOmniscientSecretMarker)) {
+                throw new GateValidationError('yield_dream_commit', `新建实体 ${id} 第 1 区 Innate Locks 严禁包含 OMNISCIENT_SECRET`);
+            }
+            if (profile.innateLocks.some((entry) => entry.storyDay !== undefined || entry.chapter !== undefined)) {
+                throw new GateValidationError('yield_dream_commit', `新建实体 ${id} 第 1 区 Innate Locks 仅接受无日期、无章号的固有事实`);
+            }
+        }
+        for (const [index, entry] of profile.recentBuffer.entries()) {
+            const prior = profile.recentBuffer.findIndex((candidate) => isDeepStrictEqual(candidate, entry));
+            if (prior === index) continue;
+            const count = profile.recentBuffer.slice(0, index + 1).filter((candidate) => isDeepStrictEqual(candidate, entry)).length;
+            if (count > originalBuffer.filter((candidate) => isDeepStrictEqual(candidate, entry)).length) {
+                throw new GateValidationError('yield_dream_commit', `实体 ${id} 第 4 区新增了重复缓冲条目，请保留一份`);
+            }
         }
         const headings = content.split(/\r?\n/).filter((line) => /^#{2,3}\s+/.test(line.trim()));
         for (const [number, title] of [[1, 'Innate Locks'], [2, 'Acquired State'], [3, 'Irreversible Trajectory'], [4, 'Recent Sliding Buffer']] as const) {
@@ -104,7 +127,7 @@ export async function validateDreamWrite(
                 throw new GateValidationError('yield_dream_commit', `实体档案 ${path} 缺少第 ${number} 区 ${title}`);
             }
         }
-        return profile;
+        return { profile, newNames };
     } catch (error) {
         const hint = dreamRevertHint(path);
         if (error instanceof InnateLockViolationError || error instanceof GateValidationError) {

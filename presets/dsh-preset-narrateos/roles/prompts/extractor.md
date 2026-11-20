@@ -27,17 +27,21 @@
 
 ### 3. 三态时间线写回约束
 - `MAINLINE`：正常更新第 2-4 区并如实估算 `story_day_delta`（整数 >= 0）。
-- `PARALLEL`：以 `story_day_delta` 如实估算本章在支线经历的天数。只累计本支线，主线时钟在合并前保持不变。
-- `FLASHBACK`：严禁覆写当前 `Acquired State` 或推进主线 `story_day`（`story_day_delta` 保持 `0`），仅将新揭露的历史事实带历史 `story_day` 记入第 3 区履历与对应知情者认知层。
+- `PARALLEL`：以 `story_day_delta` 如实估算本章在支线经历的天数。只累计本支线，主线时钟在合并前保持不变；不提交 `world_summary_markdown`。
+- `FLASHBACK`：严禁覆写当前 `Acquired State`、近期缓冲或推进主线 `story_day`（`story_day_delta` 保持 `0`），仅将新揭露的历史事实带历史 `story_day` 记入第 3 区履历与对应知情者认知层；即使揭露重要旧事，也不提交 `world_summary_markdown`。
 
 ### 4. 双轨 `L2` 章卡与候选方向（`Q1` 契约）
 - `plot_summary`：1-2 句简洁客观的因果主干剧情与意图功能义（向后兼容旧字段 `chapter_summary`，优先输出 `plot_summary`）。
 - `prose_anchors`：0-8 个从本章定稿正文中**原文逐字出现**的非角色微物件、空间死角或感官意象短词（宁缺毋滥，单条去空白长度 >= 2，严禁改写加减助词或凭记忆编造；门禁会核对原稿逐字存在性）。
-- `appeared_entity_ids`：本章实际登场交互的已建档实体 ID 列表（含无永久状态变更的在场实体）；远方提及或仅被动更新档案不算登场，冷宫实体仅更新档案不迁回活跃区。
+- `appeared_entity_ids`：列出本章实际在场或参与交互的已建档实体 ID（含无永久状态变更的在场实体）；同批新建且在正文中实际被使用、检验或交接的物件，也须在这里列出其新 ID。远方提及或仅被动更新档案不算登场，冷宫实体仅更新档案不迁回活跃区。
 - `next_chapter_options`：提供 2-3 条自然延续的后续推进候选方向（不含题材套路偏见）。
 
-### 5. `yield_state_patch` 精确 JSON 字段结构示例
-顶层及补丁字段使用 `snake_case`，内层 `entry` 使用 `camelCase`（如 `storyDay`、`slotKey`、`continuationLines`），且包含 `text`。以下示例同时演示更新既有实体与新建实体；既有实体沿用原名，新建实体填写 `canonical_name`。
+### 5. 当前公共局势摘要（`world_summary_markdown`）
+- 仅当 `MAINLINE` 定稿改变了当前公共局势时，提交更新后的 **完整摘要正文**：以现有摘要为底稿，用简洁自然段写清仍有效的公共局势，并将已失效的描述替换为正文已确认的现况。不要提交只列变化的补丁、逐章剧情流水账、人物私密认知、仅读者获知的秘密或尚未发生的计划。
+- 该字段只替换 `world/world_state.md` 的正文摘要，不包含 YAML frontmatter、分隔线或时钟字段；原有 YAML 字段由管线保留并按正常流程更新。公共局势未变或处于 `FLASHBACK` / `PARALLEL` 时，直接省略此字段，不传空串或旧摘要。
+
+### 6. `yield_state_patch` 精确 JSON 字段结构示例
+顶层及补丁字段使用 `snake_case`，内层 `entry` 使用 `camelCase`（如 `storyDay`、`slotKey`、`continuationLines`），且包含 `text`。以下是主线定稿确认公共局势变化，同时更新既有实体并新建实际使用过的物件的完整载荷示例；既有实体沿用原名，新建实体填写 `canonical_name`。
 ```json
 {
     "entity_patches": [
@@ -53,7 +57,7 @@
                         "chapter": 2,
                         "visibility": "PUBLIC",
                         "status": "ACTIVE",
-                        "text": "当前驻留于旧港码头三号库房"
+                        "text": "当前驻留于旧港东栈桥"
                     }
                 },
                 {
@@ -69,7 +73,7 @@
                         "storyDay": 1,
                         "chapter": 2,
                         "visibility": "READER_KNOWN",
-                        "text": "记下账房暗门后的铜印编号"
+                        "text": "记下陈九所持的铜印编号"
                     }
                 },
                 {
@@ -91,14 +95,15 @@
             "entity_id": "item_copper_seal",
             "canonical_name": "旧港铜印",
             "last_seen_ch": 2,
-            "acquired_state_ops": [{ "op": "upsert_slot", "slot_key": "location", "entry": { "storyDay": 1, "chapter": 2, "visibility": "PUBLIC", "text": "封存在三号库房的证物柜中" } }]
+            "acquired_state_ops": [{ "op": "upsert_slot", "slot_key": "location", "entry": { "storyDay": 1, "chapter": 2, "visibility": "PUBLIC", "text": "封存在东栈桥的证物柜中" } }]
         }
     ],
     "story_day_delta": 0,
-    "plot_summary": "林默在旧港三号库房与陈九达成夜航押运协议，并记下账房暗门铜印线索。",
-    "prose_anchors": ["三号库房", "铜印编号", "左袖口新漆"],
-    "appeared_entity_ids": ["char_linmo", "char_chenjiu"],
-    "next_chapter_options": ["候选方向一", "候选方向二"]
+    "plot_summary": "旧港公开封停三号库房，夜航押运因此改在东栈桥交接；林默验过陈九出示的旧港铜印后，将它封进证物柜。",
+    "prose_anchors": ["三号库房", "东栈桥", "铜印编号", "证物柜"],
+    "appeared_entity_ids": ["char_linmo", "char_chenjiu", "item_copper_seal"],
+    "world_summary_markdown": "旧港三号库房已公开封停，夜航押运改由东栈桥交接。",
+    "next_chapter_options": ["林默到东栈桥核实改道后的交接名单。", "陈九回码头核对已改道的货单。"]
 }
 ```
 - `acquired_state_ops` 另支持 `remove_slot`（`slot_key`）；`entry` 可选字段：`owner`、`slotKey`、`extraTags`、`isNumericLedger`、`ledger`、`continuationLines`（`visibility` 取值：`SELF_ONLY` | `OMNISCIENT_SECRET` | `PUBLIC` | `READER_KNOWN`；`status` 取值：`ACTIVE` | `WARPED`）。

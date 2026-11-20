@@ -142,14 +142,14 @@ function scanOffscreenEntityNotes(
     return merged;
 }
 
-/** 扫描 L2 双轨章卡中跨多章复现但尚未建卡/补别名的异象锚点 */
+/** 扫描跨章复现的未归档异象锚点，以及尚有出场漏登的已建档物件。 */
 function scanRecurringProseAnchors(
-    sections: readonly L2CardSection[],
+    sections: readonly (L2CardSection & { sourcePath: string })[],
     watermarkCh: number,
     entities: Readonly<Record<string, EntityProfile>>,
     promoteAnchorMinChapters: number
 ): string[] {
-    const knownKeys = new Set<string>();
+    const knownKeys = new Map<string, string | null>();
     for (const profile of Object.values(entities)) {
         for (const rawKey of [
             profile.metadata.entity_id,
@@ -158,40 +158,47 @@ function scanRecurringProseAnchors(
         ]) {
             const norm = normalizeForQuoteMatch(rawKey);
             if (norm.length >= 2) {
-                knownKeys.add(norm);
+                const id = profile.metadata.entity_id;
+                if (!knownKeys.has(norm)) knownKeys.set(norm, id);
+                else if (knownKeys.get(norm) !== id) knownKeys.set(norm, null);
             }
         }
     }
 
-    const anchorCounts = new Map<string, { display: string; chapters: Set<number> }>();
+    const anchorCounts = new Map<string, {
+        display: string;
+        chapters: Map<number, (typeof sections)[number]>;
+        latestChapter: number;
+    }>();
     for (const section of sections) {
         for (const anchor of section.anomalyAnchors) {
             const trimmed = anchor.trim();
             if (!trimmed || trimmed === '无') continue;
             const norm = normalizeForQuoteMatch(trimmed);
-            if (norm.length < 2 || knownKeys.has(norm)) continue;
-            const existing = anchorCounts.get(norm);
-            if (existing) {
-                existing.chapters.add(section.chapterNumber);
-            } else {
-                anchorCounts.set(norm, {
-                    display: trimmed,
-                    chapters: new Set([section.chapterNumber])
-                });
+            if (norm.length < 2) continue;
+            const knownId = knownKeys.get(norm);
+            if (knownId === null || knownId?.startsWith('char_')) continue;
+            let existing = anchorCounts.get(norm);
+            if (!existing) {
+                existing = { display: trimmed, chapters: new Map(), latestChapter: 0 };
+                anchorCounts.set(norm, existing);
             }
+            existing.chapters.set(section.chapterNumber, section);
+            existing.latestChapter = Math.max(existing.latestChapter, section.chapterNumber);
         }
     }
 
     const candidates: string[] = [];
-    for (const item of anchorCounts.values()) {
-        if (item.chapters.size >= promoteAnchorMinChapters && Array.from(item.chapters).some((ch) => ch > watermarkCh)) {
-            const chList = Array.from(item.chapters)
-                .sort((a, b) => a - b)
-                .map((ch) => formatChapterKey(ch))
-                .join(', ');
-            candidates.push(
-                `- "${item.display}" (已在 ${chList} 共 ${item.chapters.size} 章复现，建议评估转为 entities/item_*.md 或补入已有实体 unique_aliases)`
-            );
+    for (const [key, item] of anchorCounts) {
+        if (item.chapters.size < promoteAnchorMinChapters || item.latestChapter <= watermarkCh) continue;
+        const knownId = knownKeys.get(key);
+        const missing = [...item.chapters.values()]
+            .filter((section) => !knownId || !section.appearedEntityIds.includes(knownId))
+            .sort((a, b) => a.chapterNumber - b.chapterNumber);
+        if (missing.length > 0) {
+            const cards = missing.map((section) => `${section.chapterId} (${section.sourcePath})`).join(', ');
+            const action = knownId ? `已有实体 ${knownId} 待核对出场` : '评估建卡或补入已有实体 unique_aliases';
+            candidates.push(`- "${item.display}" (共 ${item.chapters.size} 章复现，${action}): ${cards}`);
         }
     }
     return candidates;
@@ -384,11 +391,12 @@ export class DreamingPipeline {
                 ...(anchorCandidates.length > 0
                     ? [
                           '',
-                          `## 跨章复现异象锚点建卡/补别名候选（出现 >= ${promoteAnchorMinChapters} 章，尚未匹配已知实体名录）`,
+                          `## 跨章复现异象锚点与出场补登候选（出现 >= ${promoteAnchorMinChapters} 章）`,
                           ...anchorCandidates
                       ]
                     : []),
                 '',
+                '升格或补登时，把逐章出场结论放入 yield_dream_commit.appearances（entity_id、chapter_number、quote）；quote 粘贴体现实际出场或交互的定稿原句，仅提及或无证据填 null。门禁定位卷文件并只更新该章出场实体字段。',
                 '请按规范使用 book_read / book_grep / book_glob 核实相关原稿与世界文档，通过 book_edit 在隔离暂存区联动修改脏实体与计划文件（严禁修改 manuscripts/、未出场干净实体及 world/current_arc_envelope.md / world/static_base_and_voice.md，冷宫归档仅限换卷时执行），最后调用 `yield_dream_commit` 原子提交。'
             ].join('\n');
 
