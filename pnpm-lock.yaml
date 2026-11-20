@@ -172,9 +172,6 @@ importers:
       '@narrateos/dsh-client-ui-studio':
         specifier: workspace:*
         version: link:../../packages/dsh-client-ui-studio
-      '@narrateos/dsh-client-ui-theme-narrateos':
-        specifier: workspace:*
-        version: link:../../packages/dsh-client-ui-theme-narrateos
       '@narrateos/dsh-pipeline':
         specifier: workspace:*
         version: link:../../packages/dsh-pipeline
