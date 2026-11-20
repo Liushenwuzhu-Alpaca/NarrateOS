@@ -37,7 +37,6 @@
         "@narrateos/dsh-book-tools": "workspace:*",
         "@narrateos/dsh-pipeline": "workspace:*",
         "@narrateos/dsh-client-ui-studio": "workspace:*",
-        "@narrateos/dsh-client-ui-theme-narrateos": "workspace:*",
         "@deepseek-ai/dsh-agent-preset-registry": "^0.2.2-rc.1"
     }
 }
