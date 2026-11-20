@@ -221,6 +221,9 @@ export class NarrateToolsService {
             yieldToolHint: options.yieldTool ?? 'yield_*'
         });
 
+        // yield_verdict 的候选引文先定位再取证；记录只在本轮工具集内共享。
+        const manuscriptHits = options.yieldTool === 'yield_verdict' ? new Map<string, Set<number>>() : undefined;
+
         let yielded = false;
         let yieldResult: unknown = undefined;
 
@@ -235,7 +238,8 @@ export class NarrateToolsService {
                         fence: fence!,
                         quota,
                         preInjectedFullPaths: options.preInjectedFullPaths,
-                        stagingOverlay: options.stagingOverlay
+                        stagingOverlay: options.stagingOverlay,
+                        manuscriptHits
                     })
                 );
             } else if (toolName === 'book_grep') {
@@ -245,7 +249,8 @@ export class NarrateToolsService {
                         runId,
                         fence: fence!,
                         quota,
-                        stagingOverlay: options.stagingOverlay
+                        stagingOverlay: options.stagingOverlay,
+                        manuscriptHits
                     })
                 );
             } else if (toolName === 'book_glob') {

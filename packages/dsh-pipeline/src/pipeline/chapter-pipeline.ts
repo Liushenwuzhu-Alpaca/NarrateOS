@@ -2008,7 +2008,7 @@ export class ChapterPipeline {
             `## 事实核查基线语料\n${corpusText}`,
             `## 待审正文（按段落索引标记）\n${numberedParagraphs}`,
             '',
-            '请执行硬性事实核查（必要时通过 book_read / book_grep 回查设定或旧章原句），然后调用 `yield_verdict` 提交核查结论。'
+            '请执行硬性事实核查。补查旧章原稿时，先用 book_grep 定位，再用 book_read 指定单章 path、从 1 开始的 offset 和最多 40 行的 limit，窗口覆盖命中行。已注入的原句可直接引用。最后调用 `yield_verdict`。'
         ]
             .filter(Boolean)
             .join('\n\n');

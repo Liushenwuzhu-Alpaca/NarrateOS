@@ -352,7 +352,8 @@ export class DreamingPipeline {
 
             const recentL2Text = sections.filter((section) => section.chapterNumber > watermarkCh)
                 .sort((a, b) => a.chapterNumber - b.chapterNumber)
-                .map((section) => section.rawSection).join('\n\n') || '(水位以来暂无新增章卡)';
+                .map((section) => `=== SOURCE_REF: ${section.sourcePath} ===\n${section.rawSection}`)
+                .join('\n\n') || '(水位以来暂无新增章卡)';
 
             const threadLimits = dreamingCfg ?? BookDreamingConfigSchema.parse({});
             const taskPrompt = [
@@ -368,7 +369,7 @@ export class DreamingPipeline {
                     ? dirtyEntityNotes
                     : ['- (无达到缓冲上限的脏实体，请重点核对伏笔、未来惯性与节拍)']),
                 '',
-                '## 自上次水位以来的 L2 双轨章卡',
+                '## 自上次水位以来的 L2 双轨章卡（按卷存于 index/L2_cards/vol_XX_cards.md）',
                 recentL2Text,
                 ...(offscreenList.length > 0
                     ? [
