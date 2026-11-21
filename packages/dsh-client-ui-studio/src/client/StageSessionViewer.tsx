@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { fetchRunDetail } from './api';
+import { fetchRunDetail, type StudioRequestScope } from './api';
 import type { StageNodeStatus } from './CenterWorkbench';
 import type {
     RunDetailPayload,
@@ -41,6 +41,18 @@ export type StudioSessionTarget =
           mode: StageSessionSubagentMode;
       };
 
+interface StudioObservable<T> {
+    getSnapshot(): T;
+    subscribe(listener: () => void): () => void;
+}
+
+export interface StudioSessionSummary {
+    title?: string | undefined;
+    running?: boolean | undefined;
+    cwd?: string | undefined;
+    retainedBy?: Readonly<Record<string, number | undefined>> | undefined;
+}
+
 /** 宿主 ctx.sessions 最小结构接口 */
 export interface StudioSessionsService {
     retain(
@@ -52,8 +64,12 @@ export interface StudioSessionsService {
     ): StudioSessionReference;
     list?: {
         getSnapshot(): {
-            byId?: Record<string, { title?: string | undefined; running?: boolean | undefined }> | undefined;
+            byId?: Record<string, StudioSessionSummary> | undefined;
         };
+        subscribe?(listener: () => void): () => void;
+    } | undefined;
+    binding?(sessionId: string): {
+        session: { projections: { faceOf(key: string): StudioObservable<unknown> } };
     } | undefined;
 }
 
@@ -80,6 +96,7 @@ export interface StageViewerAttemptItem {
 /** StageSessionViewer 组件 Props */
 export interface StageSessionViewerProps {
     selection: StageSessionSelection | null;
+    requestScope?: StudioRequestScope | undefined;
     sessionsService?: StudioSessionsService | undefined;
     SessionProvider?: StudioSessionProviderComponent | undefined;
     renderStageConversation?: StudioRenderStageConversation | undefined;
@@ -768,6 +785,7 @@ function renderFallbackDetailSection(options: {
  */
 export function StageSessionViewer({
     selection,
+    requestScope,
     sessionsService,
     SessionProvider,
     renderStageConversation,
@@ -883,7 +901,8 @@ export function StageSessionViewer({
 
         let cancelled = false;
         setDetailLoading(true);
-        void fetchRunDetail(selection.sessionId)
+        const detailRequest = requestScope ? fetchRunDetail(selection.sessionId, requestScope) : fetchRunDetail(selection.sessionId);
+        void detailRequest
             .then((detail) => {
                 if (!cancelled && detail && detail.sessionId === selection.sessionId) {
                     setRunDetail(detail);
@@ -904,7 +923,7 @@ export function StageSessionViewer({
         return () => {
             cancelled = true;
         };
-    }, [shouldFetchDetail, selection?.sessionId, selection?.status]);
+    }, [requestScope, shouldFetchDetail, selection?.sessionId, selection?.status]);
 
     const handleCopySessionId = () => {
         if (!selection?.sessionId) return;

@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ToolExecution, ToolsService } from '@deepseek-ai/dsh-tools';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { getWorkingDirectory } from '@narrateos/dsh-book-store';
 import { escapeRegExp } from '../tools/shared.js';
 
 const ALLOWED_BOOK_TOOL_PREFIXES = ['book_', 'yield_'] as const;
@@ -466,12 +467,12 @@ function extractShellCommandText(args: unknown): { command: string; cwd?: string
         : { command: parts.join('\n') };
 }
 
-function resolveSessionCwd(exec: Readonly<ToolExecution>): string {
-    const meta = (exec.agent?.session as { meta?: { cwd?: unknown } } | undefined)?.meta;
-    if (meta && typeof meta.cwd === 'string' && meta.cwd.trim().length > 0) {
-        return resolve(meta.cwd);
-    }
-    return process.cwd();
+function resolveSessionCwd(exec: Readonly<ToolExecution>, ctx?: Context): string {
+    const session = exec.agent?.session;
+    const directory = ctx && getWorkingDirectory(ctx);
+    if (session && directory) return directory.get(session);
+    const meta = session as { meta?: { cwd?: string } } | undefined;
+    return session?.header?.cwd ?? meta?.meta?.cwd ?? directory?.defaultDirectory ?? process.cwd();
 }
 
 function evaluateRawFileWriteGuard(
@@ -548,14 +549,14 @@ function evaluateRawShellGuard(
 export function evaluateMainSessionWriteGuard(
     exec: Readonly<ToolExecution>,
     booksRoot: string,
-    extraProtectedRoots?: ReadonlyArray<string | null | undefined>
+    extraProtectedRoots?: ReadonlyArray<string | null | undefined>,
+    sessionCwd = resolveSessionCwd(exec)
 ): string | undefined {
     if (isAllowedNarrateTool(exec.name)) {
         return undefined;
     }
 
     const protectedRoots = collectProtectedRoots(booksRoot, extraProtectedRoots);
-    const sessionCwd = resolveSessionCwd(exec);
 
     if (RAW_FILE_WRITE_TOOLS.has(exec.name)) {
         return evaluateRawFileWriteGuard(exec, protectedRoots, sessionCwd);
@@ -576,7 +577,8 @@ export function evaluateMainSessionWriteGuard(
 export function registerMainSessionWriteGuard(
     toolsService: ToolsService,
     booksRoot: string,
-    ctx?: Context
+    ctx?: Context,
+    workspaceRoots?: (cwd: string) => readonly string[]
 ): () => void {
     const resolvedBooksRoot = resolve(booksRoot);
     const targetCtx = ctx ?? (toolsService as unknown as { ctx?: Context }).ctx;
@@ -589,16 +591,17 @@ export function registerMainSessionWriteGuard(
             : [];
     }
 
-    const disposeGuard = toolsService.guard((exec) =>
-        evaluateMainSessionWriteGuard(exec, resolvedBooksRoot, getExtraProtectedRoots())
-    );
+    const evaluate = (exec: Readonly<ToolExecution>): string | undefined => {
+        if (!RAW_FILE_WRITE_TOOLS.has(exec.name) && !RAW_SHELL_TOOLS.has(exec.name)) return undefined;
+        const cwd = resolveSessionCwd(exec, targetCtx);
+        const extraRoots = getExtraProtectedRoots();
+        if (workspaceRoots) extraRoots.push(...workspaceRoots(cwd));
+        return evaluateMainSessionWriteGuard(exec, resolvedBooksRoot, extraRoots, cwd);
+    };
+    const disposeGuard = toolsService.guard(evaluate);
 
     const disposePreExecute = targetCtx?.on('tools/pre-execute', async (exec, next) => {
-        const denial = evaluateMainSessionWriteGuard(
-            exec,
-            resolvedBooksRoot,
-            getExtraProtectedRoots()
-        );
+        const denial = evaluate(exec);
         if (denial !== undefined) {
             return { kind: 'deny', reason: denial };
         }

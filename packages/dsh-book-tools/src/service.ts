@@ -7,10 +7,10 @@ import type {
     ApplyStatePatchOptions,
     EntityProfile,
     NarrationSubjectivity,
-    NarrateStoreService,
     ProseGateOptions,
     TimelineMode
 } from '@narrateos/dsh-book-store';
+import { getWorkingDirectory, NarrateStoreService, resolveAgentWorkspaceDirectory } from '@narrateos/dsh-book-store';
 import {
     createLockCharterAndBootTool,
     lockCharterAndBoot,
@@ -157,16 +157,56 @@ export interface BuiltRoleToolSet {
  */
 export class NarrateToolsService {
     public readonly defaultBookRoot: string | null;
-    public readonly booksRoot: string;
+    private readonly configuredBooksRoot: string | undefined;
+    private readonly workspaceTools = new Map<string, NarrateToolsService>();
+    private readonly startupDirectory = process.cwd();
+    private pipelineBooksRoot: string | undefined;
+    private defaultDirectory: string | undefined;
     private disposed = false;
     private readonly activeBoots = new Set<Promise<LockCharterAndBootResult>>();
 
     constructor(
         public readonly narrateStore: NarrateStoreService,
-        config: NarrateToolsConfig = {}
+        config: NarrateToolsConfig = {},
+        defaultDirectory?: string
     ) {
         this.defaultBookRoot = config.bookRoot ? resolve(config.bookRoot) : null;
-        this.booksRoot = resolve(config.booksRoot ?? narrateStore.booksRoot ?? 'books');
+        this.configuredBooksRoot = config.booksRoot;
+        this.defaultDirectory = defaultDirectory;
+    }
+
+    /** 旧配置仍可作为无独立存储配置时的回退；入口共用同一个目录解析规则。 */
+    configureWorkspace(booksRoot: string | undefined, defaultDirectory: string | undefined): void {
+        this.pipelineBooksRoot = booksRoot;
+        this.defaultDirectory = defaultDirectory;
+    }
+
+    get booksRoot(): string {
+        return this.booksRootFor(this.defaultDirectory);
+    }
+
+    booksRootFor(directory: string | undefined): string {
+        return resolve(
+            directory ?? this.startupDirectory,
+            this.narrateStore.booksRootSetting ?? this.configuredBooksRoot ?? this.pipelineBooksRoot ?? 'books'
+        );
+    }
+
+    forWorkspace(directory: string | undefined): NarrateToolsService {
+        if (this.disposed) throw new Error('NarrateToolsService 已卸载');
+        if (!directory) return this;
+        const booksRoot = this.booksRootFor(directory);
+        if (booksRoot === this.booksRoot) return this;
+        let tools = this.workspaceTools.get(booksRoot);
+        if (!tools) {
+            tools = new NarrateToolsService(new NarrateStoreService({ booksRoot }, this.narrateStore.system), { booksRoot });
+            this.workspaceTools.set(booksRoot, tools);
+        }
+        return tools;
+    }
+
+    getWorkspaceBookRoots(): string[] {
+        return [...this.workspaceTools.keys()];
     }
 
     /** 为单次角色运行实例化受控工具集（零模块级状态） */
@@ -426,6 +466,11 @@ export class NarrateToolsService {
     async dispose(): Promise<void> {
         this.disposed = true;
         await Promise.allSettled(this.activeBoots);
+        await Promise.all([...this.workspaceTools.values()].map(async (tools) => {
+            await tools.dispose();
+            tools.narrateStore.dispose();
+        }));
+        this.workspaceTools.clear();
     }
 }
 
@@ -458,7 +503,7 @@ function createAutoSwitchBookCallback(
  * - 动态注入 ctx.tools，注册 lock_charter_and_boot 与主会话 books/<slug>/ 写保护守卫。
  */
 export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
-    const service = new NarrateToolsService(ctx.narrateStore, config);
+    const service = new NarrateToolsService(ctx.narrateStore, config, getWorkingDirectory(ctx)?.defaultDirectory);
 
     ctx.effect(function* () {
         yield ctx.provide('narrateTools', service);
@@ -468,12 +513,16 @@ export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
     ctx.inject(['tools'], (toolCtx) => {
         toolCtx.effect(() => {
             const disposeBootTool = toolCtx.tools.register(
-                createLockCharterAndBootTool({ booksRoot: service.booksRoot }, input => service.lockCharterAndBoot(input))
+                createLockCharterAndBootTool({ booksRoot: service.booksRoot }, async (input, _options, exec) => {
+                    const directory = await resolveAgentWorkspaceDirectory(toolCtx, exec.agent, exec.signal);
+                    return await service.forWorkspace(directory).lockCharterAndBoot(input);
+                })
             );
             const disposeGuard = registerMainSessionWriteGuard(
                 toolCtx.tools,
                 service.booksRoot,
-                toolCtx
+                toolCtx,
+                (cwd) => [service.booksRoot, service.booksRootFor(cwd), ...service.getWorkspaceBookRoots()]
             );
             return () => {
                 disposeGuard();

@@ -350,7 +350,7 @@ export async function createHeadlessMockServices(
                     const ac = new AbortController();
                     const fakeAgent = {
                         id: options.sessionId,
-                        session: { id: options.sessionId },
+                        session: { id: options.sessionId, header: { cwd: options.meta?.cwd } },
                         options: options.agentOptions ?? {},
                         status: 'idle' as const
                     } as unknown as Agent;
