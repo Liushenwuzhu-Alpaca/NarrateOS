@@ -575,6 +575,13 @@ const STAGE_SEQUENCE: readonly PipelineStageId[] = [
     'DREAMING'
 ];
 
+function readActiveStage(status: NarrateStatusPayload): string | null {
+    const task = status.runtime.activeTask;
+    const stage = status.yolo.currentStage;
+    if (!stage || task === 'IDLE') return null;
+    return resolveStageId(stage) ? stage : null;
+}
+
 function mapRunStatusToStageStatus(rawStatus: string): StageNodeStatus {
     const normalized = rawStatus.trim().toLowerCase();
     if (normalized === 'running' || normalized === 'active' || normalized === 'in_progress') {
@@ -863,6 +870,11 @@ export function NarrateStudioRoot({
     const [syncConflictsView, setSyncConflictsView] = useState<SyncConflictsViewPayload | null>(null);
 
     const [latestSseStage, setLatestSseStage] = useState<string | null>(null);
+    const stageEventVersionRef = useRef(0);
+    const setSseStage = useCallback((stage: string | null) => {
+        stageEventVersionRef.current += 1;
+        setLatestSseStage(stage);
+    }, []);
     const [haltWaiting, setHaltWaiting] = useState(false);
     const [stageOverrides, setStageOverrides] = useState<Partial<Record<PipelineStageId, StageNodeState>>>({});
     const stageOverridesRef = useRef<Partial<Record<PipelineStageId, StageNodeState>>>({});
@@ -1013,6 +1025,7 @@ export function NarrateStudioRoot({
         if (switchingBookRef.current) return;
         const epoch = workspaceEpochRef.current;
         const seq = ++statusRequestRef.current;
+        const stageVersion = stageEventVersionRef.current;
         const next = await fetchStatus();
         if (
             isCurrentWorkspace(epoch) &&
@@ -1020,6 +1033,9 @@ export function NarrateStudioRoot({
             (!currentBookRootRef.current || next.bookRoot === currentBookRootRef.current)
         ) {
             setStatus(next);
+            if (stageVersion === stageEventVersionRef.current) {
+                setLatestSseStage(readActiveStage(next));
+            }
         }
     }, [isCurrentWorkspace]);
 
@@ -1178,6 +1194,7 @@ export function NarrateStudioRoot({
             const epoch = workspaceEpochRef.current;
             const seq = ++refreshRequestRef.current;
             const statusSeq = ++statusRequestRef.current;
+            const stageVersion = stageEventVersionRef.current;
             const chapterSeq = chapterRequestSeqRef.current;
             setLoading(true);
             try {
@@ -1231,9 +1248,17 @@ export function NarrateStudioRoot({
                 }
 
                 currentBookRootRef.current = activeRoot;
-                if (statusSeq === statusRequestRef.current) setStatus(statusRes);
+                if (statusSeq === statusRequestRef.current) {
+                    setStatus(statusRes);
+                    if (stageVersion === stageEventVersionRef.current) {
+                        const activeStage = readActiveStage(statusRes);
+                        setLatestSseStage(activeStage);
+                        if (statusRes.runtime.activeTask === 'STEPPING') {
+                            setLiveRunChapter((prev) => prev ?? (statusRes.activeChapter || statusRes.latestChapter + 1));
+                        }
+                    }
+                }
                 setChapters(chaptersRes.chapters);
-                setLatestSseStage(statusRes.yolo.currentStage ?? null);
                 // 每次全量刷新清除瞬态 liveTelemetry 覆盖层，确保展现持久化遥测或最新值
                 setLiveTelemetry(null);
 
@@ -1258,29 +1283,7 @@ export function NarrateStudioRoot({
                 } else {
                     setSelectedChapter(null);
                     setChapterDetail(null);
-                    setHistoricalRuns([]);
-                }
-
-                if (
-                    (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) &&
-                    isCurrentWorkspace(epoch) &&
-                    seq === refreshRequestRef.current
-                ) {
-                    const activeTargetChapter = (statusRes.latestChapter ?? 0) + 1;
-                    setLiveRunChapter(activeTargetChapter);
-                    const activeRunsRes = await fetchRunRecords(activeTargetChapter).catch(() => null);
-                    if (
-                        activeRunsRes &&
-                        activeRunsRes.runs.length > 0 &&
-                        isCurrentWorkspace(epoch) &&
-                        seq === refreshRequestRef.current
-                    ) {
-                        applyStageOverrides((prev) =>
-                            Object.keys(prev).length > 0
-                                ? prev
-                                : deriveHistoricalStageOverrides(activeRunsRes.runs)
-                        );
-                    }
+                    await loadRunsForChapter(statusRes.runtime.activeTask === 'STEPPING' ? statusRes.latestChapter + 1 : null);
                 }
             } catch (err) {
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
@@ -1290,7 +1293,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [applyStageOverrides, isCurrentWorkspace, loadChapterByNumber, loadViews, showToast]
+        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, showToast]
     );
 
     useEffect(() => {
@@ -1343,6 +1346,7 @@ export function NarrateStudioRoot({
                 setChapterDetail(null);
                 setSelectedChapter(null);
                 setHaltWaiting(false);
+                setSseStage(null);
                 applyStageOverrides({});
                 setInspectedStageId(null);
                 setHistoricalRuns([]);
@@ -1422,7 +1426,7 @@ export function NarrateStudioRoot({
                     setGateViolations([]);
                     setLiveSessionEvents({});
                     setLiveRunChapter(asNumber(data['chapterNumber']) ?? asNumber(data['chapter']) ?? null);
-                    setLatestSseStage('LIBRARIAN');
+                    setSseStage(null);
                     setStatus((prev) =>
                         prev
                             ? {
@@ -1436,6 +1440,7 @@ export function NarrateStudioRoot({
                 }
 
                 if (stageName === 'FAILED') {
+                    setSseStage(null);
                     const errText = asString(data['error']) ?? '章节推进失败';
                     applyStageOverrides((prev) =>
                         settleRunningStages(prev, {
@@ -1454,7 +1459,6 @@ export function NarrateStudioRoot({
                     return;
                 }
 
-                setLatestSseStage(stageName);
                 const message = asString(data['message']);
                 const timestamp = asString(data['timestamp']);
                 const eventChapter = asNumber(data['chapterNumber']) ?? asNumber(data['chapter']);
@@ -1470,6 +1474,7 @@ export function NarrateStudioRoot({
                 const rawStatus = asString(data['status']);
                 const runId = asString(data['runId']);
                 const resolvedStage = resolveStageId(stageName);
+                setSseStage(resolvedStage ? stageName : null);
                 if (resolvedStage && (message || sessionId || runId)) {
                     const upperStage = stageName.trim().toUpperCase();
                     const repairMeta = STAGE_REPAIR_META[upperStage];
@@ -1687,6 +1692,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'task:idle') {
+                setSseStage(null);
                 setHaltWaiting(false);
                 setStatus((prev) =>
                     prev
@@ -1753,7 +1759,9 @@ export function NarrateStudioRoot({
                 const dreamMode = asString(data['mode']);
                 const dreamRunId = asString(data['runId']);
                 const dreamMessage = asString(data['message']);
-                setLatestSseStage('DREAMING');
+                setSseStage('DREAMING');
+                const dreamChapter = asNumber(data['currentChapter']);
+                if (dreamChapter !== undefined) setLiveRunChapter(dreamChapter);
                 if (dreamSessionId || dreamRunId || dreamMessage) {
                     applyStageOverrides((prev) => ({
                         ...prev,
@@ -1769,6 +1777,10 @@ export function NarrateStudioRoot({
                             ...(dreamRunId !== undefined ? { runId: dreamRunId } : {})
                         }
                     }));
+                } else if (stageOverridesRef.current.DREAMING) {
+                    const next = { ...stageOverridesRef.current };
+                    delete next.DREAMING;
+                    applyStageOverrides(next);
                 }
                 setStatus((prev) =>
                     prev ? { ...prev, runtime: { ...prev.runtime, activeTask: 'DREAMING' } } : prev
@@ -1777,6 +1789,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'dream:completed') {
+                setSseStage(null);
                 applyStageOverrides((prev) => {
                     if (!prev.DREAMING) return prev;
                     const settledSessions = updateStageSessionsToTerminal(
@@ -1819,6 +1832,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'halt:completed') {
+                setSseStage(null);
                 setHaltWaiting(false);
                 setStatus((prev) =>
                     prev
@@ -1841,6 +1855,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'yolo_halted') {
+                setSseStage(null);
                 const reason = asString(data['reason']) ?? 'HALTED';
                 const errText = asString(data['error']);
                 setStatus((prev) =>
@@ -1861,6 +1876,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'yolo_completed') {
+                setSseStage(null);
                 const completed = asNumber(data['completedChapters']) ?? 0;
                 setStatus((prev) =>
                     prev
@@ -1885,7 +1901,7 @@ export function NarrateStudioRoot({
         return () => {
             unsubscribe();
         };
-    }, [applyStageOverrides, loadStatus, showToast, stashCurrentDraftIfDirty]);
+    }, [applyStageOverrides, loadStatus, setSseStage, showToast, stashCurrentDraftIfDirty]);
 
     const executeSelectBook = useCallback(
         async (bookRoot: string) => {
@@ -1895,6 +1911,7 @@ export function NarrateStudioRoot({
             chapterRequestSeqRef.current += 1;
             runsRequestSeqRef.current += 1;
             setLoading(true);
+            setSseStage(null);
             setChapterLoading(true);
             setChapterDetail(null);
             setSelectedChapter(null);
@@ -1926,7 +1943,7 @@ export function NarrateStudioRoot({
                 await refreshAll(null);
             }
         },
-        [applyStageOverrides, refreshAll, showToast]
+        [applyStageOverrides, refreshAll, setSseStage, showToast]
     );
 
     const handleSelectBook = useCallback(
@@ -2310,22 +2327,28 @@ export function NarrateStudioRoot({
         [historicalRuns]
     );
 
-    const effectiveStages = useMemo<Partial<Record<PipelineStageId, StageNodeState>>>(() => {
-        const isLiveUncommittedChapter =
-            liveRunChapter !== null &&
-            !chapters.some((ch) => ch.chapterNumber === liveRunChapter);
-        const shouldOverlayLive =
-            liveRunChapter === null ||
-            selectedChapter === null ||
-            liveRunChapter === selectedChapter ||
-            isLiveUncommittedChapter;
-        if (!shouldOverlayLive) {
-            return historicalStageOverrides;
+    const isLiveUncommittedChapter =
+        liveRunChapter !== null &&
+        !chapters.some((ch) => ch.chapterNumber === liveRunChapter);
+    const sameChapterAsSelected =
+        liveRunChapter === null ||
+        selectedChapter === null ||
+        liveRunChapter === selectedChapter;
+    const shouldOverlayLive = sameChapterAsSelected || isLiveUncommittedChapter;
+    const projectedLiveStage =
+        !loading && !chapterLoading ? latestSseStage : null;
+    const liveStageOverrides = useMemo(() => {
+        if (!projectedLiveStage) return undefined;
+        if (projectedLiveStage === 'DREAMING') {
+            const dreaming = stageOverrides.DREAMING;
+            return dreaming ? { DREAMING: dreaming } : undefined;
         }
-        const sameChapterAsSelected =
-            liveRunChapter === null ||
-            selectedChapter === null ||
-            liveRunChapter === selectedChapter;
+        return stageOverrides;
+    }, [projectedLiveStage, stageOverrides]);
+
+    // 会话范围与实时徽标独立：空闲时保留选中章节的归档和刚结束的尝试供下钻。
+    const effectiveStages = useMemo<Partial<Record<PipelineStageId, StageNodeState>>>(() => {
+        if (!shouldOverlayLive) return historicalStageOverrides;
         const merged: Partial<Record<PipelineStageId, StageNodeState>> = {
             ...historicalStageOverrides
         };
@@ -2343,7 +2366,7 @@ export function NarrateStudioRoot({
             }
         }
         return merged;
-    }, [chapters, historicalStageOverrides, liveRunChapter, selectedChapter, stageOverrides]);
+    }, [historicalStageOverrides, sameChapterAsSelected, shouldOverlayLive, stageOverrides]);
 
     const defaultModelString = useMemo(() => {
         const dm = status?.defaultModel;
@@ -2535,11 +2558,15 @@ export function NarrateStudioRoot({
         const resolved = resolveStageId(selection.stageId);
         if (resolved) {
             setInspectedStageId(resolved);
+            const attempt = effectiveStages[resolved]?.sessions?.find(
+                (item) => item.sessionId === selection.sessionId
+            );
+            if (attempt) selection = { ...selection, status: mapRunStatusToStageStatus(attempt.status) };
         }
         setSelectedStageSession(selection);
         setRightTab('trace');
         setRightOpen(true);
-    }, []);
+    }, [effectiveStages]);
 
     const handleInspectStageSessionById = useCallback(
         (sessionId: string) => {
@@ -2939,8 +2966,9 @@ export function NarrateStudioRoot({
                 chapters={chapters}
                 chapterDetail={centerChapterDetail}
                 chapterLoading={chapterLoading}
-                stages={effectiveStages}
-                latestSseStage={latestSseStage}
+                stages={liveStageOverrides}
+                sessionStages={effectiveStages}
+                latestSseStage={projectedLiveStage}
                 safeHalt={safeHaltInfo}
                 syncConflict={syncConflictInfo}
                 gateViolations={effectiveGateViolations}
