@@ -6,6 +6,7 @@ import { isEnoentError, readContentWithStagingPriority, readOptionalBookConfig }
 
 const MAX_BATCH_READ_PATHS = 8;
 const DEFAULT_MAX_OUTPUT_CHARS = 24000;
+const MAX_AUDIT_WINDOW_LINES = 40;
 
 export interface BookReadItem {
     path: string;
@@ -30,6 +31,7 @@ export interface BookReadToolOptions {
     preInjectedFullPaths?: ReadonlySet<string> | undefined;
     /** 单次输出字符预算，缺省读取 BookConfig.retrieval.read_max_output_chars。 */
     maxOutputChars?: number | undefined;
+    manuscriptHits?: ReadonlyMap<string, ReadonlySet<number>> | undefined;
 }
 
 /** 普通文件停在整行边界；单行自身超限时显式给出字符续读游标。 */
@@ -96,7 +98,8 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
     return defineTool({
         name: 'book_read',
         description:
-            '受控读取作品文件。path 单读或 paths 批读（最多 8 个路径，成功读取才消耗 1 次共享配额）；缺失批量成员独立跳过。单次默认 24000 字符，整行截断并提供精确续读参数。已完整预注入文件首次提醒免扣，显式切片或再次调用正常读取。优先返回暂存修改，路径与时间线围栏始终生效。',
+            '受控读取作品文件。path 单读或 paths 批读（最多 8 个路径，成功读取才消耗 1 次共享配额）；缺失批量成员独立跳过。单次默认 24000 字符，整行截断并提供精确续读参数。已完整预注入文件首次提醒免扣，显式切片或再次调用正常读取。优先返回暂存修改，路径与时间线围栏始终生效。'
+            + (options.manuscriptHits ? ` 审稿回查手稿时先用 book_grep 定位，再指定单个 path、offset 和 1..${MAX_AUDIT_WINDOW_LINES} 行的 limit，窗口须包含本轮命中行。` : ''),
         parameters: {
             path: { type: 'string', description: '作品内相对路径，例如 world/open_threads.md，与 paths 二选一' },
             paths: { type: 'array', items: { type: 'string' }, description: '最多 8 个作品内相对路径，保序去重，与 path 二选一' },
@@ -167,6 +170,27 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                 exec.signal.throwIfAborted();
                 const target = await fence.assertReadFile(path);
                 targets.set(target.normalized, target);
+            }
+            if (options.manuscriptHits) {
+                for (const { normalized } of targets.values()) {
+                    if (!normalized.startsWith('manuscripts/')) continue;
+                    if (args.paths !== undefined) throw new Error('审稿回查旧章仅支持 path 单文件');
+                    if (args.offset === undefined || args.limit === undefined || args.limit > MAX_AUDIT_WINDOW_LINES) {
+                        throw new Error(`审稿回查旧章须指定 offset 和 1..${MAX_AUDIT_WINDOW_LINES} 行的 limit`);
+                    }
+                    const hits = options.manuscriptHits.get(normalized);
+                    if (!hits) throw new Error(`请先用 book_grep 定位 ${normalized} 的原句`);
+                    let includesHit = false;
+                    for (let i = 0; i < args.limit; i += 1) {
+                        if (hits.has(args.offset + i)) {
+                            includesHit = true;
+                            break;
+                        }
+                    }
+                    if (!includesHit) {
+                        throw new Error(`请调整 offset 和 limit，让窗口包含 ${normalized} 本轮检索的命中行`);
+                    }
+                }
             }
             const config = options.maxOutputChars === undefined ? await readOptionalBookConfig(store, fence.bookRoot) : null;
             const retrieval = config?.retrieval as { read_max_output_chars?: number } | undefined;

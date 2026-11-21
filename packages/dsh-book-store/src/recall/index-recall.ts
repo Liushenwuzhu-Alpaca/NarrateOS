@@ -494,12 +494,18 @@ export function parseL2CardSections(cardContent: string): {
 }
 
 /** 读取所有卷的可见章卡，分支覆盖层优先于磁盘。 */
-export async function readBookL2Sections(bookRoot: string, options?: RecallReadOptions): Promise<L2CardSection[]> {
+export async function readBookL2Sections(
+    bookRoot: string, options?: RecallReadOptions
+): Promise<Array<L2CardSection & { sourcePath: string }>> {
     const dir = 'index/L2_cards';
-    const sections: L2CardSection[] = [];
+    const sections: Array<L2CardSection & { sourcePath: string }> = [];
     for (const name of await listDirWithStaging(bookRoot, dir, VOLUME_CARD_FILE_RE, options)) {
-        const raw = await readTextWithStaging(bookRoot, `${dir}/${name}`, options);
-        if (raw) sections.push(...parseL2CardSections(raw).sections);
+        const sourcePath = `${dir}/${name}`;
+        const raw = await readTextWithStaging(bookRoot, sourcePath, options);
+        if (!raw) continue;
+        for (const section of parseL2CardSections(raw).sections) {
+            sections.push({ ...section, sourcePath });
+        }
     }
     return sections;
 }
