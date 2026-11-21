@@ -63,7 +63,7 @@ import type {
     YieldPatchedDraftResult,
     YieldStatePatchResult
 } from '@narrateos/dsh-book-tools';
-import { PlanConflictError, SafeHaltError, ValidationError, type SafeHaltSnapshot } from '../errors.js';
+import { PlanConflictError, SafeHaltError, TaskConflictError, ValidationError, type SafeHaltSnapshot } from '../errors.js';
 import type { RoleLoader } from '../roles/role-loader.js';
 import type { RoleRunner } from '../runner/role-runner.js';
 import {
@@ -102,6 +102,7 @@ import {
 import { harvestVoiceWithPool } from './voice-harvest.js';
 import { resolveWriterGateRules } from './craft-gate.js';
 import { settleConfirmedLedger } from './ledger-settlement.js';
+import { ChapterRetry, clearChapterRetry, readChapterRetry } from './chapter-retry.js';
 
 export interface ChapterPipelineDeps {
     store: BookStore;
@@ -506,6 +507,21 @@ export class ChapterPipeline {
         const recovery = await this.store.recoverWal();
         let snapshot = await this.store.loadSnapshot();
 
+        options.signal?.throwIfAborted();
+        const saved = options.retry ? await readChapterRetry(this.store.bookRoot) : null;
+        if (recovery.action === 'NEEDS_STATE_EXTRACTION' && options.retry === 'restart') {
+            throw new TaskConflictError('本章正文已定稿，须原地恢复状态抽取，不能从头覆盖');
+        }
+        if (recovery.action !== 'NEEDS_STATE_EXTRACTION' && options.retry) {
+            if (!saved) throw new TaskConflictError('当前作品没有可重试的章节断点');
+            options = {
+                ...options,
+                ...saved.input,
+                parallelWindowId: saved.input.parallelWindowId,
+                parallelBranchId: saved.input.parallelBranchId
+            };
+        }
+
         const recoveredContext =
             recovery.action === 'NEEDS_STATE_EXTRACTION'
                 ? snapshot.txState.chapter_context
@@ -659,21 +675,40 @@ export class ChapterPipeline {
         );
         const voicePool = await this.readVoicePool();
         const activeSignals = signalPlan?.signals ?? [];
+        const retryInput = {
+            chapterNumber, chapterGoal: options.chapterGoal, timelineMode, targetDay,
+            parallelWindowId: windowId, parallelBranchId: branchId, povCharIds
+        };
+        // 路由是下一个模型调用的运行参数，不影响已通过门禁的前序结果。
+        const { model_routing: _models, role_routing: _roles, ...bookConfig } = snapshot.config;
+        const fingerprint = sha256Hex(JSON.stringify({
+            input: retryInput, snapshot: { ...snapshot, config: bookConfig },
+            staticBaseAndVoiceRaw, currentArcEnvelopeRaw, authorCharterRaw, arcDirectorPlanRaw,
+            previousChapter, historicalChapters, futureHorizon, openThreads, voicePool, opsStyleAmendments,
+            allowedChapterFiles, gateRules, customPlugins, signalPlan,
+            overlay: branchStagingOverlay && [...branchStagingOverlay]
+        }));
+        const retry = new ChapterRetry(
+            this.store.bookRoot, retryInput, fingerprint, options.retry === 'resume' ? saved : null, totalUsage, options.signal
+        );
 
         // Step 1: Librarian (多轮受控探查 -> yield_context_pack)
-        emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
-        const { payload: librarianOut, recalledSlices: recallSlices, selectedLoreEntries, selectedLoreSources } = await this.runLibrarian(
-            snapshot,
-            chapterNumber,
-            targetDay,
-            timelineMode,
-            options.chapterGoal,
-            previousChapter,
-            totalUsage,
-            options,
-            allowedChapterFiles,
-            branchStagingOverlay
-        );
+        const { payload: librarianOut, recalledSlices: recallSlices, selectedLoreEntries, selectedLoreSources } =
+            await retry.run('LIBRARIAN', () => {
+                emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
+                return this.runLibrarian(
+                    snapshot,
+                    chapterNumber,
+                    targetDay,
+                    timelineMode,
+                    options.chapterGoal,
+                    previousChapter,
+                    totalUsage,
+                    options,
+                    allowedChapterFiles,
+                    branchStagingOverlay
+                );
+            });
 
         const spotlightEntityIds = activeSignals
             .filter((s) => s.type === 'SPOTLIGHT_TRIGGER' && Boolean(s.entity_id))
@@ -740,54 +775,39 @@ export class ChapterPipeline {
             // Step 2: Planner (多轮受控点查 -> yield_outline)
             const plannerStage: 'PLANNER' | 'REPLAN' = totalReplans > 0 ? 'REPLAN' : 'PLANNER';
             const plannerAttempt = totalReplans + 1;
-            emit(
-                plannerStage,
-                chapterNumber,
-                totalReplans > 0 ? '改纲重排细纲 v2' : '生成章节细纲'
-            );
-            const planned = await this.runPlanner({
-                snapshot,
-                chapterNumber,
-                targetDay,
-                timelineMode,
-                povCharIds,
-                selectedEntityIds: activeCastSelectedIds,
-                recallSlices,
-                selectedLoreEntries,
-                chapterGoal: options.chapterGoal,
-                staticPrefix: plannerStaticPrefix,
-                previousChapter,
-                futureHorizon,
-                openThreads,
-                opsStyleAmendments,
-                authorCharter: authorCharterRaw,
-                arcDirectorPlan: arcDirectorPlanRaw,
-                signalDirective: formattedSignalDirective,
-                customPlugins,
-                voicePool,
-                planConflictFeedback,
-                totalUsage,
-                stage: plannerStage,
-                attempt: plannerAttempt,
-                triggerReason: totalReplans > 0 ? 'FACT_PLAN_CONFLICT' : undefined,
-                allowedChapterFiles,
-                stagingOverlay: effectiveStagingOverlay,
-                signal: options.signal,
-                onStageSession: options.onStageSession
+            activeOutline = await retry.run(plannerStage, () => {
+                emit(plannerStage, chapterNumber, totalReplans > 0 ? '改纲重排细纲 v2' : '生成章节细纲');
+                return this.runPlanner({
+                    snapshot,
+                    chapterNumber,
+                    targetDay,
+                    timelineMode,
+                    povCharIds,
+                    selectedEntityIds: activeCastSelectedIds,
+                    recallSlices,
+                    selectedLoreEntries,
+                    chapterGoal: options.chapterGoal,
+                    staticPrefix: plannerStaticPrefix,
+                    previousChapter,
+                    futureHorizon,
+                    openThreads,
+                    opsStyleAmendments,
+                    authorCharter: authorCharterRaw,
+                    arcDirectorPlan: arcDirectorPlanRaw,
+                    signalDirective: formattedSignalDirective,
+                    customPlugins,
+                    voicePool,
+                    planConflictFeedback,
+                    totalUsage,
+                    stage: plannerStage,
+                    attempt: plannerAttempt,
+                    triggerReason: totalReplans > 0 ? 'FACT_PLAN_CONFLICT' : undefined,
+                    allowedChapterFiles,
+                    stagingOverlay: effectiveStagingOverlay,
+                    signal: options.signal,
+                    onStageSession: options.onStageSession
+                });
             });
-            activeOutline = planned.outline;
-
-            // 校验 preferred_voice_tag 属于当前声纹池已有标签集
-            if (
-                activeOutline.preferred_voice_tag !== undefined &&
-                voicePool &&
-                voicePool.samples.length > 0 &&
-                !voicePool.samples.some((s) => s.tag === activeOutline.preferred_voice_tag)
-            ) {
-                throw new ValidationError(
-                    `preferred_voice_tag (${activeOutline.preferred_voice_tag}) 不在当前声纹池已有标签集内`
-                );
-            }
 
             // 将 Planner 点查补入的 focus_cast / background_cast 唤醒并并入下游可见实体集与内存覆盖层
             const plannerCastIds = [...activeOutline.focus_cast, ...activeOutline.background_cast];
@@ -808,28 +828,30 @@ export class ChapterPipeline {
 
             // Step 3: Writer (净室单轮无工具 Agent)
             writerAttempt += 1;
-            emit('WRITER', chapterNumber, '净室单轮 Agent 执笔');
-            const drafted = await this.runWriter({
-                snapshot,
-                chapterNumber,
-                targetDay,
-                timelineMode,
-                povCharIds,
-                selectedEntityIds: activeCastSelectedIds,
-                recallSlices,
-                selectedLoreEntries,
-                outline: activeOutline,
-                staticPrefix: writerStaticPrefix,
-                rolePrompt: writerRoleCfg.promptText,
-                previousChapter,
-                opsStyleAmendments,
-                customPlugins,
-                voicePool,
-                totalUsage,
-                traceStage: 'writer',
-                attempt: writerAttempt,
-                signal: options.signal,
-                onStageSession: options.onStageSession
+            const drafted = await retry.run('WRITER', () => {
+                emit('WRITER', chapterNumber, '净室单轮 Agent 执笔');
+                return this.runWriter({
+                    snapshot,
+                    chapterNumber,
+                    targetDay,
+                    timelineMode,
+                    povCharIds,
+                    selectedEntityIds: activeCastSelectedIds,
+                    recallSlices,
+                    selectedLoreEntries,
+                    outline: activeOutline,
+                    staticPrefix: writerStaticPrefix,
+                    rolePrompt: writerRoleCfg.promptText,
+                    previousChapter,
+                    opsStyleAmendments,
+                    customPlugins,
+                    voicePool,
+                    totalUsage,
+                    traceStage: 'writer',
+                    attempt: writerAttempt,
+                    signal: options.signal,
+                    onStageSession: options.onStageSession
+                });
             });
             activeProse = drafted.prose;
             let activeWriterView = drafted.writerView;
@@ -859,7 +881,7 @@ export class ChapterPipeline {
 
                 if (!skipNextProseGate) {
                     // Step 4: StaticProseGate (0 Token)
-                    emit('PROSE_GATE', chapterNumber, '运行 0 Token 静态文风门禁');
+                    if (!retry.replaying) emit('PROSE_GATE', chapterNumber, '运行 0 Token 静态文风门禁');
                     await traceArtifact('draft.before_gate', activeProse);
                     const gateResult = await withTraceStage('prose_gate', async () =>
                         this.gate.evaluate(activeProse, proseGateOptions)
@@ -893,28 +915,26 @@ export class ChapterPipeline {
                         if (canPatchGate) {
                             draftGatePatchRounds += 1;
                             totalPatchRounds += 1;
-                            emit(
-                                'LOCAL_PATCH',
-                                chapterNumber,
-                                `Gate 触发第 ${totalPatchRounds} 轮局部修补`
-                            );
-                            const positiveGateReason = buildPositiveGatePatchReason(gateResult);
-                            const patched = await this.tryRunLocalPatch({
-                                snapshot,
-                                writerView: activeWriterView,
-                                staticBaseAndVoice: writerWorldDocs.staticBaseAndVoice,
-                                outline: activeOutline,
-                                chapterNumber,
-                                prose: activeProse,
-                                violatedIndices: gateResult.violatedParagraphIndices,
-                                reason: positiveGateReason,
-                                totalUsage,
-                                proseGateOptions,
-                                violations: gateResult.violations,
-                                attempt: totalPatchRounds,
-                                triggerReason: `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`,
-                                signal: options.signal,
-                                onStageSession: options.onStageSession
+                            const patched = await retry.run('LOCAL_PATCH', () => {
+                                emit('LOCAL_PATCH', chapterNumber, `Gate 触发第 ${totalPatchRounds} 轮局部修补`);
+                                const positiveGateReason = buildPositiveGatePatchReason(gateResult);
+                                return this.tryRunLocalPatch({
+                                    snapshot,
+                                    writerView: activeWriterView,
+                                    staticBaseAndVoice: writerWorldDocs.staticBaseAndVoice,
+                                    outline: activeOutline,
+                                    chapterNumber,
+                                    prose: activeProse,
+                                    violatedIndices: gateResult.violatedParagraphIndices,
+                                    reason: positiveGateReason,
+                                    totalUsage,
+                                    proseGateOptions,
+                                    violations: gateResult.violations,
+                                    attempt: totalPatchRounds,
+                                    triggerReason: `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`,
+                                    signal: options.signal,
+                                    onStageSession: options.onStageSession
+                                });
                             });
                             if (patched !== null) {
                                 activeProse = patched;
@@ -935,29 +955,31 @@ export class ChapterPipeline {
                             draftGatePatchRounds = 0;
                             draftFactPatchRounds = 0;
                             skipNextProseGate = false;
-                            emit('REWRITE', chapterNumber, 'Gate 触发整章重写');
-                            const rewritten = await this.executeRewrite({
-                                snapshot,
-                                chapterNumber,
-                                targetDay,
-                                timelineMode,
-                                povCharIds,
-                                selectedEntityIds: activeCastSelectedIds,
-                                recallSlices,
-                                selectedLoreEntries,
-                                outline: activeOutline,
-                                staticPrefix: writerStaticPrefix,
-                                rolePrompt: writerRoleCfg.promptText,
-                                previousChapter,
-                                opsStyleAmendments,
-                                customPlugins,
-                                voicePool,
-                                totalUsage,
-                                rewriteFeedback: buildPositiveGateRewriteFeedback(gateResult),
-                                attempt: totalRewrites,
-                                triggerReason: `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`,
-                                signal: options.signal,
-                                onStageSession: options.onStageSession
+                            const rewritten = await retry.run('REWRITE', () => {
+                                emit('REWRITE', chapterNumber, 'Gate 触发整章重写');
+                                return this.executeRewrite({
+                                    snapshot,
+                                    chapterNumber,
+                                    targetDay,
+                                    timelineMode,
+                                    povCharIds,
+                                    selectedEntityIds: activeCastSelectedIds,
+                                    recallSlices,
+                                    selectedLoreEntries,
+                                    outline: activeOutline,
+                                    staticPrefix: writerStaticPrefix,
+                                    rolePrompt: writerRoleCfg.promptText,
+                                    previousChapter,
+                                    opsStyleAmendments,
+                                    customPlugins,
+                                    voicePool,
+                                    totalUsage,
+                                    rewriteFeedback: buildPositiveGateRewriteFeedback(gateResult),
+                                    attempt: totalRewrites,
+                                    triggerReason: `PROSE_GATE: ${gateResult.exceededRules.join(',') || 'VIOLATION'}`,
+                                    signal: options.signal,
+                                    onStageSession: options.onStageSession
+                                });
                             });
                             activeProse = rewritten.prose;
                             activeWriterView = rewritten.writerView;
@@ -967,6 +989,7 @@ export class ChapterPipeline {
                             continue;
                         }
 
+                        await retry.rejectFrom('WRITER', 'REWRITE');
                         await this.triggerSafeHalt({
                             status: 'SAFE_HALT',
                             chapterNumber,
@@ -983,29 +1006,31 @@ export class ChapterPipeline {
                 skipNextProseGate = false;
 
                 // Step 5: Fact Checker (多轮受控查证 -> yield_verdict)
-                emit('FACT_CHECKER', chapterNumber, '执行字面核查与双侧原句验真');
-                const verdict = await this.runFactChecker(
-                    snapshot,
-                    chapterNumber,
-                    targetDay,
-                    timelineMode,
-                    povCharIds,
-                    activeCastSelectedIds,
-                    recallSlices,
-                    activeOutline,
-                    activeProse,
-                    previousChapter,
-                    currentArcEnvelopeRaw,
-                    arcDirectorPlanRaw,
-                    authorCharterRaw,
-                    totalUsage,
-                    this.pluginLoader.mergePromptInjection(plugins, 'fact_checker'),
-                    options,
-                    allowedChapterFiles,
-                    effectiveStagingOverlay,
-                    selectedLoreSources,
-                    reviewFocus
-                );
+                const verdict = await retry.run('FACT_CHECKER', () => {
+                    emit('FACT_CHECKER', chapterNumber, '执行字面核查与双侧原句验真');
+                    return this.runFactChecker(
+                        snapshot,
+                        chapterNumber,
+                        targetDay,
+                        timelineMode,
+                        povCharIds,
+                        activeCastSelectedIds,
+                        recallSlices,
+                        activeOutline,
+                        activeProse,
+                        previousChapter,
+                        currentArcEnvelopeRaw,
+                        arcDirectorPlanRaw,
+                        authorCharterRaw,
+                        totalUsage,
+                        this.pluginLoader.mergePromptInjection(plugins, 'fact_checker'),
+                        options,
+                        allowedChapterFiles,
+                        effectiveStagingOverlay,
+                        selectedLoreSources,
+                        reviewFocus
+                    );
+                });
                 const verifiedIssues = verdict.issues;
                 reviewFocus = undefined;
                 lastFactIssues = verifiedIssues;
@@ -1038,9 +1063,9 @@ export class ChapterPipeline {
                         ) {
                             totalReplans += 1;
                             planConflictFeedback = err.reason;
-                            emit('REPLAN', chapterNumber, `细纲存在悖论，退回重排 v2: ${err.reason}`);
                             continue outerLoop;
                         }
+                        await retry.rejectFrom('FACT_CHECKER');
                         await this.triggerSafeHalt({
                             status: 'SAFE_HALT',
                             chapterNumber,
@@ -1082,28 +1107,26 @@ export class ChapterPipeline {
                 if (canPatchFact) {
                     draftFactPatchRounds += 1;
                     totalPatchRounds += 1;
-                    emit(
-                        'LOCAL_PATCH',
-                        chapterNumber,
-                        `Fact Checker 触发第 ${totalPatchRounds} 轮局部修补`
-                    );
                     const reason = verifiedIssues.map((i) => i.description).join('; ');
-                    const patched = await this.tryRunLocalPatch({
-                        snapshot,
-                        writerView: activeWriterView,
-                        staticBaseAndVoice: writerWorldDocs.staticBaseAndVoice,
-                        outline: activeOutline,
-                        chapterNumber,
-                        prose: activeProse,
-                        violatedIndices: patchIndices,
-                        reason,
-                        totalUsage,
-                        proseGateOptions,
-                        factIssues: verifiedIssues,
-                        attempt: totalPatchRounds,
-                        triggerReason: `FACT_CHECKER: ${reason}`,
-                        signal: options.signal,
-                        onStageSession: options.onStageSession
+                    const patched = await retry.run('LOCAL_PATCH', () => {
+                        emit('LOCAL_PATCH', chapterNumber, `Fact Checker 触发第 ${totalPatchRounds} 轮局部修补`);
+                        return this.tryRunLocalPatch({
+                            snapshot,
+                            writerView: activeWriterView,
+                            staticBaseAndVoice: writerWorldDocs.staticBaseAndVoice,
+                            outline: activeOutline,
+                            chapterNumber,
+                            prose: activeProse,
+                            violatedIndices: patchIndices,
+                            reason,
+                            totalUsage,
+                            proseGateOptions,
+                            factIssues: verifiedIssues,
+                            attempt: totalPatchRounds,
+                            triggerReason: `FACT_CHECKER: ${reason}`,
+                            signal: options.signal,
+                            onStageSession: options.onStageSession
+                        });
                     });
                     if (patched !== null) {
                         activeProse = patched;
@@ -1127,33 +1150,35 @@ export class ChapterPipeline {
                     draftGatePatchRounds = 0;
                     draftFactPatchRounds = 0;
                     skipNextProseGate = false;
-                    emit('REWRITE', chapterNumber, 'Fact Checker 触发整章重写');
-                    const rewritten = await this.executeRewrite({
-                        snapshot,
-                        chapterNumber,
-                        targetDay,
-                        timelineMode,
-                        povCharIds,
-                        selectedEntityIds: activeCastSelectedIds,
-                        recallSlices,
-                        selectedLoreEntries,
-                        outline: activeOutline,
-                        staticPrefix: writerStaticPrefix,
-                        rolePrompt: writerRoleCfg.promptText,
-                        previousChapter,
-                        opsStyleAmendments,
-                        customPlugins,
-                        voicePool,
-                        totalUsage,
-                        rewriteFeedback: buildPositiveFactRewriteFeedback(
-                            verifiedIssues,
+                    const rewritten = await retry.run('REWRITE', () => {
+                        emit('REWRITE', chapterNumber, 'Fact Checker 触发整章重写');
+                        return this.executeRewrite({
                             snapshot,
-                            activeWriterView
-                        ),
-                        attempt: totalRewrites,
-                        triggerReason: `FACT_CHECKER: ${verifiedIssues.map((i) => i.severity).join(',')}`,
-                        signal: options.signal,
-                        onStageSession: options.onStageSession
+                            chapterNumber,
+                            targetDay,
+                            timelineMode,
+                            povCharIds,
+                            selectedEntityIds: activeCastSelectedIds,
+                            recallSlices,
+                            selectedLoreEntries,
+                            outline: activeOutline,
+                            staticPrefix: writerStaticPrefix,
+                            rolePrompt: writerRoleCfg.promptText,
+                            previousChapter,
+                            opsStyleAmendments,
+                            customPlugins,
+                            voicePool,
+                            totalUsage,
+                            rewriteFeedback: buildPositiveFactRewriteFeedback(
+                                verifiedIssues,
+                                snapshot,
+                                activeWriterView
+                            ),
+                            attempt: totalRewrites,
+                            triggerReason: `FACT_CHECKER: ${verifiedIssues.map((i) => i.severity).join(',')}`,
+                            signal: options.signal,
+                            onStageSession: options.onStageSession
+                        });
                     });
                     activeProse = rewritten.prose;
                     activeWriterView = rewritten.writerView;
@@ -1163,6 +1188,7 @@ export class ChapterPipeline {
                     continue;
                 }
 
+                await retry.rejectFrom('FACT_CHECKER');
                 await this.triggerSafeHalt({
                     status: 'SAFE_HALT',
                     chapterNumber,
@@ -1188,6 +1214,7 @@ export class ChapterPipeline {
                 ? signalPlan.nextCursorState
                 : undefined;
 
+        await retry.beforeCommit();
         await this.store.beginDraft(chapterNumber);
         const featRes = await this.store.commitDraft(
             chapterNumber,
@@ -1207,6 +1234,8 @@ export class ChapterPipeline {
             },
             { outline: activeOutline }
         );
+        await clearChapterRetry(this.store.bookRoot);
+        options.signal?.throwIfAborted();
 
         emit('EXTRACTOR', chapterNumber, '增量抽取实体状态与四联遥测');
         const stateRes = await this.runExtractorAndCommitState({
@@ -1545,7 +1574,7 @@ export class ChapterPipeline {
         stagingOverlay?: ReadonlyMap<string, string | null> | undefined;
         signal?: AbortSignal | undefined;
         onStageSession?: ((event: StageSessionEvent) => void) | undefined;
-    }): Promise<{ outline: PlannerOutline; plannerView: ReturnType<ViewSlicer['slice']> }> {
+    }): Promise<PlannerOutline> {
         const effectiveEntityIds = Array.from(
             new Set([...params.selectedEntityIds, ...params.povCharIds])
         );
@@ -1631,11 +1660,13 @@ export class ChapterPipeline {
             onStageSession: params.onStageSession
         });
         addUsage(params.totalUsage, runRes.usage);
+        const tag = runRes.yieldResult.preferred_voice_tag;
+        if (tag !== undefined && params.voicePool?.samples.length &&
+            !params.voicePool.samples.some((sample) => sample.tag === tag)) {
+            throw new ValidationError(`preferred_voice_tag (${tag}) 不在当前声纹池已有标签集内`);
+        }
 
-        return {
-            outline: runRes.yieldResult,
-            plannerView
-        };
+        return runRes.yieldResult;
     }
 
     /** 执行净室整章重写 REWRITE（统一收拢 Gate 与 FactChecker 两条重写路径） */
@@ -2223,6 +2254,7 @@ export class ChapterPipeline {
                       ...sanitizedPatches.map((patch) => `entities/${patch.entity_id}.md`)
                   ])
         ];
+        options.signal?.throwIfAborted();
         await this.store.recordPendingWrites(plannedPaths);
 
         await mkdir(join(this.store.bookRoot, '.ops'), { recursive: true });

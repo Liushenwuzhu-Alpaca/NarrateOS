@@ -232,6 +232,7 @@ export interface CheckerResultEvent {
 /** stepChapter 调用参数 */
 export interface StepChapterOptions {
     chapterNumber?: number | undefined;
+    retry?: 'resume' | 'restart' | undefined;
     chapterGoal: string;
     timelineMode?: TimelineMode | undefined;
     targetDay?: number | undefined;
