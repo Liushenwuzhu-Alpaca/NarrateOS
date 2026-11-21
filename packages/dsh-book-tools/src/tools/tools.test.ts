@@ -113,6 +113,37 @@ describe('PathFence、ReadQuotaCounter 与受控读写工具', () => {
             .resolves.toMatchObject({ startLine: 1, content: expect.stringContaining('黄铜钥匙来源') });
     });
 
+    it('审稿读取可沿字符预算游标读完原窗口，但不能扩展窗口', async () => {
+        const { bookRoot } = await createSampleBook();
+        const path = 'manuscripts/ch_0001.md';
+        const firstLine = `货单${'甲'.repeat(248)}`;
+        const secondLine = '乙'.repeat(250);
+        await writeFile(join(bookRoot, path), `${firstLine}\n${secondLine}\n窗外\n`);
+        await writeFile(
+            join(bookRoot, 'world/book_config.yaml'),
+            'book_slug: book-alpha\ntitle: 测试作品\ntokens_per_char: 0.6\nretrieval:\n  read_max_output_chars: 768\n'
+        );
+        const ctx = new Context();
+        const store = await ctx.plugin(bookStorePlugin, { bookRoot });
+        registerCleanup(() => store.dispose());
+        const tools = await ctx.plugin(bookToolsPlugin, { bookRoot });
+        registerCleanup(() => tools.dispose());
+        const audit = ctx.narrateTools.buildRoleTools({
+            bookRoot, draftText: '草稿中的货单', yieldTool: 'yield_verdict', tools: ['book_read', 'book_grep']
+        });
+        registerCleanup(() => audit.cleanup());
+        const grep = { path, pattern: '货单', context_lines: 0 };
+        await audit.toolMap.get('book_grep')!.execute(grep, createMockExec('book_grep', grep));
+        const read = (args: { path: string; offset: number; limit: number }) =>
+            audit.toolMap.get('book_read')!.execute(args, createMockExec('book_read', args));
+
+        await expect(read({ path, offset: 1, limit: 2 }))
+            .resolves.toMatchObject({ content: firstLine, nextOffset: 2 });
+        await expect(read({ path, offset: 2, limit: 2 })).rejects.toThrow('命中行');
+        await expect(read({ path, offset: 2, limit: 1 }))
+            .resolves.toMatchObject({ content: secondLine, endLine: 2 });
+    });
+
     it('退役设定退出目录、检索和选页，暂存状态优先且显式读取仍可查档', async () => {
         const { bookRoot } = await createSampleBook();
         const retiredPath = 'lore_library/lore_a_retired.md';
