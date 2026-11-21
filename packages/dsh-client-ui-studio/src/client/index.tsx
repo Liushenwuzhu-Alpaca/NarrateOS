@@ -1439,8 +1439,9 @@ export function NarrateStudioRoot({
                     return;
                 }
 
-                if (stageName === 'FAILED') {
+                if (stageName === 'FAILED' || stageName === 'HALTED') {
                     setSseStage(null);
+                    const halted = stageName === 'HALTED';
                     const errText = asString(data['error']) ?? '章节推进失败';
                     applyStageOverrides((prev) =>
                         settleRunningStages(prev, {
@@ -1454,7 +1455,7 @@ export function NarrateStudioRoot({
                             ? { ...prev, status: 'halt' }
                             : prev
                     );
-                    showToast(errText, 'error');
+                    showToast(halted ? '章节已安全中止' : errText, halted ? 'info' : 'error');
                     void Promise.allSettled([loadStatus(), loadViewsRef.current()]);
                     return;
                 }
@@ -1475,6 +1476,9 @@ export function NarrateStudioRoot({
                 const runId = asString(data['runId']);
                 const resolvedStage = resolveStageId(stageName);
                 setSseStage(resolvedStage ? stageName : null);
+                if (data['txLockHeld'] === true) {
+                    setStatus((prev) => prev ? { ...prev, txLockHeld: true } : prev);
+                }
                 if (resolvedStage && (message || sessionId || runId)) {
                     const upperStage = stageName.trim().toUpperCase();
                     const repairMeta = STAGE_REPAIR_META[upperStage];
@@ -1698,6 +1702,7 @@ export function NarrateStudioRoot({
                     prev
                         ? {
                               ...prev,
+                              txLockHeld: false,
                               runtime: { ...prev.runtime, activeTask: 'IDLE' }
                           }
                         : prev
@@ -1816,10 +1821,12 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'halt:requested') {
+                const force = data['force'] === true;
+                if (force) setHaltWaiting(true);
                 setStatus((prev) =>
                     prev ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } } : prev
                 );
-                showToast('已请求在安全检查点停机');
+                showToast(force ? '正在中止在途调用并等待作品锁释放' : '已请求写完本章后暂停');
                 return;
             }
 
@@ -1838,6 +1845,7 @@ export function NarrateStudioRoot({
                     prev
                         ? {
                               ...prev,
+                              txLockHeld: false,
                               runtime: { ...prev.runtime, activeTask: 'IDLE', haltRequested: true },
                               yolo: { ...prev.yolo, running: false, stopRequested: true, currentStage: null }
                           }
@@ -1869,7 +1877,7 @@ export function NarrateStudioRoot({
                 );
                 showToast(
                     errText ? `连写已停止 (${reason}): ${errText}` : `连写已在安全点停止 (${reason})`,
-                    reason === 'SAFE_HALT' || reason === 'ERROR' ? 'error' : 'info'
+                    reason === 'ERROR' ? 'error' : 'info'
                 );
                 void refreshAllRef.current(selectedChapterRef.current);
                 return;
@@ -2022,7 +2030,7 @@ export function NarrateStudioRoot({
                 String(status?.worldState.timeline_mode ?? '') === 'PARALLEL' ||
                 Boolean(activeParallelWindowId);
             let nextOptions: StepChapterRequest = options ? { ...options } : {};
-            if (isParallelActive && options?.timelineMode !== 'FLASHBACK') {
+            if (!options?.retry && isParallelActive && options?.timelineMode !== 'FLASHBACK') {
                 const resolvedWindowId =
                     options?.parallelWindowId ?? (activeParallelWindowId || worldParallelWindow);
                 const resolvedBranchId =
@@ -2043,6 +2051,7 @@ export function NarrateStudioRoot({
                 await refreshAll(res.chapterNumber);
             } catch (err) {
                 if (isCurrentWorkspace(epoch)) await Promise.allSettled([loadStatus(), loadViews()]);
+                if (err instanceof Error && err.message === 'SAFE_HALT_REQUESTED') return;
                 throw err;
             }
         },
@@ -2064,19 +2073,10 @@ export function NarrateStudioRoot({
 
     const handleRequestHalt = useCallback(
         async (options?: { force?: boolean }) => {
-            try {
-                await requestHalt(options);
-                showToast(
-                    options?.force
-                        ? '已发送立即中断指令，正在清理未完成草稿'
-                        : '已发送安全停机请求，将在安全检查点挂起'
-                );
-                await loadStatus();
-            } catch (err) {
-                showToast(err instanceof Error ? err.message : String(err), 'error');
-            }
+            await requestHalt(options);
+            await loadStatus();
         },
-        [loadStatus, showToast]
+        [loadStatus]
     );
 
     const handleSync = useCallback(async () => {
@@ -2959,6 +2959,8 @@ export function NarrateStudioRoot({
                 selectedChapter={selectedChapter ?? undefined}
                 timelineMode={String(status?.worldState.timeline_mode ?? 'MAINLINE')}
                 walPhase={status?.walPhase ?? 'IDLE'}
+                txLockHeld={status?.txLockHeld}
+                chapterRetry={status?.chapterRetry}
                 activeTask={activeTask}
                 haltRequested={status?.runtime.haltRequested}
                 haltWaiting={haltWaiting}
