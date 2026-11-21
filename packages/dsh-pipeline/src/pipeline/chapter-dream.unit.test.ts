@@ -743,7 +743,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
             ''
         ].join('\r\n');
         const currentCards = '## ch_0003 (day:3)\n- 主干剧情：沈默盘问去向。\n- 异象锚点：黑铜钥匙\n- 出场实体：char_001\n';
-        await writeFile(join(bookRoot, oldVolume), oldCards);
+        await writeFile(join(bookRoot, oldVolume), oldCards.slice(oldCards.indexOf('## ch_0002')));
         await writeFile(join(bookRoot, currentVolume), currentCards);
         await setupBookGitignoreAndCommit(bookRoot, ['world/world_state.md', oldVolume, currentVolume], 'test: archive chapter cards');
         await writeFile(
@@ -770,6 +770,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         registerCleanup(() => bookToolsFiber.dispose());
 
         let dreamerPromptSeen = '';
+        let restoreStagedCard = true;
         await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_dream_commit')) {
@@ -777,14 +778,16 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                     await expect(execTool('yield_dream_commit', {
                         summary: '水位不能预支下一章', chapter_number: 4, accumulated_words: 0
                     })).rejects.toThrow(/水位/);
-                    const edit = await execTool('book_edit', {
-                        path: item, mode: 'write', replacement_text: [
-                            '---', 'entity_id: item_black_key', 'canonical_name: 黑铜钥匙', 'last_seen_ch: 2', '---',
-                            '## 1. Innate Locks', '## 2. Acquired State & Numeric Ledger',
-                            '## 3. Irreversible Trajectory', '## 4. Recent Sliding Buffer & Voice', ''
-                        ].join('\n')
-                    });
-                    expect(edit).toMatchObject({ staged: true });
+                    if (restoreStagedCard) {
+                        await execTool('book_edit', {
+                            path: item, mode: 'write', replacement_text: [
+                                '---', 'entity_id: item_black_key', 'canonical_name: 黑铜钥匙', 'last_seen_ch: 2', '---',
+                                '## 1. Innate Locks', '## 2. Acquired State & Numeric Ledger',
+                                '## 3. Irreversible Trajectory', '## 4. Recent Sliding Buffer & Voice', ''
+                            ].join('\n')
+                        });
+                        await execTool('book_edit', { path: oldVolume, mode: 'write', replacement_text: oldCards });
+                    }
                     await execTool('yield_dream_commit', {
                         summary: '完成 Dreaming 预扫描整理',
                         chapter_number: 3,
@@ -803,8 +806,11 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         const pipeFiber = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
         registerCleanup(() => pipeFiber.dispose());
 
+        expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);
+
         const dreamRes = await ctx.narratePipeline.runDreaming({
             currentChapter: 3,
+            force: true,
             coldArchiveCandidateIds: ['char_001']
         });
 
@@ -824,6 +830,13 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         await writeFile(join(bookRoot, 'world/future_horizon.md'), '');
         await writeFile(join(bookRoot, 'world/open_threads.md'), '## 已解决\n- char_001 的旧账已结。\n');
         expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);
+        restoreStagedCard = false;
+        const unindexedOldCards = expectedOldCards.replace('出场实体: item_black_key', '出场实体: 无');
+        await writeFile(join(bookRoot, oldVolume), unindexedOldCards);
+        await setupBookGitignoreAndCommit(bookRoot, [oldVolume], 'test: reproduce an omitted historical appearance');
+        await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
+        expect(dreamerPromptSeen).toContain('已有实体 item_black_key 待核对出场');
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', oldVolume)).toBe(expectedOldCards);
     });
 
     it('因果信号可在空实体候选时提交世界整理，故事日龄不单独触发整理', async () => {

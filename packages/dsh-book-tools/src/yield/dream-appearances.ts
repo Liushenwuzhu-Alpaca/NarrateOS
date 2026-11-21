@@ -85,6 +85,7 @@ export async function planDreamAppearances(options: DreamAppearanceOptions): Pro
 
     const originals = new Map<string, string>();
     const sections = await readBookL2Sections(bookRoot, {
+        stagingOverlay: pendingWrites,
         stagingRead: async (path) => {
             const raw = await readFile(path);
             if (raw !== null) originals.set(path, raw);

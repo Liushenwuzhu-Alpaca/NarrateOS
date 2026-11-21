@@ -190,8 +190,9 @@ function scanRecurringProseAnchors(
 
     const candidates: string[] = [];
     for (const [key, item] of anchorCounts) {
-        if (item.chapters.size < promoteAnchorMinChapters || item.latestChapter <= watermarkCh) continue;
+        if (item.chapters.size < promoteAnchorMinChapters) continue;
         const knownId = knownKeys.get(key);
+        if (!knownId && item.latestChapter <= watermarkCh) continue;
         const missing = [...item.chapters.values()]
             .filter((section) => !knownId || !section.appearedEntityIds.includes(knownId))
             .sort((a, b) => a.chapterNumber - b.chapterNumber);
@@ -332,20 +333,9 @@ export class DreamingPipeline {
                 openThreadsRaw,
                 futureHorizonRaw
             );
-            const sections = (await readBookL2Sections(this.store.bookRoot))
-                .filter((section) => section.chapterNumber <= options.currentChapter);
-            const anchorCandidates = scanRecurringProseAnchors(
-                sections,
-                watermarkCh,
-                snapshot.entities,
-                promoteAnchorMinChapters
-            );
 
             const bufferTriggered = dirtyEntityIds.length > 0;
-            const hasHorizonWork =
-                offscreenList.length > 0 ||
-                impactedHorizonEvents.length > 0 ||
-                anchorCandidates.length > 0;
+            const hasHorizonWork = offscreenList.length > 0 || impactedHorizonEvents.length > 0;
 
             if (!options.force && !wordTriggered && !bufferTriggered && !hasHorizonWork) {
                 return {
@@ -356,6 +346,13 @@ export class DreamingPipeline {
                     usage
                 };
             }
+
+            // 出场回填是本轮整理工作，不是独立唤醒条件。
+            const sections = (await readBookL2Sections(this.store.bookRoot))
+                .filter((section) => section.chapterNumber <= options.currentChapter);
+            const anchorCandidates = scanRecurringProseAnchors(
+                sections, watermarkCh, snapshot.entities, promoteAnchorMinChapters
+            );
 
             const recentL2Text = sections.filter((section) => section.chapterNumber > watermarkCh)
                 .sort((a, b) => a.chapterNumber - b.chapterNumber)
