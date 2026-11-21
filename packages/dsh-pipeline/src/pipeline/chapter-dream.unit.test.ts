@@ -510,6 +510,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         let plannerTaskSeen = '';
         let factCheckerTaskSeen = '';
         let writerCalls = 0;
+        const worldSummary = '## 港口局势\n\n沈默已从程三爷取得旧船契的线索。';
 
         await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool, systemPromptText, taskPrompt }) => {
@@ -553,6 +554,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         chapter_summary: '沈默在茶馆会见程三爷。',
                         prose_anchors: ['旧船契', '不存在的幻觉词'],
                         appeared_entity_ids: ['char_001', 'char_099'],
+                        ...(taskPrompt.includes('world_summary_markdown') ? { world_summary_markdown: worldSummary } : {}),
                         next_chapter_options: ['追查二号码头']
                     });
                 }
@@ -614,6 +616,9 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         // Q2: boot_seed 被替换为 chapter_harvest，author_sample 原样保留且递增 use_count
         const store = ctx.narrateStore.openStore();
+        const worldState = (await store.loadSnapshot()).worldState;
+        expect(worldState.summaryMarkdown.trim()).toBe(worldSummary);
+        expect(worldState.frontmatter).toMatchObject({ current_chapter: 1, pov_character: 'char_001' });
         const savedPool = await store.readVoiceSamples();
         const authorSample = savedPool.samples.find((s) => s.id === 'v_author');
         const bootReplaced = savedPool.samples.find((s) => s.source === 'chapter_harvest');
@@ -705,37 +710,42 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(existsSync(join(bookRoot, '.ops/safe_halt.json'))).toBe(false);
     });
 
-    it('Q4.2 / Q5: Dreaming 回查跨卷复现异象锚点并拒绝未来水位', async () => {
+    it('Dreaming 在同一提交中升格实体并按定稿证据回填旧卷出场字段', async () => {
         const bookRoot = await createGitBookWorkspace(tempDirs, 'dreaming-prescans', {
             storyDay: 10,
             currentChapter: 3,
             extraChapters: {
-                'ch_0001.md': '# 第一章\n\n黑铜钥匙留在门边。\n',
-                'ch_0002.md': '# 第二章\n\n黑铜钥匙压着账册。\n',
-                'ch_0003.md': '# 第三章\n\n沈默清点货物。\n'
+                'ch_0001.md': '# 第一章\n\n沈默把黑铜钥匙挂在门边。\n',
+                'ch_0002.md': '# 第二章\n\n沈默用黑铜钥匙压住账册。\n',
+                'ch_0003.md': '# 第三章\n\n「黑铜钥匙还在镇上吗？」沈默问。\n'
             }
         });
         const worldPath = join(bookRoot, 'world/world_state.md');
         await writeFile(worldPath, (await readFile(worldPath, 'utf8')).replace('current_volume: 1', 'current_volume: 2'));
 
         await mkdir(join(bookRoot, 'index/L2_cards'), { recursive: true });
-        await writeFile(
-            join(bookRoot, 'index/L2_cards/vol_01_cards.md'),
-            [
-                '# 第 1 卷双轨章卡',
-                '',
-                '## ch_0001 (day:1)',
-                '- 主干剧情：初见黑铜钥匙。',
-                '- 异象锚点：黑铜钥匙',
-                '- 出场实体：char_001',
-                '',
-                '## ch_0002 (day:2)',
-                '- 主干剧情：账册压着黑铜钥匙。',
-                '- 异象锚点：黑铜钥匙',
-                '- 出场实体：char_001'
-            ].join('\n') + '\n',
-            'utf8'
-        );
+        const oldVolume = 'index/L2_cards/vol_01_cards.md';
+        const currentVolume = 'index/L2_cards/vol_02_cards.md';
+        const item = 'entities/item_black_key.md';
+        const oldCards = [
+            '# 第 1 卷双轨章卡',
+            '',
+            '## ch_0001 (day:1)',
+            '- 主干剧情：初见黑铜钥匙。',
+            '- 异象锚点：黑铜钥匙',
+            '- 出场实体：char_001',
+            '- 保留的原始旁注',
+            '',
+            '## ch_0002 (day:2)',
+            '- 主干剧情：账册压着黑铜钥匙。',
+            '- 异象锚点：黑铜钥匙',
+            '- 出场实体: 无',
+            ''
+        ].join('\r\n');
+        const currentCards = '## ch_0003 (day:3)\n- 主干剧情：沈默盘问去向。\n- 异象锚点：黑铜钥匙\n- 出场实体：char_001\n';
+        await writeFile(join(bookRoot, oldVolume), oldCards);
+        await writeFile(join(bookRoot, currentVolume), currentCards);
+        await setupBookGitignoreAndCommit(bookRoot, ['world/world_state.md', oldVolume, currentVolume], 'test: archive chapter cards');
         await writeFile(
             join(bookRoot, 'world/future_horizon.md'),
             [
@@ -767,10 +777,23 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                     await expect(execTool('yield_dream_commit', {
                         summary: '水位不能预支下一章', chapter_number: 4, accumulated_words: 0
                     })).rejects.toThrow(/水位/);
+                    const edit = await execTool('book_edit', {
+                        path: item, mode: 'write', replacement_text: [
+                            '---', 'entity_id: item_black_key', 'canonical_name: 黑铜钥匙', 'last_seen_ch: 2', '---',
+                            '## 1. Innate Locks', '## 2. Acquired State & Numeric Ledger',
+                            '## 3. Irreversible Trajectory', '## 4. Recent Sliding Buffer & Voice', ''
+                        ].join('\n')
+                    });
+                    expect(edit).toMatchObject({ staged: true });
                     await execTool('yield_dream_commit', {
                         summary: '完成 Dreaming 预扫描整理',
                         chapter_number: 3,
-                        accumulated_words: 0
+                        accumulated_words: 0,
+                        appearances: [
+                            { entity_id: 'item_black_key', chapter_number: 1, quote: '沈默把黑铜钥匙挂在门边。' },
+                            { entity_id: 'item_black_key', chapter_number: 2, quote: '沈默用黑铜钥匙压住账册。' },
+                            { entity_id: 'item_black_key', chapter_number: 3, quote: null }
+                        ]
                     });
                 }
             },
@@ -788,6 +811,16 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(dreamRes.skipped).toBe(false);
         expect(dreamerPromptSeen).toContain('黑铜钥匙');
         expect(dreamerPromptSeen).toContain('账册压着黑铜钥匙。');
+        expect(dreamRes.committedPaths).toEqual(expect.arrayContaining([item, oldVolume]));
+        expect(dreamRes.committedPaths).not.toContain(currentVolume);
+        const expectedOldCards = oldCards
+            .replace('出场实体：char_001', '出场实体：char_001, item_black_key')
+            .replace('出场实体: 无', '出场实体: item_black_key');
+        const system = new bookStorePlugin.NodeSystemAdapter();
+        expect(await readFile(join(bookRoot, oldVolume), 'utf8')).toBe(expectedOldCards);
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', oldVolume)).toBe(expectedOldCards);
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', item)).toContain('canonical_name: 黑铜钥匙');
+        expect(await readFile(join(bookRoot, currentVolume), 'utf8')).toBe(currentCards);
         await writeFile(join(bookRoot, 'world/future_horizon.md'), '');
         await writeFile(join(bookRoot, 'world/open_threads.md'), '## 已解决\n- char_001 的旧账已结。\n');
         expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);

@@ -4,7 +4,7 @@
 
 ## 绝对安全红线
 1. **严禁触碰 `manuscripts/`**：已归档手稿是唯一事实真源，`book_edit` 绝对禁止修改任何手稿文件。
-2. **严禁篡改 `Innate Locks` 与 `canonical_name`**：任何实体的先天红线区与标准中文名称只读不可改。
+2. **严禁篡改既有 `Innate Locks` 与 `canonical_name`**：既有实体的先天红线区与标准中文名称只读不可改；新建实体的第 1 区只写有原稿依据且不随剧情改变的固有事实。
 3. **未出场干净实体零碰触**：仅读取并处理自上次水位以来出过场、状态变脏或缓冲达水位的实体；干净实体保持零读取零修改（`mtime` 不变）。
 4. **契约核心承诺保护**：若局部规划路径已失效且修补必然改变 `world/author_charter.md` 的核心承诺，严禁擅自修改 `author_charter.md`，应在汇报中中止维护并请求在安全点交由作者裁决。
 5. **卷中严禁修改写手静态前缀与配置**：常规卷内 `Dreaming` 严禁修改 `world/current_arc_envelope.md`、`world/static_base_and_voice.md`、`world/book_config.yaml`、`world/ops_style_amendments.md` 与 `world/roles/**`（保护跨章静态前缀缓存稳定命中）；动态微调仅允许通过 `world/arc_director_plan.md`、`world/future_horizon.md`、`world/open_threads.md` 与实体第 3/4 区收口。
@@ -22,8 +22,9 @@
 1. **脏实体履历提炼与声纹代谢**：
    - 达水位缓冲只将不可逆人生大拐点提炼进第 3 区（`Irreversible Trajectory`），保留 `[day:X | ch:Y]` 原章锚点与专属声纹；普通剧情真源留在章卡，普通换卷不压缩或重写存活人物生平；
    - 结合 `.ops/telemetry.jsonl` 退化遥测，淘汰 `.ops/voice_samples.yaml` 中复读超标的陈旧标本或临时 `boot_seed` 种子，从近期高评价定稿原稿中补充脱敏纯表达句式（剥离具体案情与专有账目数字）。
-2. **跨章复现微物件与马甲转正建卡**：
-   - 巡检近期双轨 `L2` 章卡中的 `prose_anchors`（异象锚点/微物件）：凡未建卡的关键微物件或神秘马甲在定稿正文中跨 `>= 2` 章（`promote_anchor_min_chapters`）复现并承接因果推进时，使用 `book_edit` 新建 `entities/item_<slug>.md` 档案（具备中文 `canonical_name`、合法外键与四段式结构），或将已确认马甲通过 `unique_aliases` 归并回原角色档案。
+2. **跨章复现微物件与马甲转正建卡，并回填出场台账**：
+   - 巡检近期双轨 `L2` 章卡中的 `prose_anchors`（异象锚点/微物件）。未建卡的关键微物件在定稿正文中跨 `>= 2` 章（`promote_anchor_min_chapters`）实际参与交互并承接因果推进时，使用 `book_edit` 新建 `entities/item_<slug>.md`；若已有对应档案，沿用其 `entity_id`，不要因别称或旧锚点重建。已确认的马甲通过 `unique_aliases` 归并回原角色档案。
+   - 对本轮识别的高频交互物件或确认升格的实体，逐章核对候选历史定稿。通过 `yield_dream_commit.appearances` 提交 `{ entity_id, chapter_number, quote }`：`quote` 逐字引用包含规范名或唯一别名、体现该实体实际出场或交互的正文原句；纯提及、远方转述或身份存疑时提交 `quote: null`，明确该章不回填。升格关联的候选章均须核对。终态门禁验证引文并原子补登对应卷文件的 `出场实体` 字段，无须用 `book_edit` 手改该字段。
 3. **跨卷伏笔台账盘点（`world/open_threads.md`）**：
    - 经原稿核实确已兑现的伏笔翻转为 `RESOLVED` 归档；
    - 如确需登记新跨章悬念，遵守本轮任务提供的单次新增及活跃总数上限。
@@ -37,7 +38,7 @@
    - 严格保持 `world/current_arc_envelope.md` 原样不变，确保写手静态前缀缓存跨章稳定命中。
 
 ### 新建证物最小四段格式
-新建 `entities/item_<slug>.md` 时，使用可解析的 frontmatter 与完整四段标题；以下骨架中的事实改为已核实的原稿内容，空区保留标题即可。
+新建 `entities/item_<slug>.md` 时，使用可解析的 frontmatter 与完整四段标题；将示例替换为已核实的原稿内容。第 1 区记录不随时间变化的固有构造或性质，条目直接写可见性与事实，省去 `day`、`ch` 前缀；可变的持有者、地点、使用和状态写第 2 区。已写入第 2 区、第 3 区或章卡的事实不再照抄进第 4 区，同一缓冲条目只保留一份；没有独立的近期跨章有效信息就保留空标题。
 ```markdown
 ---
 entity_id: item_copper_seal

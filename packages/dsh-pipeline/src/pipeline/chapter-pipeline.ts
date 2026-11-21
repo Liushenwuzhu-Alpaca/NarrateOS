@@ -2138,6 +2138,9 @@ export class ChapterPipeline {
                 ? `实体数量超过 ${fullThreshold}，部分档案已降级为摘要；需要具体槽位时请用 book_read 定点查阅。` : '',
             `## 第 ${chapterNumber} 章定稿正文 (mode=${timelineMode}, story_day=${targetDay})\n${prose}`,
             '',
+            timelineMode === 'MAINLINE'
+                ? '若本章改变公众已知的主线局势，请在 world_summary_markdown 提交合并仍然有效事实后的完整 Markdown 正文（不含 YAML 头），替换 world/world_state.md 的摘要；局势不变则省略。'
+                : '支线与插叙不更新主线世界摘要；省略 world_summary_markdown。',
             '请抽取实体补丁、story_day_delta、双轨章卡摘要 (plot_summary + prose_anchors + appeared_entity_ids) 及 2~3 条 next_chapter_options，并调用 `yield_state_patch` 提交。'
         ]
             .filter(Boolean)
