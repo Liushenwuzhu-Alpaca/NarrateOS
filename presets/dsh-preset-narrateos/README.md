@@ -34,7 +34,6 @@ presets/dsh-preset-narrateos/
 1. **单一顶层模式与宿主/预设分层**：`cordis.patch.yml` 在宿主平面（顶层 `- insert:`）注册 `@narrateos/dsh-book-store`、`@narrateos/dsh-book-tools`、`@narrateos/dsh-pipeline` 共享服务插件、`@narrateos/dsh-client-ui-studio` 浏览器工作台，以及唯一面向作者的 `@deepseek-ai/dsh-agent-preset`（`id: narrateos`，名称「NarrateOS 创作模式」），不将后台工种注册为模式下拉选项。
 2. **工具隔离与净室**：`preset-narrateos.config.plugins` 仅保留会话级插件（零根作用域服务泄露），并在预设作用域内显式挂载严格只读的 `@deepseek-ai/dsh-tool-fs`（`read: true, readImage: false, write: false, edit: false, applyPatch: false`）与 `@deepseek-ai/dsh-tool-fs-search`（`sampleOverCapGlobResults: false`），同时在顶层补丁显式禁用 `dsh-base` 宿主层的 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、`tool-jobs`、`tool-todo`、`tool-goal`、`plan-mode` 全部 8 项编码/终端向宿主行，使 `dsh-base` 与 `dsh-web-app` 双场景都统一获得严格只读的 `read` / `glob` / `grep` 能力且不泄露全局写工具；写手（`writer`）保持 `cleanroom: true`、`tools: []` 单轮净室，且提示词仅陈述正向目标状态。
 3. **单书覆盖**：各作品可在 `books/<slug>/world/roles/` 放置同名 YAML 或 `prompts/*.md` 覆盖本预设包的默认参数与提示词，无需重新编译。
-4. **作品库随作者工作区**：Studio、斜杠命令与主对话开书工具都使用发起会话的实际工作目录。默认作品路径为 `<工作区>/books/<slug>`，正文落在该作品的 `manuscripts/`。同一工作区的会话共享书单、选中作品和进度；不同工作区可各自创建同名作品。若要自定义库目录，在 `narrateos-book-store` 设置 `booksRoot`：相对路径按工作区解析，绝对路径表示显式共用一个库。无会话的调用沿用宿主默认工作目录，纯无头宿主回退到启动目录。
 
 ## 沙盒与分发
 
@@ -43,6 +42,12 @@ presets/dsh-preset-narrateos/
 沙盒不复制宿主凭据或保存启动日志。可使用环境变量，或在沙盒的模型设置中单独保存凭据；DSH 自身的沙盒托管凭据优先于环境变量。自定义模型需先在对应提供方注册，`NARRATEOS_SANDBOX_AGENT_MODEL=provider:model` 只选择路由，不声明模型能力。
 
 仅安装三个后端包时，默认角色、开书技能与内建文风插件随 pipeline 包分发。使用本预设且没有 web-app 注册表时，预设提供注册表；与 web-app 组合时保留宿主选择。各包的 `pnpm pack` 会生成包含入口和声明的本地安装包。
+
+## 作者工作区与作品库
+
+Studio、斜杠命令与主对话开书工具都使用发起会话的实际工作目录。默认作品路径为 `<工作区>/books/<slug>`，正文落在该作品的 `manuscripts/`。同一工作区的会话共享书单、选中作品和进度；不同工作区可各自创建同名作品。自定义库目录在 `narrateos-book-store` 的 `booksRoot` 设置：相对路径按工作区解析，绝对路径表示显式共用一个库。无会话的调用沿用宿主默认工作目录，纯无头宿主回退到启动目录。
+
+工作区尚未创建控制器时，已选模型在首次使用该作品库时生效。卸载 `narrateos-pipeline` 会先排空任务，再撤销它提供的路径覆盖；独立开书工具继续使用自身配置。
 
 ## 运行测试
 

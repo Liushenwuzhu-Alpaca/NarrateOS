@@ -827,32 +827,8 @@ export class NarrateRuntimeController {
     }
 
     /** 处理宿主主对话会话 model/selection 事件并向 SSE 推送 default_model_changed */
-    handleHostSessionModelSelection(rawData: unknown): void {
-        if (this.isAdmissionClosed || !rawData || typeof rawData !== 'object') {
-            return;
-        }
-        const rec = rawData as {
-            provider?: unknown;
-            model?: unknown;
-            reasoningEffort?: unknown;
-        };
-        if (typeof rec.provider !== 'string' || typeof rec.model !== 'string') {
-            return;
-        }
-        const provider = rec.provider.trim();
-        const model = rec.model.trim();
-        if (provider.length === 0 || model.length === 0) {
-            return;
-        }
-        const reasoningEffort =
-            typeof rec.reasoningEffort === 'string' && rec.reasoningEffort.trim().length > 0
-                ? rec.reasoningEffort.trim()
-                : undefined;
-        const selected: HostDefaultModelSelection = {
-            provider,
-            model,
-            ...(reasoningEffort !== undefined ? { reasoningEffort } : {})
-        };
+    handleHostSessionModelSelection(selected: HostDefaultModelSelection): void {
+        if (this.isAdmissionClosed) return;
 
         const agentSel = this.readAgentDefaultSelection();
         this.lastObservedAgentDefaultKey = agentSel

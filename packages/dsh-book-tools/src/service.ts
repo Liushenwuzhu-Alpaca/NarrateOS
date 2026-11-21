@@ -160,35 +160,41 @@ export class NarrateToolsService {
     private readonly configuredBooksRoot: string | undefined;
     private readonly workspaceTools = new Map<string, NarrateToolsService>();
     private readonly startupDirectory = process.cwd();
-    private pipelineBooksRoot: string | undefined;
-    private defaultDirectory: string | undefined;
+    private readonly workspaceOverrides: Array<{
+        booksRoot: string | undefined;
+        defaultDirectory: string | undefined;
+    }> = [];
     private disposed = false;
     private readonly activeBoots = new Set<Promise<LockCharterAndBootResult>>();
 
     constructor(
         public readonly narrateStore: NarrateStoreService,
         config: NarrateToolsConfig = {},
-        defaultDirectory?: string
+        private readonly defaultDirectory?: string
     ) {
         this.defaultBookRoot = config.bookRoot ? resolve(config.bookRoot) : null;
         this.configuredBooksRoot = config.booksRoot;
-        this.defaultDirectory = defaultDirectory;
     }
 
-    /** 旧配置仍可作为无独立存储配置时的回退；入口共用同一个目录解析规则。 */
-    configureWorkspace(booksRoot: string | undefined, defaultDirectory: string | undefined): void {
-        this.pipelineBooksRoot = booksRoot;
-        this.defaultDirectory = defaultDirectory;
+    /** 宿主管线挂载期间复用目录解析；卸载后回到独立工具的配置。 */
+    configureWorkspace(booksRoot: string | undefined, defaultDirectory: string | undefined): () => void {
+        const override = { booksRoot, defaultDirectory };
+        this.workspaceOverrides.push(override);
+        return () => {
+            const index = this.workspaceOverrides.indexOf(override);
+            if (index !== -1) this.workspaceOverrides.splice(index, 1);
+        };
     }
 
     get booksRoot(): string {
-        return this.booksRootFor(this.defaultDirectory);
+        const override = this.workspaceOverrides.at(-1);
+        return this.booksRootFor(override ? override.defaultDirectory : this.defaultDirectory);
     }
 
     booksRootFor(directory: string | undefined): string {
         return resolve(
             directory ?? this.startupDirectory,
-            this.narrateStore.booksRootSetting ?? this.configuredBooksRoot ?? this.pipelineBooksRoot ?? 'books'
+            this.narrateStore.booksRootSetting ?? this.configuredBooksRoot ?? this.workspaceOverrides.at(-1)?.booksRoot ?? 'books'
         );
     }
 

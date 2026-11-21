@@ -6,6 +6,7 @@ import {
     getWorkingDirectory, readSessionWorkspaceDirectory, resolveAgentWorkspaceDirectory, type WorkspaceSession
 } from '@narrateos/dsh-book-store';
 import { AdmissionClosedError, NotFoundError, PathValidationError, TaskConflictError } from '../errors.js';
+import type { HostDefaultModelSelection } from '../schemas.js';
 import { NarrateRuntimeController, type NarrateControllerConfig } from './controller.js';
 
 interface SessionObservation extends Disposable {
@@ -17,10 +18,21 @@ interface SessionQueryPort {
     observeSession(sessionId: string): Promise<SessionObservation>;
 }
 
+function readModelSelection(raw: unknown): HostDefaultModelSelection | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const data = raw as { provider?: unknown; model?: unknown; reasoningEffort?: unknown };
+    const provider = typeof data.provider === 'string' ? data.provider.trim() : '';
+    const model = typeof data.model === 'string' ? data.model.trim() : '';
+    if (!provider || !model) return undefined;
+    const reasoningEffort = typeof data.reasoningEffort === 'string' ? data.reasoningEffort.trim() : '';
+    return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) };
+}
+
 /** 每个实际作品库只保留一组控制器、暂存和选书状态；请求本身不改变任何共享目录。 */
 export function createWorkspaceRuntime(ctx: Context, config: NarrateControllerConfig) {
     const defaultController = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, config);
     const byRoot = new Map([[defaultController.booksRoot, defaultController]]);
+    const pendingModelSelections = new Map<string, HostDefaultModelSelection>();
     let executionContext = ctx;
     let closed = false;
 
@@ -39,6 +51,11 @@ export function createWorkspaceRuntime(ctx: Context, config: NarrateControllerCo
             });
             controller.roleRunner.setExecutionContext(executionContext);
             byRoot.set(booksRoot, controller);
+            const modelSelection = pendingModelSelections.get(booksRoot);
+            if (modelSelection) {
+                pendingModelSelections.delete(booksRoot);
+                controller.handleHostSessionModelSelection(modelSelection);
+            }
         }
         await controller.trackBackgroundTask(controller.ensureDefaultBookSelected());
         if (closed) throw new AdmissionClosedError();
@@ -49,9 +66,14 @@ export function createWorkspaceRuntime(ctx: Context, config: NarrateControllerCo
         defaultController,
         controllers: () => byRoot.values(),
         onSessionModelSelection(session: WorkspaceSession, data: unknown): void {
+            if (closed) return;
+            const selection = readModelSelection(data);
+            if (!selection) return;
             const directory = readSessionWorkspaceDirectory(ctx, session);
-            const controller = directory ? byRoot.get(ctx.narrateTools.booksRootFor(directory)) : defaultController;
-            controller?.handleHostSessionModelSelection(data);
+            const booksRoot = directory ? ctx.narrateTools.booksRootFor(directory) : defaultController.booksRoot;
+            const controller = byRoot.get(booksRoot);
+            if (controller) controller.handleHostSessionModelSelection(selection);
+            else pendingModelSelections.set(booksRoot, selection);
         },
         setExecutionContext(scope: Context): void {
             executionContext = scope;
@@ -92,6 +114,7 @@ export function createWorkspaceRuntime(ctx: Context, config: NarrateControllerCo
         },
         async shutdown(): Promise<void> {
             closed = true;
+            pendingModelSelections.clear();
             await Promise.all([...byRoot.values()].map((controller) => controller.shutdown()));
         }
     };

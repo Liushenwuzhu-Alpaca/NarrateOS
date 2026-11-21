@@ -347,6 +347,11 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         });
         const pipeline = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
         registerCleanup(() => pipeline.dispose());
+        (ctx.emit as (name: string, ...args: unknown[]) => void)(
+            'session/event', sessionA, { type: 'model/selection', data: { provider: 'workspace-a', model: 'early-author-model' } }
+        );
+        expect((await web.invoke('GET', '/api/narrate/status?scopeSessionId=author-a')).json?.['defaultModel'])
+            .toMatchObject({ provider: 'workspace-a', model: 'early-author-model' });
         expect((await web.invoke('GET', '/api/narrate/books?scopeSessionId=missing')).statusCode).toBe(404);
         const studioBoot = await web.invoke('POST', '/api/narrate/boot?scopeSessionId=author-b', {
             slug: 'shared-name', title: '乙地雪港', povCharacter: 'char_lead', mode: 'original',
@@ -817,12 +822,17 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             },
             onLlmStream: () => textToStreamChunks('ok')
         });
+        const standaloneTools = ctx.narrateTools;
+        const standaloneBooksRoot = standaloneTools.booksRoot;
+        const mountedBooksRoot = join(bookRoot, '..');
 
         const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            booksRoot: mountedBooksRoot,
             heartbeatIntervalMs: 0,
             shutdownTimeoutMs: 40
         });
         registerCleanup(() => pipeFiber.dispose());
+        expect(standaloneTools.booksRoot).toBe(mountedBooksRoot);
 
         const sse = await web.openSse();
         registerCleanup(() => sse.close());
@@ -856,6 +866,7 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         await Promise.allSettled([inFlightPromise, disposePromise]);
 
         expect(disposeSettled).toBe(true);
+        expect(ctx.narrateTools.booksRoot).toBe(standaloneBooksRoot);
         expect(ctx.reflect.get('narratePipeline', false)).toBeUndefined();
         expect(web.routes.size).toBe(0);
         await expect(stat(join(bookRoot, '.ops/tx.lock'))).rejects.toMatchObject({ code: 'ENOENT' });

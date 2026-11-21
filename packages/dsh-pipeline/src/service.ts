@@ -151,7 +151,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
     const resolvedPluginSearchDirs = resolvePluginSearchDirs(config);
 
     ctx.effect(function* () {
-        ctx.narrateTools.configureWorkspace(config.booksRoot, getWorkingDirectory(ctx)?.defaultDirectory);
+        yield ctx.narrateTools.configureWorkspace(config.booksRoot, getWorkingDirectory(ctx)?.defaultDirectory);
         const workspace = createWorkspaceRuntime(ctx, {
             bookRoot: config.bookRoot,
             booksRoot: ctx.narrateTools.booksRoot,
