@@ -283,7 +283,7 @@ function assertRecallEntityPairing(
     }
 }
 
-async function validateSelectedLoreFiles(
+export async function validateSelectedLoreFiles(
     bookRoot: string,
     fence: PathFence,
     combinedOverlay: ReadonlyMap<string, string | null>,

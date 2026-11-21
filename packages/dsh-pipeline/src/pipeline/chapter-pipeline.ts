@@ -55,7 +55,7 @@ import {
     type TokenUsage,
     type VoiceSamplePool
 } from '@narrateos/dsh-book-store';
-import { GATE_POSITIVE_GUIDANCE } from '@narrateos/dsh-book-tools';
+import { GATE_POSITIVE_GUIDANCE, GateValidationError, PathFence, PathFenceError, validateSelectedLoreFiles } from '@narrateos/dsh-book-tools';
 import type {
     FactCheckIssue,
     FactCheckOutput,
@@ -693,6 +693,7 @@ export class ChapterPipeline {
         );
 
         // Step 1: Librarian (多轮受控探查 -> yield_context_pack)
+        const replayedLibrarian = retry.replaying;
         const { payload: librarianOut, recalledSlices: recallSlices, selectedLoreEntries, selectedLoreSources } =
             await retry.run('LIBRARIAN', () => {
                 emit('LIBRARIAN', chapterNumber, '构建双层目录并执行成对回表检索');
@@ -709,6 +710,23 @@ export class ChapterPipeline {
                     branchStagingOverlay
                 );
             });
+        if (replayedLibrarian && librarianOut.selected_lore_files.length > 0) {
+            const librarianRole = await this.roleLoader.loadRoleConfig('librarian', this.store.bookRoot);
+            const fence = new PathFence(this.store.bookRoot, { blockedReadPaths: librarianRole.blockedReadPaths });
+            const staleLore = () => new TaskConflictError('已选世界书词条已变化或不可用，断点已保留；请从头重跑当前章');
+            try {
+                const currentSources = await validateSelectedLoreFiles(
+                    this.store.bookRoot, fence, branchStagingOverlay ?? new Map(), librarianOut.selected_lore_files
+                );
+                if (currentSources.length !== selectedLoreSources.length || currentSources.some((source, index) => {
+                    const savedSource = selectedLoreSources[index]!;
+                    return source.path !== savedSource.path || source.content !== savedSource.content;
+                })) throw staleLore();
+            } catch (error) {
+                if (error instanceof GateValidationError || error instanceof PathFenceError) throw staleLore();
+                throw error;
+            }
+        }
 
         const spotlightEntityIds = activeSignals
             .filter((s) => s.type === 'SPOTLIGHT_TRIGGER' && Boolean(s.entity_id))

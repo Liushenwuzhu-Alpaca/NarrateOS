@@ -2665,6 +2665,45 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(plannerCalls).toBe(4);
     });
 
+    it('原地重试拒绝已退役的选中词条，显式重跑使用当前选页', async () => {
+        const lore = 'lore_library/lore_old_route.md';
+        const marker = '潮水退去后沿废旧吊桥过岸。';
+        let retired = false;
+        const received: string[] = [];
+        const { bookRoot, web } = await setupWave3bWorkspace('retry-lore-retirement', {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'], recall_queries: [],
+                        selected_lore_files: retired ? [] : [lore]
+                    });
+                } else if (tools.has('yield_outline')) {
+                    received.push(taskPrompt);
+                    throw new Error('测试中断：细纲模型暂时不可用');
+                }
+            },
+            onLlmStream: () => textToStreamChunks('本场景不会运行到执笔。')
+        });
+        await mkdir(join(bookRoot, 'lore_library'), { recursive: true });
+        await writeFile(join(bookRoot, lore), `# 吊桥旧线\n\n${marker}\n`);
+
+        expect((await web.invoke('POST', '/api/narrate/step', { chapterGoal: '选择过岸路线' })).statusCode).toBe(500);
+        expect(received).toEqual([expect.stringContaining(marker)]);
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(500);
+        expect(received).toEqual([expect.stringContaining(marker), expect.stringContaining(marker)]);
+
+        retired = true;
+        await writeFile(join(bookRoot, lore), `---\nstatus: WARPED\n---\n# 吊桥旧线\n\n${marker}\n`);
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(409);
+        expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({
+            txLockHeld: false, chapterRetry: { stage: 'PLANNER', canRestart: true }
+        });
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'restart' })).statusCode).toBe(500);
+        expect(received).toEqual([
+            expect.stringContaining(marker), expect.stringContaining(marker), expect.not.stringContaining(marker)
+        ]);
+    });
+
     it('ISS-064, 065, 067, 068, 069: 软链拦截、批量 git log、SafeHalt 双套字段与严格 400 入参校验', async () => {
         const booksRoot = await mkdtemp(join(tmpdir(), 'narrateos-sec-books-'));
         tempDirs.push(booksRoot);
