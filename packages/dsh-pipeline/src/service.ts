@@ -8,18 +8,15 @@ import '@deepseek-ai/dsh-llm';
 import '@deepseek-ai/dsh-session';
 import '@deepseek-ai/dsh-skill';
 import Schema from '@deepseek-ai/schemastery';
-import '@narrateos/dsh-book-store';
+import { getWorkingDirectory } from '@narrateos/dsh-book-store';
 import '@narrateos/dsh-book-tools';
 import { resolveDefaultEngineCraftPluginDir } from './pipeline/chapter-pipeline.js';
 import type { LlmPoolRouting } from './schemas.js';
 import { registerNarrateCommands } from './runtime/commands.js';
-import {
-    NarrateRuntimeController,
-    type PluginPoolRouteOverride,
-    type PluginPoolRoutingOverrides
-} from './runtime/controller.js';
+import type { NarrateRuntimeController, PluginPoolRouteOverride, PluginPoolRoutingOverrides } from './runtime/controller.js';
 import { registerNarrateRoutes } from './runtime/routes.js';
 import { registerPresetBootSkill } from './runtime/skills.js';
+import { createWorkspaceRuntime } from './runtime/workspace-runtime.js';
 
 /** Cordis 插件标识 */
 export const name = 'narrateos-pipeline';
@@ -154,18 +151,20 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
     const resolvedPluginSearchDirs = resolvePluginSearchDirs(config);
 
     ctx.effect(function* () {
-        const controller = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, {
+        ctx.narrateTools.configureWorkspace(config.booksRoot, getWorkingDirectory(ctx)?.defaultDirectory);
+        const workspace = createWorkspaceRuntime(ctx, {
             bookRoot: config.bookRoot,
-            booksRoot: config.booksRoot,
+            booksRoot: ctx.narrateTools.booksRoot,
             presetRoot: config.presetRoot,
             pluginSearchDirs: resolvedPluginSearchDirs,
             poolRoutingOverrides: resolvedOverrides,
             heartbeatIntervalMs: config.heartbeatIntervalMs,
             shutdownTimeoutMs: config.shutdownTimeoutMs
         });
+        const controller = workspace.defaultController;
         // 构造器已持有切书监听和心跳，即使后续装配失败也必须收回。
         let draining: Promise<void> | undefined;
-        const shutdown = () => draining ??= controller.shutdown();
+        const shutdown = () => draining ??= workspace.shutdown();
         yield shutdown;
 
         yield ctx.on('session/event', (session, event) => {
@@ -175,18 +174,18 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
                 return;
             }
             if (event && event.type === 'model/selection') {
-                controller.handleHostSessionModelSelection(event.data);
+                workspace.onSessionModelSelection(session, event.data);
             }
         });
 
         yield ctx.on('llm/adapters-updated', () => {
             if (controller.isAdmissionClosed) return;
-            controller.handleHostLlmCatalogUpdated();
+            for (const runtime of workspace.controllers()) runtime.handleHostLlmCatalogUpdated();
         });
 
         yield ctx.on('llm/models-updated', () => {
             if (controller.isAdmissionClosed) return;
-            controller.handleHostLlmCatalogUpdated();
+            for (const runtime of workspace.controllers()) runtime.handleHostLlmCatalogUpdated();
         });
 
         // 独立子插件隔离 RoleRunner 动态挂载点（session/event 监听与 agents.create 作用域），
@@ -194,10 +193,10 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
         const runnerFiber = ctx.plugin({
             name: 'narrateos-pipeline:runner',
             apply(runnerCtx) {
-                controller.roleRunner.setExecutionContext(runnerCtx);
+                workspace.setExecutionContext(runnerCtx);
                 runnerCtx.effect(
                     () => () => {
-                        controller.roleRunner.setExecutionContext(ctx);
+                        workspace.setExecutionContext(ctx);
                     },
                     'narrateos-pipeline:runner-scope'
                 );
@@ -207,7 +206,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
 
         const webFiber = ctx.inject(['webServer'], (webCtx) => {
             webCtx.effect(
-                () => registerNarrateRoutes(webCtx.webServer, controller),
+                () => registerNarrateRoutes(webCtx.webServer, controller, workspace.forRequest),
                 'narrateos-pipeline:webserver'
             );
         });
@@ -215,7 +214,7 @@ export function apply(ctx: Context, config: NarratePipelineConfig = {}): void {
 
         const cmdFiber = ctx.inject(['commands'], (cmdCtx) => {
             cmdCtx.effect(
-                () => registerNarrateCommands(cmdCtx.commands, controller),
+                () => registerNarrateCommands(cmdCtx.commands, controller, workspace.forCommand),
                 'narrateos-pipeline:commands'
             );
         });

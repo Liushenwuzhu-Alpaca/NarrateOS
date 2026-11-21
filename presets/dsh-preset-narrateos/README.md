@@ -34,6 +34,7 @@ presets/dsh-preset-narrateos/
 1. **单一顶层模式与宿主/预设分层**：`cordis.patch.yml` 在宿主平面（顶层 `- insert:`）注册 `@narrateos/dsh-book-store`、`@narrateos/dsh-book-tools`、`@narrateos/dsh-pipeline` 共享服务插件、`@narrateos/dsh-client-ui-studio` 浏览器工作台，以及唯一面向作者的 `@deepseek-ai/dsh-agent-preset`（`id: narrateos`，名称「NarrateOS 创作模式」），不将后台工种注册为模式下拉选项。
 2. **工具隔离与净室**：`preset-narrateos.config.plugins` 仅保留会话级插件（零根作用域服务泄露），并在预设作用域内显式挂载严格只读的 `@deepseek-ai/dsh-tool-fs`（`read: true, readImage: false, write: false, edit: false, applyPatch: false`）与 `@deepseek-ai/dsh-tool-fs-search`（`sampleOverCapGlobResults: false`），同时在顶层补丁显式禁用 `dsh-base` 宿主层的 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、`tool-jobs`、`tool-todo`、`tool-goal`、`plan-mode` 全部 8 项编码/终端向宿主行，使 `dsh-base` 与 `dsh-web-app` 双场景都统一获得严格只读的 `read` / `glob` / `grep` 能力且不泄露全局写工具；写手（`writer`）保持 `cleanroom: true`、`tools: []` 单轮净室，且提示词仅陈述正向目标状态。
 3. **单书覆盖**：各作品可在 `books/<slug>/world/roles/` 放置同名 YAML 或 `prompts/*.md` 覆盖本预设包的默认参数与提示词，无需重新编译。
+4. **作品库随作者工作区**：Studio、斜杠命令与主对话开书工具都使用发起会话的实际工作目录。默认作品路径为 `<工作区>/books/<slug>`，正文落在该作品的 `manuscripts/`。同一工作区的会话共享书单、选中作品和进度；不同工作区可各自创建同名作品。若要自定义库目录，在 `narrateos-book-store` 设置 `booksRoot`：相对路径按工作区解析，绝对路径表示显式共用一个库。无会话的调用沿用宿主默认工作目录，纯无头宿主回退到启动目录。
 
 ## 沙盒与分发
 

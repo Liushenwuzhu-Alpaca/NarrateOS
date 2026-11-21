@@ -115,15 +115,12 @@ test('cordis.patch.yml 遵循宿主平面与预设作用域分层，不动态查
 
     const bookStore = hostByName.get('@narrateos/dsh-book-store');
     assert.equal(bookStore.id, 'narrateos-book-store');
-    assert.equal(bookStore.config?.booksRoot, './books');
 
     const bookTools = hostByName.get('@narrateos/dsh-book-tools');
     assert.equal(bookTools.id, 'narrateos-book-tools');
-    assert.equal(bookTools.config?.booksRoot, './books');
 
     const pipeline = hostByName.get('@narrateos/dsh-pipeline');
     assert.equal(pipeline.id, 'narrateos-pipeline');
-    assert.equal(pipeline.config?.booksRoot, './books');
     assert.equal(pipeline.config?.presetRoot, undefined, 'dsh-pipeline 自行回退解析 presetRoot，不在 patch 中硬编码 !!js');
     assert.equal(pipeline.config?.poolRouting?.audit, undefined, 'cordis.patch.yml 仅暴露强/弱双池，不得残留 audit 第三池');
     for (const pool of ['strong_creative', 'fast_retrieval']) {
@@ -326,7 +323,9 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
     ctx.provide('userQuestions', { ask: async () => ({}) });
     ctx.provide('commands', { register: () => () => {} });
     ctx.provide('tokenMeter', { register: () => () => {}, measure: () => 0, estimateChars: () => 0 });
-    ctx.provide('workingDirectory', { resolve: (p) => p, ensure: async () => REPO_ROOT, cwd: REPO_ROOT });
+    ctx.provide('workingDirectory', {
+        defaultDirectory: REPO_ROOT, get: () => REPO_ROOT, resolve: (p) => p, ensure: async () => REPO_ROOT
+    });
     ctx.provide('fs', {
         resolve: async (p) => ({ displayPath: p, targetKey: p }),
         stat: async () => undefined,
@@ -369,7 +368,6 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
 
         const storeEntry = hostEntries.find((entry) => entry.id === 'narrateos-book-store');
         assert.ok(storeEntry, 'Host ctx.loader.entries() 必须包含 narrateos-book-store');
-        assert.equal(ctx.get('narrateStore')?.booksRoot, path.resolve('./books'));
 
         const toolsEntry = hostEntries.find((entry) => entry.id === 'narrateos-book-tools');
         assert.ok(toolsEntry, 'Host ctx.loader.entries() 必须包含 narrateos-book-tools');
@@ -377,7 +375,9 @@ test('与真实 dsh-base + dsh-web-app 组合零告警，且 AgentPresetRegistry
 
         const pipelineEntry = hostEntries.find((entry) => entry.id === 'narrateos-pipeline');
         assert.ok(pipelineEntry, 'Host ctx.loader.entries() 必须包含 narrateos-pipeline');
-        assert.ok(ctx.get('narratePipeline'), 'Host ctx.get("narratePipeline") 必须已注册');
+        const runtime = ctx.get('narratePipeline');
+        assert.ok(runtime, 'Host ctx.get("narratePipeline") 必须已注册');
+        assert.equal(runtime.booksRoot, path.join(REPO_ROOT, 'books'));
 
         const compositions = ctx.agentPresets.inspectCompositions();
         assert.equal(compositions.length, 1);

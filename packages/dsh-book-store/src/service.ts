@@ -63,6 +63,7 @@ export class NarrateStoreService {
 
     private currentBookRoot: string | null;
     private readonly currentBooksRoot: string | null;
+    readonly booksRootSetting: string | undefined;
     private readonly activeRuns = new Set<string>();
     private readonly lockAcquireQueues = new Map<string, Promise<void>>();
     private readonly bookSwitchedListeners = new Set<BookSwitchedListener>();
@@ -72,6 +73,7 @@ export class NarrateStoreService {
     constructor(config?: NarrateStoreConfig, system?: SystemPort) {
         this.currentBookRoot =
             config?.bookRoot && config.bookRoot.trim().length > 0 ? resolve(config.bookRoot) : null;
+        this.booksRootSetting = config?.booksRoot;
         this.currentBooksRoot =
             config?.booksRoot && config.booksRoot.trim().length > 0 ? resolve(config.booksRoot) : null;
         this.system = system ?? new NodeSystemAdapter();

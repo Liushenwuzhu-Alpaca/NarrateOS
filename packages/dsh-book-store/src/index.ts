@@ -10,3 +10,4 @@ export * from './staging/index.js';
 export * from './text/paragraphs.js';
 export * from './trace/trace.js';
 export * from './service.js';
+export * from './workspace-directory.js';

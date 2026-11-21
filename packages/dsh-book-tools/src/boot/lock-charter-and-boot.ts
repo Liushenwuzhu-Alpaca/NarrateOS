@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
+import { defineTool, type ToolDefinition, type ToolExecution } from '@deepseek-ai/dsh-tools';
 import {
     BookStore,
     DEFAULT_SECTION_HEADINGS,
@@ -546,7 +546,8 @@ export async function lockCharterAndBoot(
 /** 创建主对话开书建库工具 lock_charter_and_boot */
 export function createLockCharterAndBootTool(
     options: LockCharterAndBootOptions,
-    boot: typeof lockCharterAndBoot = lockCharterAndBoot
+    boot: (input: LockCharterAndBootInput, config: LockCharterAndBootOptions, exec: Readonly<ToolExecution>) =>
+        Promise<LockCharterAndBootResult> = lockCharterAndBoot
 ): ToolDefinition {
     return defineTool({
         name: 'lock_charter_and_boot',
@@ -658,7 +659,7 @@ export function createLockCharterAndBootTool(
         isConcurrencySafe: () => false,
         async execute(args, exec) {
             exec.signal.throwIfAborted();
-            const res = await boot(args as LockCharterAndBootInput, options);
+            const res = await boot(args as LockCharterAndBootInput, options, exec);
             return {
                 bookRoot: res.bookRoot,
                 bookSlug: res.bookSlug,
