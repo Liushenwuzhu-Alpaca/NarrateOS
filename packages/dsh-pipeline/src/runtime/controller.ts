@@ -45,6 +45,7 @@ import {
     ChapterPipeline,
     resolveDefaultEngineCraftPluginDir
 } from '../pipeline/chapter-pipeline.js';
+import { readChapterRetry } from '../pipeline/chapter-retry.js';
 import { DreamingPipeline } from '../pipeline/dreaming-pipeline.js';
 import {
     appendJsonlLineSafe,
@@ -913,6 +914,19 @@ export class NarrateRuntimeController {
         };
     }
 
+    async getChapterRetry(store: BookStore, tx: BookSnapshot['txState']): Promise<{
+        chapterNumber: number;
+        stage: string;
+        canRestart: boolean;
+    } | null> {
+        if (tx.phase === 'FEAT_COMMITTED' && tx.active_chapter !== null) {
+            return { chapterNumber: tx.active_chapter, stage: 'EXTRACTOR', canRestart: false };
+        }
+        const saved = await readChapterRetry(store.bookRoot);
+        if (!saved || saved.input.chapterNumber <= tx.last_committed_ch) return null;
+        return { chapterNumber: saved.input.chapterNumber, stage: saved.pendingStage, canRestart: true };
+    }
+
     /** 要求当前已选定有效作品目录 */
     requireBookStore(): BookStore {
         return this.storeService.openStore(this.bookRoot ?? undefined);
@@ -1378,10 +1392,12 @@ export class NarrateRuntimeController {
         const fromHeal = typeof context === 'object' && context.fromHeal === true;
 
         const runCore = async (signal: AbortSignal): Promise<StepChapterResult> => {
-            const effectiveGoal = await this.resolveEffectiveChapterGoal(store, options.chapterGoal, options);
+            const taskSignal = options.signal ? AbortSignal.any([options.signal, signal]) : signal;
+            const effectiveGoal = options.retry ? '' : await this.resolveEffectiveChapterGoal(store, options.chapterGoal, options);
             this.activeStageSessions.clear();
             this.emitEvent('chapter:phase', {
                 phase: 'STARTING',
+                ...(options.retry ? { retry: options.retry } : {}),
                 chapterNumber: options.chapterNumber ?? null,
                 chapterGoal: effectiveGoal
             });
@@ -1395,7 +1411,7 @@ export class NarrateRuntimeController {
                 const resData = await pipeline.stepChapter({
                     ...options,
                     chapterGoal: effectiveGoal,
-                    signal: options.signal ?? signal,
+                    signal: taskSignal,
                     onStageSession: (evt) => {
                         this.activeStage = evt.stage;
                         this.handleStageSession(evt);
@@ -1464,6 +1480,7 @@ export class NarrateRuntimeController {
                             stage: evt.stage,
                             chapterNumber: evt.chapterNumber,
                             message: evt.message,
+                            txLockHeld: true,
                             timestamp: evt.timestamp,
                             ...(activeSessionId ? { activeSessionId, sessionId: activeSessionId } : {}),
                             ...(runId ? { runId } : {}),
@@ -1538,18 +1555,22 @@ export class NarrateRuntimeController {
                 const tx = await store.readTxState();
                 if (!fromHeal && !options.parallelWindowId && !options.parallelBranchId &&
                     !awaitingCalibration && !this.haltRequested && !this.shuttingDown &&
-                    !(options.signal ?? signal).aborted &&
+                    !taskSignal.aborted &&
                     tx.chapter_context?.timelineMode !== 'PARALLEL' &&
                     (await listOpenParallelWindows(store.bookRoot)).length === 0) {
                     await this.executeDreaming(store, {
                         currentChapter: resData.chapterNumber,
                         impactedHorizonEvents: resData.impactedHorizonEvents,
-                        signal: options.signal ?? signal,
+                        signal: taskSignal,
                         onStageSession: options.onStageSession
                     });
                 }
                 return resData;
             } catch (err) {
+                if (taskSignal.aborted) {
+                    this.emitEvent('chapter:phase', { phase: 'HALTED' });
+                    taskSignal.throwIfAborted();
+                }
                 this.emitEvent('chapter:phase', {
                     phase: 'FAILED',
                     error: err instanceof Error ? err.message : String(err)

@@ -8,6 +8,7 @@ import { collectPoolProviders, resolveEffectiveRoleModelLabel } from './RoleRout
 import type { StageSessionSelection } from './StageSessionViewer';
 import { handleTabKeyDown } from './tab-keyboard';
 import type {
+    ChapterRetrySummary,
     RoleDefinitionItem,
     RoleModelOverride,
     RolePoolId,
@@ -226,6 +227,8 @@ export interface CenterWorkbenchProps {
     selectedChapter?: number | undefined;
     timelineMode?: string | undefined;
     walPhase?: string | undefined;
+    chapterRetry?: ChapterRetrySummary | null | undefined;
+    txLockHeld?: boolean | undefined;
     activeTask?: RuntimeTaskKind | undefined;
     haltRequested?: boolean | undefined;
     haltWaiting?: boolean | undefined;
@@ -234,6 +237,8 @@ export interface CenterWorkbenchProps {
     chapterDetail?: ChapterDetailData | null | undefined;
     chapterLoading?: boolean | undefined;
     stages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
+    /** 供下钻使用的章节会话，不参与实时徽标。 */
+    sessionStages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
     latestSseStage?: string | null | undefined;
     safeHalt?: SafeHaltInfo | null | undefined;
     syncConflict?: SyncConflictDiagnostic | null | undefined;
@@ -532,11 +537,6 @@ function deriveStagesFromSse(
                 break;
             }
             case 'DREAMING': {
-                for (const id of STAGE_ORDER) {
-                    if (id !== 'DREAMING') {
-                        base[id] = { status: 'done' };
-                    }
-                }
                 base.DREAMING = { status: 'active', summary: '跨章整理与归纳运行中' };
                 break;
             }
@@ -630,10 +630,6 @@ function resolveSignalRequestType(kind: DirectorSignalKind): string {
     return 'DIRECTOR_NOTE';
 }
 
-function getStopButtonLabel(stopPending: boolean, haltWaiting: boolean): string {
-    if (!stopPending) return '写完本章暂停';
-    return haltWaiting ? '等待安全点收束…' : '写完本章即停…';
-}
 
 function getDiffRowClassName(kind: 'ctx' | 'add' | 'del'): string {
     if (kind === 'del') return 'ns-diff-row ns-diff-row-del';
@@ -806,7 +802,7 @@ function renderTaskStatusBadge(params: {
 }
 
 function renderStopSplitAction(params: {
-    stopPending: boolean;
+    softStopPending: boolean;
     haltWaiting: boolean;
     menuOpen: boolean;
     onToggleMenu: () => void;
@@ -818,11 +814,11 @@ function renderStopSplitAction(params: {
             <button
                 type="button"
                 className="ns-btn ns-btn-warn"
-                disabled={params.stopPending}
-                onClick={params.onSoftStop}
+                disabled={params.haltWaiting}
+                onClick={params.onForceStop}
             >
                 {StudioIcons.pause}
-                <span>{getStopButtonLabel(params.stopPending, params.haltWaiting)}</span>
+                <span>{params.haltWaiting ? '正在安全中止…' : '安全中止'}</span>
             </button>
             <button
                 type="button"
@@ -840,20 +836,11 @@ function renderStopSplitAction(params: {
                         type="button"
                         role="menuitem"
                         className="ns-menu-row"
+                        disabled={params.softStopPending || params.haltWaiting}
                         onClick={params.onSoftStop}
                     >
-                        <b>写完本章后平稳停下（推荐）</b>
-                        <span>等当前章节保存完整后再退出运行</span>
-                    </button>
-                    <div className="ns-menu-divider" />
-                    <button
-                        type="button"
-                        role="menuitem"
-                        className="ns-menu-row ns-danger"
-                        onClick={params.onForceStop}
-                    >
-                        <b>立即中断并撤回半截草稿</b>
-                        <span>强行打断当前生成，恢复到上一章干净状态</span>
+                        <b>写完本章暂停</b>
+                        <span>等当前章节完整保存后再停下</span>
                     </button>
                 </div>
             )}
@@ -864,6 +851,8 @@ function renderStopSplitAction(params: {
 function renderRunSplitAction(params: {
     disabled: boolean;
     stepSubmitting: boolean;
+    chapterRetry?: ChapterRetrySummary | null | undefined;
+    onRestartChapter: () => void;
     menuOpen: boolean;
     onStepOne: () => void;
     onToggleMenu: () => void;
@@ -878,20 +867,28 @@ function renderRunSplitAction(params: {
                 onClick={params.onStepOne}
             >
                 {StudioIcons.play}
-                <span>{params.stepSubmitting ? '正在开启…' : '写下一章'}</span>
+                <span>{params.stepSubmitting ? '正在开启…' : params.chapterRetry ? '原地重试' : '写下一章'}</span>
             </button>
             <button
                 type="button"
                 className="ns-btn ns-btn-primary"
-                disabled={params.disabled}
+                disabled={params.disabled || params.chapterRetry?.canRestart === false}
                 aria-haspopup="menu"
                 aria-expanded={params.menuOpen}
                 onClick={params.onToggleMenu}
             >
-                <span>YOLO</span>
+                <span>{params.chapterRetry ? '更多' : 'YOLO'}</span>
                 {StudioIcons.chev}
             </button>
-            {params.menuOpen && (
+            {params.menuOpen && params.chapterRetry?.canRestart && (
+                <div className="ns-menu-pop" role="menu" aria-label="章节重试方式">
+                    <button type="button" role="menuitem" className="ns-menu-row" onClick={params.onRestartChapter}>
+                        <b>从头重跑当前章</b>
+                        <span>重做资料选择、细纲与初稿</span>
+                    </button>
+                </div>
+            )}
+            {params.menuOpen && !params.chapterRetry && (
                 <div className="ns-menu-pop" role="menu" aria-label="YOLO 连写模式">
                     <button
                         type="button"
@@ -1009,6 +1006,7 @@ function renderOpsMenu(params: {
 function renderPipelineDrawer(params: {
     open: boolean;
     stageMap: Record<PipelineStageId, StageNodeState>;
+    sessionStages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
     inspectedStageId: PipelineStageId;
     resolveStageModelLabel: (stageDef: StageDefinition) => string;
     onInspectStep: (stageDef: StageDefinition) => void;
@@ -1018,7 +1016,9 @@ function renderPipelineDrawer(params: {
         <section className="ns-pipeline-drawer" aria-label="6 步 Agent 工序与模型矩阵">
             {PIPELINE_STAGES.map((stage) => {
                 const nodeState = params.stageMap[stage.id];
-                const primarySession = resolvePrimaryStageSession(stage.id, nodeState);
+                const primarySession = resolvePrimaryStageSession(
+                    stage.id, params.sessionStages?.[stage.id] ?? nodeState
+                );
                 const effectiveModel = params.resolveStageModelLabel(stage);
                 const isRunningLive =
                     nodeState.status === 'active' || nodeState.status === 'healing';
@@ -1535,6 +1535,8 @@ export function CenterWorkbench({
     selectedChapter,
     timelineMode = 'MAINLINE',
     walPhase = 'STATE_COMMITTED',
+    chapterRetry,
+    txLockHeld = false,
     activeTask = 'IDLE',
     haltRequested = false,
     haltWaiting = false,
@@ -1543,6 +1545,7 @@ export function CenterWorkbench({
     chapterDetail,
     chapterLoading = false,
     stages,
+    sessionStages,
     latestSseStage,
     safeHalt,
     syncConflict = null,
@@ -1598,7 +1601,7 @@ export function CenterWorkbench({
     const activeChapterNumber = chapterDetail?.chapterNumber ?? selectedChapter ?? currentChapter;
     const isYoloRunning = Boolean(yolo?.running);
     const isBusy = activeTask !== 'IDLE' || isYoloRunning;
-    const stopPending = haltRequested || Boolean(yolo?.stopRequested);
+    const softStopPending = haltRequested || Boolean(yolo?.stopRequested);
 
     // 同步防重入锁（ISS-069）：防止在途前连续点击写出重复请求
     const stepSubmittingRef = useRef(false);
@@ -1817,7 +1820,7 @@ export function CenterWorkbench({
             if (onStepOne) {
                 await onStepOne(options);
             } else {
-                await sendJsonRequest('/api/narrate/step', '写下一章失败', {
+                await sendJsonRequest('/api/narrate/step', options?.retry ? '章节重试失败' : '写下一章失败', {
                     body: options ?? {}
                 });
             }
@@ -1876,13 +1879,9 @@ export function CenterWorkbench({
             if (onRequestHalt) {
                 await onRequestHalt({ force: true });
             } else {
-                await fetch('/api/narrate/halt', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ force: true })
-                });
+                await sendJsonRequest('/api/narrate/halt', '安全中止失败', { body: { force: true } });
             }
-            showFeedback('已发送立即中断指令，正在撤回半截草稿');
+            showFeedback('已请求安全中止，正在等待本轮退出并释放作品锁');
         } catch (err) {
             showError(err);
         }
@@ -2214,7 +2213,7 @@ export function CenterWorkbench({
         isStepping ||
         Boolean(latestSseStage) ||
         PIPELINE_STAGES.some((s) => {
-            const st = stageMap[s.id];
+            const st = sessionStages?.[s.id] ?? stageMap[s.id];
             return (
                 (st.status !== 'idle' && st.status !== 'dormant') ||
                 Boolean(st.sessionId) ||
@@ -2227,7 +2226,7 @@ export function CenterWorkbench({
         chapterDetail?.volumeLabel || currentVolumeLabel || (hasChapterContent ? '第一卷' : '第一卷 · 尚未开写');
 
     const handleInspectStep = (stageDef: StageDefinition) => {
-        const nodeState = stageMap[stageDef.id];
+        const nodeState = sessionStages?.[stageDef.id] ?? stageMap[stageDef.id];
         const primarySession = resolvePrimaryStageSession(stageDef.id, nodeState);
         runWithViewTransition(() => {
             setInspectedStageId(stageDef.id);
@@ -2260,6 +2259,7 @@ export function CenterWorkbench({
     };
 
     const handleOpenPatchTrace = () => {
+        const writerSessionStage = sessionStages?.WRITER ?? stageMap.WRITER;
         runWithViewTransition(() => {
             setInspectedStageId('WRITER');
             onInspectStage?.('WRITER');
@@ -2273,17 +2273,17 @@ export function CenterWorkbench({
                         parentSessionId: patchSession.parentSessionId,
                         mode: patchSession.mode,
                         runId: patchSession.runId,
-                        status: stageMap.WRITER.status
+                        status: writerSessionStage.status
                     })
                 );
-            } else if (stageMap.WRITER.sessionId) {
+            } else if (writerSessionStage.sessionId) {
                 onSelectStageSession(
                     buildStageSessionSelection({
                         stageId: 'WRITER',
                         stageLabel: '3. Writer',
-                        sessionId: stageMap.WRITER.sessionId,
-                        runId: stageMap.WRITER.runId,
-                        status: stageMap.WRITER.status
+                        sessionId: writerSessionStage.sessionId,
+                        runId: writerSessionStage.runId,
+                        status: writerSessionStage.status
                     })
                 );
             } else {
@@ -2358,9 +2358,9 @@ export function CenterWorkbench({
                 displayVolumeLabel,
                 displayBookTitle,
                 storyDay,
-                disabled: isBusy || stepSubmitting,
+                disabled: isBusy || stepSubmitting || txLockHeld,
                 onNewBook,
-                onStepOne: () => void handleStepOne(),
+                onStepOne: () => void handleStepOne(chapterRetry ? { retry: 'resume' } : undefined),
                 onOpenCodex: handleOpenCodexFromCenter
             });
         }
@@ -2517,7 +2517,7 @@ export function CenterWorkbench({
 
     const primaryActionSplit = isBusy
         ? renderStopSplitAction({
-              stopPending,
+              softStopPending,
               haltWaiting,
               menuOpen: openMenu === 'stop',
               onToggleMenu: () => toggleMenu('stop'),
@@ -2525,10 +2525,12 @@ export function CenterWorkbench({
               onForceStop: () => void handleForceStop()
           })
         : renderRunSplitAction({
-              disabled: isBusy || stepSubmitting,
+              disabled: stepSubmitting || txLockHeld,
               stepSubmitting,
+              chapterRetry,
               menuOpen: openMenu === 'run',
-              onStepOne: () => void handleStepOne(),
+              onStepOne: () => void handleStepOne(chapterRetry ? { retry: 'resume' } : undefined),
+              onRestartChapter: () => void handleStepOne({ retry: 'restart' }),
               onToggleMenu: () => toggleMenu('run'),
               onStartYolo: (targetChapters) => void handleStartYolo(targetChapters)
           });
@@ -2635,6 +2637,12 @@ export function CenterWorkbench({
                         currentChapter,
                         activeTask
                     })}
+                    {(isBusy || txLockHeld || chapterRetry) && (
+                        <span className="ns-badge" role="status">
+                            {txLockHeld ? '作品锁已占用' : '作品锁已释放'}
+                            {chapterRetry ? ` · 第 ${chapterRetry.chapterNumber} 章 / ${chapterRetry.stage}` : ''}
+                        </span>
+                    )}
 
                     {isParallelMode && (
                         <span className="ns-badge ns-badge-warn">{parallelBadgeLabel}</span>
@@ -2796,6 +2804,7 @@ export function CenterWorkbench({
                     {renderPipelineDrawer({
                         open: stageDrawerOpen,
                         stageMap,
+                        sessionStages,
                         inspectedStageId,
                         resolveStageModelLabel,
                         onInspectStep: handleInspectStep

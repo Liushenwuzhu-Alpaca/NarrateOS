@@ -2638,6 +2638,11 @@ describe('Wave 3B 收口回归集成测试', () => {
     });
 
     it('ISS-057 & ISS-058 & ISS-061: 并发 startYolo 原子锁定；信号队列零写盘只读查询、并发串行入队及软/硬双档停机', async () => {
+        let plannerCalls = 0;
+        let writerCalls = 0;
+        let checkerCalls = 0;
+        let rejectChecker = false;
+        let rejectExtractor = false;
         let writerEntered = createDeferred<void>();
         let writerDeferred = createDeferred<void>();
         let observedAbortSignals: boolean[] = [];
@@ -2646,6 +2651,7 @@ describe('Wave 3B 收口回归集成测试', () => {
         const { bookRoot, ctx, web } = await setupWave3bWorkspace('concurrency-signal-halt', {
             onAgent: async ({ tools, execTool, signal }) => {
                 if (tools.size === 0) {
+                    writerCalls += 1;
                     writerEntered.resolve();
                     const onAbort = () => {
                         observedAbortSignals.push(true);
@@ -2671,6 +2677,7 @@ describe('Wave 3B 收口回归集成测试', () => {
                     return;
                 }
                 if (tools.has('yield_outline')) {
+                    plannerCalls += 1;
                     await execTool('yield_outline', {
                         chapter_title: '软停机与信号测试',
                         target_word_count: 1000,
@@ -2687,10 +2694,13 @@ describe('Wave 3B 收口回归集成测试', () => {
                     return;
                 }
                 if (tools.has('yield_verdict')) {
+                    checkerCalls += 1;
+                    if (rejectChecker) throw new Error('审稿模型暂不可用');
                     await execTool('yield_verdict', { passed: true, issues: [] });
                     return;
                 }
                 if (tools.has('yield_state_patch')) {
+                    if (rejectExtractor) throw new Error('抽取模型暂不可用');
                     await execTool('yield_state_patch', {
                         entity_patches: [],
                         story_day_delta: 0,
@@ -2777,8 +2787,91 @@ describe('Wave 3B 收口回归集成测试', () => {
         );
         await new Promise((r) => setImmediate(r));
         expect(observedAbortSignals).toContain(true);
+        await expect(stat(join(bookRoot, '.ops/tx.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
         expect(ctx.narratePipeline.runtimeStatus.yolo.currentStage).toBeNull();
         expect(await ctx.narratePipeline.countPendingSignals()).toBe(1);
+
+        const retryStatus = async () => (await web.invoke('GET', '/api/narrate/status')).json;
+        expect(await retryStatus()).toMatchObject({
+            txLockHeld: false, chapterRetry: { chapterNumber: 2, stage: 'WRITER', canRestart: true }
+        });
+        rejectChecker = true;
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(500);
+        expect(plannerCalls).toBe(2);
+        expect(writerCalls).toBe(3);
+        expect(await retryStatus()).toMatchObject({
+            txLockHeld: false, chapterRetry: { chapterNumber: 2, stage: 'FACT_CHECKER', canRestart: true }
+        });
+
+        rejectChecker = false;
+        rejectExtractor = true;
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(500);
+        expect(writerCalls).toBe(3);
+        const checkerCallsAfterFeat = checkerCalls;
+        const featHead = (await execFileAsync('git', ['-C', bookRoot, 'rev-parse', 'HEAD'])).stdout.trim();
+        expect(await retryStatus()).toMatchObject({
+            walPhase: 'FEAT_COMMITTED', txLockHeld: false,
+            chapterRetry: { chapterNumber: 2, stage: 'EXTRACTOR', canRestart: false }
+        });
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'restart' })).statusCode).toBe(409);
+        rejectExtractor = false;
+        const resumed = await web.invoke('POST', '/api/narrate/step', { retry: 'resume' });
+        expect(resumed.statusCode).toBe(200);
+        expect(resumed.json['chapterNumber']).toBe(2);
+        expect(plannerCalls).toBe(2);
+        expect(writerCalls).toBe(3);
+        expect(checkerCalls).toBe(checkerCallsAfterFeat);
+        expect(resumed.json['featCommitSha']).toBe(featHead);
+        expect((await retryStatus())['chapterRetry']).toBeNull();
+        expect(await readFile(join(bookRoot, 'manuscripts/ch_0002.md'), 'utf8')).toContain('铁锚重新沉入浅水');
+
+        rejectChecker = true;
+        expect((await web.invoke('POST', '/api/narrate/step', {})).statusCode).toBe(500);
+        expect(plannerCalls).toBe(3);
+        rejectChecker = false;
+        const restarted = await web.invoke('POST', '/api/narrate/step', { retry: 'restart' });
+        expect(restarted.statusCode).toBe(200);
+        expect(restarted.json['chapterNumber']).toBe(3);
+        expect(plannerCalls).toBe(4);
+    });
+
+    it('原地重试拒绝已退役的选中词条，显式重跑使用当前选页', async () => {
+        const lore = 'lore_library/lore_old_route.md';
+        const marker = '潮水退去后沿废旧吊桥过岸。';
+        let retired = false;
+        const received: string[] = [];
+        const { bookRoot, web } = await setupWave3bWorkspace('retry-lore-retirement', {
+            onAgent: async ({ tools, execTool, taskPrompt }) => {
+                if (tools.has('yield_context_pack')) {
+                    await execTool('yield_context_pack', {
+                        selected_entity_ids: ['char_001'], recall_queries: [],
+                        selected_lore_files: retired ? [] : [lore]
+                    });
+                } else if (tools.has('yield_outline')) {
+                    received.push(taskPrompt);
+                    throw new Error('测试中断：细纲模型暂时不可用');
+                }
+            },
+            onLlmStream: () => textToStreamChunks('本场景不会运行到执笔。')
+        });
+        await mkdir(join(bookRoot, 'lore_library'), { recursive: true });
+        await writeFile(join(bookRoot, lore), `# 吊桥旧线\n\n${marker}\n`);
+
+        expect((await web.invoke('POST', '/api/narrate/step', { chapterGoal: '选择过岸路线' })).statusCode).toBe(500);
+        expect(received).toEqual([expect.stringContaining(marker)]);
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(500);
+        expect(received).toEqual([expect.stringContaining(marker), expect.stringContaining(marker)]);
+
+        retired = true;
+        await writeFile(join(bookRoot, lore), `---\nstatus: WARPED\n---\n# 吊桥旧线\n\n${marker}\n`);
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(409);
+        expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({
+            txLockHeld: false, chapterRetry: { stage: 'PLANNER', canRestart: true }
+        });
+        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'restart' })).statusCode).toBe(500);
+        expect(received).toEqual([
+            expect.stringContaining(marker), expect.stringContaining(marker), expect.not.stringContaining(marker)
+        ]);
     });
 
     it('ISS-064, 065, 067, 068, 069: 软链拦截、批量 git log、SafeHalt 双套字段与严格 400 入参校验', async () => {

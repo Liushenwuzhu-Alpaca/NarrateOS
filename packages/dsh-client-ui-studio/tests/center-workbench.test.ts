@@ -739,9 +739,8 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
         view.unmount();
     });
 
-    it('便签舱精确构造 4 类导演信号（含切换视角 entityId 与插入回忆 targetDay），运行态支持强停撤回草稿', async () => {
+    it('便签舱精确构造 4 类导演信号（含切换视角 entityId 与插入回忆 targetDay）', async () => {
         const onSubmitSignal = vi.fn();
-        const onRequestHalt = vi.fn();
         const view = mountWorkbench({
             ...baseProps(chapterOneDetail),
             materializedViews: {
@@ -750,8 +749,7 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
                     { entityId: 'char_zhou', canonicalName: '周敬山', markdown: '' }
                 ]
             },
-            onSubmitSignal,
-            onRequestHalt
+            onSubmitSignal
         });
 
         const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -821,14 +819,18 @@ describe('Wave 4B 双模式冲突裁决卡、走向建议、便签舱与防重�
             runAfter: false
         });
 
-        // 4. 运行态强停菜单 -> onRequestHalt({ force: true }) 且状态胶囊使用中文创作态文案
-        view.rerender({ activeTask: 'STEPPING' });
-        const topHeaderText = view.container.querySelector('.ns-header-left')?.textContent ?? '';
-        expect(topHeaderText).toContain('正在执笔推进');
-        expect(topHeaderText).not.toContain('STEPPING');
-        await asyncClick(view.container.querySelector<HTMLButtonElement>('button[aria-label="更多停止选项"]')!);
-        await asyncClick(menuItemByTitle(view.container, '立即中断并撤回半截草稿'));
-        expect(onRequestHalt).toHaveBeenCalledWith({ force: true });
+        view.unmount();
+    });
+
+    it('安全中止直接取消在途任务，软停仍可从下拉菜单请求', async () => {
+        const onRequestHalt = vi.fn();
+        const view = mountWorkbench({ ...baseProps(chapterOneDetail), activeTask: 'STEPPING', onRequestHalt });
+        click(view.container.querySelector<HTMLButtonElement>('button[aria-label="更多停止选项"]')!);
+        click(menuItemByTitle(view.container, '写完本章暂停'));
+        expect(onRequestHalt).toHaveBeenCalledWith({ force: false });
+        view.rerender({ haltRequested: true });
+        click(buttonByText(view.container, '安全中止'));
+        expect(onRequestHalt).toHaveBeenLastCalledWith({ force: true });
         view.unmount();
     });
 

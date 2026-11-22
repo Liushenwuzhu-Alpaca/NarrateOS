@@ -282,16 +282,18 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             streams[0]!.dispatchEvent(new MessageEvent(event, { data: JSON.stringify(data) }));
         });
         await send('stage', { stage: 'STARTING' });
-        await send('halt:requested');
-        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写完本章即停');
+        await send('stage', { stage: 'WRITER', txLockHeld: true });
+        const header = container.querySelector('.ns-center-header')!;
+        expect(header.textContent).toContain('作品锁已占用');
+        await send('halt:requested', { force: true });
+        expect(buttonByText(header, '正在安全中止…').disabled).toBe(true);
         await send('halt:waiting', { activeTask: 'STEPPING' });
-        expect(container.querySelector('.ns-center-header')?.textContent).toContain('等待安全点收束');
+        expect(buttonByText(header, '正在安全中止…').disabled).toBe(true);
         vi.mocked(api.fetchStatus).mockRejectedValue(new Error('宿主已经关闭'));
         await send('halt:completed');
         expect(container.querySelector('.ns-center-header')?.textContent).toContain('写下一章');
         await send('stage', { stage: 'STARTING' });
-        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写完本章暂停');
-        expect(container.querySelector('.ns-center-header')?.textContent).not.toContain('等待安全点');
+        expect(buttonByText(header, '安全中止').disabled).toBe(false);
     });
 
     it.each(['章节视图', '作品辅助视图'])('%s支持方向键和首尾键，焦点、选择和面板身份同步', async (label) => {
@@ -652,8 +654,11 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             event: 'dream:started',
             data: { activeSessionId: 'sess-dream-1', runId: 'run-dream-1' }
         });
+        const dreamCard = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="DREAMING"]')!;
+        expect(dreamCard.querySelector('.ns-pipe-step-state')?.textContent).toBe('生成中');
         await emit({ event: 'dream:completed', data: { skipped: false } });
-        await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="DREAMING"]')!);
+        expect(dreamCard.querySelector('.ns-pipe-step-state')?.textContent).toBe('条件未达');
+        await click(dreamCard);
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
 
         // 3. signal:withdrawn / volume:advanced / task:idle / heal:started / heal:completed
@@ -986,6 +991,107 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(container.querySelector('article.ns-codex-sheet')).toBeNull();
         expect(container.textContent).toContain('乙书第一章服务器原稿');
         expect(leftEntitiesBtn.getAttribute('aria-current')).toBeNull();
+    });
+
+    it.each([
+        { event: 'task:idle', data: { task: 'STEPPING' } },
+        { event: 'stage', data: { stage: 'COMMITTED', chapterNumber: 1 } }
+    ] as const)('工序徽标只显示本次执行，$event 后仍可下钻归档尝试', async (terminal) => {
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const idle = statusPayload(activeBookRoot);
+            return { ...idle, yolo: { ...idle.yolo, currentStage: 'WRITER' } };
+        });
+        vi.mocked(api.fetchRunRecords).mockResolvedValue({
+            runs: [{
+                runId: 'writer-history', chapter: 1, stage: 'WRITER', role: 'writer',
+                sessionId: 'writer-history-session', status: 'completed', attempt: 2
+            }]
+        });
+        const container = await mountStudio();
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = (id: string) =>
+            container.querySelector<HTMLButtonElement>(`.ns-pipe-card[data-stage-id="${id}"]`)!;
+        const badge = (id: string) => card(id).querySelector('.ns-pipe-step-state')?.textContent;
+        expect(badge('WRITER')).toBe('待命');
+        await click(card('WRITER'));
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id'))
+            .toBe('writer-history-session');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+
+        for (const chapterNumber of [3, 1]) {
+            await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber } });
+            expect(badge('LIBRARIAN')).toBe('待命');
+            await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber, status: 'running' } });
+            expect(badge('LIBRARIAN')).toBe('生成中');
+            expect(badge('WRITER')).toBe('待命');
+        }
+        await emit({ event: 'stage', data: {
+            stage: 'WRITER', chapterNumber: 1, status: 'running', activeSessionId: 'writer-live-session'
+        } });
+        expect(badge('LIBRARIAN')).toBe('已完成');
+        expect(badge('WRITER')).toBe('生成中');
+        expect(card('WRITER').getAttribute('data-session-id')).toBe('writer-live-session');
+        if (terminal.event === 'task:idle') {
+            await emit({ event: 'stage:session', data: {
+                stage: 'WRITER', chapterNumber: 1, status: 'completed', sessionId: 'writer-live-session'
+            } });
+        }
+
+        await emit(terminal);
+        expect(badge('LIBRARIAN')).toBe('待命');
+        expect(badge('WRITER')).toBe('待命');
+        await click(card('WRITER'));
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+    });
+
+    it('重新打开 Studio 时，进行中的下一章工序打开本章会话而不是归档章', async () => {
+        vi.mocked(api.fetchChapters).mockImplementation(async () => ({
+            chapters: chaptersPayload(activeBookRoot).chapters.slice(0, 1)
+        }));
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const status = statusPayload(activeBookRoot);
+            return {
+                ...status, activeChapter: null, latestChapter: 1, lastCommittedChapter: 1, chapterCount: 1,
+                runtime: { ...status.runtime, activeTask: 'STEPPING' },
+                yolo: { ...status.yolo, currentStage: 'WRITER' }
+            };
+        });
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => ({
+            runs: [{
+                runId: `writer-${chapter}`, chapter, stage: 'WRITER', role: 'writer', attempt: 1,
+                sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
+            }]
+        }));
+        const container = await mountStudio();
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="WRITER"]')!;
+        expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe('生成中');
+        await click(card);
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('writer-session-2');
+        expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
+    });
+
+    it('章节加载期间暂不显示实时徽标，加载完毕后恢复仍在运行的工序', async () => {
+        const container = await mountStudio();
+        await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
+        await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber: 3, status: 'running' } });
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const badge = () => container.querySelector(
+            '.ns-pipe-card[data-stage-id="LIBRARIAN"] .ns-pipe-step-state'
+        )?.textContent;
+        expect(badge()).toBe('生成中');
+        const secondChapter = Promise.withResolvers<ChapterDetail>();
+        vi.mocked(api.fetchChapter).mockImplementationOnce(() => secondChapter.promise);
+        await click(chapterButton(container, 2));
+        expect(badge()).toBe('待命');
+        await act(async () => {
+            secondChapter.resolve(chapterDetail('/books/a', 2));
+            await secondChapter.promise;
+        });
+        expect(badge()).toBe('生成中');
     });
 
     it('点击无 sessionId 的非 Writer 工序卡片会打开右栏思考过程并清空上一工种残留会话', async () => {
