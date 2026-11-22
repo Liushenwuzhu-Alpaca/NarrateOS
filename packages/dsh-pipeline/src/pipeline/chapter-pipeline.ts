@@ -710,21 +710,49 @@ export class ChapterPipeline {
                     branchStagingOverlay
                 );
             });
-        if (replayedLibrarian && librarianOut.selected_lore_files.length > 0) {
+        if (replayedLibrarian && (recallSlices.length > 0 || librarianOut.selected_lore_files.length > 0)) {
             const librarianRole = await this.roleLoader.loadRoleConfig('librarian', this.store.bookRoot);
-            const fence = new PathFence(this.store.bookRoot, { blockedReadPaths: librarianRole.blockedReadPaths });
-            const staleLore = () => new TaskConflictError('已选世界书词条已变化或不可用，断点已保留；请从头重跑当前章');
-            try {
-                const currentSources = await validateSelectedLoreFiles(
-                    this.store.bookRoot, fence, branchStagingOverlay ?? new Map(), librarianOut.selected_lore_files
-                );
-                if (currentSources.length !== selectedLoreSources.length || currentSources.some((source, index) => {
-                    const savedSource = selectedLoreSources[index]!;
-                    return source.path !== savedSource.path || source.content !== savedSource.content;
-                })) throw staleLore();
-            } catch (error) {
-                if (error instanceof GateValidationError || error instanceof PathFenceError) throw staleLore();
-                throw error;
+            const fence = new PathFence(this.store.bookRoot, {
+                blockedReadPaths: librarianRole.blockedReadPaths,
+                allowedChapterFiles
+            });
+            if (recallSlices.length > 0) {
+                const verified = new Map<string, string>();
+                const staleRecall = () => new TaskConflictError('已引用的历史手稿已变化或不可用，断点已保留；请从头重跑当前章');
+                for (const { file, sourceSha256 } of recallSlices) {
+                    if (!sourceSha256) throw staleRecall();
+                    let currentHash = verified.get(file);
+                    if (currentHash === undefined) {
+                        try {
+                            const target = await fence.assertReadFile(file);
+                            const text = branchStagingOverlay?.has(target.normalized)
+                                ? branchStagingOverlay.get(target.normalized)
+                                : await readOptionalText(target.absPath);
+                            if (text == null) throw staleRecall();
+                            currentHash = sha256Hex(text);
+                            verified.set(file, currentHash);
+                        } catch (error) {
+                            if (error instanceof PathFenceError) throw staleRecall();
+                            throw error;
+                        }
+                    }
+                    if (currentHash !== sourceSha256) throw staleRecall();
+                }
+            }
+            if (librarianOut.selected_lore_files.length > 0) {
+                const staleLore = () => new TaskConflictError('已选世界书词条已变化或不可用，断点已保留；请从头重跑当前章');
+                try {
+                    const currentSources = await validateSelectedLoreFiles(
+                        this.store.bookRoot, fence, branchStagingOverlay ?? new Map(), librarianOut.selected_lore_files
+                    );
+                    if (currentSources.length !== selectedLoreSources.length || currentSources.some((source, index) => {
+                        const savedSource = selectedLoreSources[index]!;
+                        return source.path !== savedSource.path || source.content !== savedSource.content;
+                    })) throw staleLore();
+                } catch (error) {
+                    if (error instanceof GateValidationError || error instanceof PathFenceError) throw staleLore();
+                    throw error;
+                }
             }
         }
 

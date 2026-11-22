@@ -2665,17 +2665,21 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(plannerCalls).toBe(4);
     });
 
-    it('原地重试拒绝已退役的选中词条，显式重跑使用当前选页', async () => {
+    it.each(['退役词条', '手填原稿切片', '自动原稿切片'])('原地重试拒绝失效的%s，显式重跑使用当前证据', async (source) => {
         const lore = 'lore_library/lore_old_route.md';
-        const marker = '潮水退去后沿废旧吊桥过岸。';
-        let retired = false;
+        const manuscript = 'manuscripts/ch_0001.md';
+        const marker = '沈默等潮水退去后沿废旧吊桥过岸。';
+        const updated = '沈默看到吊桥拆除后改乘渡船。';
+        let edited = false;
         const received: string[] = [];
-        const { bookRoot, web } = await setupWave3bWorkspace('retry-lore-retirement', {
+        const { bookRoot, web, ctx } = await setupWave3bWorkspace('retry-recall-inputs', {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_context_pack')) {
                     await execTool('yield_context_pack', {
-                        selected_entity_ids: ['char_001'], recall_queries: [],
-                        selected_lore_files: retired ? [] : [lore]
+                        selected_entity_ids: ['char_001'],
+                        recall_queries: source === '自动原稿切片' ? [{ entity_id: 'char_001', focus_chapters: [1] }] : [],
+                        recall_slices: source === '手填原稿切片' ? [{ file: manuscript, snippet: edited ? updated : marker }] : [],
+                        selected_lore_files: source === '退役词条' && !edited ? [lore] : []
                     });
                 } else if (tools.has('yield_outline')) {
                     received.push(taskPrompt);
@@ -2684,17 +2688,33 @@ describe('Wave 3B 收口回归集成测试', () => {
             },
             onLlmStream: () => textToStreamChunks('本场景不会运行到执笔。')
         });
-        await mkdir(join(bookRoot, 'lore_library'), { recursive: true });
-        await writeFile(join(bookRoot, lore), `# 吊桥旧线\n\n${marker}\n`);
+        if (source === '退役词条') {
+            await mkdir(join(bookRoot, 'lore_library'), { recursive: true });
+            await writeFile(join(bookRoot, lore), `# 吊桥旧线\n\n${marker}\n`);
+        } else {
+            const store = ctx.narratePipeline.requireBookStore();
+            await store.beginDraft(1);
+            await store.commitDraft(1, `# 过岸\n\n${marker}\n`);
+            await store.applyStatePatch(1, []);
+            await store.beginDraft(20);
+            await store.commitDraft(20, '# 港口\n\n雨势稍缓，水面无波。\n');
+            await store.applyStatePatch(20, []);
+        }
 
         expect((await web.invoke('POST', '/api/narrate/step', { chapterGoal: '选择过岸路线' })).statusCode).toBe(500);
         expect(received).toEqual([expect.stringContaining(marker)]);
         expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(500);
         expect(received).toEqual([expect.stringContaining(marker), expect.stringContaining(marker)]);
 
-        retired = true;
-        await writeFile(join(bookRoot, lore), `---\nstatus: WARPED\n---\n# 吊桥旧线\n\n${marker}\n`);
-        expect((await web.invoke('POST', '/api/narrate/step', { retry: 'resume' })).statusCode).toBe(409);
+        edited = true;
+        if (source === '退役词条') {
+            await writeFile(join(bookRoot, lore), `---\nstatus: WARPED\n---\n# 吊桥旧线\n\n${marker}\n`);
+        } else {
+            await writeFile(join(bookRoot, manuscript), `# 过岸\n\n${updated}\n`);
+        }
+        const stale = await web.invoke('POST', '/api/narrate/step', { retry: 'resume' });
+        expect(stale.statusCode).toBe(409);
+        expect(stale.json['error']).toContain(source === '退役词条' ? '世界书词条' : '历史手稿');
         expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({
             txLockHeld: false, chapterRetry: { stage: 'PLANNER', canRestart: true }
         });
@@ -2702,6 +2722,7 @@ describe('Wave 3B 收口回归集成测试', () => {
         expect(received).toEqual([
             expect.stringContaining(marker), expect.stringContaining(marker), expect.not.stringContaining(marker)
         ]);
+        if (source !== '退役词条') expect(received[2]).toContain(updated);
     });
 
     it('ISS-064, 065, 067, 068, 069: 软链拦截、批量 git log、SafeHalt 双套字段与严格 400 入参校验', async () => {
