@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -833,10 +833,16 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         restoreStagedCard = false;
         const unindexedOldCards = expectedOldCards.replace('出场实体: item_black_key', '出场实体: 无');
         await writeFile(join(bookRoot, oldVolume), unindexedOldCards);
-        await setupBookGitignoreAndCommit(bookRoot, [oldVolume], 'test: reproduce an omitted historical appearance');
+        const archivedItem = 'entities/cold_archive/item_black_key.md';
+        await mkdir(join(bookRoot, 'entities/cold_archive'), { recursive: true });
+        await rename(join(bookRoot, item), join(bookRoot, archivedItem));
+        await setupBookGitignoreAndCommit(bookRoot, [oldVolume, item, archivedItem], 'test: archive item with an omitted appearance');
+        expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);
         await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
         expect(dreamerPromptSeen).toContain('已有实体 item_black_key 待核对出场');
         expect(await system.readFileAtRef(bookRoot, 'HEAD', oldVolume)).toBe(expectedOldCards);
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', item)).toBeNull();
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', archivedItem)).toContain('canonical_name: 黑铜钥匙');
     });
 
     it('因果信号可在空实体候选时提交世界整理，故事日龄不单独触发整理', async () => {

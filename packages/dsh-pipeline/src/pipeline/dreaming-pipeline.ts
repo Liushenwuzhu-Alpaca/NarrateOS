@@ -146,21 +146,18 @@ function scanOffscreenEntityNotes(
 function scanRecurringProseAnchors(
     sections: readonly (L2CardSection & { sourcePath: string })[],
     watermarkCh: number,
-    entities: Readonly<Record<string, EntityProfile>>,
+    entityGroups: readonly Readonly<Record<string, EntityProfile>>[],
     promoteAnchorMinChapters: number
 ): string[] {
     const knownKeys = new Map<string, string | null>();
-    for (const profile of Object.values(entities)) {
-        for (const rawKey of [
-            profile.metadata.entity_id,
-            profile.metadata.canonical_name,
-            ...profile.metadata.unique_aliases
-        ]) {
-            const norm = normalizeForQuoteMatch(rawKey);
-            if (norm.length >= 2) {
-                const id = profile.metadata.entity_id;
-                if (!knownKeys.has(norm)) knownKeys.set(norm, id);
-                else if (knownKeys.get(norm) !== id) knownKeys.set(norm, null);
+    for (const entities of entityGroups) {
+        for (const { metadata } of Object.values(entities)) {
+            const id = metadata.entity_id;
+            for (const rawKey of [id, metadata.canonical_name, ...metadata.unique_aliases]) {
+                const key = normalizeForQuoteMatch(rawKey);
+                if (key.length < 2) continue;
+                if (!knownKeys.has(key)) knownKeys.set(key, id);
+                else if (knownKeys.get(key) !== id) knownKeys.set(key, null);
             }
         }
     }
@@ -351,7 +348,7 @@ export class DreamingPipeline {
             const sections = (await readBookL2Sections(this.store.bookRoot))
                 .filter((section) => section.chapterNumber <= options.currentChapter);
             const anchorCandidates = scanRecurringProseAnchors(
-                sections, watermarkCh, snapshot.entities, promoteAnchorMinChapters
+                sections, watermarkCh, [snapshot.entities, snapshot.coldEntities], promoteAnchorMinChapters
             );
 
             const recentL2Text = sections.filter((section) => section.chapterNumber > watermarkCh)
