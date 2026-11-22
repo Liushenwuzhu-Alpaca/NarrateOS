@@ -1280,7 +1280,7 @@ export function NarrateStudioRoot({
                         const runningSessionId = statusRes.runtime.stageSessionId;
                         if (activeStage && runningChapter !== null) setLiveRunChapter(runningChapter);
                         if (activeStage && runningChapter !== null && runningSessionId) {
-                            void fetchRunRecords(runningChapter).then(({ runs }) => {
+                            void fetchRunRecords(runningChapter, ...scopeArgs).then(({ runs }) => {
                                 if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current ||
                                     statusSeq !== statusRequestRef.current || stageVersion !== stageEventVersionRef.current) return;
                                 applyStageOverrides(deriveHistoricalStageOverrides(

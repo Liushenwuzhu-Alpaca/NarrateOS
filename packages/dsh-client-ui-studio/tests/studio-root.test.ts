@@ -185,12 +185,12 @@ afterEach(() => {
     vi.unstubAllGlobals();
 });
 
-async function mountStudio(): Promise<HTMLElement> {
+async function mountStudio(requestScope?: Parameters<typeof NarrateStudioRoot>[0]['requestScope']): Promise<HTMLElement> {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
     mountedRoots.push(root);
-    await act(async () => { root.render(createElement(NarrateStudioRoot)); });
+    await act(async () => { root.render(createElement(NarrateStudioRoot, requestScope ? { requestScope } : {})); });
     expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
     return container;
 }
@@ -1060,8 +1060,9 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 yolo: { ...status.yolo, currentStage: stage }
             };
         });
-        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => ({
-            runs: [
+        const requestScope = { sessionId: 'author-a' };
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter, scope) => ({
+            runs: scope?.sessionId === requestScope.sessionId ? [
                 ...(chapter === 2 ? [{
                     runId: 'old-review-2', chapter, stage: 'FACT_CHECKER', role: 'fact-checker', attempt: 1,
                     sessionId: 'old-review-session-2', status: 'completed'
@@ -1070,9 +1071,9 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                     runId: `writer-${chapter}`, chapter, stage: chapter === 2 ? stage : 'WRITER', role: 'writer', attempt: 1,
                     sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
                 }
-            ]
+            ] : []
         }));
-        const container = await mountStudio();
+        const container = await mountStudio(requestScope);
         const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
         if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
         const card = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="WRITER"]')!;
