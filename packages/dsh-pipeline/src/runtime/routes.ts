@@ -704,6 +704,8 @@ function buildNarrateRoutes(controller: NarrateRuntimeController): WebRoute[] {
                     yolo: rt.yolo,
                     runtime: {
                         activeTask: rt.activeTask,
+                        stageChapter: rt.stageChapter,
+                        stageSessionId: rt.stageSessionId,
                         haltRequested: rt.haltRequested
                     },
                     txLockHeld: false,
@@ -776,6 +778,8 @@ function buildNarrateRoutes(controller: NarrateRuntimeController): WebRoute[] {
                 yolo: rt.yolo,
                 runtime: {
                     activeTask: rt.activeTask,
+                    stageChapter: rt.stageChapter,
+                    stageSessionId: rt.stageSessionId,
                     haltRequested: rt.haltRequested
                 },
                 ...diagnostics

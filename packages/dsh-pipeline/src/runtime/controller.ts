@@ -491,6 +491,7 @@ export class NarrateRuntimeController {
     private pendingSessionDefaultSelection: HostDefaultModelSelection | null = null;
     private activeTask: RuntimeTaskKind = 'IDLE';
     private activeStage: YoloRuntimeState['currentStage'] = null;
+    private activeStageChapter: number | null = null;
     private haltRequested = false;
     private shuttingDown = false;
     private activeAbortController: AbortController | null = null;
@@ -896,12 +897,16 @@ export class NarrateRuntimeController {
     /** 当前运行态摘要 */
     get runtimeStatus(): {
         activeTask: RuntimeTaskKind;
+        stageChapter: number | null;
+        stageSessionId: string | null;
         haltRequested: boolean;
         shuttingDown: boolean;
         yolo: Omit<YoloRuntimeState, 'loopPromise'>;
     } {
         return {
             activeTask: this.activeTask,
+            stageChapter: this.activeStageChapter,
+            stageSessionId: this.activeStage ? this.activeStageSessions.get(this.activeStage)?.sessionId ?? null : null,
             haltRequested: this.haltRequested,
             shuttingDown: this.shuttingDown,
             yolo: {
@@ -1300,6 +1305,11 @@ export class NarrateRuntimeController {
         });
     }
 
+    private setActiveStage(stage: YoloRuntimeState['currentStage'], chapter: number | null = null): void {
+        this.activeStage = stage;
+        this.activeStageChapter = chapter;
+    }
+
     /** 处理工种会话启动事件并向 SSE 推送 stage:session 与 activeSessionId / sessionId / runId */
     private handleStageSession = (evt: StageSessionEvent): void => {
         this.activeStageSessions.set(evt.stage, evt);
@@ -1413,7 +1423,7 @@ export class NarrateRuntimeController {
                     chapterGoal: effectiveGoal,
                     signal: taskSignal,
                     onStageSession: (evt) => {
-                        this.activeStage = evt.stage;
+                        this.setActiveStage(evt.stage, evt.chapter);
                         this.handleStageSession(evt);
                         options.onStageSession?.(evt);
                     },
@@ -1464,7 +1474,7 @@ export class NarrateRuntimeController {
                         options.onCheckerResult?.(checkerEvt);
                     },
                     onProgress: (evt) => {
-                        this.activeStage = evt.stage;
+                        this.setActiveStage(evt.stage, evt.chapterNumber);
                         if (!evt.activeSessionId) {
                             // 进入新一轮子调用前清理同阶段上一轮残留会话，避免在 onStageSession 到达前误绑旧 sessionId
                             this.activeStageSessions.delete(evt.stage);
@@ -1577,7 +1587,7 @@ export class NarrateRuntimeController {
                 });
                 throw err;
             } finally {
-                this.activeStage = null;
+                this.setActiveStage(null);
             }
         };
 
@@ -1620,7 +1630,7 @@ export class NarrateRuntimeController {
         this.yoloState.stopRequested = false;
         this.yoloState.completedChapters = 0;
         this.yoloState.targetChapters = targetChapters;
-        this.activeStage = 'STARTING';
+        this.setActiveStage('STARTING');
 
         try {
             await this.assertNoActiveTxLock('当前作品持有 .ops/tx.lock，禁止启动 YOLO 连跑');
@@ -1630,7 +1640,7 @@ export class NarrateRuntimeController {
             if (this.yoloGeneration === currentGen) {
                 this.yoloState.running = false;
                 this.yoloState.stopRequested = false;
-                this.activeStage = null;
+                this.setActiveStage(null);
                 this.yoloState.loopPromise = null;
             }
             throw err;
@@ -1716,7 +1726,7 @@ export class NarrateRuntimeController {
             this.storeService.endRun(runId);
             if (this.yoloGeneration === currentGen) {
                 this.yoloState.running = false;
-                this.activeStage = null;
+                this.setActiveStage(null);
                 this.yoloState.loopPromise = null;
             }
         }
@@ -1922,7 +1932,8 @@ export class NarrateRuntimeController {
     private async executeDreaming(store: BookStore, options: Partial<RunDreamingOptions>): Promise<RunDreamingResult> {
         const txState = await store.readTxState();
         const currentChapter = options.currentChapter ?? txState.last_committed_ch;
-        this.activeStage = 'DREAMING';
+        this.activeStageSessions.delete('DREAMING');
+        this.setActiveStage('DREAMING', currentChapter);
         this.emitEvent('dream:started', { currentChapter });
         try {
             const dreamRes = await this.createDreamingPipeline(store).runDreaming({
@@ -1940,7 +1951,7 @@ export class NarrateRuntimeController {
             });
             return dreamRes;
         } finally {
-            this.activeStage = null;
+            this.setActiveStage(null);
         }
     }
 

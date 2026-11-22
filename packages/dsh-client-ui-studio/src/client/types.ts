@@ -54,6 +54,9 @@ export interface YoloStatusSummary {
 /** 运行态任务与停机标志 */
 export interface RuntimeStatusSummary {
     activeTask: RuntimeTaskKind;
+    /** 当前工序的实际章号，与 WAL 索引独立。 */
+    stageChapter: number | null;
+    stageSessionId: string | null;
     haltRequested: boolean;
 }
 

@@ -384,7 +384,7 @@ describe('Studio HTTP & SSE 运行契约 (Wave 4A)', () => {
             worldState: { story_day: 6, current_chapter: 5, timeline_mode: 'MAINLINE' },
             pendingSignalsCount: 1,
             yolo: { running: false, completedChapters: 0, targetChapters: 0, currentStage: null },
-            runtime: { activeTask: 'ADVANCING_VOLUME', haltRequested: false },
+            runtime: { activeTask: 'ADVANCING_VOLUME', stageChapter: null, stageSessionId: null, haltRequested: false },
             txLockHeld: false,
             featCommitSha: '111aaaa',
             stateCommitSha: '222bbbb',

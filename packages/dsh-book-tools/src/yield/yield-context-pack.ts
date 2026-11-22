@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -541,6 +542,7 @@ async function verifyAndEnvelopeManualSlices(params: {
         }
         const envelopedSlice: RecallSlice = {
             file: verified.normalized,
+            sourceSha256: createHash('sha256').update(chapterText).digest('hex'),
             chapterId: `ch_${String(realChapterNumber).padStart(4, '0')}`,
             chapterNumber: realChapterNumber,
             chapterDay,
@@ -807,7 +809,8 @@ export function createYieldContextPackTool(options: YieldContextPackOptions): To
                     maxSlicesPerEntity: retrievalCfg.max_slices_per_entity,
                     sliceContextParagraphs: retrievalCfg.slice_context_paragraphs,
                     sliceMaxChars: retrievalCfg.slice_max_chars,
-                    includeHistoricalAnchors: true
+                    includeHistoricalAnchors: true,
+                    includeSourceHash: true
                 });
                 for (const s of slices) {
                     autoSlices.push({ slice: s, entityId: query.entity_id });
