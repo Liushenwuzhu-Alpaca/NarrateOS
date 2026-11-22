@@ -1045,6 +1045,34 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
     });
 
+    it('重新打开 Studio 时，进行中的下一章工序打开本章会话而不是归档章', async () => {
+        vi.mocked(api.fetchChapters).mockImplementation(async () => ({
+            chapters: chaptersPayload(activeBookRoot).chapters.slice(0, 1)
+        }));
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const status = statusPayload(activeBookRoot);
+            return {
+                ...status, activeChapter: null, latestChapter: 1, lastCommittedChapter: 1, chapterCount: 1,
+                runtime: { ...status.runtime, activeTask: 'STEPPING' },
+                yolo: { ...status.yolo, currentStage: 'WRITER' }
+            };
+        });
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => ({
+            runs: [{
+                runId: `writer-${chapter}`, chapter, stage: 'WRITER', role: 'writer', attempt: 1,
+                sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
+            }]
+        }));
+        const container = await mountStudio();
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="WRITER"]')!;
+        expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe('生成中');
+        await click(card);
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('writer-session-2');
+        expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
+    });
+
     it('章节加载期间暂不显示实时徽标，加载完毕后恢复仍在运行的工序', async () => {
         const container = await mountStudio();
         await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });

@@ -1253,8 +1253,18 @@ export function NarrateStudioRoot({
                     if (stageVersion === stageEventVersionRef.current) {
                         const activeStage = readActiveStage(statusRes);
                         setLatestSseStage(activeStage);
-                        if (statusRes.runtime.activeTask === 'STEPPING') {
-                            setLiveRunChapter((prev) => prev ?? (statusRes.activeChapter || statusRes.latestChapter + 1));
+                        if (statusRes.runtime.activeTask === 'STEPPING' ||
+                            (activeStage && statusRes.runtime.activeTask === 'DREAMING')) {
+                            const runningChapter = statusRes.activeChapter ||
+                                (statusRes.runtime.activeTask === 'STEPPING' ? statusRes.latestChapter + 1 : statusRes.latestChapter);
+                            setLiveRunChapter(runningChapter);
+                            void fetchRunRecords(runningChapter).then(({ runs }) => {
+                                if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current ||
+                                    statusSeq !== statusRequestRef.current || stageVersion !== stageEventVersionRef.current) return;
+                                applyStageOverrides(deriveHistoricalStageOverrides(
+                                    runs.filter((record) => record.chapter === runningChapter)
+                                ));
+                            }).catch(() => {});
                         }
                     }
                 }
@@ -1283,7 +1293,7 @@ export function NarrateStudioRoot({
                 } else {
                     setSelectedChapter(null);
                     setChapterDetail(null);
-                    await loadRunsForChapter(statusRes.runtime.activeTask === 'STEPPING' ? statusRes.latestChapter + 1 : null);
+                    await loadRunsForChapter(null);
                 }
             } catch (err) {
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
@@ -1293,7 +1303,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, showToast]
+        [applyStageOverrides, isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, showToast]
     );
 
     useEffect(() => {
@@ -2334,9 +2344,9 @@ export function NarrateStudioRoot({
         liveRunChapter === null ||
         selectedChapter === null ||
         liveRunChapter === selectedChapter;
-    const shouldOverlayLive = sameChapterAsSelected || isLiveUncommittedChapter;
     const projectedLiveStage =
         !loading && !chapterLoading ? latestSseStage : null;
+    const shouldOverlayLive = sameChapterAsSelected || isLiveUncommittedChapter;
     const liveStageOverrides = useMemo(() => {
         if (!projectedLiveStage) return undefined;
         if (projectedLiveStage === 'DREAMING') {
@@ -2349,9 +2359,10 @@ export function NarrateStudioRoot({
     // 会话范围与实时徽标独立：空闲时保留选中章节的归档和刚结束的尝试供下钻。
     const effectiveStages = useMemo<Partial<Record<PipelineStageId, StageNodeState>>>(() => {
         if (!shouldOverlayLive) return historicalStageOverrides;
-        const merged: Partial<Record<PipelineStageId, StageNodeState>> = {
-            ...historicalStageOverrides
-        };
+        const merged: Partial<Record<PipelineStageId, StageNodeState>> = { ...historicalStageOverrides };
+        // 运行中的工序不可回退到另一章；其余工序仍可浏览选中章的历史。
+        const liveStageId = projectedLiveStage ? resolveStageId(projectedLiveStage) : null;
+        if (!sameChapterAsSelected && liveStageId) delete merged[liveStageId];
         for (const id of STAGE_SEQUENCE) {
             const live = stageOverrides[id];
             if (live) {
@@ -2366,7 +2377,7 @@ export function NarrateStudioRoot({
             }
         }
         return merged;
-    }, [historicalStageOverrides, sameChapterAsSelected, shouldOverlayLive, stageOverrides]);
+    }, [historicalStageOverrides, projectedLiveStage, sameChapterAsSelected, shouldOverlayLive, stageOverrides]);
 
     const defaultModelString = useMemo(() => {
         const dm = status?.defaultModel;
