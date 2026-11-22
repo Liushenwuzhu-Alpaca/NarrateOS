@@ -103,7 +103,7 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
         name: 'book_read',
         description:
             '受控读取作品文件。path 单读或 paths 批读（最多 8 个路径，成功读取才消耗 1 次共享配额）；缺失批量成员独立跳过。单次默认 24000 字符，整行截断并提供精确续读参数。已完整预注入文件首次提醒免扣，显式切片或再次调用正常读取。优先返回暂存修改，路径与时间线围栏始终生效。'
-            + (options.manuscriptHits ? ` 审稿回查手稿时先用 book_grep 定位，再指定单个 path、offset 和 1..${MAX_AUDIT_WINDOW_LINES} 行的 limit，窗口须包含本轮命中行。` : ''),
+            + (options.manuscriptHits ? ` 审稿回查手稿时先用 book_grep 定位，再指定单个 path、offset 和 1..${MAX_AUDIT_WINDOW_LINES} 行的 limit。新窗口须包含本轮命中行；续读同一短窗时使用返回的完整参数。` : ''),
         parameters: {
             path: { type: 'string', description: '作品内相对路径，例如 world/open_threads.md，与 paths 二选一' },
             paths: { type: 'array', items: { type: 'string' }, description: '最多 8 个作品内相对路径，保序去重，与 path 二选一' },
@@ -186,6 +186,7 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                     const continuation = auditContinuations?.get(normalized);
                     if (continuation && continuation.offset === args.offset && continuation.limit === args.limit
                         && continuation.charOffset === (args.char_offset ?? 0)) continue;
+                    if (args.char_offset) throw new Error('审稿回查须使用上一段返回的精确字符游标');
                     const hits = options.manuscriptHits.get(normalized);
                     if (!hits) throw new Error(`请先用 book_grep 定位 ${normalized} 的原句`);
                     let includesHit = false;
