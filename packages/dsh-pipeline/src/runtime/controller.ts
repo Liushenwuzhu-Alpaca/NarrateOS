@@ -942,11 +942,6 @@ export class NarrateRuntimeController {
         };
     }
 
-    private setActiveStage(stage: YoloRuntimeState['currentStage'], chapter: number | null = null): void {
-        this.activeStage = stage;
-        this.activeStageChapter = chapter;
-    }
-
     /** 要求当前已选定有效作品目录 */
     requireBookStore(): BookStore {
         return this.storeService.openStore(this.bookRoot ?? undefined);
@@ -1318,6 +1313,11 @@ export class NarrateRuntimeController {
             llm: this.llmAdapter,
             system: this.system
         });
+    }
+
+    private setActiveStage(stage: YoloRuntimeState['currentStage'], chapter: number | null = null): void {
+        this.activeStage = stage;
+        this.activeStageChapter = chapter;
     }
 
     /** 处理工种会话启动事件并向 SSE 推送 stage:session 与 activeSessionId / sessionId / runId */
