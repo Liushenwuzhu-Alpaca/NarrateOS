@@ -1253,16 +1253,15 @@ export function NarrateStudioRoot({
                     if (stageVersion === stageEventVersionRef.current) {
                         const activeStage = readActiveStage(statusRes);
                         setLatestSseStage(activeStage);
-                        if (statusRes.runtime.activeTask === 'STEPPING' ||
-                            (activeStage && statusRes.runtime.activeTask === 'DREAMING')) {
-                            const runningChapter = statusRes.activeChapter ||
-                                (statusRes.runtime.activeTask === 'STEPPING' ? statusRes.latestChapter + 1 : statusRes.latestChapter);
-                            setLiveRunChapter(runningChapter);
+                        const runningChapter = statusRes.runtime.stageChapter;
+                        const runningSessionId = statusRes.runtime.stageSessionId;
+                        if (activeStage && runningChapter !== null) setLiveRunChapter(runningChapter);
+                        if (activeStage && runningChapter !== null && runningSessionId) {
                             void fetchRunRecords(runningChapter).then(({ runs }) => {
                                 if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current ||
                                     statusSeq !== statusRequestRef.current || stageVersion !== stageEventVersionRef.current) return;
                                 applyStageOverrides(deriveHistoricalStageOverrides(
-                                    runs.filter((record) => record.chapter === runningChapter)
+                                    runs.filter((record) => record.chapter === runningChapter && record.sessionId === runningSessionId)
                                 ));
                             }).catch(() => {});
                         }

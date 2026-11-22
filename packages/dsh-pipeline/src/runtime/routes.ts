@@ -677,6 +677,8 @@ export function registerNarrateRoutes(
                     yolo: rt.yolo,
                     runtime: {
                         activeTask: rt.activeTask,
+                        stageChapter: rt.stageChapter,
+                        stageSessionId: rt.stageSessionId,
                         haltRequested: rt.haltRequested
                     },
                     txLockHeld: false,
@@ -744,6 +746,8 @@ export function registerNarrateRoutes(
                 yolo: rt.yolo,
                 runtime: {
                     activeTask: rt.activeTask,
+                    stageChapter: rt.stageChapter,
+                    stageSessionId: rt.stageSessionId,
                     haltRequested: rt.haltRequested
                 },
                 ...diagnostics
