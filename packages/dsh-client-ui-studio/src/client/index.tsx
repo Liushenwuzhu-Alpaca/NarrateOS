@@ -724,7 +724,7 @@ function deriveHistoricalStageOverrides(
             );
         }
         const nextNode: StageNodeState = {
-            status: mapRunStatusToStageStatus(run.status),
+            status: resolveIncomingNodeStatus(run.stage.trim().toUpperCase(), run.status, existing?.status),
             summary: DEFAULT_STAGE_SUMMARIES[stageId],
             updatedAt: updatedAt ?? existing?.updatedAt,
             runId: run.runId

@@ -1043,7 +1043,9 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
     });
 
-    it('重新打开 Studio 时，进行中的下一章工序打开本章会话而不是归档章', async () => {
+    it.each([
+        ['WRITER', '生成中'], ['LOCAL_PATCH', '润色中']
+    ])('重新打开 Studio 时，下一章的 %s 不使用归档章会话或旧工序徽标', async (stage, badge) => {
         vi.mocked(api.fetchChapters).mockImplementation(async () => ({
             chapters: chaptersPayload(activeBookRoot).chapters.slice(0, 1)
         }));
@@ -1053,7 +1055,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 ...status, walPhase: 'STATE_COMMITTED', activeChapter: 1, latestChapter: 1,
                 lastCommittedChapter: 1, chapterCount: 1,
                 runtime: { ...status.runtime, activeTask: 'STEPPING', stageChapter: 2, stageSessionId: 'writer-session-2' },
-                yolo: { ...status.yolo, currentStage: 'WRITER' }
+                yolo: { ...status.yolo, currentStage: stage }
             };
         });
         vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => ({
@@ -1063,7 +1065,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                     sessionId: 'old-review-session-2', status: 'completed'
                 }] : []),
                 {
-                    runId: `writer-${chapter}`, chapter, stage: 'WRITER', role: 'writer', attempt: 1,
+                    runId: `writer-${chapter}`, chapter, stage: chapter === 2 ? stage : 'WRITER', role: 'writer', attempt: 1,
                     sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
                 }
             ]
@@ -1072,7 +1074,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
         if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
         const card = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="WRITER"]')!;
-        expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe('生成中');
+        expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe(badge);
         expect(container.querySelector('.ns-pipe-card[data-stage-id="FACT_CHECKER"] .ns-pipe-step-state')?.textContent)
             .toBe('待命');
         await click(card);
