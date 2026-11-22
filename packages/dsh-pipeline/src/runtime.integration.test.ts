@@ -1770,6 +1770,10 @@ describe('Wave 3B 收口回归集成测试', () => {
             },
             onLlmStream: () => textToStreamChunks('雨歇之后，铁锚重新沉入浅水，灯塔光束掠过防波堤。')
         });
+        const store = ctx.narratePipeline.requireBookStore();
+        await store.beginDraft(1);
+        await store.commitDraft(1, '灯塔清点了本日到港船只。');
+        await store.applyStatePatch(1, []);
         const step = ctx.narratePipeline.stepChapter({ chapterGoal: '推进港口剧情', signal: abort.signal });
         // 立即接住拒绝，避免取消或工种失败形成未处理的 Promise。
         const settled = step.then(() => '完成', () => '拒绝');
@@ -1777,15 +1781,28 @@ describe('Wave 3B 收口回归集成测试', () => {
             await entered.promise;
             const status = await web.invoke('GET', '/api/narrate/status');
             expect(status.statusCode).toBe(200);
-            expect(status.json['runtime']).toMatchObject({ activeTask: 'STEPPING' });
+            expect(status.json).toMatchObject({
+                activeChapter: 1,
+                latestChapter: 1,
+                walPhase: 'STATE_COMMITTED',
+                runtime: { activeTask: 'STEPPING', stageChapter: 2 }
+            });
             expect(status.json['yolo']).toMatchObject({ running: false, currentStage: 'LIBRARIAN' });
+            const runtime = status.json['runtime'];
+            if (typeof runtime !== 'object' || !runtime || !('stageSessionId' in runtime)) {
+                throw new Error('运行态未提供工序会话');
+            }
+            const running = await web.invoke('GET', '/api/narrate/runs?chapter=2');
+            expect(running.json['runs']).toMatchObject([
+                { chapter: 2, stage: 'LIBRARIAN', status: 'running', sessionId: runtime.stageSessionId }
+            ]);
             if (outcome === '取消') abort.abort(new Error('单步取消'));
         } finally {
             release.resolve();
         }
         expect(await settled).toBe(outcome === '完成' ? '完成' : '拒绝');
         const status = await web.invoke('GET', '/api/narrate/status');
-        expect(status.json['runtime']).toMatchObject({ activeTask: 'IDLE' });
+        expect(status.json['runtime']).toMatchObject({ activeTask: 'IDLE', stageChapter: null, stageSessionId: null });
         expect(status.json['yolo']).toMatchObject({ running: false, currentStage: null });
     });
 
