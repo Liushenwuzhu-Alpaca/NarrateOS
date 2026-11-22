@@ -1,6 +1,6 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
-import { PathFence } from './path-fence.js';
+import type { PathFence, ReadFileTarget } from './path-fence.js';
 import type { ReadQuotaCounter } from './read-quota.js';
 import { isEnoentError, readContentWithStagingPriority, readOptionalBookConfig } from './shared.js';
 
@@ -93,6 +93,10 @@ function sliceWithinBudget(
 /** 创建受控作品只读工具，批量读取按成功调用计费并保留逐文件续读位置。 */
 export function createBookReadTool(options: BookReadToolOptions): ToolDefinition {
     const { store, runId, fence, quota, stagingOverlay } = options;
+    // 审稿续读只承认本轮实际发出的游标，范围不能超过最初的命中窗口。
+    const auditContinuations = options.manuscriptHits
+        ? new Map<string, { offset: number; limit: number; charOffset: number }>()
+        : undefined;
     const remindedPaths = new Set<string>();
 
     return defineTool({
@@ -165,19 +169,23 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
             if (requestedPaths.length > MAX_BATCH_READ_PATHS) {
                 throw new Error(`book_read 单次最多读取 ${MAX_BATCH_READ_PATHS} 个路径，收到 ${requestedPaths.length} 个`);
             }
-            const targets = new Map<string, { normalized: string; absPath: string }>();
+            const targets = new Map<string, ReadFileTarget>();
             for (const path of requestedPaths) {
                 exec.signal.throwIfAborted();
                 const target = await fence.assertReadFile(path);
                 targets.set(target.normalized, target);
             }
             if (options.manuscriptHits) {
-                for (const { normalized } of targets.values()) {
-                    if (!normalized.startsWith('manuscripts/')) continue;
+                for (const { normalized, realNormalized } of targets.values()) {
+                    if (!normalized.startsWith('manuscripts/') && !realNormalized.startsWith('manuscripts/')) continue;
+                    if (normalized !== realNormalized) throw new Error('审稿回查旧章请使用手稿的原始作品路径');
                     if (args.paths !== undefined) throw new Error('审稿回查旧章仅支持 path 单文件');
                     if (args.offset === undefined || args.limit === undefined || args.limit > MAX_AUDIT_WINDOW_LINES) {
                         throw new Error(`审稿回查旧章须指定 offset 和 1..${MAX_AUDIT_WINDOW_LINES} 行的 limit`);
                     }
+                    const continuation = auditContinuations?.get(normalized);
+                    if (continuation && continuation.offset === args.offset && continuation.limit === args.limit
+                        && continuation.charOffset === (args.char_offset ?? 0)) continue;
                     const hits = options.manuscriptHits.get(normalized);
                     if (!hits) throw new Error(`请先用 book_grep 定位 ${normalized} 的原句`);
                     let includesHit = false;
@@ -223,6 +231,17 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                     const read = await readContentWithStagingPriority({ store, runId, normalizedPath: target.normalized,
                         absPath: target.absPath, stagingOverlay, missingInOverlayMessage: `文件在当前分支视图中不存在或不可见: ${target.normalized}` });
                     const item = { ...sliceWithinBudget(read.content, target.normalized, remaining, maxOutputChars, args.offset, args.limit, args.char_offset), fromStaging: read.fromStaging };
+                    if (auditContinuations && target.normalized.startsWith('manuscripts/')) {
+                        if (item.nextOffset === undefined) {
+                            auditContinuations.delete(target.normalized);
+                        } else {
+                            const end = Math.min(item.totalLines, args.offset! + args.limit! - 1);
+                            auditContinuations.set(target.normalized, {
+                                offset: item.nextOffset, limit: end - item.nextOffset + 1,
+                                charOffset: item.nextCharOffset ?? 0
+                            });
+                        }
+                    }
                     items.push(item);
                     remaining -= item.content.length;
                     budgetExhausted = item.nextOffset !== undefined || remaining <= 0;

@@ -147,6 +147,12 @@ export interface PathFenceOptions {
     allowedChapterFiles?: string[] | undefined;
 }
 
+export interface ReadFileTarget {
+    normalized: string;
+    absPath: string;
+    realNormalized: string;
+}
+
 /**
  * 作品路径围栏（PathFence）
  * - 将所有读写检索严格锁死在当前 bookRoot 允许目录内；
@@ -364,17 +370,17 @@ export class PathFence {
     private async assertFileAccess(
         relPath: string,
         mode: 'read' | 'write'
-    ): Promise<{ normalized: string; absPath: string }> {
+    ): Promise<ReadFileTarget> {
         const normalized = this.normalizeRelPath(relPath);
         this.assertNormalizedAllowed(normalized, relPath, mode);
 
         const absPath = resolve(this.bookRoot, normalized);
-        await this.assertSymlinkSafe(absPath, relPath, mode);
-        return { normalized, absPath };
+        const realNormalized = await this.assertSymlinkSafe(absPath, relPath, mode);
+        return { normalized, absPath, realNormalized };
     }
 
     /** 校验只读文件路径：必须位于允许目录或白名单 .ops 文件内，且 realpath 后二次复核合法 */
-    async assertReadFile(relPath: string): Promise<{ normalized: string; absPath: string }> {
+    async assertReadFile(relPath: string): Promise<ReadFileTarget> {
         return await this.assertFileAccess(relPath, 'read');
     }
 
@@ -436,17 +442,17 @@ export class PathFence {
         absPath: string,
         requestedPath: string,
         mode: PathFenceAccessMode = 'read'
-    ): Promise<void> {
+    ): Promise<string> {
         const realRoot = await realpath(this.bookRoot);
         const realTarget = await resolveTargetRealPath(absPath, requestedPath);
         if (!isInsideRealRoot(realRoot, realTarget)) {
             throw new PathFenceError(requestedPath, `符号链接越界 bookRoot: ${requestedPath}`);
         }
         const realRel = relative(realRoot, realTarget);
-        if (realRel !== '') {
-            const normalizedRealRel = normalizeRelPosixPath(realRel, { stripTrailingSlash: true });
-            this.assertNormalizedAllowed(normalizedRealRel, requestedPath, mode);
-        }
+        if (realRel === '') return realRel;
+        const normalizedRealRel = normalizeRelPosixPath(realRel, { stripTrailingSlash: true });
+        this.assertNormalizedAllowed(normalizedRealRel, requestedPath, mode);
+        return normalizedRealRel;
     }
 
     /** 检查实际遍历到的子路径是否仍在 bookRoot 真实目录内且符合指定访问模式 */
