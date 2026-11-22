@@ -1035,6 +1035,7 @@ export function NarrateStudioRoot({
         if (switchingBookRef.current) return;
         const epoch = workspaceEpochRef.current;
         const seq = ++statusRequestRef.current;
+        const stageVersion = stageEventVersionRef.current;
         const next = await fetchStatus(...scopeArgs);
         if (
             isCurrentWorkspace(epoch) &&
@@ -1046,7 +1047,7 @@ export function NarrateStudioRoot({
                 setLatestSseStage(readActiveStage(next));
             }
         }
-    }, [isCurrentWorkspace]);
+    }, [isCurrentWorkspace, scopeArgs]);
 
     const loadViews = useCallback(async () => {
         if (switchingBookRef.current) return;
@@ -1280,7 +1281,7 @@ export function NarrateStudioRoot({
                             const runningChapter = statusRes.activeChapter ||
                                 (statusRes.runtime.activeTask === 'STEPPING' ? statusRes.latestChapter + 1 : statusRes.latestChapter);
                             setLiveRunChapter(runningChapter);
-                            void fetchRunRecords(runningChapter).then(({ runs }) => {
+                            void fetchRunRecords(runningChapter, ...scopeArgs).then(({ runs }) => {
                                 if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current ||
                                     statusSeq !== statusRequestRef.current || stageVersion !== stageEventVersionRef.current) return;
                                 applyStageOverrides(deriveHistoricalStageOverrides(
@@ -1315,29 +1316,7 @@ export function NarrateStudioRoot({
                 } else {
                     setSelectedChapter(null);
                     setChapterDetail(null);
-                    setHistoricalRuns([]);
-                }
-
-                if (
-                    (statusRes.runtime.activeTask === 'STEPPING' || statusRes.yolo.running) &&
-                    isCurrentWorkspace(epoch) &&
-                    seq === refreshRequestRef.current
-                ) {
-                    const activeTargetChapter = (statusRes.latestChapter ?? 0) + 1;
-                    setLiveRunChapter(activeTargetChapter);
-                    const activeRunsRes = await fetchRunRecords(activeTargetChapter, ...scopeArgs).catch(() => null);
-                    if (
-                        activeRunsRes &&
-                        activeRunsRes.runs.length > 0 &&
-                        isCurrentWorkspace(epoch) &&
-                        seq === refreshRequestRef.current
-                    ) {
-                        applyStageOverrides((prev) =>
-                            Object.keys(prev).length > 0
-                                ? prev
-                                : deriveHistoricalStageOverrides(activeRunsRes.runs)
-                        );
-                    }
+                    await loadRunsForChapter(null);
                 }
             } catch (err) {
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) {
@@ -1347,7 +1326,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [applyStageOverrides, isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, showToast]
+        [applyStageOverrides, isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, scopeArgs, showToast]
     );
 
     useEffect(() => {
@@ -1966,7 +1945,7 @@ export function NarrateStudioRoot({
         return () => {
             unsubscribe();
         };
-    }, [applyStageOverrides, booksState.scopeBooksRoot, loadStatus, requestScope, showToast, stashCurrentDraftIfDirty]);
+    }, [applyStageOverrides, booksState.scopeBooksRoot, loadStatus, requestScope, setSseStage, showToast, stashCurrentDraftIfDirty]);
 
     const executeSelectBook = useCallback(
         async (bookRoot: string) => {
@@ -2130,19 +2109,10 @@ export function NarrateStudioRoot({
 
     const handleRequestHalt = useCallback(
         async (options?: { force?: boolean }) => {
-            try {
-                await requestHalt(options, ...scopeArgs);
-                showToast(
-                    options?.force
-                        ? '已发送立即中断指令，正在清理未完成草稿'
-                        : '已发送安全停机请求，将在安全检查点挂起'
-                );
-                await loadStatus();
-            } catch (err) {
-                showToast(err instanceof Error ? err.message : String(err), 'error');
-            }
+            await requestHalt(options, ...scopeArgs);
+            await loadStatus();
         },
-        [loadStatus]
+        [loadStatus, scopeArgs]
     );
 
     const handleSync = useCallback(async () => {
