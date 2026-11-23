@@ -1022,6 +1022,9 @@ export function NarrateStudioRoot({
     const refreshRequestRef = useRef(0);
     const viewsRequestRef = useRef(0);
     const statusRequestRef = useRef(0);
+    const restoredStageRef = useRef<{
+        epoch: number; version: number; stage: string; chapter: number; sessionId: string;
+    } | null>(null);
     const saveInFlightRef = useRef(false);
     useLayoutEffect(() => () => {
         workspaceEpochRef.current += 1;
@@ -1030,6 +1033,46 @@ export function NarrateStudioRoot({
         (epoch: number) => epoch === workspaceEpochRef.current && !switchingBookRef.current,
         []
     );
+
+    const restoreLiveStage = useCallback((snapshot: NarrateStatusPayload, epoch: number, version: number) => {
+        if (version !== stageEventVersionRef.current) return;
+        const stage = readActiveStage(snapshot);
+        setLatestSseStage(stage);
+        const { stageChapter: chapter, stageSessionId: sessionId } = snapshot.runtime;
+        if (stage && chapter !== null) setLiveRunChapter(chapter);
+        if (!stage || chapter === null || !sessionId) {
+            restoredStageRef.current = null;
+            return;
+        }
+        const stageId = resolveStageId(stage);
+        if (!stageId) return;
+        const previous = restoredStageRef.current;
+        if (previous?.epoch === epoch && previous.version === version && previous.stage === stage &&
+            previous.chapter === chapter && previous.sessionId === sessionId) return;
+
+        const request = { epoch, version, stage, chapter, sessionId };
+        restoredStageRef.current = request;
+        void fetchRunRecords(chapter).then(({ runs }) => {
+            if (!isCurrentWorkspace(epoch) || restoredStageRef.current !== request ||
+                version !== stageEventVersionRef.current) return;
+            const chapterRuns = runs.filter((record) => record.chapter === chapter);
+            const current = deriveHistoricalStageOverrides(
+                chapterRuns.filter((record) => record.sessionId === sessionId)
+            )[stageId];
+            if (!current) {
+                restoredStageRef.current = null;
+                return;
+            }
+            const earlier = deriveHistoricalStageOverrides(
+                chapterRuns.filter((record) => record.sessionId !== sessionId && resolveStageId(record.stage) === stageId)
+            )[stageId];
+            // 同章同工序的旧尝试只参与会话切换，不参与实时徽标投影。
+            current.sessions = mergeStageSessions(earlier?.sessions, current.sessions);
+            applyStageOverrides((previousStages) => ({ ...previousStages, [stageId]: current }));
+        }).catch(() => {
+            if (restoredStageRef.current === request) restoredStageRef.current = null;
+        });
+    }, [applyStageOverrides, isCurrentWorkspace]);
 
     const loadStatus = useCallback(async () => {
         if (switchingBookRef.current) return;
@@ -1043,11 +1086,9 @@ export function NarrateStudioRoot({
             (!currentBookRootRef.current || next.bookRoot === currentBookRootRef.current)
         ) {
             setStatus(next);
-            if (stageVersion === stageEventVersionRef.current) {
-                setLatestSseStage(readActiveStage(next));
-            }
+            restoreLiveStage(next, epoch, stageVersion);
         }
-    }, [isCurrentWorkspace, scopeArgs]);
+    }, [isCurrentWorkspace, restoreLiveStage]);
 
     const loadViews = useCallback(async () => {
         if (switchingBookRef.current) return;
@@ -1273,22 +1314,7 @@ export function NarrateStudioRoot({
                 currentBookRootRef.current = activeRoot;
                 if (statusSeq === statusRequestRef.current) {
                     setStatus(statusRes);
-                    if (stageVersion === stageEventVersionRef.current) {
-                        const activeStage = readActiveStage(statusRes);
-                        setLatestSseStage(activeStage);
-                        const runningChapter = statusRes.runtime.stageChapter;
-                        const runningSessionId = statusRes.runtime.stageSessionId;
-                        if (activeStage && runningChapter !== null) setLiveRunChapter(runningChapter);
-                        if (activeStage && runningChapter !== null && runningSessionId) {
-                            void fetchRunRecords(runningChapter, ...scopeArgs).then(({ runs }) => {
-                                if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current ||
-                                    statusSeq !== statusRequestRef.current || stageVersion !== stageEventVersionRef.current) return;
-                                applyStageOverrides(deriveHistoricalStageOverrides(
-                                    runs.filter((record) => record.chapter === runningChapter && record.sessionId === runningSessionId)
-                                ));
-                            }).catch(() => {});
-                        }
-                    }
+                    restoreLiveStage(statusRes, epoch, stageVersion);
                 }
                 setChapters(chaptersRes.chapters);
                 // 每次全量刷新清除瞬态 liveTelemetry 覆盖层，确保展现持久化遥测或最新值
@@ -1325,7 +1351,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [applyStageOverrides, isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, scopeArgs, showToast]
+        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, restoreLiveStage, showToast]
     );
 
     useEffect(() => {

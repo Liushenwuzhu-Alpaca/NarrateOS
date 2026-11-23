@@ -1060,20 +1060,29 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 yolo: { ...status.yolo, currentStage: stage }
             };
         });
-        const requestScope = { sessionId: 'author-a' };
-        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter, scope) => ({
-            runs: scope?.sessionId === requestScope.sessionId ? [
-                ...(chapter === 2 ? [{
-                    runId: 'old-review-2', chapter, stage: 'FACT_CHECKER', role: 'fact-checker', attempt: 1,
-                    sessionId: 'old-review-session-2', status: 'completed'
-                }] : []),
-                {
-                    runId: `writer-${chapter}`, chapter, stage: chapter === 2 ? stage : 'WRITER', role: 'writer', attempt: 1,
-                    sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
-                }
-            ] : []
-        }));
-        const container = await mountStudio(requestScope);
+        const liveRuns = Promise.withResolvers<void>();
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => {
+            if (chapter === 2) await liveRuns.promise;
+            return {
+                runs: [
+                    ...(chapter === 2 ? [{
+                        runId: 'old-review-2', chapter, stage: 'FACT_CHECKER', role: 'fact-checker', attempt: 1,
+                        sessionId: 'old-review-session-2', status: 'completed'
+                    }] : []),
+                    ...(chapter === 2 && stage === 'LOCAL_PATCH' ? [{
+                        runId: 'initial-writer-2', chapter, stage: 'WRITER', role: 'writer', attempt: 1,
+                        sessionId: 'initial-writer-session-2', status: 'completed'
+                    }] : []),
+                    {
+                        runId: `writer-${chapter}`, chapter, stage: chapter === 2 ? stage : 'WRITER', role: 'writer', attempt: 1,
+                        sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
+                    }
+                ]
+            };
+        });
+        const container = await mountStudio();
+        await emit({ event: 'signal:received', data: {} });
+        await act(async () => { liveRuns.resolve(); });
         const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
         if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
         const card = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="WRITER"]')!;
@@ -1082,6 +1091,14 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             .toBe('待命');
         await click(card);
         expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('writer-session-2');
+        if (stage === 'LOCAL_PATCH') {
+            const original = container.querySelector<HTMLButtonElement>('[data-attempt-session-id="initial-writer-session-2"]');
+            expect(original).not.toBeNull();
+            await click(original!);
+            expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id'))
+                .toBe('initial-writer-session-2');
+            expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe('润色中');
+        }
         expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
     });
 
