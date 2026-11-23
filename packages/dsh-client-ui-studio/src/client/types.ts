@@ -30,6 +30,7 @@ export interface BookSummary {
 /** 作品列表响应载荷 */
 export interface BooksListPayload {
     currentBookRoot: string | null;
+    scopeBooksRoot?: string | undefined;
     books: BookSummary[];
 }
 

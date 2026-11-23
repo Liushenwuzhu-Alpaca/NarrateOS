@@ -58,7 +58,23 @@ export class NarrateApiError extends Error {
     }
 }
 
-async function requestJson<T>(url: string, options?: { method?: string; body?: unknown }): Promise<T> {
+export interface StudioRequestScope {
+    readonly sessionId: string;
+    booksRoot?: string | undefined;
+}
+
+function scopedUrl(url: string, scope?: StudioRequestScope): string {
+    if (!scope) return url;
+    const delimiter = url.includes('?') ? '&' : '?';
+    const query = new URLSearchParams({ scopeSessionId: scope.sessionId });
+    if (scope.booksRoot !== undefined) query.set('scopeBooksRoot', scope.booksRoot);
+    return `${url}${delimiter}${query}`;
+}
+
+async function requestJson<T>(url: string, options?: { method?: string; body?: unknown }, scope?: StudioRequestScope): Promise<T> {
+    if (scope && !scope.booksRoot && options?.method && options.method !== 'GET') {
+        throw new NarrateApiError('正在定位当前作品库，请刷新后重试', 409);
+    }
     const headers: Record<string, string> = {
         Accept: 'application/json'
     };
@@ -72,7 +88,7 @@ async function requestJson<T>(url: string, options?: { method?: string; body?: u
         init.body = JSON.stringify(options.body);
     }
 
-    const res = await fetch(url, init);
+    const res = await fetch(scopedUrl(url, scope), init);
     const rawText = await res.text();
     let parsed: unknown = null;
 
@@ -105,57 +121,57 @@ async function requestJson<T>(url: string, options?: { method?: string; body?: u
 }
 
 /** 获取 booksRoot 下的作品列表与当前活跃作品 */
-export function fetchBooks(): Promise<BooksListPayload> {
-    return requestJson<BooksListPayload>('/api/narrate/books');
+export function fetchBooks(scope?: StudioRequestScope): Promise<BooksListPayload> {
+    return requestJson<BooksListPayload>('/api/narrate/books', undefined, scope);
 }
 
 /** 切换当前活跃作品目录 */
-export function selectBook(payload: SelectBookRequest): Promise<SelectBookResponse> {
+export function selectBook(payload: SelectBookRequest, scope?: StudioRequestScope): Promise<SelectBookResponse> {
     return requestJson<SelectBookResponse>('/api/narrate/book/select', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 执行 Step 0 开书编译并切换至新书 */
-export function bootBook(payload: BootBookRequest): Promise<BootBookResponse> {
+export function bootBook(payload: BootBookRequest, scope?: StudioRequestScope): Promise<BootBookResponse> {
     return requestJson<BootBookResponse>('/api/narrate/boot', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 获取当前作品的全局 WAL / YOLO / 遥测状态 */
-export function fetchStatus(): Promise<NarrateStatusPayload> {
-    return requestJson<NarrateStatusPayload>('/api/narrate/status');
+export function fetchStatus(scope?: StudioRequestScope): Promise<NarrateStatusPayload> {
+    return requestJson<NarrateStatusPayload>('/api/narrate/status', undefined, scope);
 }
 
 /** 更新双池或分角色两层模型路由配置 */
-export function saveModelRouting(payload: SaveModelRoutingRequest): Promise<SaveModelRoutingResponse> {
+export function saveModelRouting(payload: SaveModelRoutingRequest, scope?: StudioRequestScope): Promise<SaveModelRoutingResponse> {
     return requestJson<SaveModelRoutingResponse>('/api/narrate/model-routing', {
         method: 'PUT',
         body: payload
-    });
+    }, scope);
 }
 
 /** 获取当前作品的所有章节摘要列表 */
-export function fetchChapters(): Promise<ChaptersListPayload> {
-    return requestJson<ChaptersListPayload>('/api/narrate/chapters');
+export function fetchChapters(scope?: StudioRequestScope): Promise<ChaptersListPayload> {
+    return requestJson<ChaptersListPayload>('/api/narrate/chapters', undefined, scope);
 }
 
 /** 读取指定章节正文与 Git HEAD Diff */
-export function fetchChapter(chapterNumber: number): Promise<ChapterDetail> {
+export function fetchChapter(chapterNumber: number, scope?: StudioRequestScope): Promise<ChapterDetail> {
     const ch = encodeURIComponent(String(chapterNumber));
-    return requestJson<ChapterDetail>(`/api/narrate/chapter?ch=${ch}`);
+    return requestJson<ChapterDetail>(`/api/narrate/chapter?ch=${ch}`, undefined, scope);
 }
 
 /** 查询当前作品或指定章节的工种会话运行索引 (.ops/runs.jsonl) */
-export async function fetchRunRecords(chapter?: number): Promise<RunsListPayload> {
+export async function fetchRunRecords(chapter?: number, scope?: StudioRequestScope): Promise<RunsListPayload> {
     const url =
         chapter !== undefined && Number.isFinite(chapter)
             ? `/api/narrate/runs?chapter=${encodeURIComponent(String(chapter))}`
             : '/api/narrate/runs';
-    const raw = await requestJson<RunsListPayload | StageRunRecord[]>(url);
+    const raw = await requestJson<RunsListPayload | StageRunRecord[]>(url, undefined, scope);
     if (Array.isArray(raw)) {
         return { runs: raw };
     }
@@ -165,113 +181,113 @@ export async function fetchRunRecords(chapter?: number): Promise<RunsListPayload
 }
 
 /** 查询指定 sessionId 的历史回合、思考链、工具调用与输出明细 */
-export function fetchRunDetail(sessionId: string): Promise<RunDetailPayload> {
+export function fetchRunDetail(sessionId: string, scope?: StudioRequestScope): Promise<RunDetailPayload> {
     return requestJson<RunDetailPayload>(
-        `/api/narrate/runs/detail?sessionId=${encodeURIComponent(sessionId)}`
+        `/api/narrate/runs/detail?sessionId=${encodeURIComponent(sessionId)}`, undefined, scope
     );
 }
 
 /** 保存章节正文修改并自动触发 SHA-256 增量同步 */
-export function saveChapter(payload: PutChapterRequest): Promise<PutChapterResponse> {
+export function saveChapter(payload: PutChapterRequest, scope?: StudioRequestScope): Promise<PutChapterResponse> {
     return requestJson<PutChapterResponse>('/api/narrate/chapter', {
         method: 'PUT',
         body: payload
-    });
+    }, scope);
 }
 
 /** 查询活跃实体档案与冷档案统计 */
-export function fetchViewEntities(): Promise<EntitiesViewPayload> {
-    return requestJson<EntitiesViewPayload>('/api/narrate/views?kind=entities');
+export function fetchViewEntities(scope?: StudioRequestScope): Promise<EntitiesViewPayload> {
+    return requestJson<EntitiesViewPayload>('/api/narrate/views?kind=entities', undefined, scope);
 }
 
 /** 查询未来视野（world/future_horizon.md） */
-export function fetchViewHorizon(): Promise<MarkdownViewPayload> {
-    return requestJson<MarkdownViewPayload>('/api/narrate/views?kind=horizon');
+export function fetchViewHorizon(scope?: StudioRequestScope): Promise<MarkdownViewPayload> {
+    return requestJson<MarkdownViewPayload>('/api/narrate/views?kind=horizon', undefined, scope);
 }
 
 /** 查询跨卷未收伏笔（world/open_threads.md） */
-export function fetchViewThreads(): Promise<MarkdownViewPayload> {
-    return requestJson<MarkdownViewPayload>('/api/narrate/views?kind=threads');
+export function fetchViewThreads(scope?: StudioRequestScope): Promise<MarkdownViewPayload> {
+    return requestJson<MarkdownViewPayload>('/api/narrate/views?kind=threads', undefined, scope);
 }
 
 /** 查询历史遥测日志（.ops/telemetry.jsonl） */
-export function fetchViewTelemetry(): Promise<TelemetryViewPayload> {
-    return requestJson<TelemetryViewPayload>('/api/narrate/views?kind=telemetry');
+export function fetchViewTelemetry(scope?: StudioRequestScope): Promise<TelemetryViewPayload> {
+    return requestJson<TelemetryViewPayload>('/api/narrate/views?kind=telemetry', undefined, scope);
 }
 
 /** 查询待消费与历史导演信号（.ops/signals.jsonl） */
-export function fetchViewSignals(): Promise<SignalsViewPayload> {
-    return requestJson<SignalsViewPayload>('/api/narrate/views?kind=signals');
+export function fetchViewSignals(scope?: StudioRequestScope): Promise<SignalsViewPayload> {
+    return requestJson<SignalsViewPayload>('/api/narrate/views?kind=signals', undefined, scope);
 }
 
 /** 查询 SAFE_HALT 与隔离报告状态 */
-export function fetchViewHalt(): Promise<HaltViewPayload> {
-    return requestJson<HaltViewPayload>('/api/narrate/views?kind=halt');
+export function fetchViewHalt(scope?: StudioRequestScope): Promise<HaltViewPayload> {
+    return requestJson<HaltViewPayload>('/api/narrate/views?kind=halt', undefined, scope);
 }
 
 /** 查询手改下游同步冲突视图（.ops/sync_conflicts.json） */
-export function fetchViewSyncConflicts(): Promise<SyncConflictsViewPayload> {
-    return requestJson<SyncConflictsViewPayload>('/api/narrate/views?kind=sync_conflicts');
+export function fetchViewSyncConflicts(scope?: StudioRequestScope): Promise<SyncConflictsViewPayload> {
+    return requestJson<SyncConflictsViewPayload>('/api/narrate/views?kind=sync_conflicts', undefined, scope);
 }
 
 /** 推进单章生成流水线 */
-export function stepChapter(payload: StepChapterRequest): Promise<StepChapterResponse> {
+export function stepChapter(payload: StepChapterRequest, scope?: StudioRequestScope): Promise<StepChapterResponse> {
     return requestJson<StepChapterResponse>('/api/narrate/step', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 触发全书手改对账同步 */
-export function syncManuscripts(): Promise<SyncResponse> {
+export function syncManuscripts(scope?: StudioRequestScope): Promise<SyncResponse> {
     return requestJson<SyncResponse>('/api/narrate/sync', {
         method: 'POST',
         body: {}
-    });
+    }, scope);
 }
 
 /** 手动触发离线 Dreaming（VACUUM 与跨章自愈） */
-export function runDreaming(payload: DreamRequest = {}): Promise<DreamResponse> {
+export function runDreaming(payload: DreamRequest = {}, scope?: StudioRequestScope): Promise<DreamResponse> {
     return requestJson<DreamResponse>('/api/narrate/dream', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 仅提交已选择的冲突或显式清单。 */
-export function healConflicts(payload: HealConflictsRequest): Promise<HealConflictsResponse> {
+export function healConflicts(payload: HealConflictsRequest, scope?: StudioRequestScope): Promise<HealConflictsResponse> {
     return requestJson<HealConflictsResponse>('/api/narrate/heal', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 执行原子换卷封存或全书完结封笔 */
-export function advanceVolume(payload: AdvanceVolumeRequest = {}): Promise<AdvanceVolumeResponse> {
+export function advanceVolume(payload: AdvanceVolumeRequest = {}, scope?: StudioRequestScope): Promise<AdvanceVolumeResponse> {
     return requestJson<AdvanceVolumeResponse>('/api/narrate/volume/advance', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 开启并行时间线分叉窗口 */
-export function forkParallelWindow(payload: ParallelWindowRequest): Promise<ParallelForkResponse> {
+export function forkParallelWindow(payload: ParallelWindowRequest, scope?: StudioRequestScope): Promise<ParallelForkResponse> {
     return requestJson<ParallelForkResponse>('/api/narrate/parallel/fork', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 合流并执行并行时间线 3-Way Merge */
-export function mergeParallelWindow(payload: ParallelWindowRequest): Promise<ParallelMergeResponse> {
+export function mergeParallelWindow(payload: ParallelWindowRequest, scope?: StudioRequestScope): Promise<ParallelMergeResponse> {
     return requestJson<ParallelMergeResponse>('/api/narrate/parallel/merge', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 从当前或指定章节触发声纹采集 (Voice Harvest) */
-export function harvestVoice(chapterNumber?: number): Promise<HarvestVoiceResponse> {
+export function harvestVoice(chapterNumber?: number, scope?: StudioRequestScope): Promise<HarvestVoiceResponse> {
     const body: HarvestVoiceRequest =
         chapterNumber !== undefined && Number.isFinite(chapterNumber)
             ? { chapterNumber }
@@ -279,52 +295,52 @@ export function harvestVoice(chapterNumber?: number): Promise<HarvestVoiceRespon
     return requestJson<HarvestVoiceResponse>('/api/narrate/voice-harvest', {
         method: 'POST',
         body
-    });
+    }, scope);
 }
 
 /** 向 .ops/signals.jsonl 投递一次性导演信号 */
-export function postSignal(payload: PostSignalRequest): Promise<PostSignalResponse> {
+export function postSignal(payload: PostSignalRequest, scope?: StudioRequestScope): Promise<PostSignalResponse> {
     return requestJson<PostSignalResponse>('/api/narrate/signals', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 撤回一条未消费导演信号（按 created_at + reason 内容匹配删除） */
 export function deleteSignal(payload: {
     created_at: string;
     reason: string;
-}): Promise<{ status: string; remaining: number }> {
+}, scope?: StudioRequestScope): Promise<{ status: string; remaining: number }> {
     return requestJson<{ status: string; remaining: number }>('/api/narrate/signals/delete', {
         method: 'DELETE',
         body: payload
-    });
+    }, scope);
 }
 
 /** 请求停机（默认安全点软停机；传入 { force: true } 立即硬中断在途调用） */
-export function requestHalt(options?: HaltRequest): Promise<HaltResponse> {
+export function requestHalt(options?: HaltRequest, scope?: StudioRequestScope): Promise<HaltResponse> {
     const body: HaltRequest =
         options?.force !== undefined ? { force: options.force } : {};
     return requestJson<HaltResponse>('/api/narrate/halt', {
         method: 'POST',
         body
-    });
+    }, scope);
 }
 
 /** 启动 YOLO 连续自治推进 */
-export function startYolo(payload: YoloStartRequest = {}): Promise<YoloStartResponse> {
+export function startYolo(payload: YoloStartRequest = {}, scope?: StudioRequestScope): Promise<YoloStartResponse> {
     return requestJson<YoloStartResponse>('/api/narrate/yolo/start', {
         method: 'POST',
         body: payload
-    });
+    }, scope);
 }
 
 /** 请求在本章安全点后优雅停止 YOLO 连跑 */
-export function stopYolo(): Promise<YoloStopResponse> {
+export function stopYolo(scope?: StudioRequestScope): Promise<YoloStopResponse> {
     return requestJson<YoloStopResponse>('/api/narrate/yolo/stop', {
         method: 'POST',
         body: {}
-    });
+    }, scope);
 }
 
 export const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
@@ -363,9 +379,10 @@ export const KNOWN_SSE_EVENTS: readonly SseEventName[] = [
  */
 export function subscribeNarrateEvents(
     onEvent: (event: SseEventPayload) => void,
-    onError?: (err: Event) => void
+    onError?: (err: Event) => void,
+    scope?: StudioRequestScope
 ): () => void {
-    const source = new EventSource('/api/narrate/events');
+    const source = new EventSource(scopedUrl('/api/narrate/events', scope));
     let closed = false;
 
     const handleEvent = (eventName: string) => (ev: Event) => {

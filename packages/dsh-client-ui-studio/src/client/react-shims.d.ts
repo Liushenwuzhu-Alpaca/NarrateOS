@@ -117,6 +117,8 @@ declare module 'react' {
     ];
 
     export function useEffect(effect: () => void | (() => void), deps?: readonly unknown[]): void;
+    export function useLayoutEffect(effect: () => void | (() => void), deps?: readonly unknown[]): void;
+    export function useSyncExternalStore<T>(subscribe: (listener: () => void) => () => void, getSnapshot: () => T): T;
     export function useCallback<T extends (...args: any[]) => any>(
         callback: T,
         deps: readonly unknown[]

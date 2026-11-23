@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
@@ -31,7 +31,8 @@ import {
     stepChapter,
     stopYolo,
     subscribeNarrateEvents,
-    syncManuscripts
+    syncManuscripts,
+    type StudioRequestScope
 } from './api';
 import { BootBookModal } from './BootBookModal';
 import {
@@ -842,6 +843,8 @@ export interface NarrateStudioRootProps {
     sessionsService?: StudioSessionsService | undefined;
     SessionProvider?: StudioSessionProviderComponent | undefined;
     renderStageConversation?: StudioRenderStageConversation | undefined;
+    requestScope?: StudioRequestScope | undefined;
+    sharedDrafts?: React.MutableRefObject<DraftStashMap> | undefined;
 }
 
 /**
@@ -850,8 +853,12 @@ export interface NarrateStudioRootProps {
 export function NarrateStudioRoot({
     sessionsService,
     SessionProvider,
-    renderStageConversation
+    renderStageConversation,
+    requestScope,
+    sharedDrafts
 }: NarrateStudioRootProps = {}): React.ReactElement {
+    // 作用域由宿主按工作区重新挂载；旧回调只持有旧库根。
+    const scopeArgs = useMemo<[] | [StudioRequestScope]>(() => requestScope ? [requestScope] : [], [requestScope]);
     const [booksState, setBooksState] = useState<BooksListPayload>({
         currentBookRoot: '',
         books: []
@@ -1026,6 +1033,9 @@ export function NarrateStudioRoot({
         epoch: number; version: number; stage: string; chapter: number; sessionId: string;
     } | null>(null);
     const saveInFlightRef = useRef(false);
+    useLayoutEffect(() => () => {
+        workspaceEpochRef.current += 1;
+    }, []);
     const isCurrentWorkspace = useCallback(
         (epoch: number) => epoch === workspaceEpochRef.current && !switchingBookRef.current,
         []
@@ -1063,7 +1073,7 @@ export function NarrateStudioRoot({
 
         const request = { epoch, version, stage, chapter, sessionId };
         restoredStageRef.current = request;
-        void fetchRunRecords(chapter).then(({ runs }) => {
+        void fetchRunRecords(chapter, ...scopeArgs).then(({ runs }) => {
             if (!isCurrentWorkspace(epoch) || restoredStageRef.current !== request ||
                 version !== stageEventVersionRef.current) return;
             const chapterRuns = runs.filter((record) => record.chapter === chapter);
@@ -1083,7 +1093,7 @@ export function NarrateStudioRoot({
         }).catch(() => {
             if (restoredStageRef.current === request) restoredStageRef.current = null;
         });
-    }, [applyStageOverrides, isCurrentWorkspace, setLiveRunChapter]);
+    }, [applyStageOverrides, isCurrentWorkspace, scopeArgs, setLiveRunChapter]);
 
     const loadStatus = useCallback(async () => {
         if (switchingBookRef.current) return;
@@ -1091,7 +1101,7 @@ export function NarrateStudioRoot({
         const seq = ++statusRequestRef.current;
         for (;;) {
             const runtimeVersion = runtimeEventVersionRef.current;
-            const next = await fetchStatus();
+            const next = await fetchStatus(...scopeArgs);
             if (!isCurrentWorkspace(epoch) || seq !== statusRequestRef.current ||
                 (currentBookRootRef.current && next.bookRoot !== currentBookRootRef.current)) return;
             // 状态接口在读书库文件前采样运行态，途中抵达的实时事件优先。
@@ -1100,20 +1110,20 @@ export function NarrateStudioRoot({
             restoreLiveStage(next, epoch, stageEventVersionRef.current);
             return;
         }
-    }, [isCurrentWorkspace, restoreLiveStage]);
+    }, [isCurrentWorkspace, restoreLiveStage, scopeArgs]);
 
     const loadViews = useCallback(async () => {
         if (switchingBookRef.current) return;
         const epoch = workspaceEpochRef.current;
         const seq = ++viewsRequestRef.current;
         const [entities, horizon, threads, telemetry, signals, halt, syncConflicts] = await Promise.all([
-            fetchViewEntities().catch(() => null),
-            fetchViewHorizon().catch(() => null),
-            fetchViewThreads().catch(() => null),
-            fetchViewTelemetry().catch(() => null),
-            fetchViewSignals().catch(() => null),
-            fetchViewHalt().catch(() => null),
-            fetchViewSyncConflicts().catch(() => null)
+            fetchViewEntities(...scopeArgs).catch(() => null),
+            fetchViewHorizon(...scopeArgs).catch(() => null),
+            fetchViewThreads(...scopeArgs).catch(() => null),
+            fetchViewTelemetry(...scopeArgs).catch(() => null),
+            fetchViewSignals(...scopeArgs).catch(() => null),
+            fetchViewHalt(...scopeArgs).catch(() => null),
+            fetchViewSyncConflicts(...scopeArgs).catch(() => null)
         ]);
         if (!isCurrentWorkspace(epoch) || seq !== viewsRequestRef.current) return;
         if (entities) setEntitiesView(entities);
@@ -1141,7 +1151,7 @@ export function NarrateStudioRoot({
             const epoch = workspaceEpochRef.current;
             const bookRoot = currentBookRootRef.current;
             try {
-                const payload = await fetchRunRecords(chapterNumber);
+                const payload = await fetchRunRecords(chapterNumber, ...scopeArgs);
                 if (!isCurrentWorkspace(epoch) || seq !== runsRequestSeqRef.current) return;
                 if (bookRoot && currentBookRootRef.current && bookRoot !== currentBookRootRef.current) return;
                 setHistoricalRuns(payload.runs);
@@ -1160,8 +1170,20 @@ export function NarrateStudioRoot({
     // 非阻断式草稿守卫与内存暂存表（DraftStashMap）
     const [draftLocation, setDraftLocation] = useState<DraftLocation | null>(null);
     const draftLocationRef = useRef<DraftLocation | null>(null);
-    const [draftStash, setDraftStash] = useState<DraftStashMap>({});
-    const draftStashRef = useRef<DraftStashMap>({});
+    const [draftStash, setDraftStash] = useState<DraftStashMap>(() => sharedDrafts?.current ?? {});
+    const localDrafts = useRef<DraftStashMap>({});
+    const draftStashRef = sharedDrafts ?? localDrafts;
+
+    useLayoutEffect(() => {
+        if (!sharedDrafts) return;
+        setDraftStash(sharedDrafts.current);
+        return () => {
+            const draft = draftLocationRef.current;
+            if (draft) {
+                sharedDrafts.current = putStashedDraft(sharedDrafts.current, { ...draft, updatedAt: Date.now() });
+            }
+        };
+    }, [sharedDrafts]);
 
     const handleDraftDirtyChange = useCallback((dirty: DraftLocation | null) => {
         draftLocationRef.current = dirty;
@@ -1220,7 +1242,7 @@ export function NarrateStudioRoot({
             const epoch = workspaceEpochRef.current;
             setChapterLoading(true);
             try {
-                const detail = await fetchChapter(chapterNumber);
+                const detail = await fetchChapter(chapterNumber, ...scopeArgs);
                 if (!isCurrentWorkspace(epoch) || seq !== chapterRequestSeqRef.current) return;
                 if (detail.bookRoot !== currentBookRootRef.current || detail.chapterNumber !== chapterNumber) return;
                 const dirtyNow = draftLocationRef.current;
@@ -1260,15 +1282,16 @@ export function NarrateStudioRoot({
             const chapterSeq = chapterRequestSeqRef.current;
             setLoading(true);
             try {
-                let booksRes = await fetchBooks();
+                let booksRes = await fetchBooks(...scopeArgs);
                 if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
+                if (requestScope && booksRes.scopeBooksRoot) requestScope.booksRoot = booksRes.scopeBooksRoot;
 
                 if (!booksRes.currentBookRoot && booksRes.books.length > 0 && !currentBookRootRef.current) {
                     const defaultBook = booksRes.books[0];
                     if (defaultBook) {
-                        await selectBook({ bookRoot: defaultBook.bookRoot });
+                        await selectBook({ bookRoot: defaultBook.bookRoot }, ...scopeArgs);
                         if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
-                        booksRes = await fetchBooks();
+                        booksRes = await fetchBooks(...scopeArgs);
                         if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
                     }
                 }
@@ -1289,7 +1312,7 @@ export function NarrateStudioRoot({
                     setHaltView(null);
                     setSyncConflictsView(null);
                     const runtimeVersion = runtimeEventVersionRef.current;
-                    const noBookStatus = await fetchStatus().catch(() => null);
+                    const noBookStatus = await fetchStatus(...scopeArgs).catch(() => null);
                     if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
                     if (statusSeq === statusRequestRef.current) {
                         if (runtimeVersion === runtimeEventVersionRef.current) setStatus(noBookStatus);
@@ -1300,8 +1323,8 @@ export function NarrateStudioRoot({
 
                 const runtimeVersion = runtimeEventVersionRef.current;
                 const [statusRes, chaptersRes] = await Promise.all([
-                    fetchStatus(),
-                    fetchChapters(),
+                    fetchStatus(...scopeArgs),
+                    fetchChapters(...scopeArgs),
                     loadViews()
                 ]);
                 if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
@@ -1356,7 +1379,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadStatus, loadViews, restoreLiveStage, showToast]
+        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadStatus, loadViews, requestScope, restoreLiveStage, scopeArgs, showToast]
     );
 
     useEffect(() => {
@@ -1374,6 +1397,7 @@ export function NarrateStudioRoot({
 
     // 订阅全量 25 类 SSE 事件
     useEffect(() => {
+        if (requestScope && !booksState.scopeBooksRoot) return;
         const handleSseEvent = (payload: SseEventPayload) => {
             const { event, data } = payload;
 
@@ -1973,11 +1997,13 @@ export function NarrateStudioRoot({
             }
         };
 
-        const unsubscribe = subscribeNarrateEvents(handleSseEvent);
+        const unsubscribe = requestScope
+            ? subscribeNarrateEvents(handleSseEvent, undefined, requestScope)
+            : subscribeNarrateEvents(handleSseEvent);
         return () => {
             unsubscribe();
         };
-    }, [applyStageOverrides, loadStatus, setLiveRunChapter, setSseStage, showToast, stashCurrentDraftIfDirty]);
+    }, [applyStageOverrides, booksState.scopeBooksRoot, loadStatus, requestScope, setLiveRunChapter, setSseStage, showToast, stashCurrentDraftIfDirty]);
 
     const executeSelectBook = useCallback(
         async (bookRoot: string) => {
@@ -1998,7 +2024,7 @@ export function NarrateStudioRoot({
             setSelectedStageSession(null);
             setLiveSessionEvents({});
             try {
-                await selectBook({ bookRoot });
+                await selectBook({ bookRoot }, ...scopeArgs);
                 currentBookRootRef.current = bookRoot;
                 setActiveParallelWindowId('');
                 setActiveParallelBranchId('');
@@ -2113,7 +2139,7 @@ export function NarrateStudioRoot({
             }
             const epoch = workspaceEpochRef.current;
             try {
-                const res = await stepChapter(nextOptions);
+                const res = await stepChapter(nextOptions, ...scopeArgs);
                 if (!isCurrentWorkspace(epoch)) return;
                 setRevealNonce((n) => n + 1);
                 await refreshAll(res.chapterNumber);
@@ -2128,40 +2154,40 @@ export function NarrateStudioRoot({
 
     const handleStartYolo = useCallback(
         async (targetChapters: number) => {
-            await startYolo({ targetChapters });
+            await startYolo({ targetChapters }, ...scopeArgs);
             await loadStatus();
         },
         [loadStatus]
     );
 
     const handleStopYolo = useCallback(async () => {
-        await stopYolo();
+        await stopYolo(...scopeArgs);
         await loadStatus();
     }, [loadStatus]);
 
     const handleRequestHalt = useCallback(
         async (options?: { force?: boolean }) => {
-            await requestHalt(options);
+            await requestHalt(options, ...scopeArgs);
             await loadStatus();
         },
-        [loadStatus]
+        [loadStatus, scopeArgs]
     );
 
     const handleSync = useCallback(async () => {
-        await syncManuscripts();
+        await syncManuscripts(...scopeArgs);
         setRevealNonce((n) => n + 1);
         await refreshAll(selectedChapterRef.current);
     }, [refreshAll]);
 
     const handleDream = useCallback(async () => {
-        await runDreaming({ force: true });
+        await runDreaming({ force: true }, ...scopeArgs);
         await Promise.all([loadStatus(), loadViews()]);
     }, [loadStatus, loadViews]);
 
     const handleHealConflicts = useCallback(async () => {
         if (!syncConflictsView?.reportRevision || !syncConflictsView.conflicts[0]) return;
         try {
-            const res = await healConflicts({ selection: { bookSlug: syncConflictsView.bookSlug, reportRevision: syncConflictsView.reportRevision, conflictIndex: 0 } });
+            const res = await healConflicts({ selection: { bookSlug: syncConflictsView.bookSlug, reportRevision: syncConflictsView.reportRevision, conflictIndex: 0 } }, ...scopeArgs);
             setRevealNonce((n) => n + 1);
             showToast(res.quarantined ? '本条冲突已保留，请人工裁决' : '本条冲突已处理');
         } catch (err) {
@@ -2183,7 +2209,7 @@ export function NarrateStudioRoot({
                 targetChapter = selectedChapterRef.current;
             }
             try {
-                const res = await harvestVoice(targetChapter);
+                const res = await harvestVoice(targetChapter, ...scopeArgs);
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) {
                     return;
                 }
@@ -2211,7 +2237,7 @@ export function NarrateStudioRoot({
             const bookRoot = currentBookRootRef.current;
             const epoch = workspaceEpochRef.current;
             try {
-                const res = await saveModelRouting(payload);
+                const res = await saveModelRouting(payload, ...scopeArgs);
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
                 setStatus((prev) => {
                     if (!prev) return prev;
@@ -2248,7 +2274,7 @@ export function NarrateStudioRoot({
             const epoch = workspaceEpochRef.current;
             saveInFlightRef.current = true;
             try {
-                const saved = await saveChapter(draft);
+                const saved = await saveChapter(draft, ...scopeArgs);
                 if (!isCurrentWorkspace(epoch) || currentBookRootRef.current !== bookRoot) return;
                 // 保存成功后清除该章内存暂存草稿
                 const nextStash = removeStashedDraft(draftStashRef.current, bookRoot, chapterNumber);
@@ -2276,7 +2302,7 @@ export function NarrateStudioRoot({
     const handleSubmitSignal = useCallback(
         async (payload: SubmitSignalPayload) => {
             const req = buildSignalPayload(payload);
-            await postSignal(req);
+            await postSignal(req, ...scopeArgs);
             await Promise.all([loadViews(), loadStatus()]);
             if (payload.runAfter) {
                 if (payload.kind === 'FLASHBACK') {
@@ -2301,7 +2327,7 @@ export function NarrateStudioRoot({
                 return;
             }
             try {
-                await deleteSignal({ created_at: item.created_at, reason });
+                await deleteSignal({ created_at: item.created_at, reason }, ...scopeArgs);
                 await loadViews();
                 showToast('已撤回便签');
             } catch (err) {
@@ -2848,6 +2874,7 @@ export function NarrateStudioRoot({
             return (
                 <StageSessionViewer
                     selection={selectedStageSession}
+                    requestScope={requestScope}
                     sessionsService={sessionsService}
                     SessionProvider={SessionProvider}
                     renderStageConversation={renderStageConversation}
@@ -2933,7 +2960,7 @@ export function NarrateStudioRoot({
                     }}
                     onInspectHalt={() => {
                         const epoch = workspaceEpochRef.current;
-                        void fetchViewHalt().then((nextHalt) => {
+                        void fetchViewHalt(...scopeArgs).then((nextHalt) => {
                             if (!isCurrentWorkspace(epoch)) return;
                             setHaltView(nextHalt);
                             const diag = mapHaltDiagnostic(nextHalt);
@@ -3250,7 +3277,7 @@ export function NarrateStudioRoot({
             <BootBookModal
                 open={bootModalOpen}
                 onClose={() => setBootModalOpen(false)}
-                onSubmitBoot={(payload) => bootBook(payload)}
+                onSubmitBoot={(payload) => bootBook(payload, ...scopeArgs)}
                 onBootSuccess={(data) => {
                     stashCurrentDraftIfDirty();
                     workspaceEpochRef.current += 1;
@@ -3280,7 +3307,7 @@ export function NarrateStudioRoot({
                     setVolumeSubmitting(true);
                     setVolumeError(null);
                     try {
-                        const res = await advanceVolume(payload);
+                        const res = await advanceVolume(payload, ...scopeArgs);
                         setVolumeModalOpen(false);
                         showToast(
                             res.completedBook
@@ -3322,7 +3349,7 @@ export function NarrateStudioRoot({
                             showToast(`已切换并行支线：${resolvedBranch}（窗口 ${payload.windowId}）`);
                             return;
                         }
-                        await forkParallelWindow({ windowId: payload.windowId });
+                        await forkParallelWindow({ windowId: payload.windowId }, ...scopeArgs);
                         setActiveParallelWindowId(payload.windowId);
                         setActiveParallelBranchId(resolvedBranch);
                         setParallelModalOpen(false);
@@ -3338,7 +3365,7 @@ export function NarrateStudioRoot({
                     setParallelSubmitting(true);
                     setParallelError(null);
                     try {
-                        await mergeParallelWindow({ windowId: payload.windowId });
+                        await mergeParallelWindow({ windowId: payload.windowId }, ...scopeArgs);
                         setActiveParallelWindowId('');
                         setActiveParallelBranchId('');
                         setParallelModalOpen(false);
@@ -3693,13 +3720,46 @@ export function apply(ctx: Context): void {
             };
         }, []);
 
+        const sessionList = sessionsService?.list;
+        const subscribeSessions = useCallback((listener: () => void) =>
+            sessionList?.subscribe?.(listener) ?? (() => {}), [sessionList]);
+        const readSessionList = useCallback(
+            () => sessionList?.subscribe ? sessionList.getSnapshot() : undefined,
+            [sessionList]
+        );
+        const sessions = useSyncExternalStore(subscribeSessions, readSessionList);
+        const mainSession = Object.entries(sessions?.byId ?? {}).find(([, row]) =>
+            (row.retainedBy?.['mainView'] ?? 0) > 0
+        );
+        const sessionId = mainSession?.[0];
+        const directory = sessionId
+            ? sessionsService?.binding?.(sessionId)?.session.projections.faceOf('workingDirectory')
+            : undefined;
+        const subscribeDirectory = useCallback((listener: () => void) =>
+            directory?.subscribe(listener) ?? (() => {}), [directory]);
+        const readDirectory = useCallback(() => directory?.getSnapshot(), [directory]);
+        const projectedDirectory = useSyncExternalStore(subscribeDirectory, readDirectory);
+        const cwd = typeof projectedDirectory === 'string' ? projectedDirectory : mainSession?.[1].cwd;
+        const requestScope = useMemo<StudioRequestScope | undefined>(
+            () => sessionId ? { sessionId } : undefined,
+            [sessionId, cwd]
+        );
+        const sharedDrafts = useRef<DraftStashMap>({});
+
         const renderStageConversation = useMemo<StudioRenderStageConversation | undefined>(() => {
             if (typeof renderSlot !== 'function') return undefined;
             return (owner) => renderSlot(STAGE_CONVERSATION_SLOT, owner);
         }, [renderSlot]);
 
+        if (sessionList?.subscribe && !requestScope) {
+            return <div role="status">请先在主对话选择工作区并打开会话，再使用创作室。</div>;
+        }
+
         return (
             <NarrateStudioRoot
+                key={JSON.stringify([sessionId, cwd])}
+                requestScope={requestScope}
+                sharedDrafts={sharedDrafts}
                 sessionsService={sessionsService}
                 SessionProvider={SessionProvider}
                 renderStageConversation={renderStageConversation}

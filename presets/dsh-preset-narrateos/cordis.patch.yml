@@ -11,18 +11,13 @@
 
     - id: narrateos-book-store
       name: '@narrateos/dsh-book-store'
-      config:
-        booksRoot: ./books
 
     - id: narrateos-book-tools
       name: '@narrateos/dsh-book-tools'
-      config:
-        booksRoot: ./books
 
     - id: narrateos-pipeline
       name: '@narrateos/dsh-pipeline'
       config:
-        booksRoot: ./books
         poolRouting:
           strong_creative: {}
           fast_retrieval: {}

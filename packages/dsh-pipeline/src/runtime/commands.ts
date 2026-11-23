@@ -1,4 +1,4 @@
-import type { CommandDefinition, CommandResult, CommandRuntime } from '@deepseek-ai/dsh-commands';
+import type { CommandDefinition, CommandInvocation, CommandResult, CommandRuntime } from '@deepseek-ai/dsh-commands';
 import type { NarrateRuntimeController, StepChapterInputOptions } from './controller.js';
 
 function formatErr(err: unknown): string {
@@ -180,9 +180,34 @@ function dispatchBackgroundCommand(
  */
 export function registerNarrateCommands(
     commands: Pick<CommandRuntime, 'register'>,
-    controller: NarrateRuntimeController
+    controller: NarrateRuntimeController,
+    resolveController?: (inv: CommandInvocation) => Promise<NarrateRuntimeController>
 ): () => void {
-    const definitions: CommandDefinition[] = [
+    const definitions = buildNarrateCommands(controller);
+    const scopedCommands = new WeakMap([[controller, definitions]]);
+    const disposers = definitions.map((def, index) => commands.register({
+        ...def,
+        async handler(inv) {
+            try {
+                const target = resolveController ? await resolveController(inv) : controller;
+                let entries = scopedCommands.get(target);
+                if (!entries) {
+                    entries = buildNarrateCommands(target);
+                    scopedCommands.set(target, entries);
+                }
+                return await entries[index]!.handler(inv);
+            } catch (error) {
+                return { kind: 'error', text: formatErr(error) };
+            }
+        }
+    }));
+    return () => {
+        for (const dispose of disposers) dispose();
+    };
+}
+
+function buildNarrateCommands(controller: NarrateRuntimeController): CommandDefinition[] {
+    return [
         {
             name: 'narrate-status',
             description: '查看当前激活作品、章号、WAL 相位与运行态摘要（0 Token 只读）',
@@ -367,11 +392,4 @@ export function registerNarrateCommands(
             }
         }
     ];
-
-    const disposers = definitions.map((def) => commands.register(def));
-    return () => {
-        for (const dispose of disposers) {
-            dispose();
-        }
-    };
 }

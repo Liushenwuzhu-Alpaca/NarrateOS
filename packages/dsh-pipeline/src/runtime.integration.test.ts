@@ -137,7 +137,7 @@ function createMockWebServer(ctx: Context) {
         };
     }
 
-    async function openSse(): Promise<{
+    async function openSse(query = ''): Promise<{
         statusCode: number;
         events: Array<{ event: string; data: Record<string, unknown> }>;
         waitForEvent: (
@@ -151,7 +151,7 @@ function createMockWebServer(ctx: Context) {
         }
         const req = new EventEmitter() as unknown as IncomingMessage;
         req.method = 'GET';
-        req.url = '/api/narrate/events';
+        req.url = `/api/narrate/events${query}`;
 
         const events: Array<{ event: string; data: Record<string, unknown> }> = [];
         const waiters: Array<{
@@ -236,12 +236,12 @@ function createMockCommandsRuntime(ctx: Context) {
 
     return {
         defs,
-        async invokeCommand(name: string, rawInput = '') {
+        async invokeCommand(name: string, rawInput = '', agent = { id: 'main-session' } as unknown as Agent) {
             const def = defs.get(name);
             if (!def) throw new Error(`未注册命令 /${name}`);
             return await def.handler({
                 commandId: `cmd-${name}` as never,
-                agent: { id: 'main-session' } as unknown as Agent,
+                agent,
                 rawInput,
                 attachments: [],
                 signal: new AbortController().signal
@@ -251,6 +251,213 @@ function createMockCommandsRuntime(ctx: Context) {
 }
 
 describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停机集成测试', () => {
+    it('按发起会话隔离同名作品的开书、Studio 与斜杠命令', async () => {
+        const root = await mkdtemp(join(tmpdir(), 'narrateos-workspaces-'));
+        tempDirs.push(root);
+        const cwdA = join(root, 'A');
+        const cwdB = join(root, 'B');
+        await mkdir(cwdA);
+        await mkdir(cwdB);
+        const bookA = join(cwdA, 'books', 'shared-name');
+        const bookB = join(cwdB, 'books', 'shared-name');
+        const sessionA = { id: 'author-a', header: { cwd: cwdB } };
+        const sessionB = { id: 'author-b', header: { cwd: cwdA } };
+        let effectiveA = cwdA;
+        const agentA = { id: sessionA.id, session: sessionA } as unknown as Agent;
+        const ctx = new Context();
+        const provide = ctx.provide.bind(ctx) as (key: string, value: unknown) => unknown;
+        provide('workingDirectory', { get: (session: typeof sessionA) => session === sessionA ? effectiveA : cwdB });
+        provide('sessionQuery', {
+            async observeSession(id: string) {
+                const session = [sessionA, sessionB].find((candidate) => candidate.id === id);
+                if (!session) throw Object.assign(new Error('会话不存在'), { code: 'SESSION_QUERY_SESSION_NOT_FOUND' });
+                return {
+                    header: session.header,
+                    projections: { values: { workingDirectory: session === sessionA ? effectiveA : cwdB } },
+                    [Symbol.dispose]() {}
+                };
+            }
+        });
+        const web = createMockWebServer(ctx);
+        const commands = createMockCommandsRuntime(ctx);
+        const prompt = await ctx.plugin(SystemPrompt);
+        registerCleanup(() => prompt.dispose());
+        const toolsSvc = await ctx.plugin(ToolsService);
+        registerCleanup(() => toolsSvc.dispose());
+        const store = await ctx.plugin(bookStorePlugin);
+        registerCleanup(() => store.dispose());
+        const tools = await ctx.plugin(bookToolsPlugin);
+        registerCleanup(() => tools.dispose());
+
+        const protagonist = {
+            entityId: 'char_lead',
+            canonicalName: '沈清',
+            innateLocks: [{ visibility: 'PUBLIC', text: '右腕旧伤' }],
+            acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '码头账房' }],
+            irreversibleTrajectory: [{ storyDay: 0, text: '接手查账' }],
+            recentBuffer: []
+        } satisfies bookToolsPlugin.LockCharterAndBootInput['entities'][number];
+        const beats = [
+            { craft_focus: '雪夜盘库', clue_budget: '密信封蜡', completion_sign: '密信现形' },
+            { craft_focus: '对质', clue_budget: '缺页清单', completion_sign: '锁定内鬼' },
+            { craft_focus: '封港', clue_budget: '号灯', completion_sign: '船队滞留' }
+        ];
+        await createHeadlessMockServices(ctx, {
+            onAgent: async ({ tools, execTool, agent }) => {
+                if (tools.has('yield_boot_bundle')) {
+                    await execTool('yield_boot_bundle', {
+                        world_summary: '冬至雪夜港区奇案。',
+                        static_base_and_voice: '冷静客观第三人称。',
+                        current_arc_envelope: '第一卷围绕港口账目展开。',
+                        stage_ceiling: '线索从旧账中浮现。',
+                        opening_sequence_beats: beats,
+                        l1_volumes_markdown: '# L1\n\n- vol_01: 雪夜账册',
+                        entities: [protagonist]
+                    });
+                } else if (tools.has('yield_context_pack')) {
+                    const read = await execTool('book_read', { path: 'world/book_config.yaml' });
+                    expect(JSON.stringify(read)).toContain(agent.session.header.cwd === bookA ? '甲地雪港' : '乙地雪港');
+                    await execTool('yield_context_pack', { selected_entity_ids: ['char_lead'], recall_queries: [], selected_lore_files: [] });
+                } else if (tools.has('yield_outline')) {
+                    await execTool('yield_outline', {
+                        chapter_title: '账房灯火',
+                        target_word_count: 1000,
+                        focus_cast: ['char_lead'],
+                        background_cast: [],
+                        ending_beat: 'HOOK',
+                        director_rationale: '先取物证',
+                        chapter_turn: '发现旧账缺页',
+                        scene_plan: [{ scene_index: 1, location: '岸边', summary: '查旧账', is_spotlight: true }],
+                        outline_text: `沈清提灯查${agent.session.header.cwd === bookA ? '甲地' : '乙地'}旧账，在封套里找到一页清单。`
+                    });
+                } else if (tools.has('yield_verdict')) {
+                    await execTool('yield_verdict', { passed: true, issues: [] });
+                } else if (tools.has('yield_state_patch')) {
+                    await execTool('yield_state_patch', { entity_patches: [], chapter_summary: '沈清查旧账。', story_day_delta: 1 });
+                }
+            },
+            onLlmStream: ({ messages }) => {
+                const prompt = JSON.stringify(messages);
+                const location = prompt.includes('甲地旧账') ? '甲地' : prompt.includes('乙地旧账') ? '乙地' : null;
+                if (!location) throw new Error('执笔上下文丢失所属作品的细纲');
+                return textToStreamChunks(
+                    `<blocking>沈清站在码头账房。</blocking>\n\n沈清将油灯换到柜台另一头，翻开${location}的旧账。风推着门板响了一声，窗沿的红绳搭在账页上。`
+                );
+            }
+        });
+        const pipeline = await ctx.plugin(pipelinePlugin, { heartbeatIntervalMs: 0 });
+        registerCleanup(() => pipeline.dispose());
+        (ctx.emit as (name: string, ...args: unknown[]) => void)(
+            'session/event', sessionA, { type: 'model/selection', data: { provider: 'workspace-a', model: 'early-author-model' } }
+        );
+        expect((await web.invoke('GET', '/api/narrate/status?scopeSessionId=author-a')).json?.['defaultModel'])
+            .toMatchObject({ provider: 'workspace-a', model: 'early-author-model' });
+        expect((await web.invoke('GET', '/api/narrate/books?scopeSessionId=missing')).statusCode).toBe(404);
+        const studioBoot = await web.invoke('POST', '/api/narrate/boot?scopeSessionId=author-b', {
+            slug: 'shared-name', title: '乙地雪港', povCharacter: 'char_lead', mode: 'original',
+            premiseOrSeed: '雪夜调查旧账', commitments: ['事实以定稿为准']
+        });
+        expect(studioBoot).toMatchObject({ statusCode: 201, json: { bookRoot: bookB } });
+        const lockTool = ctx.tools.get('lock_charter_and_boot')!;
+        const bootInput = {
+            book_slug: 'shared-name', title: '甲地雪港', pov_character: 'char_lead',
+            t0_anchor: '雪夜账房开门', commitments: ['调查旧账'],
+            excluded_cliches: [], authorization_boundary: '允许调整查账方式',
+            world_summary: '雪落港区，账房仍亮着灯。', static_base_and_voice: '短句与具体动作。',
+            current_arc_envelope: '沿旧账追索失踪的货物。', stage_ceiling: '本卷围绕旧账展开。',
+            opening_sequence_beats: beats, l1_volumes_markdown: '# L1\n\n- vol_01: 雪港',
+            entities: [protagonist]
+        } satisfies bookToolsPlugin.LockCharterAndBootInput;
+        const toolContext = {
+            token: Symbol('workspace-boot') as never, callId: 'boot-a' as never, rootCallId: 'boot-a' as never,
+            name: 'lock_charter_and_boot', arguments: {}, agent: agentA,
+            signal: new AbortController().signal, deferContext() {}, concludeTurn() {}
+        };
+        await expect(lockTool.execute(bootInput, toolContext)).resolves.toMatchObject({
+            bookRoot: bookA, switchedBook: true
+        });
+
+        const query = '?scopeSessionId=author-b';
+        expect((await web.invoke('GET', `/api/narrate/books${query}`)).json).toMatchObject({
+            currentBookRoot: bookB, books: [{ bookRoot: bookB, title: '乙地雪港' }]
+        });
+        expect((await web.invoke('POST', `/api/narrate/book/select${query}`, { bookRoot: bookA })).statusCode).toBe(400);
+        expect((await commands.invokeCommand('narrate-status', '', agentA)).text).toContain('甲地雪港');
+        const sse = await web.openSse(query);
+        registerCleanup(sse.close);
+        expect(sse.events[0]?.data['bookRoot']).toBe(bookB);
+        const sseA = await web.openSse('?scopeSessionId=author-a');
+        registerCleanup(sseA.close);
+        expect(sseA.events[0]?.data['bookRoot']).toBe(bookA);
+
+        expect((await commands.invokeCommand('narrate-step', '只查甲地', agentA)).kind).toBe('success');
+        const stepB = await web.invoke('POST', `/api/narrate/step${query}`, { chapterGoal: '只查乙地' });
+        expect(stepB.statusCode, JSON.stringify(stepB.json)).toBe(200);
+        await sse.waitForEvent((e) => e.event === 'chapter:phase' && e.data['phase'] === 'COMMITTED');
+        await sseA.waitForEvent((e) => e.event === 'task:idle' && e.data['task'] === 'STEPPING');
+        expect(await readFile(join(bookA, 'manuscripts/ch_0001.md'), 'utf8')).toContain('甲地的旧账');
+        expect(await readFile(join(bookB, 'manuscripts/ch_0001.md'), 'utf8')).toContain('乙地的旧账');
+        const chapterB = await web.invoke('GET', `/api/narrate/chapter${query}&ch=1`);
+        expect(chapterB.json).toMatchObject({ bookRoot: bookB, content: expect.stringContaining('乙地的旧账') });
+        expect(sse.events.some((e) => e.data['bookRoot'] === bookA)).toBe(false);
+        expect(sseA.events.some((e) => e.data['bookRoot'] === bookB)).toBe(false);
+        (ctx.emit as (name: string, ...args: unknown[]) => void)(
+            'session/event', sessionA, { type: 'model/selection', data: { provider: 'workspace-a', model: 'author-model' } }
+        );
+        expect((await sseA.waitForEvent((e) => e.event === 'default_model_changed')).data['defaultModel'])
+            .toMatchObject({ provider: 'workspace-a', model: 'author-model' });
+        const statusB = await web.invoke('GET', `/api/narrate/status${query}`);
+        expect(statusB.json?.['defaultModel']).not.toMatchObject({ provider: 'workspace-a' });
+        effectiveA = cwdB;
+        expect((await web.invoke('GET', '/api/narrate/books?scopeSessionId=author-a')).json).toMatchObject({
+            scopeBooksRoot: join(cwdB, 'books'), currentBookRoot: bookB
+        });
+        expect((await web.invoke(
+            'POST',
+            `/api/narrate/step?scopeSessionId=author-a&scopeBooksRoot=${encodeURIComponent(join(cwdA, 'books'))}`,
+            { chapterGoal: '不能误写到乙地' }
+        )).statusCode).toBe(409);
+
+        // 只重载 pipeline，工具插件和其选书状态仍在同一个宿主内。
+        await pipeline.dispose();
+        const defaultA = await ctx.plugin(pipelinePlugin, { booksRoot: join(cwdA, 'books'), heartbeatIntervalMs: 0 });
+        registerCleanup(() => defaultA.dispose());
+        expect((await web.invoke('GET', '/api/narrate/books')).json).toMatchObject({
+            currentBookRoot: bookA, books: [{ bookRoot: bookA, title: '甲地雪港' }]
+        });
+        const signalsA = join(bookA, '.ops/signals.jsonl');
+        expect((await web.invoke('POST', '/api/narrate/signals', {
+            type: 'DIRECTOR_NOTE', reason: '只在甲地待处理的导演便签'
+        })).statusCode).toBe(201);
+        const before = await readFile(signalsA, 'utf8');
+        await ctx.narrateStore.switchBook(bookA);
+        await defaultA.dispose();
+        const defaultB = await ctx.plugin(pipelinePlugin, { booksRoot: join(cwdB, 'books'), heartbeatIntervalMs: 0 });
+        registerCleanup(() => defaultB.dispose());
+        expect((await web.invoke('GET', '/api/narrate/books')).json).toMatchObject({
+            currentBookRoot: bookB, books: [{ bookRoot: bookB, title: '乙地雪港' }]
+        });
+        expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({ bookRoot: bookB });
+        const note = '只在乙地待处理的导演便签';
+        expect((await web.invoke('POST', '/api/narrate/signals', { type: 'DIRECTOR_NOTE', reason: note })).statusCode)
+            .toBe(201);
+        expect(await readFile(join(bookB, '.ops/signals.jsonl'), 'utf8')).toContain(note);
+        expect(await readFile(signalsA, 'utf8')).toBe(before);
+
+        const toolService = ctx.narrateTools;
+        const newBookB = join(cwdB, 'books', 'programmatic-b');
+        await expect(toolService.lockCharterAndBoot({
+            ...bootInput, book_slug: 'programmatic-b', title: '乙地新书'
+        })).resolves.toMatchObject({ bookRoot: newBookB, switchedBook: true });
+        const bookRead = toolService.buildRoleTools({ tools: ['book_read'] }).toolMap.get('book_read')!;
+        const newConfig = await bookRead.execute({ path: 'world/book_config.yaml' }, {
+            ...toolContext, name: 'book_read'
+        });
+        expect(JSON.stringify(newConfig)).toContain('乙地新书');
+        expect(ctx.narrateStore.bookRoot).toBe(bookA);
+        expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({ bookRoot: newBookB });
+    });
+
     it('Config 满足 DSH Schemastery 原生协议 (isNativeConfigSchema === true) 且无写死假模型/audit 池', () => {
         expect(isNativeConfigSchema(pipelinePlugin.Config)).toBe(true);
         const normalized = pipelinePlugin.Config(undefined);
@@ -658,12 +865,17 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             },
             onLlmStream: () => textToStreamChunks('ok')
         });
+        const standaloneTools = ctx.narrateTools;
+        const standaloneBooksRoot = standaloneTools.booksRoot;
+        const mountedBooksRoot = join(bookRoot, '..');
 
         const pipeFiber = await ctx.plugin(pipelinePlugin, {
+            booksRoot: mountedBooksRoot,
             heartbeatIntervalMs: 0,
             shutdownTimeoutMs: 40
         });
         registerCleanup(() => pipeFiber.dispose());
+        expect(standaloneTools.booksRoot).toBe(mountedBooksRoot);
 
         const sse = await web.openSse();
         registerCleanup(() => sse.close());
@@ -697,6 +909,7 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         await Promise.allSettled([inFlightPromise, disposePromise]);
 
         expect(disposeSettled).toBe(true);
+        expect(ctx.narrateTools.booksRoot).toBe(standaloneBooksRoot);
         expect(ctx.reflect.get('narratePipeline', false)).toBeUndefined();
         expect(web.routes.size).toBe(0);
         await expect(stat(join(bookRoot, '.ops/tx.lock'))).rejects.toMatchObject({ code: 'ENOENT' });

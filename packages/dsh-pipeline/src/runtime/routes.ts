@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { basename, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { WebServer } from '@deepseek-ai/dsh-host-webserver';
+import type { WebRoute, WebServer } from '@deepseek-ai/dsh-host-webserver';
 import { z } from 'zod';
 import {
     BookSwitchConflictError,
@@ -542,13 +542,39 @@ function sendErrorResponse(res: ServerResponse, err: unknown): void {
  */
 export function registerNarrateRoutes(
     webServer: Pick<WebServer, 'register'>,
-    controller: NarrateRuntimeController
+    controller: NarrateRuntimeController,
+    resolveController?: (req: IncomingMessage) => Promise<NarrateRuntimeController>
 ): () => void {
+    const routes = buildNarrateRoutes(controller);
+    const scopedRoutes = new WeakMap([[controller, routes]]);
+    const disposers = routes.map((route, index) => webServer.register({
+        ...route,
+        async handler(req, res) {
+            try {
+                const target = resolveController ? await resolveController(req) : controller;
+                let entries = scopedRoutes.get(target);
+                if (!entries) {
+                    entries = buildNarrateRoutes(target);
+                    scopedRoutes.set(target, entries);
+                }
+                await entries[index]!.handler(req, res);
+            } catch (error) {
+                if (!res.headersSent) sendErrorResponse(res, error);
+                else res.end();
+            }
+        }
+    }));
+    return () => {
+        for (const dispose of disposers) dispose();
+    };
+}
+
+function buildNarrateRoutes(controller: NarrateRuntimeController): WebRoute[] {
     const handleBooks = async (req: IncomingMessage, res: ServerResponse) => {
         if (!assertMethod(req, res, 'GET')) return;
         try {
             const payload = await controller.listBooks();
-            sendJson(res, 200, payload);
+            sendJson(res, 200, { ...payload, scopeBooksRoot: controller.booksRoot });
         } catch (err) {
             sendErrorResponse(res, err);
         }
@@ -1363,80 +1389,30 @@ export function registerNarrateRoutes(
         res.on('error', removeClient);
     };
 
-    const disposers = [
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/parallel/fork',
-            handler: (req, res) => handleParallel(req, res, 'fork')
-        }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/parallel/merge',
-            handler: (req, res) => handleParallel(req, res, 'merge')
-        }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/books', handler: handleBooks }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/book/select',
-            handler: handleBookSelect
-        }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/boot', handler: handleBoot }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/status', handler: handleStatus }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/model-routing',
-            handler: handleModelRouting
-        }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/chapters', handler: handleChapters }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/chapter', handler: handleChapter }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/runs', handler: handleRuns }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/runs/detail',
-            handler: handleRunDetail
-        }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/views', handler: handleViews }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/step', handler: handleStep }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/yolo/start',
-            handler: handleYoloStart
-        }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/yolo/stop',
-            handler: handleYoloStop
-        }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/sync', handler: handleSync }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/dream', handler: handleDream }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/heal', handler: handleHeal }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/voice-harvest',
-            handler: handleVoiceHarvest
-        }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/volume/advance',
-            handler: handleAdvanceVolume
-        }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/signals',
-            handler: handleSignals
-        }),
-        webServer.register({
-            kind: 'exact',
-            path: '/api/narrate/signals/delete',
-            handler: handleSignalDelete
-        }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/halt', handler: handleHalt }),
-        webServer.register({ kind: 'exact', path: '/api/narrate/events', handler: handleEvents })
+    return [
+        { kind: 'exact', path: '/api/narrate/parallel/fork', handler: (req, res) => handleParallel(req, res, 'fork') },
+        { kind: 'exact', path: '/api/narrate/parallel/merge', handler: (req, res) => handleParallel(req, res, 'merge') },
+        { kind: 'exact', path: '/api/narrate/books', handler: handleBooks },
+        { kind: 'exact', path: '/api/narrate/book/select', handler: handleBookSelect },
+        { kind: 'exact', path: '/api/narrate/boot', handler: handleBoot },
+        { kind: 'exact', path: '/api/narrate/status', handler: handleStatus },
+        { kind: 'exact', path: '/api/narrate/model-routing', handler: handleModelRouting },
+        { kind: 'exact', path: '/api/narrate/chapters', handler: handleChapters },
+        { kind: 'exact', path: '/api/narrate/chapter', handler: handleChapter },
+        { kind: 'exact', path: '/api/narrate/runs', handler: handleRuns },
+        { kind: 'exact', path: '/api/narrate/runs/detail', handler: handleRunDetail },
+        { kind: 'exact', path: '/api/narrate/views', handler: handleViews },
+        { kind: 'exact', path: '/api/narrate/step', handler: handleStep },
+        { kind: 'exact', path: '/api/narrate/yolo/start', handler: handleYoloStart },
+        { kind: 'exact', path: '/api/narrate/yolo/stop', handler: handleYoloStop },
+        { kind: 'exact', path: '/api/narrate/sync', handler: handleSync },
+        { kind: 'exact', path: '/api/narrate/dream', handler: handleDream },
+        { kind: 'exact', path: '/api/narrate/heal', handler: handleHeal },
+        { kind: 'exact', path: '/api/narrate/voice-harvest', handler: handleVoiceHarvest },
+        { kind: 'exact', path: '/api/narrate/volume/advance', handler: handleAdvanceVolume },
+        { kind: 'exact', path: '/api/narrate/signals', handler: handleSignals },
+        { kind: 'exact', path: '/api/narrate/signals/delete', handler: handleSignalDelete },
+        { kind: 'exact', path: '/api/narrate/halt', handler: handleHalt },
+        { kind: 'exact', path: '/api/narrate/events', handler: handleEvents }
     ];
-
-    return () => {
-        for (const dispose of disposers) {
-            dispose();
-        }
-    };
 }
