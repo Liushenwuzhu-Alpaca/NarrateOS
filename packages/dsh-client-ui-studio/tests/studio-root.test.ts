@@ -1060,8 +1060,15 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 yolo: { ...status.yolo, currentStage: stage }
             };
         });
+        const requestScope = { sessionId: 'author-a' };
+        vi.mocked(api.fetchBooks).mockImplementation(async () => ({
+            currentBookRoot: activeBookRoot,
+            books,
+            scopeBooksRoot: '/books'
+        }));
         const liveRuns = Promise.withResolvers<void>();
-        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => {
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter, scope) => {
+            if (scope?.sessionId !== requestScope.sessionId || scope.booksRoot !== '/books') return { runs: [] };
             if (chapter === 2) await liveRuns.promise;
             return {
                 runs: [
@@ -1080,7 +1087,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
                 ]
             };
         });
-        const container = await mountStudio();
+        const container = await mountStudio(requestScope);
         await emit({ event: 'signal:received', data: {} });
         await act(async () => { liveRuns.resolve(); });
         const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;

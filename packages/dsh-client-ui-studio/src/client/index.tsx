@@ -1052,7 +1052,7 @@ export function NarrateStudioRoot({
 
         const request = { epoch, version, stage, chapter, sessionId };
         restoredStageRef.current = request;
-        void fetchRunRecords(chapter).then(({ runs }) => {
+        void fetchRunRecords(chapter, ...scopeArgs).then(({ runs }) => {
             if (!isCurrentWorkspace(epoch) || restoredStageRef.current !== request ||
                 version !== stageEventVersionRef.current) return;
             const chapterRuns = runs.filter((record) => record.chapter === chapter);
@@ -1072,7 +1072,7 @@ export function NarrateStudioRoot({
         }).catch(() => {
             if (restoredStageRef.current === request) restoredStageRef.current = null;
         });
-    }, [applyStageOverrides, isCurrentWorkspace]);
+    }, [applyStageOverrides, isCurrentWorkspace, scopeArgs]);
 
     const loadStatus = useCallback(async () => {
         if (switchingBookRef.current) return;
@@ -1088,7 +1088,7 @@ export function NarrateStudioRoot({
             setStatus(next);
             restoreLiveStage(next, epoch, stageVersion);
         }
-    }, [isCurrentWorkspace, restoreLiveStage]);
+    }, [isCurrentWorkspace, restoreLiveStage, scopeArgs]);
 
     const loadViews = useCallback(async () => {
         if (switchingBookRef.current) return;
@@ -1351,7 +1351,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, restoreLiveStage, showToast]
+        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, restoreLiveStage, scopeArgs, showToast]
     );
 
     useEffect(() => {
