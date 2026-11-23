@@ -1111,15 +1111,17 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
         await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber: 3, message: '读取章卡' } });
         await emit({ event: 'halt:waiting', data: { activeTask: 'STEPPING' } });
-        const header = () => container.querySelector('.ns-center-header')?.textContent;
-        expect(header()).toContain('等待安全点收束');
+        const stopAction = () => container
+            .querySelector('.ns-center-header [aria-label="更多停止选项"]')
+            ?.previousElementSibling as HTMLButtonElement | undefined;
+        expect(stopAction()?.disabled).toBe(true);
         await act(async () => { stale.resolve(statusPayload(activeBookRoot)); });
-        expect(header()).toContain('等待安全点收束');
+        expect(stopAction()?.disabled).toBe(true);
         await act(async () => {
             const status = statusPayload(activeBookRoot);
             fresh.resolve({ ...status, runtime: { ...status.runtime, activeTask: 'STEPPING', haltRequested: true } });
         });
-        expect(header()).toContain('等待安全点收束');
+        expect(stopAction()?.disabled).toBe(true);
     });
 
     it('仅从快照观察到新工序时，收束旧运行徽标并保留其会话', async () => {
