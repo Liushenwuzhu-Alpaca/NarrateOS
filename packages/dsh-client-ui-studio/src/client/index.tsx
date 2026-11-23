@@ -878,8 +878,10 @@ export function NarrateStudioRoot({
 
     const [latestSseStage, setLatestSseStage] = useState<string | null>(null);
     const stageEventVersionRef = useRef(0);
+    const runtimeEventVersionRef = useRef(0);
     const setSseStage = useCallback((stage: string | null) => {
         stageEventVersionRef.current += 1;
+        runtimeEventVersionRef.current += 1;
         setLatestSseStage(stage);
     }, []);
     const [haltWaiting, setHaltWaiting] = useState(false);
@@ -901,7 +903,12 @@ export function NarrateStudioRoot({
         []
     );
     const [historicalRuns, setHistoricalRuns] = useState<StageRunRecord[]>([]);
-    const [liveRunChapter, setLiveRunChapter] = useState<number | null>(null);
+    const [liveRunChapter, setLiveRunChapterState] = useState<number | null>(null);
+    const liveRunChapterRef = useRef<number | null>(null);
+    const setLiveRunChapter = useCallback((chapter: number | null) => {
+        liveRunChapterRef.current = chapter;
+        setLiveRunChapterState(chapter);
+    }, []);
     const [inspectedStageId, setInspectedStageId] = useState<PipelineStageId | null>(null);
     const [selectedStageSession, setSelectedStageSession] = useState<StageSessionSelection | null>(null);
     const [liveSessionEvents, setLiveSessionEvents] = useState<Record<string, StageSessionDetailEvent[]>>({});
@@ -1039,13 +1046,27 @@ export function NarrateStudioRoot({
         const stage = readActiveStage(snapshot);
         setLatestSseStage(stage);
         const { stageChapter: chapter, stageSessionId: sessionId } = snapshot.runtime;
-        if (stage && chapter !== null) setLiveRunChapter(chapter);
-        if (!stage || chapter === null || !sessionId) {
+        const stageId = stage ? resolveStageId(stage) : null;
+        if (stageId && chapter !== null) {
+            if (liveRunChapterRef.current !== chapter) {
+                setLiveRunChapter(chapter);
+                applyStageOverrides({});
+            } else if (STAGE_SEQUENCE.some((id) => {
+                const status = stageOverridesRef.current[id]?.status;
+                return id !== stageId && (status === 'active' || status === 'healing');
+            })) {
+                applyStageOverrides((prev) => settleRunningStages(prev, {
+                    targetNodeStatus: 'done',
+                    terminalSessionStatus: 'completed',
+                    includeDreaming: true,
+                    skipStageId: stageId
+                }));
+            }
+        }
+        if (!stage || !stageId || chapter === null || !sessionId) {
             restoredStageRef.current = null;
             return;
         }
-        const stageId = resolveStageId(stage);
-        if (!stageId) return;
         const previous = restoredStageRef.current;
         if (previous?.epoch === epoch && previous.version === version && previous.stage === stage &&
             previous.chapter === chapter && previous.sessionId === sessionId) return;
@@ -1072,21 +1093,22 @@ export function NarrateStudioRoot({
         }).catch(() => {
             if (restoredStageRef.current === request) restoredStageRef.current = null;
         });
-    }, [applyStageOverrides, isCurrentWorkspace, scopeArgs]);
+    }, [applyStageOverrides, isCurrentWorkspace, scopeArgs, setLiveRunChapter]);
 
     const loadStatus = useCallback(async () => {
         if (switchingBookRef.current) return;
         const epoch = workspaceEpochRef.current;
         const seq = ++statusRequestRef.current;
-        const stageVersion = stageEventVersionRef.current;
-        const next = await fetchStatus(...scopeArgs);
-        if (
-            isCurrentWorkspace(epoch) &&
-            seq === statusRequestRef.current &&
-            (!currentBookRootRef.current || next.bookRoot === currentBookRootRef.current)
-        ) {
+        for (;;) {
+            const runtimeVersion = runtimeEventVersionRef.current;
+            const next = await fetchStatus(...scopeArgs);
+            if (!isCurrentWorkspace(epoch) || seq !== statusRequestRef.current ||
+                (currentBookRootRef.current && next.bookRoot !== currentBookRootRef.current)) return;
+            // 状态接口在读书库文件前采样运行态，途中抵达的实时事件优先。
+            if (runtimeVersion !== runtimeEventVersionRef.current) continue;
             setStatus(next);
-            restoreLiveStage(next, epoch, stageVersion);
+            restoreLiveStage(next, epoch, stageEventVersionRef.current);
+            return;
         }
     }, [isCurrentWorkspace, restoreLiveStage, scopeArgs]);
 
@@ -1257,7 +1279,6 @@ export function NarrateStudioRoot({
             const epoch = workspaceEpochRef.current;
             const seq = ++refreshRequestRef.current;
             const statusSeq = ++statusRequestRef.current;
-            const stageVersion = stageEventVersionRef.current;
             const chapterSeq = chapterRequestSeqRef.current;
             setLoading(true);
             try {
@@ -1290,14 +1311,17 @@ export function NarrateStudioRoot({
                     setSignalsView(null);
                     setHaltView(null);
                     setSyncConflictsView(null);
+                    const runtimeVersion = runtimeEventVersionRef.current;
                     const noBookStatus = await fetchStatus(...scopeArgs).catch(() => null);
                     if (!isCurrentWorkspace(epoch) || seq !== refreshRequestRef.current) return;
                     if (statusSeq === statusRequestRef.current) {
-                        setStatus(noBookStatus);
+                        if (runtimeVersion === runtimeEventVersionRef.current) setStatus(noBookStatus);
+                        else void loadStatus().catch(() => undefined);
                     }
                     return;
                 }
 
+                const runtimeVersion = runtimeEventVersionRef.current;
                 const [statusRes, chaptersRes] = await Promise.all([
                     fetchStatus(...scopeArgs),
                     fetchChapters(...scopeArgs),
@@ -1313,8 +1337,12 @@ export function NarrateStudioRoot({
 
                 currentBookRootRef.current = activeRoot;
                 if (statusSeq === statusRequestRef.current) {
-                    setStatus(statusRes);
-                    restoreLiveStage(statusRes, epoch, stageVersion);
+                    if (runtimeVersion === runtimeEventVersionRef.current) {
+                        setStatus(statusRes);
+                        restoreLiveStage(statusRes, epoch, stageEventVersionRef.current);
+                    } else {
+                        void loadStatus().catch(() => undefined);
+                    }
                 }
                 setChapters(chaptersRes.chapters);
                 // 每次全量刷新清除瞬态 liveTelemetry 覆盖层，确保展现持久化遥测或最新值
@@ -1351,7 +1379,7 @@ export function NarrateStudioRoot({
                 if (isCurrentWorkspace(epoch) && seq === refreshRequestRef.current) setLoading(false);
             }
         },
-        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadViews, restoreLiveStage, scopeArgs, showToast]
+        [isCurrentWorkspace, loadChapterByNumber, loadRunsForChapter, loadStatus, loadViews, requestScope, restoreLiveStage, scopeArgs, showToast]
     );
 
     useEffect(() => {
@@ -1773,6 +1801,7 @@ export function NarrateStudioRoot({
             if (event === 'heal:started') {
                 const count = asNumber(data['conflictCount']) ?? 0;
                 showToast(`已启动跨章连续性自愈 (${count} 处冲突)`);
+                runtimeEventVersionRef.current += 1;
                 setStatus((prev) =>
                     prev
                         ? { ...prev, runtime: { ...prev.runtime, activeTask: 'SYNCING' } }
@@ -1794,6 +1823,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'sync:started') {
+                runtimeEventVersionRef.current += 1;
                 setStatus((prev) =>
                     prev ? { ...prev, runtime: { ...prev.runtime, activeTask: 'SYNCING' } } : prev
                 );
@@ -1882,6 +1912,7 @@ export function NarrateStudioRoot({
             if (event === 'halt:requested') {
                 const force = data['force'] === true;
                 if (force) setHaltWaiting(true);
+                runtimeEventVersionRef.current += 1;
                 setStatus((prev) =>
                     prev ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } } : prev
                 );
@@ -1890,6 +1921,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'halt:waiting') {
+                runtimeEventVersionRef.current += 1;
                 setHaltWaiting(true);
                 setStatus((prev) =>
                     prev ? { ...prev, runtime: { ...prev.runtime, haltRequested: true } } : prev
@@ -1914,6 +1946,7 @@ export function NarrateStudioRoot({
             }
 
             if (event === 'yolo:stop_requested') {
+                runtimeEventVersionRef.current += 1;
                 setStatus((prev) =>
                     prev ? { ...prev, yolo: { ...prev.yolo, stopRequested: true } } : prev
                 );
@@ -1970,7 +2003,7 @@ export function NarrateStudioRoot({
         return () => {
             unsubscribe();
         };
-    }, [applyStageOverrides, booksState.scopeBooksRoot, loadStatus, requestScope, setSseStage, showToast, stashCurrentDraftIfDirty]);
+    }, [applyStageOverrides, booksState.scopeBooksRoot, loadStatus, requestScope, setLiveRunChapter, setSseStage, showToast, stashCurrentDraftIfDirty]);
 
     const executeSelectBook = useCallback(
         async (bookRoot: string) => {
@@ -2012,7 +2045,7 @@ export function NarrateStudioRoot({
                 await refreshAll(null);
             }
         },
-        [applyStageOverrides, refreshAll, setSseStage, showToast]
+        [applyStageOverrides, refreshAll, setLiveRunChapter, setSseStage, showToast]
     );
 
     const handleSelectBook = useCallback(
