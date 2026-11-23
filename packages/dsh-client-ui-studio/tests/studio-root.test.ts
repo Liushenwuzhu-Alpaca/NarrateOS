@@ -93,7 +93,7 @@ function statusPayload(bookRoot: string): NarrateStatusPayload {
         worldState: { story_day: 2, current_chapter: 2, timeline_mode: 'MAINLINE' },
         pendingSignalsCount: 0,
         yolo: { running: false, completedChapters: 0, targetChapters: 0, currentStage: null },
-        runtime: { activeTask: 'IDLE', haltRequested: false }
+        runtime: { activeTask: 'IDLE', stageChapter: null, stageSessionId: null, haltRequested: false }
     };
 }
 
@@ -652,8 +652,11 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             event: 'dream:started',
             data: { activeSessionId: 'sess-dream-1', runId: 'run-dream-1' }
         });
+        const dreamCard = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="DREAMING"]')!;
+        expect(dreamCard.querySelector('.ns-pipe-step-state')?.textContent).toBe('生成中');
         await emit({ event: 'dream:completed', data: { skipped: false } });
-        await click(container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="DREAMING"]')!);
+        expect(dreamCard.querySelector('.ns-pipe-step-state')?.textContent).toBe('条件未达');
+        await click(dreamCard);
         expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
 
         // 3. signal:withdrawn / volume:advanced / task:idle / heal:started / heal:completed
@@ -988,6 +991,186 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(leftEntitiesBtn.getAttribute('aria-current')).toBeNull();
     });
 
+    it.each([
+        { event: 'task:idle', data: { task: 'STEPPING' } },
+        { event: 'stage', data: { stage: 'COMMITTED', chapterNumber: 1 } }
+    ] as const)('工序徽标只显示本次执行，$event 后仍可下钻归档尝试', async (terminal) => {
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const idle = statusPayload(activeBookRoot);
+            return { ...idle, yolo: { ...idle.yolo, currentStage: 'WRITER' } };
+        });
+        vi.mocked(api.fetchRunRecords).mockResolvedValue({
+            runs: [{
+                runId: 'writer-history', chapter: 1, stage: 'WRITER', role: 'writer',
+                sessionId: 'writer-history-session', status: 'completed', attempt: 2
+            }]
+        });
+        const container = await mountStudio();
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = (id: string) =>
+            container.querySelector<HTMLButtonElement>(`.ns-pipe-card[data-stage-id="${id}"]`)!;
+        const badge = (id: string) => card(id).querySelector('.ns-pipe-step-state')?.textContent;
+        expect(badge('WRITER')).toBe('待命');
+        await click(card('WRITER'));
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id'))
+            .toBe('writer-history-session');
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+
+        for (const chapterNumber of [3, 1]) {
+            await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber } });
+            expect(badge('LIBRARIAN')).toBe('待命');
+            await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber, status: 'running' } });
+            expect(badge('LIBRARIAN')).toBe('生成中');
+            expect(badge('WRITER')).toBe('待命');
+        }
+        await emit({ event: 'stage', data: {
+            stage: 'WRITER', chapterNumber: 1, status: 'running', activeSessionId: 'writer-live-session'
+        } });
+        expect(badge('LIBRARIAN')).toBe('已完成');
+        expect(badge('WRITER')).toBe('生成中');
+        expect(card('WRITER').getAttribute('data-session-id')).toBe('writer-live-session');
+        if (terminal.event === 'task:idle') {
+            await emit({ event: 'stage:session', data: {
+                stage: 'WRITER', chapterNumber: 1, status: 'completed', sessionId: 'writer-live-session'
+            } });
+        }
+
+        await emit(terminal);
+        expect(badge('LIBRARIAN')).toBe('待命');
+        expect(badge('WRITER')).toBe('待命');
+        await click(card('WRITER'));
+        expect(container.querySelector('.ns-session-viewer')?.textContent).toContain('已完成');
+    });
+
+    it.each([
+        ['WRITER', '生成中'], ['LOCAL_PATCH', '润色中']
+    ])('重新打开 Studio 时，下一章的 %s 不使用归档章会话或旧工序徽标', async (stage, badge) => {
+        vi.mocked(api.fetchChapters).mockImplementation(async () => ({
+            chapters: chaptersPayload(activeBookRoot).chapters.slice(0, 1)
+        }));
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const status = statusPayload(activeBookRoot);
+            return {
+                ...status, walPhase: 'STATE_COMMITTED', activeChapter: 1, latestChapter: 1,
+                lastCommittedChapter: 1, chapterCount: 1,
+                runtime: { ...status.runtime, activeTask: 'STEPPING', stageChapter: 2, stageSessionId: 'writer-session-2' },
+                yolo: { ...status.yolo, currentStage: stage }
+            };
+        });
+        const liveRuns = Promise.withResolvers<void>();
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => {
+            if (chapter === 2) await liveRuns.promise;
+            return {
+                runs: [
+                    ...(chapter === 2 ? [{
+                        runId: 'old-review-2', chapter, stage: 'FACT_CHECKER', role: 'fact-checker', attempt: 1,
+                        sessionId: 'old-review-session-2', status: 'completed'
+                    }] : []),
+                    ...(chapter === 2 && stage === 'LOCAL_PATCH' ? [{
+                        runId: 'initial-writer-2', chapter, stage: 'WRITER', role: 'writer', attempt: 1,
+                        sessionId: 'initial-writer-session-2', status: 'completed'
+                    }] : []),
+                    {
+                        runId: `writer-${chapter}`, chapter, stage: chapter === 2 ? stage : 'WRITER', role: 'writer', attempt: 1,
+                        sessionId: `writer-session-${chapter}`, status: chapter === 2 ? 'running' : 'completed'
+                    }
+                ]
+            };
+        });
+        const container = await mountStudio();
+        await emit({ event: 'signal:received', data: {} });
+        await act(async () => { liveRuns.resolve(); });
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = container.querySelector<HTMLButtonElement>('.ns-pipe-card[data-stage-id="WRITER"]')!;
+        expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe(badge);
+        expect(container.querySelector('.ns-pipe-card[data-stage-id="FACT_CHECKER"] .ns-pipe-step-state')?.textContent)
+            .toBe('待命');
+        await click(card);
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('writer-session-2');
+        if (stage === 'LOCAL_PATCH') {
+            const original = container.querySelector<HTMLButtonElement>('[data-attempt-session-id="initial-writer-session-2"]');
+            expect(original).not.toBeNull();
+            await click(original!);
+            expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id'))
+                .toBe('initial-writer-session-2');
+            expect(card.querySelector('.ns-pipe-step-state')?.textContent).toBe('润色中');
+        }
+        expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
+    });
+
+    it('较早的空闲快照不会覆盖已收到的开写和安全中止状态', async () => {
+        const container = await mountStudio();
+        const stale = Promise.withResolvers<NarrateStatusPayload>();
+        const fresh = Promise.withResolvers<NarrateStatusPayload>();
+        vi.mocked(api.fetchStatus).mockReturnValueOnce(stale.promise).mockReturnValueOnce(fresh.promise);
+        await emit({ event: 'signal:received', data: {} });
+        await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
+        await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber: 3, message: '读取章卡' } });
+        await emit({ event: 'halt:waiting', data: { activeTask: 'STEPPING' } });
+        const header = () => container.querySelector('.ns-center-header')?.textContent;
+        expect(header()).toContain('等待安全点收束');
+        await act(async () => { stale.resolve(statusPayload(activeBookRoot)); });
+        expect(header()).toContain('等待安全点收束');
+        await act(async () => {
+            const status = statusPayload(activeBookRoot);
+            fresh.resolve({ ...status, runtime: { ...status.runtime, activeTask: 'STEPPING', haltRequested: true } });
+        });
+        expect(header()).toContain('等待安全点收束');
+    });
+
+    it('仅从快照观察到新工序时，收束旧运行徽标并保留其会话', async () => {
+        let stage: 'LIBRARIAN' | 'WRITER' = 'LIBRARIAN';
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const status = statusPayload(activeBookRoot);
+            return {
+                ...status, activeChapter: 1,
+                yolo: { ...status.yolo, currentStage: stage },
+                runtime: { ...status.runtime, activeTask: 'STEPPING', stageChapter: 3, stageSessionId: `current-${stage}` }
+            };
+        });
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => ({
+            runs: chapter === 3 ? [{
+                runId: `run-${stage}`, chapter, stage, role: stage.toLowerCase(), attempt: 1,
+                sessionId: `current-${stage}`, status: 'running'
+            }] : []
+        }));
+        const container = await mountStudio();
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = (id: string) => container.querySelector<HTMLButtonElement>(`.ns-pipe-card[data-stage-id="${id}"]`)!;
+        const badge = (id: string) => card(id).querySelector('.ns-pipe-step-state')?.textContent;
+        expect(badge('LIBRARIAN')).toBe('生成中');
+        stage = 'WRITER';
+        await emit({ event: 'signal:received', data: {} });
+        expect(badge('WRITER')).toBe('生成中');
+        expect(badge('LIBRARIAN')).toBe('已完成');
+        await click(card('LIBRARIAN'));
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('current-LIBRARIAN');
+    });
+
+    it('章节加载期间暂不显示实时徽标，加载完毕后恢复仍在运行的工序', async () => {
+        const container = await mountStudio();
+        await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
+        await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber: 3, status: 'running' } });
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const badge = () => container.querySelector(
+            '.ns-pipe-card[data-stage-id="LIBRARIAN"] .ns-pipe-step-state'
+        )?.textContent;
+        expect(badge()).toBe('生成中');
+        const secondChapter = Promise.withResolvers<ChapterDetail>();
+        vi.mocked(api.fetchChapter).mockImplementationOnce(() => secondChapter.promise);
+        await click(chapterButton(container, 2));
+        expect(badge()).toBe('待命');
+        await act(async () => {
+            secondChapter.resolve(chapterDetail('/books/a', 2));
+            await secondChapter.promise;
+        });
+        expect(badge()).toBe('生成中');
+    });
+
     it('点击无 sessionId 的非 Writer 工序卡片会打开右栏思考过程并清空上一工种残留会话', async () => {
         vi.mocked(api.fetchRunRecords).mockResolvedValue({
             runs: [
@@ -1038,7 +1221,7 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             worldState: { story_day: 0, current_chapter: 0, timeline_mode: 'MAINLINE' },
             pendingSignalsCount: 0,
             yolo: { running: false, completedChapters: 0, targetChapters: 0, currentStage: null },
-            runtime: { activeTask: 'IDLE', haltRequested: false },
+            runtime: { activeTask: 'IDLE', stageChapter: null, stageSessionId: null, haltRequested: false },
             defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' },
             poolOverrides: {},
             modelRouting: {

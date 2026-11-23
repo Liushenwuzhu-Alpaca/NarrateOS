@@ -119,7 +119,7 @@ function makeStatus(): NarrateStatusPayload {
         worldState: { story_day: 2, current_chapter: 2, timeline_mode: 'MAINLINE' },
         pendingSignalsCount: 0,
         yolo: { running: false, completedChapters: 0, targetChapters: 0, currentStage: null },
-        runtime: { activeTask: 'IDLE', haltRequested: false }
+        runtime: { activeTask: 'IDLE', stageChapter: null, stageSessionId: null, haltRequested: false }
     };
 }
 
@@ -1658,12 +1658,13 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
     it('BUG-02: 0 章新书在 STEPPING 态刷新页面且 runs 暂为空时，仍自动展开 6 节点流水线并承接第 1 章 SSE', async () => {
         vi.mocked(api.fetchStatus).mockResolvedValue({
             ...makeStatus(),
-            activeChapter: 0,
+            activeChapter: null,
             lastCommittedChapter: 0,
             latestChapter: 0,
             chapterCount: 0,
             worldState: { story_day: 1, current_chapter: 0, timeline_mode: 'MAINLINE' },
-            runtime: { activeTask: 'STEPPING', haltRequested: false }
+            yolo: { ...makeStatus().yolo, currentStage: 'LIBRARIAN' },
+            runtime: { activeTask: 'STEPPING', stageChapter: 1, stageSessionId: null, haltRequested: false }
         });
         vi.mocked(api.fetchChapters).mockResolvedValue({ chapters: [] });
         vi.mocked(api.fetchRunRecords).mockResolvedValue({ runs: [] });
@@ -1676,7 +1677,6 @@ describe('Phase 4 阶段节点实时与历史原生会话钻取', () => {
             root.render(createElement(NarrateStudioRoot));
         });
 
-        expect(api.fetchRunRecords).toHaveBeenCalledWith(1);
         const toggle = container.querySelector<HTMLButtonElement>('button.ns-pipeline-toggle-btn');
         expect(toggle).not.toBeNull();
         expect(toggle?.getAttribute('aria-expanded')).toBe('true');

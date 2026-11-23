@@ -234,6 +234,8 @@ export interface CenterWorkbenchProps {
     chapterDetail?: ChapterDetailData | null | undefined;
     chapterLoading?: boolean | undefined;
     stages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
+    /** 供下钻使用的章节会话，不参与实时徽标。 */
+    sessionStages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
     latestSseStage?: string | null | undefined;
     safeHalt?: SafeHaltInfo | null | undefined;
     syncConflict?: SyncConflictDiagnostic | null | undefined;
@@ -532,11 +534,6 @@ function deriveStagesFromSse(
                 break;
             }
             case 'DREAMING': {
-                for (const id of STAGE_ORDER) {
-                    if (id !== 'DREAMING') {
-                        base[id] = { status: 'done' };
-                    }
-                }
                 base.DREAMING = { status: 'active', summary: '跨章整理与归纳运行中' };
                 break;
             }
@@ -1009,6 +1006,7 @@ function renderOpsMenu(params: {
 function renderPipelineDrawer(params: {
     open: boolean;
     stageMap: Record<PipelineStageId, StageNodeState>;
+    sessionStages?: Partial<Record<PipelineStageId, StageNodeState>> | undefined;
     inspectedStageId: PipelineStageId;
     resolveStageModelLabel: (stageDef: StageDefinition) => string;
     onInspectStep: (stageDef: StageDefinition) => void;
@@ -1018,7 +1016,9 @@ function renderPipelineDrawer(params: {
         <section className="ns-pipeline-drawer" aria-label="6 步 Agent 工序与模型矩阵">
             {PIPELINE_STAGES.map((stage) => {
                 const nodeState = params.stageMap[stage.id];
-                const primarySession = resolvePrimaryStageSession(stage.id, nodeState);
+                const primarySession = resolvePrimaryStageSession(
+                    stage.id, params.sessionStages?.[stage.id] ?? nodeState
+                );
                 const effectiveModel = params.resolveStageModelLabel(stage);
                 const isRunningLive =
                     nodeState.status === 'active' || nodeState.status === 'healing';
@@ -1543,6 +1543,7 @@ export function CenterWorkbench({
     chapterDetail,
     chapterLoading = false,
     stages,
+    sessionStages,
     latestSseStage,
     safeHalt,
     syncConflict = null,
@@ -2214,7 +2215,7 @@ export function CenterWorkbench({
         isStepping ||
         Boolean(latestSseStage) ||
         PIPELINE_STAGES.some((s) => {
-            const st = stageMap[s.id];
+            const st = sessionStages?.[s.id] ?? stageMap[s.id];
             return (
                 (st.status !== 'idle' && st.status !== 'dormant') ||
                 Boolean(st.sessionId) ||
@@ -2227,7 +2228,7 @@ export function CenterWorkbench({
         chapterDetail?.volumeLabel || currentVolumeLabel || (hasChapterContent ? '第一卷' : '第一卷 · 尚未开写');
 
     const handleInspectStep = (stageDef: StageDefinition) => {
-        const nodeState = stageMap[stageDef.id];
+        const nodeState = sessionStages?.[stageDef.id] ?? stageMap[stageDef.id];
         const primarySession = resolvePrimaryStageSession(stageDef.id, nodeState);
         runWithViewTransition(() => {
             setInspectedStageId(stageDef.id);
@@ -2260,6 +2261,7 @@ export function CenterWorkbench({
     };
 
     const handleOpenPatchTrace = () => {
+        const writerSessionStage = sessionStages?.WRITER ?? stageMap.WRITER;
         runWithViewTransition(() => {
             setInspectedStageId('WRITER');
             onInspectStage?.('WRITER');
@@ -2273,17 +2275,17 @@ export function CenterWorkbench({
                         parentSessionId: patchSession.parentSessionId,
                         mode: patchSession.mode,
                         runId: patchSession.runId,
-                        status: stageMap.WRITER.status
+                        status: writerSessionStage.status
                     })
                 );
-            } else if (stageMap.WRITER.sessionId) {
+            } else if (writerSessionStage.sessionId) {
                 onSelectStageSession(
                     buildStageSessionSelection({
                         stageId: 'WRITER',
                         stageLabel: '3. Writer',
-                        sessionId: stageMap.WRITER.sessionId,
-                        runId: stageMap.WRITER.runId,
-                        status: stageMap.WRITER.status
+                        sessionId: writerSessionStage.sessionId,
+                        runId: writerSessionStage.runId,
+                        status: writerSessionStage.status
                     })
                 );
             } else {
@@ -2796,6 +2798,7 @@ export function CenterWorkbench({
                     {renderPipelineDrawer({
                         open: stageDrawerOpen,
                         stageMap,
+                        sessionStages,
                         inspectedStageId,
                         resolveStageModelLabel,
                         onInspectStep: handleInspectStep
