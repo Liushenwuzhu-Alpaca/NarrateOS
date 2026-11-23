@@ -296,7 +296,7 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             acquiredState: [{ storyDay: 0, visibility: 'PUBLIC', text: '码头账房' }],
             irreversibleTrajectory: [{ storyDay: 0, text: '接手查账' }],
             recentBuffer: []
-        };
+        } satisfies bookToolsPlugin.LockCharterAndBootInput['entities'][number];
         const beats = [
             { craft_focus: '雪夜盘库', clue_budget: '密信封蜡', completion_sign: '密信现形' },
             { craft_focus: '对质', clue_budget: '缺页清单', completion_sign: '锁定内鬼' },
