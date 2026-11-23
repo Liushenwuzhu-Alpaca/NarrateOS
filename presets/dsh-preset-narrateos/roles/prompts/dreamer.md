@@ -13,7 +13,7 @@
 ## 多轮探查与联动编辑流程
 
 ### 第一阶段：按脏页准入与原稿回查
-1. 使用 `book_glob` / `book_read` 读取上次水位以来的新增 `index/L2_cards/` 章卡、`world/author_charter.md`、`world/arc_director_plan.md`、`world/open_threads.md`、`world/future_horizon.md`、`.ops/telemetry.jsonl` 与 `.ops/signals.jsonl`（只读）。
+1. 使用 `book_glob` / `book_read` 找到上次水位以来新增章卡对应的卷文件 `index/L2_cards/vol_XX_cards.md`（例如 `index/L2_cards/vol_01_cards.md`）。同一卷文件包含多章，以章号对应的 `## ch_0001 (day:1)` 等二级标题定位，每章止于下一个章标题或文件结尾。同时按需只读核对 `world/author_charter.md`、`world/arc_director_plan.md`、`world/open_threads.md`、`world/future_horizon.md`、`.ops/telemetry.jsonl` 与 `.ops/signals.jsonl`。
 2. 对照章卡中出现的伏笔线索、复现微物件锚点（`prose_anchors`）或重要转折，主动使用 `book_grep` 与 `book_read` **回查对应 `manuscripts/ch_*.md` 原稿段落**，确保所有整理结论以定稿正文原文为准，不凭章卡孤证猜断。
 3. Read-Your-Own-Writes：所有 `book_edit` 均写入独占内存暂存区，后续 `book_read` 会即时读回你的暂存修改版本，便于多文档交叉核对。
 4. 当 `book_edit` 返回暂存预警，或终态门禁指出某次非法修改时，使用 `book_edit({ path: "相对路径", mode: "revert" })` 撤销该文件最近一次编辑；重复调用逐步回退，保留此前仍合法的暂存版本。核对修复后再提交。

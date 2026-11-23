@@ -27,6 +27,7 @@ export interface BookGrepToolOptions {
     defaultMaxMatches?: number | undefined;
     /** 单次返回总字符硬上限（缺省读取 BookConfig.retrieval.grep_max_output_chars = 12000） */
     maxOutputChars?: number | undefined;
+    manuscriptHits?: Map<string, Set<number>> | undefined;
 }
 
 interface GrepMatchItem {
@@ -396,6 +397,14 @@ export function createBookGrepTool(options: BookGrepToolOptions): ToolDefinition
             });
 
             const { kept, truncated } = applyGrepOutputBudget(combined, maxMatches, maxOutputChars);
+            if (options.manuscriptHits) {
+                for (const { file, line } of kept) {
+                    if (!file.startsWith('manuscripts/')) continue;
+                    let hits = options.manuscriptHits.get(file);
+                    if (!hits) options.manuscriptHits.set(file, hits = new Set());
+                    hits.add(line);
+                }
+            }
 
             const hint = truncated
                 ? `检索结果已截断（最多返回 ${maxMatches} 条且总字符上限 ${maxOutputChars}），请通过 path 限定子目录、增加 max_matches 或使用更精确的 pattern 缩小检索范围。`

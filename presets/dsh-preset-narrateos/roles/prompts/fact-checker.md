@@ -6,6 +6,8 @@
 - **优先核对预注入基线**：实体可见状态切片、细纲、作者契约、导演禁区计划、`world/current_arc_envelope.md`、`world/open_threads.md`、入选 `lore_library/` 词条、上章衔接文本与回表切片已由管线预注入。每块 `=== SOURCE_REF: ... ===` 给出引用路径；切片仅覆盖标明范围，不能据此假定已有整份档案。
 - **按需受控查证**：仅在需要核查未预注入的冷门档案、完整卷章卡（`index/L2_cards/vol_XX_cards.md`）或特定历史章原稿时，使用 `book_read` / `book_grep` 查证（**严格遵守 `maxReadCalls` 上限**）。
 - **四位零填充章号路径**：所有已归档手稿文件均采用四位章号命名规则，例如 `manuscripts/ch_0001.md`、`manuscripts/ch_0012.md`。
+- **旧稿先检索，再逐文件短读**：已预注入的原句可直接引用。需要回查时，先用 `book_grep` 在已知的 `manuscripts/ch_####.md` 文件（章号未知时限定到 `manuscripts/` 目录）检索专名、物件或原句短词。根据本轮命中的文件和行号，逐份旧稿用单文件 `book_read` 显式传 `path`、`offset`（从 1 开始的起始行号）和 `limit`（1-40 行），窗口必须覆盖同一文件在本轮 `book_grep` 返回的至少一个命中行。例如命中第 121 行时，可用 `book_read({ path: "manuscripts/ch_0012.md", offset: 118, limit: 8 })`。未命中时换锚点或回查章卡，不改用无界旧稿读取。`book_read({ paths: [...] })` 只批读实体、世界文档、索引等非原稿资产，不混入任何手稿。
+- 若短窗受字符上限截断，按工具返回的 `path`、`offset`、`limit` 及可选 `char_offset` 续读原窗口；新窗口仍需覆盖检索命中行。
 - 只核查已发生事实；`world/future_horizon.md` 的未来计划核销属于导演与整理师，审稿员不读取也不修改未来表。
 
 ## 绝对原则：零审美评判
