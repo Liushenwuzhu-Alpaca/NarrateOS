@@ -774,6 +774,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         let restoreStagedCard = true;
         let dirtyReview = false;
         let unreadError: unknown;
+        let partialReadError: unknown;
         let unreadIdentityError: unknown;
         let dirtyError: unknown;
         let dirtyText: string | undefined;
@@ -832,8 +833,18 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         }
                     }
                     if (result.appearances.includes(negative)) {
+                        if (restoreStagedCard) {
+                            await execTool('book_read', { path: manuscript, offset: 1, limit: 1 });
+                            try {
+                                await execTool('yield_dream_commit', result);
+                                return;
+                            } catch (error) {
+                                partialReadError = error;
+                            }
+                        }
                         await execTool('book_read', { path: manuscript });
                         if (restoreStagedCard) {
+                            await execTool('book_read', { path: item, offset: 1, limit: 1 });
                             try {
                                 await execTool('yield_dream_commit', result);
                                 return;
@@ -862,6 +873,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         expect(dreamRes.skipped).toBe(false);
         expect(unreadError).toMatchObject({ message: expect.stringContaining('实际读取的定稿') });
+        expect(partialReadError).toMatchObject({ message: expect.stringContaining('实际读取的定稿') });
         expect(unreadIdentityError).toMatchObject({ message: expect.stringContaining('实际读取的实体档案') });
         expect(dreamerPromptSeen).toContain('黑铜钥匙');
         expect(dreamerPromptSeen).toContain('账册压着黑铜钥匙。');
