@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
@@ -160,6 +160,8 @@ export class NarrateToolsService {
     private readonly configuredBooksRoot: string | undefined;
     private readonly workspaceTools = new Map<string, NarrateToolsService>();
     private readonly startupDirectory = process.cwd();
+    private readonly standaloneBooksRoot: string;
+    private readonly initialBookRoot: string | null;
     private readonly workspaceOverrides: Array<{
         booksRoot: string | undefined;
         defaultDirectory: string | undefined;
@@ -174,6 +176,8 @@ export class NarrateToolsService {
     ) {
         this.defaultBookRoot = config.bookRoot ? resolve(config.bookRoot) : null;
         this.configuredBooksRoot = config.booksRoot;
+        this.standaloneBooksRoot = this.booksRootFor(defaultDirectory);
+        this.initialBookRoot = narrateStore.bookRoot ?? this.defaultBookRoot;
     }
 
     /** 宿主管线挂载期间复用目录解析；卸载后回到独立工具的配置。 */
@@ -199,13 +203,20 @@ export class NarrateToolsService {
     }
 
     forWorkspace(directory: string | undefined): NarrateToolsService {
+        return this.forBooksRoot(directory === undefined ? this.booksRoot : this.booksRootFor(directory));
+    }
+
+    private forBooksRoot(booksRoot: string): NarrateToolsService {
         if (this.disposed) throw new Error('NarrateToolsService 已卸载');
-        if (!directory) return this;
-        const booksRoot = this.booksRootFor(directory);
-        if (booksRoot === this.booksRoot) return this;
+        if (booksRoot === this.standaloneBooksRoot) return this;
         let tools = this.workspaceTools.get(booksRoot);
         if (!tools) {
-            tools = new NarrateToolsService(new NarrateStoreService({ booksRoot }, this.narrateStore.system), { booksRoot });
+            const bookRoot = this.initialBookRoot && dirname(this.initialBookRoot) === booksRoot
+                ? this.initialBookRoot : undefined;
+            tools = new NarrateToolsService(
+                new NarrateStoreService({ booksRoot, ...(bookRoot ? { bookRoot } : {}) }, this.narrateStore.system),
+                { booksRoot }
+            );
             this.workspaceTools.set(booksRoot, tools);
         }
         return tools;
@@ -444,23 +455,22 @@ export class NarrateToolsService {
         input: LockCharterAndBootInput,
         overrides?: Partial<LockCharterAndBootOptions>
     ): Promise<LockCharterAndBootResult> {
-        if (this.disposed) {
-            throw new Error('NarrateToolsService 已卸载，拒绝执行开书编译');
-        }
-        const defaultOnBookBooted = createAutoSwitchBookCallback(this.narrateStore);
+        const booksRoot = overrides?.booksRoot ? resolve(overrides.booksRoot) : this.booksRoot;
+        const owner = this.forBooksRoot(booksRoot);
+        const defaultOnBookBooted = createAutoSwitchBookCallback(owner.narrateStore);
         const boot = lockCharterAndBoot(input, {
-            booksRoot: overrides?.booksRoot ?? this.booksRoot,
-            system: overrides?.system ?? this.narrateStore.system,
+            booksRoot,
+            system: overrides?.system ?? owner.narrateStore.system,
             onBookBooted:
                 overrides && 'onBookBooted' in overrides
                     ? overrides.onBookBooted
                     : defaultOnBookBooted
         });
-        this.activeBoots.add(boot);
+        owner.activeBoots.add(boot);
         try {
             return await boot;
         } finally {
-            this.activeBoots.delete(boot);
+            owner.activeBoots.delete(boot);
         }
     }
 
@@ -521,7 +531,9 @@ export function apply(ctx: Context, config: NarrateToolsConfig = {}): void {
             const disposeBootTool = toolCtx.tools.register(
                 createLockCharterAndBootTool({ booksRoot: service.booksRoot }, async (input, _options, exec) => {
                     const directory = await resolveAgentWorkspaceDirectory(toolCtx, exec.agent, exec.signal);
-                    return await service.forWorkspace(directory).lockCharterAndBoot(input);
+                    return await service.lockCharterAndBoot(input, {
+                        booksRoot: directory === undefined ? service.booksRoot : service.booksRootFor(directory)
+                    });
                 })
             );
             const disposeGuard = registerMainSessionWriteGuard(

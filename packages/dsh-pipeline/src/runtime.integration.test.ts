@@ -413,6 +413,31 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             `/api/narrate/step?scopeSessionId=author-a&scopeBooksRoot=${encodeURIComponent(join(cwdA, 'books'))}`,
             { chapterGoal: '不能误写到乙地' }
         )).statusCode).toBe(409);
+
+        // 只重载 pipeline，工具插件和其选书状态仍在同一个宿主内。
+        await pipeline.dispose();
+        const defaultA = await ctx.plugin(pipelinePlugin, { booksRoot: join(cwdA, 'books'), heartbeatIntervalMs: 0 });
+        registerCleanup(() => defaultA.dispose());
+        expect((await web.invoke('GET', '/api/narrate/books')).json).toMatchObject({
+            currentBookRoot: bookA, books: [{ bookRoot: bookA, title: '甲地雪港' }]
+        });
+        const signalsA = join(bookA, '.ops/signals.jsonl');
+        expect((await web.invoke('POST', '/api/narrate/signals', {
+            type: 'DIRECTOR_NOTE', reason: '只在甲地待处理的导演便签'
+        })).statusCode).toBe(201);
+        const before = await readFile(signalsA, 'utf8');
+        await defaultA.dispose();
+        const defaultB = await ctx.plugin(pipelinePlugin, { booksRoot: join(cwdB, 'books'), heartbeatIntervalMs: 0 });
+        registerCleanup(() => defaultB.dispose());
+        expect((await web.invoke('GET', '/api/narrate/books')).json).toMatchObject({
+            currentBookRoot: bookB, books: [{ bookRoot: bookB, title: '乙地雪港' }]
+        });
+        expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({ bookRoot: bookB });
+        const note = '只在乙地待处理的导演便签';
+        expect((await web.invoke('POST', '/api/narrate/signals', { type: 'DIRECTOR_NOTE', reason: note })).statusCode)
+            .toBe(201);
+        expect(await readFile(join(bookB, '.ops/signals.jsonl'), 'utf8')).toContain(note);
+        expect(await readFile(signalsA, 'utf8')).toBe(before);
     });
 
     it('Config 满足 DSH Schemastery 原生协议 (isNativeConfigSchema === true) 且无写死假模型/audit 池', () => {

@@ -30,7 +30,8 @@ function readModelSelection(raw: unknown): HostDefaultModelSelection | undefined
 
 /** 每个实际作品库只保留一组控制器、暂存和选书状态；请求本身不改变任何共享目录。 */
 export function createWorkspaceRuntime(ctx: Context, config: NarrateControllerConfig) {
-    const defaultController = new NarrateRuntimeController(ctx, ctx.narrateStore, ctx.narrateTools, config);
+    const defaultTools = ctx.narrateTools.forWorkspace(undefined);
+    const defaultController = new NarrateRuntimeController(ctx, defaultTools.narrateStore, defaultTools, config);
     const byRoot = new Map([[defaultController.booksRoot, defaultController]]);
     const pendingModelSelections = new Map<string, HostDefaultModelSelection>();
     let executionContext = ctx;
