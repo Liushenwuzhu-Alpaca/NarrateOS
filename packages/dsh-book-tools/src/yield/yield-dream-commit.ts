@@ -47,6 +47,7 @@ export interface YieldDreamCommitOptions {
     bookRoot: string;
     runId: string;
     fence?: PathFence | undefined;
+    dreamReadHashes?: ReadonlyMap<string, string | null> | undefined;
     onYield?: ((record: DreamCommitRecord) => void) | undefined;
 }
 
@@ -255,7 +256,7 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                         quote: {
                             oneOf: [{ type: 'string' }, { type: 'null' }],
                             required: true,
-                            description: '逐字引用体现实际出场或交互且含规范名称或唯一别名的定稿正文；读过定稿并确认仅提及或未出场时传 null，未核实则不提交'
+                            description: '逐字引用体现实际出场或交互且含规范名称或唯一别名的定稿正文；本轮用 book_read 核对定稿和最终实体档案并确认仅提及或未出场时传 null，未核实则不提交'
                         }
                     }
                 }
@@ -335,6 +336,7 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                     bookRoot, system: store.system, txState, chapterNumber, pendingWrites, entities, absences,
                     minPromotionChapters: dreamingCfg.promote_anchor_min_chapters,
                     appearances: parsed.appearances, reachableIds: reachableKeys,
+                    dreamReadHashes: options.dreamReadHashes,
                     readFile: async (path) => {
                         const { absPath } = await fence.assertReadFile(path);
                         return await readDiskOptional(absPath);

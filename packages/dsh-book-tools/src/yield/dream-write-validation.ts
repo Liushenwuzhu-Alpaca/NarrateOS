@@ -16,6 +16,7 @@ import { ENTITY_ID_PATTERN_RE, hasOmniscientSecretMarker } from './shared.js';
 export const ENTITY_PROFILE_PATH_RE = /^entities\/(?:cold_archive\/)?([^/]+)\.md$/;
 
 export interface ValidatedDreamEntity {
+    path: string;
     profile: EntityProfile;
     newNames: string[];
 }
@@ -127,7 +128,7 @@ export async function validateDreamWrite(
                 throw new GateValidationError('yield_dream_commit', `实体档案 ${path} 缺少第 ${number} 区 ${title}`);
             }
         }
-        return { profile, newNames };
+        return { path, profile, newNames };
     } catch (error) {
         const hint = dreamRevertHint(path);
         if (error instanceof InnateLockViolationError || error instanceof GateValidationError) {

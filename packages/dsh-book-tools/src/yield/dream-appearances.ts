@@ -24,6 +24,7 @@ interface DreamAppearanceOptions {
     pendingWrites: Map<string, string>;
     readFile: (path: string) => Promise<string | null>;
     absences: NonNullable<DreamWatermark['appearance_absences']>;
+    dreamReadHashes: ReadonlyMap<string, string | null> | undefined;
 }
 
 /** 规范名和别名决定否定回查结论的适用范围，别名次序不影响身份。 */
@@ -147,24 +148,36 @@ export async function planDreamAppearances(options: DreamAppearanceOptions): Pro
     const byVolume = new Map<string, Map<number, Set<string>>>();
     let revision: string | undefined;
     for (const [id, entries] of audited) {
-        let profile: EntityProfile | undefined = entities.get(id)?.profile;
-        if (!profile) {
-            const raw = await readFile(`entities/${id}.md`) ?? await readFile(`entities/cold_archive/${id}.md`);
-            if (raw !== null) profile = parseEntityMarkdown(raw);
+        const stagedEntity = entities.get(id);
+        let entityPath = stagedEntity?.path ?? `entities/${id}.md`;
+        let rawEntity = pendingWrites.get(entityPath) ?? await readFile(entityPath);
+        if (rawEntity === null) {
+            entityPath = `entities/cold_archive/${id}.md`;
+            rawEntity = await readFile(entityPath);
         }
+        const profile = stagedEntity?.profile ?? (rawEntity === null ? undefined : parseEntityMarkdown(rawEntity));
         if (profile?.metadata.entity_id !== id) {
             throw new GateValidationError('yield_dream_commit', `出场实体档案与 ID 不匹配: ${id}`);
         }
         const names = [profile.metadata.canonical_name, ...profile.metadata.unique_aliases]
             .map(normalizeForQuoteMatch).filter((name) => name.length > 0);
         let identity: string | undefined;
+        let identityReadMatches: boolean | undefined;
         for (const [chapter, quote] of entries) {
             const section = chapters.get(chapter)!;
             const chapterHash = txState.chapter_hashes[section.chapterId]!;
+            const manuscript = `manuscripts/${section.chapterId}.md`;
+            if (quote === null && options.dreamReadHashes?.get(manuscript) !== chapterHash) {
+                throw new GateValidationError('yield_dream_commit', `${section.chapterId} 缺少本轮实际读取的定稿证据：请用 book_read 核对已同步的正文，未核实则省略此结论`);
+            }
+            if (quote === null && !(identityReadMatches ??= rawEntity !== null &&
+                options.dreamReadHashes?.get(entityPath) === createHash('sha256').update(rawEntity).digest('hex'))) {
+                throw new GateValidationError('yield_dream_commit', `${id} 缺少本轮实际读取的实体档案证据：请用 book_read 核对最终版本的名称和别名`);
+            }
             let text = texts.get(chapter);
             if (text === undefined) {
                 revision ??= await system.currentRevision(bookRoot);
-                const archived = await system.readFileAtRef(bookRoot, revision, `manuscripts/${section.chapterId}.md`);
+                const archived = await system.readFileAtRef(bookRoot, revision, manuscript);
                 if (archived === null || createHash('sha256').update(archived).digest('hex') !== chapterHash) {
                     throw new GateValidationError('yield_dream_commit', `${section.chapterId} 的定稿与 WAL 指纹不符，不能登记出场核对结论`);
                 }

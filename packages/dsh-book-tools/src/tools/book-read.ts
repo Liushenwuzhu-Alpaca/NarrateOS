@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import type { PathFence, ReadFileTarget } from './path-fence.js';
@@ -32,6 +33,8 @@ export interface BookReadToolOptions {
     /** 单次输出字符预算，缺省读取 BookConfig.retrieval.read_max_output_chars。 */
     maxOutputChars?: number | undefined;
     manuscriptHits?: ReadonlyMap<string, ReadonlySet<number>> | undefined;
+    /** Dreaming 记录成功返回的档案与手稿版本；手稿读到多个版本时失去资格。 */
+    dreamReadHashes?: Map<string, string | null> | undefined;
 }
 
 /** 普通文件停在整行边界；单行自身超限时显式给出字符续读游标。 */
@@ -213,6 +216,7 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
             const notices: string[] = [];
             const missing: string[] = [];
             let budgetExhausted = false;
+            let dreamReads: Array<[path: string, hash: string]> | undefined;
             const staged = store.staging.has(runId) ? store.staging.getPendingWrites(runId) : undefined;
             for (const target of targets.values()) {
                 exec.signal.throwIfAborted();
@@ -243,6 +247,12 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                             });
                         }
                     }
+                    if (options.dreamReadHashes && item.content && target.normalized === target.realNormalized &&
+                        /^(?:manuscripts\/ch_\d{4}|entities\/(?:cold_archive\/)?(?:char|item)_[\w]+)\.md$/.test(target.normalized)) {
+                        (dreamReads ??= []).push([
+                            target.normalized, createHash('sha256').update(read.content).digest('hex')
+                        ]);
+                    }
                     items.push(item);
                     remaining -= item.content.length;
                     budgetExhausted = item.nextOffset !== undefined || remaining <= 0;
@@ -259,6 +269,13 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                 throw new Error(`文件不存在: ${missing.join(', ')}`);
             }
             if (items.length > 0) quota.consume('book_read');
+            if (dreamReads && options.dreamReadHashes) {
+                for (const [path, hash] of dreamReads) {
+                    const previous = options.dreamReadHashes.get(path);
+                    const mixedManuscript = path.startsWith('manuscripts/') && previous !== undefined && previous !== hash;
+                    options.dreamReadHashes.set(path, mixedManuscript ? null : hash);
+                }
+            }
             notices.unshift(...missing.map(path => `[跳过不存在的文件: ${path}]`));
             const first = items[0];
             if (args.paths === undefined && first && notices.length === 0) return first;

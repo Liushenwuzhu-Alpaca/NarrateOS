@@ -202,14 +202,36 @@ function scanRecurringProseAnchors(
         const missing = [...item.chapters.values()].filter((section) => {
             if (!knownId) return true;
             if (section.appearedEntityIds.includes(knownId)) return false;
-            const absence = reviews?.chapters[section.chapterId];
-            return !absence || absence.chapter_sha256 !== chapterHashes[section.chapterId] ||
-                absence.identity_sha256 !== reviews?.identity;
+            return !reviews?.chapters[section.chapterId];
         }).sort((a, b) => a.chapterNumber - b.chapterNumber);
         if (missing.length > 0) {
             const cards = missing.map((section) => `${section.chapterId} (${section.sourcePath})`).join(', ');
             const action = knownId ? `已有实体 ${knownId} 待核对出场` : '评估建卡或补入已有实体 unique_aliases';
             candidates.push(`- "${item.display}" (共 ${item.chapters.size} 章复现，${action}): ${cards}`);
+        }
+    }
+
+    if (reviewed.size > 0) {
+        // 定稿或身份变化后，旧锚点可能已经从章卡或实体别名消失。
+        const byChapterId = new Map<string, (typeof sections)[number] | null>();
+        for (const section of sections) {
+            byChapterId.set(section.chapterId, byChapterId.has(section.chapterId) ? null : section);
+        }
+        for (const [id, { identity, chapters }] of reviewed) {
+            const stale: (typeof sections)[number][] = [];
+            for (const [chapterId, absence] of Object.entries(chapters)) {
+                const section = byChapterId.get(chapterId);
+                const hash = chapterHashes[chapterId];
+                if (section && hash && !section.appearedEntityIds.includes(id) &&
+                    (absence.chapter_sha256 !== hash || absence.identity_sha256 !== identity)) {
+                    stale.push(section);
+                }
+            }
+            if (stale.length > 0) {
+                stale.sort((a, b) => a.chapterNumber - b.chapterNumber);
+                const cards = stale.map((section) => `${section.chapterId} (${section.sourcePath})`).join(', ');
+                candidates.push(`- 已有实体 ${id} 待核对出场（定稿或身份已变更）: ${cards}`);
+            }
         }
     }
     return candidates;
@@ -399,12 +421,12 @@ export class DreamingPipeline {
                 ...(anchorCandidates.length > 0
                     ? [
                           '',
-                          `## 跨章复现异象锚点与出场补登候选（出现 >= ${promoteAnchorMinChapters} 章）`,
+                          `## 跨章复现异象锚点（出现 >= ${promoteAnchorMinChapters} 章）与历史出场复核`,
                           ...anchorCandidates
                       ]
                     : []),
                 '',
-                '升格或补登时，把逐章出场结论放入 yield_dream_commit.appearances（entity_id、chapter_number、quote）；quote 粘贴体现实际出场或交互的定稿原句，仅提及或无证据填 null。门禁定位卷文件并只更新该章出场实体字段。',
+                '升格或补登时，把已核实的逐章出场结论放入 yield_dream_commit.appearances（entity_id、chapter_number、quote）。quote 粘贴体现出场或交互的定稿原句；仅在本轮用 book_read 核对已同步的正文与最终实体档案（含本轮暂存的名称和别名）并确认仅提及或未出场时填 null。未读、证据不足或工作稿尚未同步的章先不提交。',
                 '请按规范使用 book_read / book_grep / book_glob 核实相关原稿与世界文档，通过 book_edit 在隔离暂存区联动修改脏实体与计划文件（严禁修改 manuscripts/、未出场干净实体及 world/current_arc_envelope.md / world/static_base_and_voice.md，冷宫归档仅限换卷时执行），最后调用 `yield_dream_commit` 原子提交。'
             ].join('\n');
 

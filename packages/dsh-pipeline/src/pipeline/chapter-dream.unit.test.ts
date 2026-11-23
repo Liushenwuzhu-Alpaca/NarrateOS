@@ -772,6 +772,13 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         let dreamerPromptSeen = '';
         let restoreStagedCard = true;
+        let dirtyReview = false;
+        let unreadError: unknown;
+        let unreadIdentityError: unknown;
+        let dirtyError: unknown;
+        let dirtyText: string | undefined;
+        const manuscript = 'manuscripts/ch_0003.md';
+        const archivedItem = 'entities/cold_archive/item_black_key.md';
         const candidate = () => dreamerPromptSeen.split('\n').find((line) => line.includes('已有实体 item_black_key 待核对出场'));
         await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
@@ -780,6 +787,18 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                     await expect(execTool('yield_dream_commit', {
                         summary: '水位不能预支下一章', chapter_number: 4, accumulated_words: 0
                     })).rejects.toThrow(/水位/);
+                    const negative = { entity_id: 'item_black_key', chapter_number: 3, quote: null };
+                    if (dirtyReview) {
+                        const read = await execTool('book_read', { paths: [archivedItem, manuscript] });
+                        dirtyText = JSON.stringify(read);
+                        try {
+                            await execTool('yield_dream_commit', { summary: '工作稿不能用于否定核对', appearances: [negative] });
+                        } catch (error) {
+                            dirtyError = error;
+                            await execTool('yield_dream_commit', { summary: '待同步后再核对' });
+                        }
+                        return;
+                    }
                     if (restoreStagedCard) {
                         await execTool('book_edit', {
                             path: item, mode: 'write', replacement_text: [
@@ -790,7 +809,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         });
                         await execTool('book_edit', { path: oldVolume, mode: 'write', replacement_text: oldCards });
                     }
-                    await execTool('yield_dream_commit', {
+                    const result = {
                         summary: '完成 Dreaming 预扫描整理',
                         chapter_number: 3,
                         accumulated_words: 0,
@@ -801,11 +820,30 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                             ...(restoreStagedCard || candidate()?.includes('ch_0002') ? [{
                                 entity_id: 'item_black_key', chapter_number: 2, quote: '沈默用黑铜钥匙压住账册。'
                             }] : []),
-                            ...(restoreStagedCard || candidate()?.includes('ch_0003') ? [{
-                                entity_id: 'item_black_key', chapter_number: 3, quote: null
-                            }] : [])
+                            ...(restoreStagedCard || candidate()?.includes('ch_0003') ? [negative] : [])
                         ]
-                    });
+                    };
+                    if (restoreStagedCard) {
+                        try {
+                            await execTool('yield_dream_commit', result);
+                            return;
+                        } catch (error) {
+                            unreadError = error;
+                        }
+                    }
+                    if (result.appearances.includes(negative)) {
+                        await execTool('book_read', { path: manuscript });
+                        if (restoreStagedCard) {
+                            try {
+                                await execTool('yield_dream_commit', result);
+                                return;
+                            } catch (error) {
+                                unreadIdentityError = error;
+                            }
+                        }
+                        await execTool('book_read', { path: restoreStagedCard ? item : archivedItem });
+                    }
+                    await execTool('yield_dream_commit', result);
                 }
             },
             onLlmStream: () => textToStreamChunks('ok')
@@ -823,6 +861,8 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         });
 
         expect(dreamRes.skipped).toBe(false);
+        expect(unreadError).toMatchObject({ message: expect.stringContaining('实际读取的定稿') });
+        expect(unreadIdentityError).toMatchObject({ message: expect.stringContaining('实际读取的实体档案') });
         expect(dreamerPromptSeen).toContain('黑铜钥匙');
         expect(dreamerPromptSeen).toContain('账册压着黑铜钥匙。');
         expect(dreamRes.committedPaths).toEqual(expect.arrayContaining([item, oldVolume]));
@@ -841,7 +881,6 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         restoreStagedCard = false;
         const unindexedOldCards = expectedOldCards.replace('出场实体: item_black_key', '出场实体: 无');
         await writeFile(join(bookRoot, oldVolume), unindexedOldCards);
-        const archivedItem = 'entities/cold_archive/item_black_key.md';
         await mkdir(join(bookRoot, 'entities/cold_archive'), { recursive: true });
         await rename(join(bookRoot, item), join(bookRoot, archivedItem));
         await setupBookGitignoreAndCommit(bookRoot, [oldVolume, item, archivedItem], 'test: archive item with an omitted appearance');
@@ -856,16 +895,24 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect(await system.readFileAtRef(bookRoot, 'HEAD', archivedItem)).toContain('canonical_name: 黑铜钥匙');
         await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
         expect(candidate()).toBeUndefined();
+        const original = await readFile(join(bookRoot, manuscript), 'utf8');
+        dirtyReview = true;
+        await writeFile(join(bookRoot, manuscript), '# 第三章\n\n尚未同步的工作稿。\n');
+        await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
+        expect(dirtyText).toContain('尚未同步的工作稿');
+        expect(dirtyError).toMatchObject({ message: expect.stringContaining('实际读取的定稿') });
+        dirtyReview = false;
+        await writeFile(join(bookRoot, manuscript), original);
 
-        // 以另一份已提交的定稿和 WAL 模拟同步手改后的状态；实体身份保持不变。
-        const manuscript = 'manuscripts/ch_0003.md';
+        // 以另一份定稿、WAL 和已去除旧锚点的章卡模拟同步手改后的状态。
         const revised = '# 第三章\n\n「昨天那把黑铜钥匙送走了吗？」沈默问。\n';
         await writeFile(join(bookRoot, manuscript), revised);
+        await writeFile(join(bookRoot, currentVolume), currentCards.replace('异象锚点：黑铜钥匙', '异象锚点：无'));
         const store = ctx.narrateStore.openStore();
         const tx = await store.readTxState();
         tx.chapter_hashes['ch_0003'] = createHash('sha256').update(revised).digest('hex');
         await store.writeTxState(tx);
-        await setupBookGitignoreAndCommit(bookRoot, [manuscript, '.ops/tx_state.json'], 'test: revise the finalized chapter');
+        await setupBookGitignoreAndCommit(bookRoot, [manuscript, currentVolume, '.ops/tx_state.json'], 'test: revise the finalized chapter');
         await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
         expect(candidate()).toContain('ch_0003');
 
