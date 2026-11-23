@@ -339,6 +339,7 @@ const BootBookRequestSchema = z.object({
 });
 
 const StepChapterRequestSchema = z.object({
+    retry: z.enum(['resume', 'restart']).optional(),
     chapterGoal: z.string().optional(),
     chapterNumber: z.number().int().min(1).max(9999).optional(),
     timelineMode: z.enum(['MAINLINE', 'PARALLEL', 'FLASHBACK']).optional(),
@@ -682,6 +683,7 @@ export function registerNarrateRoutes(
                         haltRequested: rt.haltRequested
                     },
                     txLockHeld: false,
+                    chapterRetry: null,
                     featCommitSha: null,
                     stateCommitSha: null,
                     recentCommits: { featCommitSha: null, stateCommitSha: null },
@@ -720,6 +722,9 @@ export function registerNarrateRoutes(
                 controller.resolveRoleDefinitions(snapshot.config, store.bookRoot),
                 controller.getDiagnosticsStatus(store, snapshot)
             ]);
+            const chapterRetry = !diagnostics.txLockHeld && rt.activeTask === 'IDLE' && !rt.yolo.running
+                ? await controller.getChapterRetry(store, snapshot.txState)
+                : null;
 
             sendJson(res, 200, {
                 bookRoot: store.bookRoot,
@@ -728,6 +733,7 @@ export function registerNarrateRoutes(
                 walPhase: snapshot.txState.phase,
                 activeChapter: snapshot.txState.active_chapter,
                 lastCommittedChapter: snapshot.txState.last_committed_ch,
+                chapterRetry,
                 latestChapter,
                 chapterCount: snapshot.chapterFiles.length,
                 entityCount: Object.keys(snapshot.entities).length,
@@ -1141,6 +1147,7 @@ export function registerNarrateRoutes(
 
         try {
             const stepOptions: StepChapterInputOptions = {
+                retry: body.retry,
                 ...(body.chapterGoal !== undefined ? { chapterGoal: body.chapterGoal } : {}),
                 ...(body.chapterNumber !== undefined ? { chapterNumber: body.chapterNumber } : {}),
                 ...(body.timelineMode !== undefined ? { timelineMode: body.timelineMode } : {}),

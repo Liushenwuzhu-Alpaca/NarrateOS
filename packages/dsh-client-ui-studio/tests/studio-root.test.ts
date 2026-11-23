@@ -282,16 +282,18 @@ describe('真实根组件的草稿身份与异步隔离', () => {
             streams[0]!.dispatchEvent(new MessageEvent(event, { data: JSON.stringify(data) }));
         });
         await send('stage', { stage: 'STARTING' });
-        await send('halt:requested');
-        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写完本章即停');
+        await send('stage', { stage: 'WRITER', txLockHeld: true });
+        const header = container.querySelector('.ns-center-header')!;
+        expect(header.textContent).toContain('作品锁已占用');
+        await send('halt:requested', { force: true });
+        expect(buttonByText(header, '正在安全中止…').disabled).toBe(true);
         await send('halt:waiting', { activeTask: 'STEPPING' });
-        expect(container.querySelector('.ns-center-header')?.textContent).toContain('等待安全点收束');
+        expect(buttonByText(header, '正在安全中止…').disabled).toBe(true);
         vi.mocked(api.fetchStatus).mockRejectedValue(new Error('宿主已经关闭'));
         await send('halt:completed');
         expect(container.querySelector('.ns-center-header')?.textContent).toContain('写下一章');
         await send('stage', { stage: 'STARTING' });
-        expect(container.querySelector('.ns-center-header')?.textContent).toContain('写完本章暂停');
-        expect(container.querySelector('.ns-center-header')?.textContent).not.toContain('等待安全点');
+        expect(buttonByText(header, '安全中止').disabled).toBe(false);
     });
 
     it.each(['章节视图', '作品辅助视图'])('%s支持方向键和首尾键，焦点、选择和面板身份同步', async (label) => {
@@ -1109,15 +1111,17 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
         await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber: 3, message: '读取章卡' } });
         await emit({ event: 'halt:waiting', data: { activeTask: 'STEPPING' } });
-        const header = () => container.querySelector('.ns-center-header')?.textContent;
-        expect(header()).toContain('等待安全点收束');
+        const stopAction = () => container
+            .querySelector('.ns-center-header [aria-label="更多停止选项"]')
+            ?.previousElementSibling as HTMLButtonElement | undefined;
+        expect(stopAction()?.disabled).toBe(true);
         await act(async () => { stale.resolve(statusPayload(activeBookRoot)); });
-        expect(header()).toContain('等待安全点收束');
+        expect(stopAction()?.disabled).toBe(true);
         await act(async () => {
             const status = statusPayload(activeBookRoot);
             fresh.resolve({ ...status, runtime: { ...status.runtime, activeTask: 'STEPPING', haltRequested: true } });
         });
-        expect(header()).toContain('等待安全点收束');
+        expect(stopAction()?.disabled).toBe(true);
     });
 
     it('仅从快照观察到新工序时，收束旧运行徽标并保留其会话', async () => {

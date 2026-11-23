@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -97,6 +98,7 @@ export interface EntityRecallQuery extends RecallReadOptions {
     maxSlicesPerEntity?: number | undefined;
     sliceContextParagraphs?: number | undefined;
     sliceMaxChars?: number | undefined;
+    includeSourceHash?: boolean | undefined;
 }
 
 /** 带时间差信封的原稿召回切片 */
@@ -104,6 +106,7 @@ export interface RecallSlice {
     /** 成对挂载的必需证据，不参与可选切片裁剪。 */
     requiredEntityId?: string | undefined;
     file: string;
+    sourceSha256?: string | undefined;
     chapterId: string;
     chapterNumber: number;
     chapterDay: number | null;
@@ -166,6 +169,7 @@ interface ParsedChapterContent {
     storyDay?: number | undefined;
     lines: string[];
     paragraphs: CachedParagraph[];
+    sourceSha256?: string | undefined;
 }
 
 interface CachedChapterEntry extends ParsedChapterContent {
@@ -321,7 +325,7 @@ function extractChapterMetadata(content: string): { title?: string | undefined; 
     return { title, storyDay };
 }
 
-function parseChapterContent(content: string): ParsedChapterContent {
+function parseChapterContent(content: string, includeSourceHash = false): ParsedChapterContent {
     const normalized = content.replace(/\r\n/g, '\n');
     const lines = normalized.split('\n');
     const meta = extractChapterMetadata(normalized);
@@ -360,7 +364,8 @@ function parseChapterContent(content: string): ParsedChapterContent {
         title: meta.title,
         storyDay: meta.storyDay,
         lines,
-        paragraphs
+        paragraphs,
+        sourceSha256: includeSourceHash ? createHash('sha256').update(content).digest('hex') : undefined
     };
 }
 
@@ -966,17 +971,18 @@ export class IndexRecall {
     private async loadChapterData(
         bookRoot: string,
         relativePath: string,
-        options?: RecallReadOptions
+        options?: RecallReadOptions,
+        includeSourceHash = false
     ): Promise<ParsedChapterContent | null> {
         const normalizedPath = normalizeRelativePath(relativePath);
         if (options?.stagingOverlay && options.stagingOverlay.has(normalizedPath)) {
             const staged = options.stagingOverlay.get(normalizedPath) ?? null;
-            return staged === null ? null : parseChapterContent(staged);
+            return staged === null ? null : parseChapterContent(staged, includeSourceHash);
         }
         if (options?.stagingRead) {
             const staged = await options.stagingRead(normalizedPath);
             if (staged !== undefined) {
-                return staged === null ? null : parseChapterContent(staged);
+                return staged === null ? null : parseChapterContent(staged, includeSourceHash);
             }
         }
 
@@ -1002,6 +1008,7 @@ export class IndexRecall {
             cached &&
             cached.mtimeMs === fileStat.mtimeMs &&
             cached.size === fileStat.size &&
+            (!includeSourceHash || cached.sourceSha256 !== undefined) &&
             (expectedHash === undefined || cached.chapterHash === expectedHash)
         ) {
             return cached;
@@ -1015,7 +1022,7 @@ export class IndexRecall {
             return null;
         }
 
-        const parsed = parseChapterContent(rawContent);
+        const parsed = parseChapterContent(rawContent, includeSourceHash);
         const entry: CachedChapterEntry = {
             ...parsed,
             mtimeMs: fileStat.mtimeMs,
@@ -1315,7 +1322,7 @@ export class IndexRecall {
                 const chapterNumber = parseChapterNumberFromPath(file);
                 if (chapterNumber === null) continue;
 
-                const chapterData = await this.loadChapterData(bookRoot, file, effectiveQuery);
+                const chapterData = await this.loadChapterData(bookRoot, file, effectiveQuery, effectiveQuery.includeSourceHash);
                 if (!chapterData) continue;
 
                 const chapterDay = explicitDayMap.get(chapterNumber) ?? chapterData.storyDay ?? null;
@@ -1500,6 +1507,7 @@ export class IndexRecall {
                 score: computeScore(paragraph.text),
                 slice: {
                     file,
+                    sourceSha256: chapterData.sourceSha256,
                     chapterId,
                     chapterNumber,
                     chapterDay,
@@ -1571,6 +1579,7 @@ export class IndexRecall {
                 score: computeScore(containingParagraph?.text ?? lineText),
                 slice: {
                     file,
+                    sourceSha256: chapterData.sourceSha256,
                     chapterId,
                     chapterNumber,
                     chapterDay,

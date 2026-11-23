@@ -199,6 +199,12 @@ export interface HealPlanSummary {
     updatedAt: string;
 }
 
+export interface ChapterRetrySummary {
+    chapterNumber: number;
+    stage: string;
+    canRestart: boolean;
+}
+
 /** 作品全局状态载荷（对应 GET /api/narrate/status） */
 export interface NarrateStatusPayload {
     bookRoot: string;
@@ -222,6 +228,7 @@ export interface NarrateStatusPayload {
     roleDefinitions?: RoleDefinitionItem[] | undefined;
     availableModels?: AvailableModelItem[] | undefined;
     txLockHeld?: boolean | undefined;
+    chapterRetry?: ChapterRetrySummary | null | undefined;
     featCommitSha?: string | null | undefined;
     stateCommitSha?: string | null | undefined;
     recentCommits?: { featCommitSha: string | null; stateCommitSha: string | null } | undefined;
@@ -556,6 +563,7 @@ export interface BootBookResponse {
 
 /** 单章推进请求 */
 export interface StepChapterRequest {
+    retry?: 'resume' | 'restart' | undefined;
     chapterGoal?: string | undefined;
     chapterNumber?: number | undefined;
     timelineMode?: TimelineMode | undefined;
