@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { NarrateStoreService } from '@narrateos/dsh-book-store';
 import type { PathFence, ReadFileTarget } from './path-fence.js';
@@ -32,6 +33,45 @@ export interface BookReadToolOptions {
     /** 单次输出字符预算，缺省读取 BookConfig.retrieval.read_max_output_chars。 */
     maxOutputChars?: number | undefined;
     manuscriptHits?: ReadonlyMap<string, ReadonlySet<number>> | undefined;
+    /** Dreaming 记录成功返回的档案与手稿版本；手稿读到多个版本时失去资格。 */
+    dreamReadHashes?: Map<string, string | null> | undefined;
+}
+
+interface ReadCoverage {
+    readonly start: number;
+    readonly end: number;
+    readonly total: number;
+}
+
+interface DreamCoverageState {
+    hash: string;
+    total: number;
+    intervals: Array<[number, number]>;
+    mixed: boolean;
+}
+
+/** 合并已读偏移区间，用于校验 Dreaming 否定证据是否覆盖了完整原文。 */
+function mergeCoverageInterval(intervals: Array<[number, number]>, start: number, end: number): Array<[number, number]> {
+    const merged: Array<[number, number]> = [];
+    let inserted = false;
+    let curStart = start;
+    let curEnd = end;
+    for (const [a, b] of intervals) {
+        if (b < curStart) {
+            merged.push([a, b]);
+        } else if (curEnd < a) {
+            if (!inserted) {
+                merged.push([curStart, curEnd]);
+                inserted = true;
+            }
+            merged.push([a, b]);
+        } else {
+            curStart = Math.min(curStart, a);
+            curEnd = Math.max(curEnd, b);
+        }
+    }
+    if (!inserted) merged.push([curStart, curEnd]);
+    return merged;
 }
 
 /** 普通文件停在整行边界；单行自身超限时显式给出字符续读游标。 */
@@ -43,8 +83,14 @@ function sliceWithinBudget(
     offset = 1,
     limit?: number,
     charOffset = 0
-): Omit<BookReadItem, 'fromStaging'> {
+): { item: Omit<BookReadItem, 'fromStaging'>; coverage: ReadCoverage } {
     const lines = rawText.split(/\r?\n/);
+    const lineStarts = new Array<number>(lines.length);
+    let totalUnits = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+        lineStarts[i] = totalUnits;
+        totalUnits += lines[i]!.length + 1;
+    }
     const startIndex = offset - 1;
     const requestedEnd = Math.min(lines.length, startIndex + (limit ?? lines.length));
     if (charOffset > (lines[startIndex]?.length ?? 0)) {
@@ -77,16 +123,28 @@ function sliceWithinBudget(
     const hint = truncated
         ? `[已触发单次 ${maxOutputChars} 字符上限，本文件显示第 ${offset}~${endLine} 行（共 ${lines.length} 行）${nextCharOffset > 0 ? '，末行仅部分显示' : ''}；续读请传 path="${path}", offset=${nextOffset}, limit=${requestedEnd - cursor}${nextCharOffset > 0 ? `, char_offset=${nextCharOffset}` : ''}]`
         : undefined;
+    const coverage: ReadCoverage = kept.length === 0
+        ? { start: 0, end: 0, total: totalUnits }
+        : {
+            start: lineStarts[startIndex]! + charOffset,
+            end: nextCharOffset > 0
+                ? lineStarts[cursor]! + nextCharOffset
+                : (cursor < lines.length ? lineStarts[cursor]! : totalUnits),
+            total: totalUnits
+        };
     return {
-        path,
-        // 未截断、未切片时保留原始换行字节，避免把 CRLF 全文误标为原文。
-        content: !truncated && offset === 1 && limit === undefined && charOffset === 0 && rawText.length <= budget
-            ? rawText
-            : kept.join('\n'),
-        totalLines: lines.length,
-        startLine: offset,
-        endLine,
-        ...(hint !== undefined ? { nextOffset, nextCharOffset, hint } : {})
+        item: {
+            path,
+            // 未截断、未切片时保留原始换行字节，避免把 CRLF 全文误标为原文。
+            content: !truncated && offset === 1 && limit === undefined && charOffset === 0 && rawText.length <= budget
+                ? rawText
+                : kept.join('\n'),
+            totalLines: lines.length,
+            startLine: offset,
+            endLine,
+            ...(hint !== undefined ? { nextOffset, nextCharOffset, hint } : {})
+        },
+        coverage
     };
 }
 
@@ -97,6 +155,7 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
     const auditContinuations = options.manuscriptHits
         ? new Map<string, { offset: number; limit: number; charOffset: number }>()
         : undefined;
+    const dreamCoverage = options.dreamReadHashes ? new Map<string, DreamCoverageState>() : undefined;
     const remindedPaths = new Set<string>();
 
     return defineTool({
@@ -213,6 +272,7 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
             const notices: string[] = [];
             const missing: string[] = [];
             let budgetExhausted = false;
+            let dreamReads: Array<[path: string, hash: string, coverage: ReadCoverage]> | undefined;
             const staged = store.staging.has(runId) ? store.staging.getPendingWrites(runId) : undefined;
             for (const target of targets.values()) {
                 exec.signal.throwIfAborted();
@@ -231,7 +291,8 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                 try {
                     const read = await readContentWithStagingPriority({ store, runId, normalizedPath: target.normalized,
                         absPath: target.absPath, stagingOverlay, missingInOverlayMessage: `文件在当前分支视图中不存在或不可见: ${target.normalized}` });
-                    const item = { ...sliceWithinBudget(read.content, target.normalized, remaining, maxOutputChars, args.offset, args.limit, args.char_offset), fromStaging: read.fromStaging };
+                    const sliced = sliceWithinBudget(read.content, target.normalized, remaining, maxOutputChars, args.offset, args.limit, args.char_offset);
+                    const item = { ...sliced.item, fromStaging: read.fromStaging };
                     if (auditContinuations && target.normalized.startsWith('manuscripts/')) {
                         if (item.nextOffset === undefined) {
                             auditContinuations.delete(target.normalized);
@@ -242,6 +303,12 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                                 charOffset: item.nextCharOffset ?? 0
                             });
                         }
+                    }
+                    if (options.dreamReadHashes && sliced.coverage.end > sliced.coverage.start && target.normalized === target.realNormalized &&
+                        /^(?:manuscripts\/ch_\d{4}|entities\/(?:cold_archive\/)?(?:char|item)_[\w]+)\.md$/.test(target.normalized)) {
+                        (dreamReads ??= []).push([
+                            target.normalized, createHash('sha256').update(read.content).digest('hex'), sliced.coverage
+                        ]);
                     }
                     items.push(item);
                     remaining -= item.content.length;
@@ -259,6 +326,27 @@ export function createBookReadTool(options: BookReadToolOptions): ToolDefinition
                 throw new Error(`文件不存在: ${missing.join(', ')}`);
             }
             if (items.length > 0) quota.consume('book_read');
+            if (dreamReads && options.dreamReadHashes && dreamCoverage) {
+                for (const [path, hash, coverage] of dreamReads) {
+                    const isManuscript = path.startsWith('manuscripts/');
+                    let state = dreamCoverage.get(path);
+                    const previousHash = options.dreamReadHashes.get(path);
+                    if (isManuscript && (state?.mixed || (state && state.hash !== hash) || (previousHash !== undefined && previousHash !== hash))) {
+                        dreamCoverage.set(path, { hash, total: coverage.total, intervals: [], mixed: true });
+                        options.dreamReadHashes.set(path, null);
+                        continue;
+                    }
+                    if (!state || state.hash !== hash) {
+                        if (previousHash !== undefined && previousHash !== hash) options.dreamReadHashes.delete(path);
+                        state = { hash, total: coverage.total, intervals: [], mixed: false };
+                        dreamCoverage.set(path, state);
+                    }
+                    state.intervals = mergeCoverageInterval(state.intervals, coverage.start, coverage.end);
+                    if (state.intervals.length === 1 && state.intervals[0]![0] === 0 && state.intervals[0]![1] === state.total) {
+                        options.dreamReadHashes.set(path, hash);
+                    }
+                }
+            }
             notices.unshift(...missing.map(path => `[跳过不存在的文件: ${path}]`));
             const first = items[0];
             if (args.paths === undefined && first && notices.length === 0) return first;

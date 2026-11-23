@@ -137,4 +137,76 @@ describe('只读工具边界', () => {
         await expect(execute(bounded, { path: 'manuscripts/ch_0001.md' })).rejects.toThrow('时间线');
         expect(f.quota.count).toBe(2);
     });
+
+    it('Dreaming 全文指纹仅在覆盖完整原文后写入，切片、预算截断或改版均不得提前放行', async () => {
+        const f = await fixture(20);
+        const manuscript = 'manuscripts/ch_0003.md';
+        const entity = 'entities/item_key.md';
+        const longSingleLine = 'manuscripts/ch_0004.md';
+        const msText = '# 第三章\n\n第一段。\n第二段。\n第三段。\n';
+        const entityV1 = '---\nentity_id: item_key\ncanonical_name: 铜钥匙\n---\n描述一\n';
+        const entityV2 = '---\nentity_id: item_key\ncanonical_name: 铜钥匙\nunique_aliases: [旧钥匙]\n---\n描述二\n';
+        const singleLineText = '甲'.repeat(400);
+        await writeFile(join(f.root, manuscript), msText);
+        await writeFile(join(f.root, entity), entityV1);
+        await writeFile(join(f.root, longSingleLine), singleLineText);
+
+        const dreamReadHashes = new Map<string, string | null>();
+        const tool = createBookReadTool({ ...f, maxOutputChars: 600, dreamReadHashes });
+
+        // 1. 仅读标题行或存在空洞的切片不得记录完整指纹
+        await execute(tool, { path: manuscript, offset: 1, limit: 1 });
+        expect(dreamReadHashes.has(manuscript)).toBe(false);
+        await execute(tool, { path: manuscript, offset: 4, limit: 3 });
+        expect(dreamReadHashes.has(manuscript)).toBe(false);
+        // 补齐中间第 2~3 行后才完整覆盖
+        await execute(tool, { path: manuscript, offset: 2, limit: 2 });
+        expect(dreamReadHashes.get(manuscript)).toBeTruthy();
+
+        // 2. 实体档案仅读首行不得放行；先读完整旧版再暂存新版仅读首行时，旧版指纹必须失效且不得写入新版
+        await execute(tool, { path: entity, offset: 1, limit: 1 });
+        expect(dreamReadHashes.has(entity)).toBe(false);
+        await execute(tool, { path: entity });
+        const hashV1 = dreamReadHashes.get(entity);
+        expect(hashV1).toBeTruthy();
+        f.store.staging.stageWrite(f.runId, entity, entityV2);
+        await execute(tool, { path: entity, offset: 1, limit: 1 });
+        expect(dreamReadHashes.get(entity)).toBeUndefined();
+        await execute(tool, { path: entity, offset: 2 });
+        const hashV2 = dreamReadHashes.get(entity);
+        expect(hashV2).toBeTruthy();
+        expect(hashV2).not.toBe(hashV1);
+
+        // 3. 单行字符预算截断时未续读完不得记录指纹，按 nextCharOffset 续读完后记录
+        const firstChunk = await execute(tool, { path: longSingleLine }) as { nextOffset?: number; nextCharOffset?: number };
+        expect(firstChunk.nextOffset).toBe(1);
+        expect(firstChunk.nextCharOffset).toBeGreaterThan(0);
+        expect(dreamReadHashes.has(longSingleLine)).toBe(false);
+        let nextOffset = firstChunk.nextOffset;
+        let nextCharOffset = firstChunk.nextCharOffset;
+        while (nextOffset !== undefined) {
+            const chunk = await execute(tool, { path: longSingleLine, offset: nextOffset, char_offset: nextCharOffset }) as { nextOffset?: number; nextCharOffset?: number };
+            nextOffset = chunk.nextOffset;
+            nextCharOffset = chunk.nextCharOffset;
+        }
+        expect(dreamReadHashes.get(longSingleLine)).toBeTruthy();
+
+        // 4. 批量读取因前序文件耗尽预算导致末文件被整行截断时，也不得记为全文已读
+        const filler = 'entities/item_filler.md';
+        const batchMs = 'manuscripts/ch_0005.md';
+        await writeFile(join(f.root, filler), '甲'.repeat(160) + '\n');
+        await writeFile(join(f.root, batchMs), '# 第五章\n\n' + Array.from({ length: 12 }, (_, i) => `第${i + 1}段内容：乙乙乙乙乙乙乙乙乙乙`).join('\n') + '\n');
+        const batchTool = createBookReadTool({ ...f, maxOutputChars: 1100, dreamReadHashes });
+        const batchRes = await execute(batchTool, { paths: [filler, batchMs] }) as { items: Array<{ path: string; nextOffset?: number }> };
+        const batchMsItem = batchRes.items.find((entry) => entry.path === batchMs);
+        expect(batchMsItem?.nextOffset).toBeGreaterThan(1);
+        expect(dreamReadHashes.has(batchMs)).toBe(false);
+        await execute(batchTool, { path: batchMs, offset: batchMsItem!.nextOffset });
+        expect(dreamReadHashes.get(batchMs)).toBeTruthy();
+
+        // 5. 手稿中途变更后即使再完整读取，也必须保持混合版本失效（null）
+        await writeFile(join(f.root, manuscript), msText + '追加一行\n');
+        await execute(tool, { path: manuscript });
+        expect(dreamReadHashes.get(manuscript)).toBeNull();
+    });
 });

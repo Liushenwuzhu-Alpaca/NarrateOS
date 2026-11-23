@@ -34,6 +34,8 @@ presets/dsh-preset-narrateos/
 1. **单一顶层模式与宿主/预设分层**：`cordis.patch.yml` 在宿主平面（顶层 `- insert:`）注册 `@narrateos/dsh-book-store`、`@narrateos/dsh-book-tools`、`@narrateos/dsh-pipeline` 共享服务插件、`@narrateos/dsh-client-ui-studio` 浏览器工作台，以及唯一面向作者的 `@deepseek-ai/dsh-agent-preset`（`id: narrateos`，名称「NarrateOS 创作模式」），不将后台工种注册为模式下拉选项。
 2. **工具隔离与净室**：`preset-narrateos.config.plugins` 仅保留会话级插件（零根作用域服务泄露），并在预设作用域内显式挂载严格只读的 `@deepseek-ai/dsh-tool-fs`（`read: true, readImage: false, write: false, edit: false, applyPatch: false`）与 `@deepseek-ai/dsh-tool-fs-search`（`sampleOverCapGlobResults: false`），同时在顶层补丁显式禁用 `dsh-base` 宿主层的 `tool-bash`、`tool-pwsh`、`tool-fs`、`tool-fs-search`、`tool-jobs`、`tool-todo`、`tool-goal`、`plan-mode` 全部 8 项编码/终端向宿主行，使 `dsh-base` 与 `dsh-web-app` 双场景都统一获得严格只读的 `read` / `glob` / `grep` 能力且不泄露全局写工具；写手（`writer`）保持 `cleanroom: true`、`tools: []` 单轮净室，且提示词仅陈述正向目标状态。
 3. **单书覆盖**：各作品可在 `books/<slug>/world/roles/` 放置同名 YAML 或 `prompts/*.md` 覆盖本预设包的默认参数与提示词，无需重新编译。
+4. **历史出场回填**：`Dreamer` 用 `book_read` 回查正文后，通过 `yield_dream_commit.appearances` 逐章提交规范 `entity_id`、`chapter_number` 和出场原句 `quote`。核对定稿与最终实体档案并确认仅提及或未出场时传 `null`；未核实则不提交。工具核验 Git 定稿、WAL 指纹与档案身份，将出场原句对应的实体补登到卷章卡；否定结论还要求本轮实际读到相应的正文和档案版本，并在同一次 `dream` 事务内记入 `.ops/dream_watermark.json`，不改章卡。定稿或实体身份变化后，即使旧锚点已移除，下次整理仍会提出这份待复核记录。
+   出场漏登本身不触发整理；在已触发的一轮中，已建档道具（包括冷宫归档）可回查水位以前的章卡，回填不会唤醒实体。同轮暂存的卷卡优先参与核验，回填结果并入同一次落盘。
 
 ## 沙盒与分发
 

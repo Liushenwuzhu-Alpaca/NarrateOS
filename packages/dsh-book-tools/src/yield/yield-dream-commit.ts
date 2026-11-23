@@ -31,7 +31,8 @@ import {
     extractActiveOpenThreadLines
 } from './shared.js';
 
-import { ENTITY_PROFILE_PATH_RE, validateDreamWrite } from './dream-write-validation.js';
+import { planDreamAppearances } from './dream-appearances.js';
+import { ENTITY_PROFILE_PATH_RE, validateDreamWrite, type ValidatedDreamEntity } from './dream-write-validation.js';
 const DEFAULT_DREAMING_CFG = BookDreamingConfigSchema.parse({});
 
 function extractActiveThreadKeys(markdown: string): string[] {
@@ -46,6 +47,7 @@ export interface YieldDreamCommitOptions {
     bookRoot: string;
     runId: string;
     fence?: PathFence | undefined;
+    dreamReadHashes?: ReadonlyMap<string, string | null> | undefined;
     onYield?: ((record: DreamCommitRecord) => void) | undefined;
 }
 
@@ -242,6 +244,23 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 type: 'integer',
                 description: '本次清理前累计字数（默认 0）'
             },
+            appearances: {
+                type: 'array',
+                description: '逐章核对历史出场；工具自动将有原句证据的实体补登到对应卷的章卡',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        entity_id: { type: 'string', required: true, description: '规范实体 ID，新实体先通过 book_edit 暂存' },
+                        chapter_number: { type: 'integer', required: true, description: '已定稿历史章号' },
+                        quote: {
+                            oneOf: [{ type: 'string' }, { type: 'null' }],
+                            required: true,
+                            description: '逐字引用体现实际出场或交互且含规范名称或唯一别名的定稿正文；本轮用 book_read 核对定稿和最终实体档案并确认仅提及或未出场时传 null，未核实则不提交'
+                        }
+                    }
+                }
+            },
             spotlight_triggers: {
                 type: 'array',
                 items: {
@@ -303,10 +322,26 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
 
                 // 路径、实体格式与先天锁校验和 book_edit 的当步预警保持一致。
                 const reachableKeys = await buildDreamReachableKeys(bookRoot, pendingWrites);
+                const entities = new Map<string, ValidatedDreamEntity>();
                 for (const [relPath, content] of pendingWrites) {
-                    const profile = await validateDreamWrite(bookRoot, relPath, content, fence);
-                    if (profile) assertForeignKeysReachable(profile.metadata.entity_id, profile, reachableKeys);
+                    const entity = await validateDreamWrite(bookRoot, relPath, content, fence);
+                    if (!entity) continue;
+                    const id = entity.profile.metadata.entity_id;
+                    assertForeignKeysReachable(id, entity.profile, reachableKeys);
+                    entities.set(id, entity);
                 }
+
+                const absences = (await bookStore.readDreamWatermark())?.appearance_absences ?? {};
+                await planDreamAppearances({
+                    bookRoot, system: store.system, txState, chapterNumber, pendingWrites, entities, absences,
+                    minPromotionChapters: dreamingCfg.promote_anchor_min_chapters,
+                    appearances: parsed.appearances, reachableIds: reachableKeys,
+                    dreamReadHashes: options.dreamReadHashes,
+                    readFile: async (path) => {
+                        const { absPath } = await fence.assertReadFile(path);
+                        return await readDiskOptional(absPath);
+                    }
+                });
 
                 // 3. 校验暂存 world/open_threads.md 的活跃伏笔上限与单次新增伏笔上限
                 await validateStagedOpenThreads(
@@ -337,6 +372,7 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 for (const [relPath, content] of pendingWrites.entries()) {
                     const entity = ENTITY_PROFILE_PATH_RE.exec(relPath)?.[1];
                     if (entity && ENTITY_ID_PATTERN_RE.test(entity)) continue;
+                    await fence.assertWriteFile(relPath);
                     assertTextForeignKeys(relPath, content, reachableKeys);
                 }
                 for (const trigger of parsed.spotlight_triggers) {
@@ -344,6 +380,8 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                         throw new ForeignKeyError([trigger.entity_id], 'spotlight_triggers');
                     }
                 }
+
+                exec.signal.throwIfAborted();
 
                 // 5. 全部确定性门禁通过：在首次落盘前写入 .ops/pending_writes.json 崩溃恢复清单
                 const allTargetRelPaths = [...pendingWrites.keys()];
@@ -378,7 +416,8 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 await bookStore.writeDreamWatermark({
                     last_dream_ch: chapterNumber,
                     accumulated_words_since_dream: 0,
-                    updated_at: new Date().toISOString()
+                    updated_at: new Date().toISOString(),
+                    ...(Object.keys(absences).length > 0 ? { appearance_absences: absences } : {})
                 });
                 if (!committedRelPaths.includes('.ops/dream_watermark.json')) {
                     committedRelPaths.push('.ops/dream_watermark.json');
