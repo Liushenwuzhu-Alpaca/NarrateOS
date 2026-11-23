@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -771,6 +772,7 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
 
         let dreamerPromptSeen = '';
         let restoreStagedCard = true;
+        const candidate = () => dreamerPromptSeen.split('\n').find((line) => line.includes('已有实体 item_black_key 待核对出场'));
         await createHeadlessMockServices(ctx, {
             onAgent: async ({ tools, execTool, taskPrompt }) => {
                 if (tools.has('yield_dream_commit')) {
@@ -793,9 +795,15 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
                         chapter_number: 3,
                         accumulated_words: 0,
                         appearances: [
-                            { entity_id: 'item_black_key', chapter_number: 1, quote: '沈默把黑铜钥匙挂在门边。' },
-                            { entity_id: 'item_black_key', chapter_number: 2, quote: '沈默用黑铜钥匙压住账册。' },
-                            { entity_id: 'item_black_key', chapter_number: 3, quote: null }
+                            ...(restoreStagedCard ? [{
+                                entity_id: 'item_black_key', chapter_number: 1, quote: '沈默把黑铜钥匙挂在门边。'
+                            }] : []),
+                            ...(restoreStagedCard || candidate()?.includes('ch_0002') ? [{
+                                entity_id: 'item_black_key', chapter_number: 2, quote: '沈默用黑铜钥匙压住账册。'
+                            }] : []),
+                            ...(restoreStagedCard || candidate()?.includes('ch_0003') ? [{
+                                entity_id: 'item_black_key', chapter_number: 3, quote: null
+                            }] : [])
                         ]
                     });
                 }
@@ -840,9 +848,33 @@ describe('Wave 3A Chapter & Dreaming 核心机制单测与回归验证', () => {
         expect((await ctx.narratePipeline.runDreaming({ currentChapter: 3 })).skipped).toBe(true);
         await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
         expect(dreamerPromptSeen).toContain('已有实体 item_black_key 待核对出场');
+        expect(candidate()).toContain('ch_0002');
+        expect(candidate()).not.toContain('ch_0003');
+        expect(await system.readFileAtRef(bookRoot, 'HEAD', currentVolume)).toBe(currentCards);
         expect(await system.readFileAtRef(bookRoot, 'HEAD', oldVolume)).toBe(expectedOldCards);
         expect(await system.readFileAtRef(bookRoot, 'HEAD', item)).toBeNull();
         expect(await system.readFileAtRef(bookRoot, 'HEAD', archivedItem)).toContain('canonical_name: 黑铜钥匙');
+        await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
+        expect(candidate()).toBeUndefined();
+
+        // 以另一份已提交的定稿和 WAL 模拟同步手改后的状态；实体身份保持不变。
+        const manuscript = 'manuscripts/ch_0003.md';
+        const revised = '# 第三章\n\n「昨天那把黑铜钥匙送走了吗？」沈默问。\n';
+        await writeFile(join(bookRoot, manuscript), revised);
+        const store = ctx.narrateStore.openStore();
+        const tx = await store.readTxState();
+        tx.chapter_hashes['ch_0003'] = createHash('sha256').update(revised).digest('hex');
+        await store.writeTxState(tx);
+        await setupBookGitignoreAndCommit(bookRoot, [manuscript, '.ops/tx_state.json'], 'test: revise the finalized chapter');
+        await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
+        expect(candidate()).toContain('ch_0003');
+
+        // 新别名改变实体身份范围，已确认的非出场结论不能屏蔽本轮核对。
+        await writeFile(join(bookRoot, archivedItem), (await readFile(join(bookRoot, archivedItem), 'utf8'))
+            .replace('canonical_name: 黑铜钥匙', 'canonical_name: 黑铜钥匙\nunique_aliases: [库房钥匙]'));
+        await setupBookGitignoreAndCommit(bookRoot, [archivedItem], 'test: extend the item identity');
+        await ctx.narratePipeline.runDreaming({ currentChapter: 3, force: true });
+        expect(candidate()).toContain('ch_0003');
     });
 
     it('因果信号可在空实体候选时提交世界整理，故事日龄不单独触发整理', async () => {

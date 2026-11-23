@@ -255,7 +255,7 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                         quote: {
                             oneOf: [{ type: 'string' }, { type: 'null' }],
                             required: true,
-                            description: '逐字引用体现实际出场或交互且含规范名称或唯一别名的定稿正文；仅提及或无法确认时传 null'
+                            description: '逐字引用体现实际出场或交互且含规范名称或唯一别名的定稿正文；读过定稿并确认仅提及或未出场时传 null，未核实则不提交'
                         }
                     }
                 }
@@ -330,8 +330,9 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                     entities.set(id, entity);
                 }
 
+                const absences = (await bookStore.readDreamWatermark())?.appearance_absences ?? {};
                 await planDreamAppearances({
-                    bookRoot, system: store.system, txState, chapterNumber, pendingWrites, entities,
+                    bookRoot, system: store.system, txState, chapterNumber, pendingWrites, entities, absences,
                     minPromotionChapters: dreamingCfg.promote_anchor_min_chapters,
                     appearances: parsed.appearances, reachableIds: reachableKeys,
                     readFile: async (path) => {
@@ -413,7 +414,8 @@ export function createYieldDreamCommitTool(options: YieldDreamCommitOptions): To
                 await bookStore.writeDreamWatermark({
                     last_dream_ch: chapterNumber,
                     accumulated_words_since_dream: 0,
-                    updated_at: new Date().toISOString()
+                    updated_at: new Date().toISOString(),
+                    ...(Object.keys(absences).length > 0 ? { appearance_absences: absences } : {})
                 });
                 if (!committedRelPaths.includes('.ops/dream_watermark.json')) {
                     committedRelPaths.push('.ops/dream_watermark.json');

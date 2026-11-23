@@ -18,6 +18,7 @@ import {
     withTraceRun,
     type BookConfig,
     type BookStore,
+    type DreamWatermark,
     type EntityProfile,
     type LlmPort,
     type ProseGateOptions,
@@ -25,7 +26,9 @@ import {
     type SystemPort,
     type TxState
 } from '@narrateos/dsh-book-store';
-import { extractActiveOpenThreadLines, type DreamCommitRecord, type YieldPatchedDraftResult } from '@narrateos/dsh-book-tools';
+import {
+    dreamAppearanceIdentity, extractActiveOpenThreadLines, type DreamCommitRecord, type YieldPatchedDraftResult
+} from '@narrateos/dsh-book-tools';
 import { ValidationError } from '../errors.js';
 import type { RoleRunner } from '../runner/role-runner.js';
 import {
@@ -147,12 +150,17 @@ function scanRecurringProseAnchors(
     sections: readonly (L2CardSection & { sourcePath: string })[],
     watermarkCh: number,
     entityGroups: readonly Readonly<Record<string, EntityProfile>>[],
-    promoteAnchorMinChapters: number
+    promoteAnchorMinChapters: number,
+    chapterHashes: TxState['chapter_hashes'],
+    absences: DreamWatermark['appearance_absences']
 ): string[] {
     const knownKeys = new Map<string, string | null>();
+    const reviewed = new Map<string, { identity: string; chapters: NonNullable<typeof absences>[string] }>();
     for (const entities of entityGroups) {
         for (const { metadata } of Object.values(entities)) {
             const id = metadata.entity_id;
+            const chapters = absences?.[id];
+            if (chapters) reviewed.set(id, { identity: dreamAppearanceIdentity(metadata), chapters });
             for (const rawKey of [id, metadata.canonical_name, ...metadata.unique_aliases]) {
                 const key = normalizeForQuoteMatch(rawKey);
                 if (key.length < 2) continue;
@@ -190,9 +198,14 @@ function scanRecurringProseAnchors(
         if (item.chapters.size < promoteAnchorMinChapters) continue;
         const knownId = knownKeys.get(key);
         if (!knownId && item.latestChapter <= watermarkCh) continue;
-        const missing = [...item.chapters.values()]
-            .filter((section) => !knownId || !section.appearedEntityIds.includes(knownId))
-            .sort((a, b) => a.chapterNumber - b.chapterNumber);
+        const reviews = knownId ? reviewed.get(knownId) : undefined;
+        const missing = [...item.chapters.values()].filter((section) => {
+            if (!knownId) return true;
+            if (section.appearedEntityIds.includes(knownId)) return false;
+            const absence = reviews?.chapters[section.chapterId];
+            return !absence || absence.chapter_sha256 !== chapterHashes[section.chapterId] ||
+                absence.identity_sha256 !== reviews?.identity;
+        }).sort((a, b) => a.chapterNumber - b.chapterNumber);
         if (missing.length > 0) {
             const cards = missing.map((section) => `${section.chapterId} (${section.sourcePath})`).join(', ');
             const action = knownId ? `已有实体 ${knownId} 待核对出场` : '评估建卡或补入已有实体 unique_aliases';
@@ -241,7 +254,7 @@ export class DreamingPipeline {
         return await withTraceRun(this.store.bookRoot, 'dream', {}, async () => {
             const usage = createEmptyUsage();
             // 1. 前置门禁：拒绝未完成相位 (DRAFTING / FEAT_COMMITTED) 与 PARALLEL 窗口
-            await this.store.assertDreamingPhaseSafe();
+            const txState = await this.store.assertDreamingPhaseSafe();
             const snapshot = await this.store.loadSnapshot();
             if (snapshot.worldState.frontmatter.timeline_mode === 'PARALLEL') {
                 throw new Error('并行窗口合并前不能整理主线实体');
@@ -348,7 +361,8 @@ export class DreamingPipeline {
             const sections = (await readBookL2Sections(this.store.bookRoot))
                 .filter((section) => section.chapterNumber <= options.currentChapter);
             const anchorCandidates = scanRecurringProseAnchors(
-                sections, watermarkCh, [snapshot.entities, snapshot.coldEntities], promoteAnchorMinChapters
+                sections, watermarkCh, [snapshot.entities, snapshot.coldEntities], promoteAnchorMinChapters,
+                txState.chapter_hashes, watermarkObj?.appearance_absences
             );
 
             const recentL2Text = sections.filter((section) => section.chapterNumber > watermarkCh)

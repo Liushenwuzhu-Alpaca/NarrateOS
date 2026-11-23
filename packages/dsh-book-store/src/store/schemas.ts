@@ -210,7 +210,14 @@ export type RunRecord = z.infer<typeof RunRecordSchema>;
 export const DreamWatermarkSchema = z.object({
     last_dream_ch: z.number().int().nonnegative(),
     accumulated_words_since_dream: z.number().int().nonnegative(),
-    updated_at: z.string().min(1)
+    updated_at: z.string().min(1),
+    appearance_absences: z.record(
+        z.string().regex(/^(?:char|item)_[a-zA-Z0-9_]+$/),
+        z.record(z.string().regex(/^ch_\d{4}$/), z.object({
+            chapter_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            identity_sha256: z.string().regex(/^[a-f0-9]{64}$/)
+        }))
+    ).optional()
 });
 export type DreamWatermark = z.infer<typeof DreamWatermarkSchema>;
 

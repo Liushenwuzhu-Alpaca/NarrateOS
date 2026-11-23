@@ -3,6 +3,7 @@ import {
     normalizeForQuoteMatch,
     parseEntityMarkdown,
     readBookL2Sections,
+    type DreamWatermark,
     type EntityProfile,
     type SystemPort,
     type TxState
@@ -22,6 +23,14 @@ interface DreamAppearanceOptions {
     reachableIds: ReadonlySet<string>;
     pendingWrites: Map<string, string>;
     readFile: (path: string) => Promise<string | null>;
+    absences: NonNullable<DreamWatermark['appearance_absences']>;
+}
+
+/** 规范名和别名决定否定回查结论的适用范围，别名次序不影响身份。 */
+export function dreamAppearanceIdentity(metadata: EntityProfile['metadata']): string {
+    return createHash('sha256')
+        .update(JSON.stringify([metadata.canonical_name, [...new Set(metadata.unique_aliases)].sort()]))
+        .digest('hex');
 }
 
 /** 仅拼回实际变动的字段；不通过重序列化改写整卷。 */
@@ -75,7 +84,7 @@ function backfillVolume(
 
 /** 在提交锁内核实逐章证据，只扩展本轮暂存写集，不直接落盘。 */
 export async function planDreamAppearances(options: DreamAppearanceOptions): Promise<void> {
-    const { bookRoot, system, txState, chapterNumber, appearances, entities, pendingWrites, readFile } = options;
+    const { bookRoot, system, txState, chapterNumber, appearances, entities, pendingWrites, readFile, absences } = options;
     const promotions = new Map<string, Set<string>>();
     for (const [id, entity] of entities) {
         const names = new Set(entity.newNames.map(normalizeForQuoteMatch).filter((name) => name.length >= 2));
@@ -134,18 +143,10 @@ export async function planDreamAppearances(options: DreamAppearanceOptions): Pro
         }
     }
 
-    const texts = new Map<number, string>();
+    const texts = new Map<number, { archived: string; prose?: string }>();
     const byVolume = new Map<string, Map<number, Set<string>>>();
     let revision: string | undefined;
     for (const [id, entries] of audited) {
-        let hasEvidence = false;
-        for (const quote of entries.values()) {
-            if (quote !== null) {
-                hasEvidence = true;
-                break;
-            }
-        }
-        if (!hasEvidence) continue;
         let profile: EntityProfile | undefined = entities.get(id)?.profile;
         if (!profile) {
             const raw = await readFile(`entities/${id}.md`) ?? await readFile(`entities/cold_archive/${id}.md`);
@@ -156,23 +157,39 @@ export async function planDreamAppearances(options: DreamAppearanceOptions): Pro
         }
         const names = [profile.metadata.canonical_name, ...profile.metadata.unique_aliases]
             .map(normalizeForQuoteMatch).filter((name) => name.length > 0);
+        let identity: string | undefined;
         for (const [chapter, quote] of entries) {
-            if (quote === null) continue;
             const section = chapters.get(chapter)!;
+            const chapterHash = txState.chapter_hashes[section.chapterId]!;
             let text = texts.get(chapter);
             if (text === undefined) {
                 revision ??= await system.currentRevision(bookRoot);
                 const archived = await system.readFileAtRef(bookRoot, revision, `manuscripts/${section.chapterId}.md`);
-                if (archived === null || createHash('sha256').update(archived).digest('hex') !== txState.chapter_hashes[section.chapterId]) {
-                    throw new GateValidationError('yield_dream_commit', `${section.chapterId} 的定稿与 WAL 指纹不符，不能补登出场实体`);
+                if (archived === null || createHash('sha256').update(archived).digest('hex') !== chapterHash) {
+                    throw new GateValidationError('yield_dream_commit', `${section.chapterId} 的定稿与 WAL 指纹不符，不能登记出场核对结论`);
                 }
-                text = archived.replace(/^\uFEFF?# [^\r\n]*(?:\r?\n|$)/, '').replaceAll('\r\n', '\n');
+                text = { archived };
                 texts.set(chapter, text);
             }
+            if (quote === null) {
+                if (!section.appearedEntityIds.includes(id)) {
+                    (absences[id] ??= {})[section.chapterId] = {
+                        chapter_sha256: chapterHash,
+                        identity_sha256: identity ??= dreamAppearanceIdentity(profile.metadata)
+                    };
+                }
+                continue;
+            }
+            text.prose ??= text.archived.replace(/^\uFEFF?# [^\r\n]*(?:\r?\n|$)/, '').replaceAll('\r\n', '\n');
             const normalizedQuote = normalizeForQuoteMatch(quote);
-            if (!text.includes(quote.replaceAll('\r\n', '\n')) ||
+            if (!text.prose.includes(quote.replaceAll('\r\n', '\n')) ||
                 !names.some((name) => normalizedQuote.length > name.length && normalizedQuote.includes(name))) {
                 throw new GateValidationError('yield_dream_commit', `${id} 第 ${chapter} 章出场引文必须是含实体名称或别名的定稿正文原句`);
+            }
+            const previousAbsences = absences[id];
+            if (previousAbsences) {
+                delete previousAbsences[section.chapterId];
+                if (Object.keys(previousAbsences).length === 0) delete absences[id];
             }
             let volume = byVolume.get(section.sourcePath);
             if (!volume) byVolume.set(section.sourcePath, volume = new Map());
