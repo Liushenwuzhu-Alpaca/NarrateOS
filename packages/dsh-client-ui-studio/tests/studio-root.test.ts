@@ -1102,6 +1102,56 @@ describe('真实根组件的草稿身份与异步隔离', () => {
         expect(container.querySelector('.ns-prose')?.textContent).toContain('甲书第一章服务器原稿。');
     });
 
+    it('较早的空闲快照不会覆盖已收到的开写和安全中止状态', async () => {
+        const container = await mountStudio();
+        const stale = Promise.withResolvers<NarrateStatusPayload>();
+        const fresh = Promise.withResolvers<NarrateStatusPayload>();
+        vi.mocked(api.fetchStatus).mockReturnValueOnce(stale.promise).mockReturnValueOnce(fresh.promise);
+        await emit({ event: 'signal:received', data: {} });
+        await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
+        await emit({ event: 'stage', data: { stage: 'LIBRARIAN', chapterNumber: 3, message: '读取章卡' } });
+        await emit({ event: 'halt:waiting', data: { activeTask: 'STEPPING' } });
+        const header = () => container.querySelector('.ns-center-header')?.textContent;
+        expect(header()).toContain('等待安全点收束');
+        await act(async () => { stale.resolve(statusPayload(activeBookRoot)); });
+        expect(header()).toContain('等待安全点收束');
+        await act(async () => {
+            const status = statusPayload(activeBookRoot);
+            fresh.resolve({ ...status, runtime: { ...status.runtime, activeTask: 'STEPPING', haltRequested: true } });
+        });
+        expect(header()).toContain('等待安全点收束');
+    });
+
+    it('仅从快照观察到新工序时，收束旧运行徽标并保留其会话', async () => {
+        let stage: 'LIBRARIAN' | 'WRITER' = 'LIBRARIAN';
+        vi.mocked(api.fetchStatus).mockImplementation(async () => {
+            const status = statusPayload(activeBookRoot);
+            return {
+                ...status, activeChapter: 1,
+                yolo: { ...status.yolo, currentStage: stage },
+                runtime: { ...status.runtime, activeTask: 'STEPPING', stageChapter: 3, stageSessionId: `current-${stage}` }
+            };
+        });
+        vi.mocked(api.fetchRunRecords).mockImplementation(async (chapter) => ({
+            runs: chapter === 3 ? [{
+                runId: `run-${stage}`, chapter, stage, role: stage.toLowerCase(), attempt: 1,
+                sessionId: `current-${stage}`, status: 'running'
+            }] : []
+        }));
+        const container = await mountStudio();
+        const toggle = container.querySelector<HTMLButtonElement>('.ns-pipeline-toggle-btn')!;
+        if (toggle.getAttribute('aria-expanded') === 'false') await click(toggle);
+        const card = (id: string) => container.querySelector<HTMLButtonElement>(`.ns-pipe-card[data-stage-id="${id}"]`)!;
+        const badge = (id: string) => card(id).querySelector('.ns-pipe-step-state')?.textContent;
+        expect(badge('LIBRARIAN')).toBe('生成中');
+        stage = 'WRITER';
+        await emit({ event: 'signal:received', data: {} });
+        expect(badge('WRITER')).toBe('生成中');
+        expect(badge('LIBRARIAN')).toBe('已完成');
+        await click(card('LIBRARIAN'));
+        expect(container.querySelector('.ns-session-viewer')?.getAttribute('data-session-id')).toBe('current-LIBRARIAN');
+    });
+
     it('章节加载期间暂不显示实时徽标，加载完毕后恢复仍在运行的工序', async () => {
         const container = await mountStudio();
         await emit({ event: 'stage', data: { stage: 'STARTING', chapterNumber: 3 } });
