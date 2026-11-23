@@ -243,6 +243,10 @@ export class NarrateToolsService {
             requestedTools.some((toolName) => toolName !== 'patch_paragraphs') ||
             (options.yieldTool !== undefined && options.yieldTool !== 'yield_patched_draft');
         const isPureInMemoryPatch = usesPatchSession && !hasDiskTools;
+        if (!isPureInMemoryPatch && options.bookRoot === undefined) {
+            const owner = this.forWorkspace(undefined);
+            if (owner !== this) return owner.buildRoleTools(options);
+        }
 
         let patchSession: InMemoryDraftPatchSession | undefined;
         if (usesPatchSession) {

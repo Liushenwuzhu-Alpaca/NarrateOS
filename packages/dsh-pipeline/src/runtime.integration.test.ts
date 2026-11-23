@@ -359,7 +359,7 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
         });
         expect(studioBoot).toMatchObject({ statusCode: 201, json: { bookRoot: bookB } });
         const lockTool = ctx.tools.get('lock_charter_and_boot')!;
-        await expect(lockTool.execute({
+        const bootInput = {
             book_slug: 'shared-name', title: '甲地雪港', pov_character: 'char_lead',
             t0_anchor: '雪夜账房开门', commitments: ['调查旧账'],
             excluded_cliches: [], authorization_boundary: '允许调整查账方式',
@@ -367,11 +367,15 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             current_arc_envelope: '沿旧账追索失踪的货物。', stage_ceiling: '本卷围绕旧账展开。',
             opening_sequence_beats: beats, l1_volumes_markdown: '# L1\n\n- vol_01: 雪港',
             entities: [protagonist]
-        }, {
+        } satisfies bookToolsPlugin.LockCharterAndBootInput;
+        const toolContext = {
             token: Symbol('workspace-boot') as never, callId: 'boot-a' as never, rootCallId: 'boot-a' as never,
             name: 'lock_charter_and_boot', arguments: {}, agent: agentA,
             signal: new AbortController().signal, deferContext() {}, concludeTurn() {}
-        })).resolves.toMatchObject({ bookRoot: bookA, switchedBook: true });
+        };
+        await expect(lockTool.execute(bootInput, toolContext)).resolves.toMatchObject({
+            bookRoot: bookA, switchedBook: true
+        });
 
         const query = '?scopeSessionId=author-b';
         expect((await web.invoke('GET', `/api/narrate/books${query}`)).json).toMatchObject({
@@ -426,6 +430,7 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             type: 'DIRECTOR_NOTE', reason: '只在甲地待处理的导演便签'
         })).statusCode).toBe(201);
         const before = await readFile(signalsA, 'utf8');
+        await ctx.narrateStore.switchBook(bookA);
         await defaultA.dispose();
         const defaultB = await ctx.plugin(pipelinePlugin, { booksRoot: join(cwdB, 'books'), heartbeatIntervalMs: 0 });
         registerCleanup(() => defaultB.dispose());
@@ -438,6 +443,19 @@ describe('Phase 3 控制面、切书 409、斜杠命令、REST/SSE 与优雅停�
             .toBe(201);
         expect(await readFile(join(bookB, '.ops/signals.jsonl'), 'utf8')).toContain(note);
         expect(await readFile(signalsA, 'utf8')).toBe(before);
+
+        const toolService = ctx.narrateTools;
+        const newBookB = join(cwdB, 'books', 'programmatic-b');
+        await expect(toolService.lockCharterAndBoot({
+            ...bootInput, book_slug: 'programmatic-b', title: '乙地新书'
+        })).resolves.toMatchObject({ bookRoot: newBookB, switchedBook: true });
+        const bookRead = toolService.buildRoleTools({ tools: ['book_read'] }).toolMap.get('book_read')!;
+        const newConfig = await bookRead.execute({ path: 'world/book_config.yaml' }, {
+            ...toolContext, name: 'book_read'
+        });
+        expect(JSON.stringify(newConfig)).toContain('乙地新书');
+        expect(ctx.narrateStore.bookRoot).toBe(bookA);
+        expect((await web.invoke('GET', '/api/narrate/status')).json).toMatchObject({ bookRoot: newBookB });
     });
 
     it('Config 满足 DSH Schemastery 原生协议 (isNativeConfigSchema === true) 且无写死假模型/audit 池', () => {
